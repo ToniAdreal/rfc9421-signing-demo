@@ -1,0 +1,27 @@
+{
+  "description": "Sign and verify HTTP messages per RFC 9421 (ed25519 / hmac-sha256), with RFC 9530 Content-Digest body binding",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "http-signatures",
+    "rfc9421",
+    "ed25519",
+    "api-security"
+  ],
+  "license": "MIT",
+  "main": "dist/index.js",
+  "name": "rfc9421-signing-demo",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "type": "module",
+  "types": "dist/index.d.ts",
+  "version": "0.1.0"
+}
