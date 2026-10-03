@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 11 tests, all local, no network
+npm test   # 18 tests, all local, no network
 ```
 
 ## Quickstart
@@ -91,9 +91,28 @@ const result = verifyRequest(signed, { key: secret });
 - **Demo-grade key management.** Keys are passed in directly; there is no
   keystore, rotation, or `keyid`→key lookup.
 
+## Benchmarks
+
+`npm run bench` measures locally-observed sign/verify throughput per
+algorithm (3000 timed iterations per op after 200 warmup, printing the Node
+version and CPU). One real run on 2026-10-03:
+
+| alg | op | throughput |
+|-----|--------|------------|
+| ed25519 | sign | ~16,300 ops/sec (~61 µs/op) |
+| ed25519 | verify | ~4,500 ops/sec (~223 µs/op) |
+| hmac-sha256 | sign | ~37,600 ops/sec (~27 µs/op) |
+| hmac-sha256 | verify | ~40,500 ops/sec (~25 µs/op) |
+
+Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized; shared
+host, so numbers vary run to run). Request fixture: POST with a 31-byte JSON
+body, covered components `@method @authority @path content-digest`.
+Machine-local measurements for capacity planning, not guaranteed
+throughput — run `npm run bench` on your own hardware.
+
 ## Reproducibility
 
-`npm test` runs 11 tests including a golden signature-base vector and a
+`npm test` runs 18 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

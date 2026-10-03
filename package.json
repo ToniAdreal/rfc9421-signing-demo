@@ -17,6 +17,7 @@
   "main": "dist/index.js",
   "name": "rfc9421-signing-demo",
   "scripts": {
+    "bench": "npm run build && node dist/bench/bench.js",
     "build": "tsc",
     "clean": "rm -rf dist",
     "test": "npm run build && node --test dist/test/*.test.js"
