@@ -93,6 +93,53 @@ const result = verifyRequest(signed, { key: secret });
 - **Demo-grade key management.** Keys are passed in directly; there is no
   keystore, rotation, or `keyid`→key lookup.
 
+## Interoperability
+
+Honest status: **this library has only been tested against itself.** No
+third-party RFC 9421 implementation has been exercised against it yet, so
+cross-implementation compatibility is untested. Interop reports and issues
+are welcome.
+
+What *has* been verified beyond the sign→verify round-trip tests:
+
+- The signature-base construction follows RFC 9421 §2.5. The golden vector
+  in `test/golden.test.ts` is asserted against a hand-written expectation
+  derived from the spec's format rules — that checks internal consistency
+  with the spec as implemented here, not independent agreement.
+- The `Content-Digest: sha-512` value is plain SHA-512; the golden vector
+  was cross-checked against `openssl dgst -sha512` output for the same
+  input.
+
+Known interop hazards (things a foreign implementation may do differently;
+most also appear in [Limitations](#limitations)):
+
+- **Key delivery is out of band.** `keyid` is carried but never resolved —
+  no key discovery, JWKS, or keystore. Both sides must agree on keys and
+  `keyid` values manually.
+- **Authority normalization.** `@authority` is normalized with WHATWG `URL`
+  semantics (lowercased, default ports elided). A peer that normalizes
+  differently will build a different signature base.
+- **Covered component selection.** Signer and verifier must agree on the
+  exact covered components, in the exact order. Defaults here are
+  `@method @authority @path`, plus `content-digest` when a body exists.
+- **Digest algorithm.** Body binding only understands `sha-512`. A peer
+  sending `sha-256` digests fails with "no sha-512 content-digest present".
+- **Signature algorithms.** Only `ed25519` and `hmac-sha256` are
+  implemented. Not supported: `ecdsa-p256-sha256`, `rsa-pss-sha512`,
+  `hmac-sha512`, or anything else.
+- **Components.** Not supported: `@query`, `@status`, `@request-response`,
+  trailers, `bs`, and other derived components beyond the list under
+  "What it implements".
+- **Single signature.** The verifier checks one signature label per call;
+  messages carrying multiple signatures are not handled.
+- **Freshness is not replay protection.** `created`/`expires` bound the
+  acceptance window, but there is no nonce or replay cache.
+
+In short: a spec-conformant *subset* that is self-consistent and locally
+well-tested, but wire compatibility with any third-party RFC 9421
+implementation has **not** been demonstrated. Do not assume it without
+testing.
+
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
