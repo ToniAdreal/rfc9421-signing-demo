@@ -28,6 +28,13 @@ export interface VerifyOptions {
    * (clock skew between signer and verifier). Defaults to 60.
    */
   clockSkewToleranceSec?: number;
+  /**
+   * Accept signatures whose `expires` timestamp is up to this many
+   * seconds in the past. Defaults to 0: expiry is enforced strictly,
+   * with no grace period. Set a small positive value to tolerate
+   * verifier clock lag during deployments and key rollovers.
+   */
+  expiredToleranceSec?: number;
 }
 
 export interface VerifyResult {
@@ -50,6 +57,7 @@ export function verifyRequest(
   const label = opts.label ?? "sig1";
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   const skew = opts.clockSkewToleranceSec ?? 60;
+  const expiredTolerance = opts.expiredToleranceSec ?? 0;
 
   const sigInput = getHeader(req.headers, "signature-input");
   if (!sigInput)
@@ -155,7 +163,10 @@ export function verifyRequest(
       };
   }
 
-  if (parsed.params.expires !== undefined && now > parsed.params.expires)
+  if (
+    parsed.params.expires !== undefined &&
+    now > parsed.params.expires + expiredTolerance
+  )
     return {
       ok: false,
       reason: "signature expired",

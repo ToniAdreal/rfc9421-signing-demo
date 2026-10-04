@@ -71,8 +71,10 @@ const result = verifyRequest(signed, { key: secret });
 - **Body binding**: `Content-Digest: sha-512=:…:` is computed when the body
   is covered, and the verifier recomputes it — a swapped body fails even if
   the signature itself is valid.
-- **Freshness**: `created` / `expires` parameters enforced with a
-  configurable clock-skew tolerance (default 60s).
+- **Freshness**: `created` enforced with a configurable clock-skew
+  tolerance (`clockSkewToleranceSec`, default 60s); `expires` enforced
+  strictly by default, with an optional grace period
+  (`expiredToleranceSec`, default 0s).
 - Minimal `Signature-Input` / `Signature` field parsing for verification.
 
 ## Limitations (honest)
