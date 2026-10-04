@@ -76,4 +76,5 @@ test("expires parameter is enforced on the wire", () => {
   const late = verifyRequest(signed, { key: publicKey, now: CREATED + 301 });
   assert.equal(late.ok, false);
   assert.equal(late.reason, "signature expired");
+  assert.equal(late.code, "EXPIRED");
 });

@@ -65,6 +65,7 @@ test("wrong key fails verification", () => {
   const res = verifyRequest(signed, { key: other, now: CREATED + 60 });
   assert.equal(res.ok, false);
   assert.equal(res.reason, "signature mismatch");
+  assert.equal(res.code, "SIGNATURE_MISMATCH");
 });
 
 test("missing signature headers fail cleanly", () => {
@@ -76,4 +77,5 @@ test("missing signature headers fail cleanly", () => {
   );
   assert.equal(r1.ok, false);
   assert.equal(r1.reason, "missing signature-input header");
+  assert.equal(r1.code, "MISSING_SIGNATURE_INPUT");
 });

@@ -44,6 +44,7 @@ test("default: signature expired 1s ago is rejected", () => {
   });
   assert.equal(res.ok, false);
   assert.equal(res.reason, "signature expired");
+  assert.equal(res.code, "EXPIRED");
 });
 
 test("default: signature expiring exactly now still verifies (boundary)", () => {
@@ -76,6 +77,7 @@ test("expiredToleranceSec: too-small window still rejects", () => {
   });
   assert.equal(res.ok, false);
   assert.equal(res.reason, "signature expired");
+  assert.equal(res.code, "EXPIRED");
 });
 
 test("expiredToleranceSec: boundary — now exactly at expires + tolerance verifies", () => {
@@ -111,4 +113,5 @@ test("clockSkewToleranceSec: custom narrow window rejects a mildly future signat
   });
   assert.equal(res.ok, false);
   assert.equal(res.reason, "signature created in the future (clock skew)");
+  assert.equal(res.code, "CREATED_IN_FUTURE");
 });

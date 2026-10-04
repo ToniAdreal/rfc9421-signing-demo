@@ -159,9 +159,48 @@ body, covered components `@method @authority @path content-digest`.
 Machine-local measurements for capacity planning, not guaranteed
 throughput — run `npm run bench` on your own hardware.
 
+## Error codes
+
+`verifyRequest` never throws: every failure returns `{ ok: false, code, reason, label, ... }`.
+`verifyRequestOrThrow` is the throwing twin — it raises a `VerifyError`
+(an `Error` subclass, so existing generic `catch (e)` handlers keep working)
+carrying the same machine-readable `.code`, plus `.label`, `.keyId`, `.alg`.
+
+Codes are stable across versions; the human-readable `reason` strings are not.
+
+| `code` | meaning |
+|--------|---------|
+| `MISSING_SIGNATURE_INPUT` | `signature-input` header absent |
+| `MISSING_SIGNATURE` | `signature` header absent |
+| `MALFORMED_SIGNATURE_INPUT` | `signature-input` present but unparseable |
+| `SIGNATURE_BASE_BUILD_FAILED` | covered components could not be rebuilt from the request |
+| `MALFORMED_SIGNATURE` | `signature` present but unparseable |
+| `UNSUPPORTED_ALG` | `alg` parameter names an unsupported algorithm |
+| `VERIFICATION_ERROR` | the crypto layer itself threw (e.g. malformed key material) |
+| `SIGNATURE_MISMATCH` | cryptographic signature does not verify (wrong key or tampering) |
+| `MISSING_CONTENT_DIGEST` | body present but no `sha-512` entry in `content-digest` |
+| `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` digest |
+| `EXPIRED` | `expires` timestamp is in the past (beyond tolerance) |
+| `CREATED_IN_FUTURE` | `created` timestamp is in the future (beyond clock-skew tolerance) |
+
+```ts
+import { verifyRequestOrThrow, isVerifyError } from "rfc9421-signing-demo";
+
+try {
+  const { label, keyId, alg } = verifyRequestOrThrow(req, { key: publicKey });
+  // ...
+} catch (e) {
+  if (isVerifyError(e)) {
+    if (e.code === "EXPIRED") { /* ask the client to re-sign */ }
+    // e.reason carries the human-readable detail; e is still an Error.
+  }
+  throw e;
+}
+```
+
 ## Reproducibility
 
-`npm test` runs 18 tests including a golden signature-base vector and a
+`npm test` runs 57 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

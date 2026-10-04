@@ -74,6 +74,7 @@ test("only sha-256 present: rejected, no usable sha-512 digest", () => {
   const res = verify(signed);
   assert.equal(res.ok, false);
   assert.equal(res.reason, "cannot verify body: no sha-512 content-digest present");
+  assert.equal(res.code, "MISSING_CONTENT_DIGEST");
 });
 
 test("tampered digest header: rejected as signature mismatch", () => {
@@ -94,6 +95,7 @@ test("tampered digest header: rejected as signature mismatch", () => {
   const res = verifyRequest(tampered, { key: pub, now: CREATED + 60 });
   assert.equal(res.ok, false);
   assert.equal(res.reason, "signature mismatch");
+  assert.equal(res.code, "SIGNATURE_MISMATCH");
 });
 
 test("body swapped after signing: explicit body/digest mismatch rejection", () => {
@@ -108,6 +110,7 @@ test("body swapped after signing: explicit body/digest mismatch rejection", () =
   const res = verifyRequest(swapped, { key: pub, now: CREATED + 60 });
   assert.equal(res.ok, false);
   assert.equal(res.reason, "body does not match content-digest");
+  assert.equal(res.code, "BODY_DIGEST_MISMATCH");
 });
 
 test("empty body with correct digest: verifies (zero-length body binding)", () => {
@@ -124,4 +127,5 @@ test("empty body with digest of a non-empty body: rejected", () => {
   const res = verify(signed);
   assert.equal(res.ok, false);
   assert.equal(res.reason, "body does not match content-digest");
+  assert.equal(res.code, "BODY_DIGEST_MISMATCH");
 });

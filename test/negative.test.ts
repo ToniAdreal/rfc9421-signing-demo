@@ -46,6 +46,7 @@ test("created beyond clock skew tolerance is rejected", () => {
   const res = verifyRequest(signed, { key: publicKey, now: CREATED });
   assert.equal(res.ok, false);
   assert.equal(res.reason, "signature created in the future (clock skew)");
+  assert.equal(res.code, "CREATED_IN_FUTURE");
 });
 
 test("created within clock skew tolerance still verifies", () => {
@@ -68,6 +69,7 @@ test("missing covered header fails cleanly", () => {
   const res = verifyRequest(stripped, { key: publicKey, now: CREATED + 60 });
   assert.equal(res.ok, false);
   assert.match(res.reason ?? "", /cannot rebuild signature base/);
+  assert.equal(res.code, "SIGNATURE_BASE_BUILD_FAILED");
 });
 
 test("wrong hmac secret fails verification", () => {
@@ -86,6 +88,7 @@ test("wrong hmac secret fails verification", () => {
   });
   assert.equal(res.ok, false);
   assert.equal(res.reason, "signature mismatch");
+  assert.equal(res.code, "SIGNATURE_MISMATCH");
 });
 
 test("unsupported alg in signature-input is rejected", () => {
@@ -103,6 +106,7 @@ test("unsupported alg in signature-input is rejected", () => {
   const res = verifyRequest(tampered, { key: publicKey, now: CREATED + 60 });
   assert.equal(res.ok, false);
   assert.equal(res.reason, 'unsupported alg "rsa-pss-sha512"');
+  assert.equal(res.code, "UNSUPPORTED_ALG");
 });
 
 test("content-digest without sha-512 cannot be body-verified", () => {
@@ -132,6 +136,7 @@ test("content-digest without sha-512 cannot be body-verified", () => {
   const res = verifyRequest(withDigest, { key: publicKey, now: CREATED + 60 });
   assert.equal(res.ok, false);
   assert.equal(res.reason, "cannot verify body: no sha-512 content-digest present");
+  assert.equal(res.code, "MISSING_CONTENT_DIGEST");
 });
 
 test("documents: body swap is undetected when content-digest is not covered", () => {

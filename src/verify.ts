@@ -12,6 +12,7 @@ import {
   parseSignatureInput,
   type RequestLike,
 } from "./components.js";
+import { VerifyError, type VerifyFailureCode } from "./errors.js";
 
 export interface VerifyOptions {
   /**
@@ -40,6 +41,11 @@ export interface VerifyOptions {
 export interface VerifyResult {
   ok: boolean;
   reason?: string;
+  /**
+   * Machine-readable failure code. Present on every failure; stable
+   * across versions (the human `reason` strings may be reworded).
+   */
+  code?: VerifyFailureCode;
   label: string;
   keyId?: string;
   alg?: string;
@@ -49,6 +55,9 @@ export interface VerifyResult {
  * Verify an RFC 9421 signed request: rebuild the signature base from the
  * covered components, check the cryptographic signature, then enforce
  * freshness (expires / created).
+ *
+ * Never throws on verification failure: returns `{ ok: false, code, reason }`.
+ * For a throwing variant, see `verifyRequestOrThrow`.
  */
 export function verifyRequest(
   req: RequestLike,
@@ -61,10 +70,20 @@ export function verifyRequest(
 
   const sigInput = getHeader(req.headers, "signature-input");
   if (!sigInput)
-    return { ok: false, reason: "missing signature-input header", label };
+    return {
+      ok: false,
+      code: "MISSING_SIGNATURE_INPUT",
+      reason: "missing signature-input header",
+      label,
+    };
   const sigField = getHeader(req.headers, "signature");
   if (!sigField)
-    return { ok: false, reason: "missing signature header", label };
+    return {
+      ok: false,
+      code: "MISSING_SIGNATURE",
+      reason: "missing signature header",
+      label,
+    };
 
   let parsed;
   try {
@@ -72,6 +91,7 @@ export function verifyRequest(
   } catch (e) {
     return {
       ok: false,
+      code: "MALFORMED_SIGNATURE_INPUT",
       reason: `bad signature-input: ${(e as Error).message}`,
       label,
     };
@@ -83,6 +103,7 @@ export function verifyRequest(
   } catch (e) {
     return {
       ok: false,
+      code: "SIGNATURE_BASE_BUILD_FAILED",
       reason: `cannot rebuild signature base: ${(e as Error).message}`,
       label,
     };
@@ -94,6 +115,7 @@ export function verifyRequest(
   } catch (e) {
     return {
       ok: false,
+      code: "MALFORMED_SIGNATURE",
       reason: `bad signature field: ${(e as Error).message}`,
       label,
     };
@@ -112,11 +134,17 @@ export function verifyRequest(
         sigBytes.length === expected.length &&
         timingSafeEqual(sigBytes, expected);
     } else {
-      return { ok: false, reason: `unsupported alg "${alg}"`, label };
+      return {
+        ok: false,
+        code: "UNSUPPORTED_ALG",
+        reason: `unsupported alg "${alg}"`,
+        label,
+      };
     }
   } catch (e) {
     return {
       ok: false,
+      code: "VERIFICATION_ERROR",
       reason: `verification error: ${(e as Error).message}`,
       label,
     };
@@ -124,6 +152,7 @@ export function verifyRequest(
   if (!cryptoOk)
     return {
       ok: false,
+      code: "SIGNATURE_MISMATCH",
       reason: "signature mismatch",
       label,
       keyId: parsed.params.keyid,
@@ -146,6 +175,7 @@ export function verifyRequest(
     if (!dm)
       return {
         ok: false,
+        code: "MISSING_CONTENT_DIGEST",
         reason: "cannot verify body: no sha-512 content-digest present",
         label,
         keyId: parsed.params.keyid,
@@ -156,6 +186,7 @@ export function verifyRequest(
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
       return {
         ok: false,
+        code: "BODY_DIGEST_MISMATCH",
         reason: "body does not match content-digest",
         label,
         keyId: parsed.params.keyid,
@@ -169,6 +200,7 @@ export function verifyRequest(
   )
     return {
       ok: false,
+      code: "EXPIRED",
       reason: "signature expired",
       label,
       keyId: parsed.params.keyid,
@@ -180,6 +212,7 @@ export function verifyRequest(
   )
     return {
       ok: false,
+      code: "CREATED_IN_FUTURE",
       reason: "signature created in the future (clock skew)",
       label,
       keyId: parsed.params.keyid,
@@ -187,4 +220,23 @@ export function verifyRequest(
     };
 
   return { ok: true, label, keyId: parsed.params.keyid, alg };
+}
+
+/**
+ * Like `verifyRequest`, but throws a `VerifyError` — an `Error` subclass
+ * carrying a machine-readable `.code` — instead of returning
+ * `{ ok: false, ... }`. Use when callers prefer exceptions over
+ * result-branching.
+ */
+export function verifyRequestOrThrow(
+  req: RequestLike,
+  opts: VerifyOptions,
+): { label: string; keyId?: string; alg?: string } {
+  const res = verifyRequest(req, opts);
+  if (res.ok) return { label: res.label, keyId: res.keyId, alg: res.alg };
+  throw new VerifyError(
+    res.code ?? "VERIFICATION_ERROR",
+    res.reason ?? "verification failed",
+    { label: res.label, keyId: res.keyId, alg: res.alg },
+  );
 }
