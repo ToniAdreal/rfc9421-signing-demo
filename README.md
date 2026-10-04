@@ -140,6 +140,9 @@ well-tested, but wire compatibility with any third-party RFC 9421
 implementation has **not** been demonstrated. Do not assume it without
 testing.
 
+Security notes (scope, replay, key management, why not production):
+see [SECURITY.md](SECURITY.md).
+
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
