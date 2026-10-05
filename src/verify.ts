@@ -344,7 +344,11 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
  * A failing label never blocks the remaining labels.
  *
  * Returns an empty array when the request has no `Signature-Input`
- * header. Duplicate labels are verified once (first occurrence).
+ * header. When the header is present but cannot even be split into
+ * labels, returns a single-element array with `ok: false` and code
+ * `MALFORMED_SIGNATURE_INPUT` (the header carries no usable label).
+ * Like `verifyRequest`, this function never throws on malformed input.
+ * Duplicate labels are verified once (first occurrence).
  */
 export function verifyAllLabels(
   req: RequestLike,
@@ -352,7 +356,20 @@ export function verifyAllLabels(
 ): VerifyResult[] {
   const sigInput = getHeader(req.headers, "signature-input");
   if (sigInput === undefined) return [];
-  return listSignatureLabels(sigInput).map((label) => {
+  let labels: string[];
+  try {
+    labels = listSignatureLabels(sigInput);
+  } catch (e) {
+    return [
+      {
+        ok: false,
+        code: "MALFORMED_SIGNATURE_INPUT",
+        reason: `bad signature-input: ${(e as Error).message}`,
+        label: "",
+      },
+    ];
+  }
+  return labels.map((label) => {
     const key = opts.keys?.[label] ?? opts.key;
     return verifyRequest(req, { ...opts, label, key });
   });
