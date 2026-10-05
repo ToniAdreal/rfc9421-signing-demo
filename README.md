@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 18 tests, all local, no network
+npm test   # 92 tests, all local, no network
 ```
 
 ## Quickstart
@@ -176,10 +176,19 @@ most also appear in [Limitations](#limitations)):
 - **Components.** Not supported: `@query`, `@status`, `@request-response`,
   trailers, `bs`, and other derived components beyond the list under
   "What it implements".
-- **Single signature.** The verifier checks one signature label per call;
-  messages carrying multiple signatures are not handled.
-- **Freshness is not replay protection.** `created`/`expires` bound the
-  acceptance window, but there is no nonce or replay cache.
+- **Multiple signatures.** `verifyRequest` checks one label per call; for
+  multi-party flows, `verifyAllLabels` verifies every label in the request
+  (one `VerifyResult` per label, and a failing label never blocks the
+  remaining labels). Per-label key material is still caller-supplied via
+  the optional `keys` map — a peer that expects automatic per-label key
+  discovery will need keys wired up manually.
+- **Freshness is not automatic replay protection.** `created`/`expires`
+  only bound the acceptance window. RFC 9421 `nonce` is supported
+  (`signRequest` accepts a `nonce` option; `verifyRequest` echoes it back
+  as `result.nonce`), and an opt-in per-process in-memory `ReplayCache`
+  (LRU + TTL) rejects a replayed nonce with `NONCE_REPLAY`. There is no
+  shared or distributed nonce store — multi-verifier deployments still
+  need one (see Limitations).
 
 In short: a spec-conformant *subset* that is self-consistent and locally
 well-tested, but wire compatibility with any third-party RFC 9421
@@ -251,7 +260,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 57 tests including a golden signature-base vector and a
+`npm test` runs 92 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).
