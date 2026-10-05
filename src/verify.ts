@@ -49,6 +49,12 @@ export interface VerifyResult {
   label: string;
   keyId?: string;
   alg?: string;
+  /**
+   * The `nonce` signature-input parameter parsed from the request, as
+   * seen on the wire (i.e. *before* signature verification establishes
+   * its authenticity). Absent when the signer did not send one.
+   */
+  nonce?: string;
 }
 
 /**
@@ -118,6 +124,9 @@ export function verifyRequest(
       code: "MALFORMED_SIGNATURE",
       reason: `bad signature field: ${(e as Error).message}`,
       label,
+      keyId: parsed.params.keyid,
+      alg: parsed.params.alg,
+      nonce: parsed.params.nonce,
     };
   }
 
@@ -139,6 +148,7 @@ export function verifyRequest(
         code: "UNSUPPORTED_ALG",
         reason: `unsupported alg "${alg}"`,
         label,
+        nonce: parsed.params.nonce,
       };
     }
   } catch (e) {
@@ -147,6 +157,7 @@ export function verifyRequest(
       code: "VERIFICATION_ERROR",
       reason: `verification error: ${(e as Error).message}`,
       label,
+      nonce: parsed.params.nonce,
     };
   }
   if (!cryptoOk)
@@ -157,6 +168,7 @@ export function verifyRequest(
       label,
       keyId: parsed.params.keyid,
       alg,
+      nonce: parsed.params.nonce,
     };
 
   // Body binding (RFC 9530): the signature only covers the *value* of the
@@ -180,6 +192,7 @@ export function verifyRequest(
         label,
         keyId: parsed.params.keyid,
         alg,
+        nonce: parsed.params.nonce,
       };
     const expected = createHash("sha512").update(bodyBytes).digest();
     const actual = Buffer.from(dm[1], "base64");
@@ -191,6 +204,7 @@ export function verifyRequest(
         label,
         keyId: parsed.params.keyid,
         alg,
+        nonce: parsed.params.nonce,
       };
   }
 
@@ -205,6 +219,7 @@ export function verifyRequest(
       label,
       keyId: parsed.params.keyid,
       alg,
+      nonce: parsed.params.nonce,
     };
   if (
     parsed.params.created !== undefined &&
@@ -217,9 +232,16 @@ export function verifyRequest(
       label,
       keyId: parsed.params.keyid,
       alg,
+      nonce: parsed.params.nonce,
     };
 
-  return { ok: true, label, keyId: parsed.params.keyid, alg };
+  return {
+    ok: true,
+    label,
+    keyId: parsed.params.keyid,
+    alg,
+    nonce: parsed.params.nonce,
+  };
 }
 
 /**
@@ -231,12 +253,13 @@ export function verifyRequest(
 export function verifyRequestOrThrow(
   req: RequestLike,
   opts: VerifyOptions,
-): { label: string; keyId?: string; alg?: string } {
+): { label: string; keyId?: string; alg?: string; nonce?: string } {
   const res = verifyRequest(req, opts);
-  if (res.ok) return { label: res.label, keyId: res.keyId, alg: res.alg };
+  if (res.ok)
+    return { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce };
   throw new VerifyError(
     res.code ?? "VERIFICATION_ERROR",
     res.reason ?? "verification failed",
-    { label: res.label, keyId: res.keyId, alg: res.alg },
+    { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce },
   );
 }

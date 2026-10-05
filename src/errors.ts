@@ -35,6 +35,7 @@ export interface VerifyErrorOptions {
   label: string;
   keyId?: string;
   alg?: string;
+  nonce?: string;
 }
 
 /**
@@ -48,6 +49,7 @@ export class VerifyError extends Error {
   readonly label: string;
   readonly keyId?: string;
   readonly alg?: string;
+  readonly nonce?: string;
 
   constructor(
     code: VerifyFailureCode,
@@ -61,6 +63,7 @@ export class VerifyError extends Error {
     this.label = opts.label;
     this.keyId = opts.keyId;
     this.alg = opts.alg;
+    this.nonce = opts.nonce;
   }
 }
 

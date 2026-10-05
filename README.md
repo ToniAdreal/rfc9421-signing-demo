@@ -75,21 +75,28 @@ const result = verifyRequest(signed, { key: secret });
   tolerance (`clockSkewToleranceSec`, default 60s); `expires` enforced
   strictly by default, with an optional grace period
   (`expiredToleranceSec`, default 0s).
+- **Nonce (RFC 9421 §2.3)**: pass `nonce` to `signRequest` and it is
+  emitted as a `nonce` signature-input parameter — part of the signed
+  `@signature-params` line, so a forged nonce fails with
+  `SIGNATURE_MISMATCH`. `verifyRequest` returns it as `result.nonce`
+  (the wire-seen value, reported before authenticity is established).
+  Tracking seen nonces to detect replays is the caller's job.
 - Minimal `Signature-Input` / `Signature` field parsing for verification.
 
 ## Limitations (honest)
 
 - **Subset of RFC 9421.** Not implemented: `ecdsa-p256-sha256`, `rsa-pss-sha512`,
   `hmac-sha512`, `@query`, `@status`, `@request-response`, trailers, `bs`,
-  `keyid` resolution / key discovery, `nonce` replay tracking. The verifier
+  `keyid` resolution / key discovery. The verifier
   checks one signature label per call.
 - **Authority normalization** uses WHATWG `URL` semantics (lowercased, default
   ports elided). Both sides of this library agree with each other, but a
   foreign implementation with different normalization would disagree.
 - **Body binding only understands `sha-512`** digests.
-- **No replay cache.** Freshness (`created`/`expires`) bounds the window, but
-  deduplicating signatures within that window is the caller's job (see the
-  planned `replay-cache-go` companion).
+- **No replay cache.** The `nonce` parameter is emitted, signed, and
+  returned so callers can track seen nonces, but this library keeps no
+  cache itself — detecting a nonce reuse within the freshness window is
+  the caller's job (see the planned `replay-cache-go` companion).
 - **Demo-grade key management.** Keys are passed in directly; there is no
   keystore, rotation, or `keyid`→key lookup.
 

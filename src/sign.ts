@@ -24,6 +24,13 @@ export interface SignOptions {
   /** Signature label. Defaults to "sig1". */
   label?: string;
   /**
+   * Optional nonce (RFC 9421 §2.3): emitted as a `nonce` signature-input
+   * parameter and therefore covered by the signature. The verifier
+   * returns it on `VerifyResult.nonce`; tracking seen nonces to detect
+   * replays is the caller's job.
+   */
+  nonce?: string;
+  /**
    * Covered components, in order. Defaults to
    * ["@method", "@authority", "@path"] plus "content-digest" when a body
    * is present.
@@ -71,6 +78,7 @@ export function signRequest(
 
   const params: SignatureParams = { created, keyid: opts.keyId, alg: opts.alg };
   if (opts.expires !== undefined) params.expires = opts.expires;
+  if (opts.nonce !== undefined) params.nonce = opts.nonce;
 
   const signingInput: RequestLike = {
     method: req.method,
