@@ -22,6 +22,12 @@ export type VerifyFailureCode =
   | "VERIFICATION_ERROR"
   /** Cryptographic signature does not verify (wrong key or tampering). */
   | "SIGNATURE_MISMATCH"
+  /**
+   * `keyid` in the signature-input does not match the verifier's
+   * `expectedKeyId` (key-confusion / wrong-key binding). Includes a
+   * signature that carries no `keyid` at all.
+   */
+  | "KEYID_MISMATCH"
   /** Body present but no `sha-512` entry in `content-digest`. */
   | "MISSING_CONTENT_DIGEST"
   /** Body bytes do not match the signed `sha-512` digest. */

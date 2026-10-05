@@ -61,6 +61,16 @@ const signed = signRequest(req, { keyId: "k", alg: "hmac-sha256", key: secret })
 const result = verifyRequest(signed, { key: secret });
 ```
 
+Optional `keyid` pinning (key-confusion defense): pass `expectedKeyId` and
+the verifier asserts the signature's `keyid` equals it *after* the
+cryptographic check — a signature from a different key with a different
+`keyid` fails with `KEYID_MISMATCH` even when the crypto key itself verifies.
+
+```ts
+const ok = verifyRequest(signed, { key: publicKey, expectedKeyId: "my-key" });
+// mismatch -> { ok: false, code: "KEYID_MISMATCH", reason: 'keyid mismatch: ...' }
+```
+
 ## What it implements
 
 - **Signature base** (§2.5): `"id": value` lines for each covered component,
@@ -210,6 +220,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `UNSUPPORTED_ALG` | `alg` parameter names an unsupported algorithm |
 | `VERIFICATION_ERROR` | the crypto layer itself threw (e.g. malformed key material) |
 | `SIGNATURE_MISMATCH` | cryptographic signature does not verify (wrong key or tampering) |
+| `KEYID_MISMATCH` | signature's `keyid` does not match the verifier's `expectedKeyId` (or no `keyid` present) |
 | `MISSING_CONTENT_DIGEST` | body present but no `sha-512` entry in `content-digest` |
 | `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` digest |
 | `EXPIRED` | `expires` timestamp is in the past (beyond tolerance) |

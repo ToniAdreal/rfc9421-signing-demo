@@ -37,6 +37,15 @@ export interface VerifyOptions {
    * verifier clock lag during deployments and key rollovers.
    */
   expiredToleranceSec?: number;
+  /**
+   * Optional `keyid` pinning (key-confusion protection): after the
+   * cryptographic check passes, the `keyid` claimed in the
+   * signature-input must equal this value, otherwise verification
+   * fails with `KEYID_MISMATCH`. A signature that carries no `keyid`
+   * also fails when this is set. Defaults to unset: no check is made.
+   * In `verifyAllLabels` the same expectation applies to every label.
+   */
+  expectedKeyId?: string;
 }
 
 export interface VerifyResult {
@@ -166,6 +175,26 @@ export function verifyRequest(
       ok: false,
       code: "SIGNATURE_MISMATCH",
       reason: "signature mismatch",
+      label,
+      keyId: parsed.params.keyid,
+      alg,
+      nonce: parsed.params.nonce,
+    };
+
+  // Key-id pinning (key-confusion defense): the signature is already
+  // authenticated by the crypto check above, and `keyid` is part of the
+  // signed params, so the claim here is trustworthy. Reject when it is
+  // not the key the verifier expected to see.
+  const expectedKeyId = opts.expectedKeyId;
+  if (expectedKeyId !== undefined && parsed.params.keyid !== expectedKeyId)
+    return {
+      ok: false,
+      code: "KEYID_MISMATCH",
+      reason: `keyid mismatch: expected "${expectedKeyId}", got ${
+        parsed.params.keyid === undefined
+          ? "no keyid"
+          : `"${parsed.params.keyid}"`
+      }`,
       label,
       keyId: parsed.params.keyid,
       alg,
