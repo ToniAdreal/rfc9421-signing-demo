@@ -22,10 +22,14 @@ Read this before using it anywhere that matters.
 
 ## Assumptions that do not hold in production
 
-- **No replay protection.** `created`/`expires` only bound the acceptance
-  window; there is no nonce and no replay cache. A signature captured
-  inside its validity window can be replayed. Deduplicating signatures is
-  the caller's job.
+- **Replay protection is opt-in and single-process.** `created`/`expires`
+  only bound the acceptance window; a signature captured inside its
+  validity window can be replayed unless the caller opts into the
+  in-memory `ReplayCache` (`VerifyOptions.replayCache`), which tracks
+  seen nonces with a TTL and an LRU capacity cap. The cache does not
+  survive restarts and is not shared across verifier instances, so a
+  multi-instance deployment must still deduplicate nonces in a shared
+  store — that part remains the caller's job.
 - **Fixed, configurable tolerance windows.** `verifyRequest` accepts
   `created` timestamps up to `clockSkewToleranceSec` seconds in the future
   (default 60 — generous, shrink it if your clocks are trustworthy) and
@@ -58,7 +62,8 @@ Read this before using it anywhere that matters.
 ## Why not use this directly in production
 
 In short: untested cross-implementation compatibility, no replay
-protection, no key lifecycle story, unaudited parser, and a deliberately
+protection out of the box (opt-in, single-process cache only), no key
+lifecycle story, unaudited parser, and a deliberately
 narrow feature subset. If you need production message signatures, use a
 maintained, audited implementation of the full RFC 9421 with replay
 handling and key management, and validate it against independent

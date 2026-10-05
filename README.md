@@ -90,7 +90,13 @@ const ok = verifyRequest(signed, { key: publicKey, expectedKeyId: "my-key" });
   `@signature-params` line, so a forged nonce fails with
   `SIGNATURE_MISMATCH`. `verifyRequest` returns it as `result.nonce`
   (the wire-seen value, reported before authenticity is established).
-  Tracking seen nonces to detect replays is the caller's job.
+  For replay detection, pass a `ReplayCache` via
+  `verifyRequest(req, { key, replayCache })`: a nonce already seen within
+  the cache TTL fails with `NONCE_REPLAY` (fresh nonces are recorded only
+  *after* the signature fully verifies, so forgeries can't pollute the
+  cache). The cache is in-memory, bounded (LRU + TTL), and per-process —
+  multi-verifier deployments still need a shared nonce store (see the
+  Limitations and SECURITY.md).
 - Minimal `Signature-Input` / `Signature` field parsing for verification.
 - **Multi-signature verification**: `verifyAllLabels(req, { key, keys })`
   parses every label from the `Signature-Input` header and verifies each
@@ -125,10 +131,11 @@ for (const r of results) {
   ports elided). Both sides of this library agree with each other, but a
   foreign implementation with different normalization would disagree.
 - **Body binding only understands `sha-512`** digests.
-- **No replay cache.** The `nonce` parameter is emitted, signed, and
-  returned so callers can track seen nonces, but this library keeps no
-  cache itself — detecting a nonce reuse within the freshness window is
-  the caller's job (see the planned `replay-cache-go` companion).
+- **In-memory replay cache only.** The optional `ReplayCache` is a
+  per-process helper with a configurable TTL and LRU capacity cap — it
+  does not survive restarts and is not shared between verifier instances.
+  If you run multiple verifiers, deduplicate nonces in a shared store
+  (e.g. Redis) instead of (or in addition to) this cache.
 - **Demo-grade key management.** Keys are passed in directly; there is no
   keystore, rotation, or `keyid`→key lookup.
 
@@ -225,6 +232,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` digest |
 | `EXPIRED` | `expires` timestamp is in the past (beyond tolerance) |
 | `CREATED_IN_FUTURE` | `created` timestamp is in the future (beyond clock-skew tolerance) |
+| `NONCE_REPLAY` | nonce already seen within the replay-cache TTL (`VerifyOptions.replayCache`) |
 
 ```ts
 import { verifyRequestOrThrow, isVerifyError } from "rfc9421-signing-demo";

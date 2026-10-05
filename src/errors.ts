@@ -35,7 +35,13 @@ export type VerifyFailureCode =
   /** `expires` timestamp is in the past (beyond tolerance). */
   | "EXPIRED"
   /** `created` timestamp is in the future (beyond clock-skew tolerance). */
-  | "CREATED_IN_FUTURE";
+  | "CREATED_IN_FUTURE"
+  /**
+   * Nonce already seen within the TTL of `VerifyOptions.replayCache`
+   * (replayed signature). Only possible when a cache is configured and
+   * the signature carries a `nonce`.
+   */
+  | "NONCE_REPLAY";
 
 export interface VerifyErrorOptions {
   label: string;

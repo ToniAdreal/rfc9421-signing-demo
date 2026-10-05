@@ -14,6 +14,7 @@ import {
   type RequestLike,
 } from "./components.js";
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
+import type { ReplayCache } from "./replay.js";
 
 export interface VerifyOptions {
   /**
@@ -46,6 +47,21 @@ export interface VerifyOptions {
    * In `verifyAllLabels` the same expectation applies to every label.
    */
   expectedKeyId?: string;
+  /**
+   * Optional nonce replay cache (see `ReplayCache`). When set and the
+   * signature carries a non-empty `nonce`, the cache is consulted *after*
+   * every other check has passed: a nonce seen within the cache TTL fails
+   * with `NONCE_REPLAY`, otherwise the nonce is recorded. Failed
+   * verifications never record anything, so forgeries cannot pollute the
+   * cache. A signature without a nonce bypasses the cache entirely.
+   * Defaults to unset: no replay detection (backwards compatible).
+   *
+   * Note: the cache is shared across `verifyAllLabels` labels and across
+   * calls, so re-verifying the *same* request with the same cache is
+   * itself reported as a replay — one cache per verifier lifetime is the
+   * intended usage.
+   */
+  replayCache?: ReplayCache;
 }
 
 export interface VerifyResult {
@@ -265,12 +281,30 @@ export function verifyRequest(
       nonce: parsed.params.nonce,
     };
 
+  // Nonce replay detection: consulted only *after* the signature has
+  // passed every check, so failed forgeries never pollute the cache.
+  // Signatures without a (non-empty) nonce bypass the cache entirely.
+  const nonce = parsed.params.nonce;
+  const cache = opts.replayCache;
+  if (cache !== undefined && nonce !== undefined && nonce !== "") {
+    if (cache.check(nonce, now))
+      return {
+        ok: false,
+        code: "NONCE_REPLAY",
+        reason: `nonce replay detected: "${nonce}" was already seen`,
+        label,
+        keyId: parsed.params.keyid,
+        alg,
+        nonce,
+      };
+  }
+
   return {
     ok: true,
     label,
     keyId: parsed.params.keyid,
     alg,
-    nonce: parsed.params.nonce,
+    nonce,
   };
 }
 
