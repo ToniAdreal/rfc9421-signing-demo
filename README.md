@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 92 tests, all local, no network
+npm test   # 111 tests, all local, no network
 ```
 
 ## Quickstart
@@ -71,6 +71,18 @@ const ok = verifyRequest(signed, { key: publicKey, expectedKeyId: "my-key" });
 // mismatch -> { ok: false, code: "KEYID_MISMATCH", reason: 'keyid mismatch: ...' }
 ```
 
+Optional `keyid`→key resolution (key discovery / rotation): pass `keyResolver`
+and the verifier looks up the signing key from the `keyid` claimed in the
+signature-input, instead of using a fixed `key`. Mutually exclusive with
+`key` (passing both throws a configuration error).
+
+```ts
+const store = new Map([["my-key", publicKey], ["old-key", oldPublicKey]]);
+const result = verifyRequest(signed, {
+  keyResolver: (keyId) => store.get(keyId), // unknown keyid -> KEY_RESOLUTION_FAILED
+});
+```
+
 ## What it implements
 
 - **Signature base** (§2.5): `"id": value` lines for each covered component,
@@ -124,7 +136,11 @@ for (const r of results) {
 
 - **Subset of RFC 9421.** Not implemented: `ecdsa-p256-sha256`, `rsa-pss-sha512`,
   `hmac-sha512`, `@query`, `@status`, `@request-response`, trailers, `bs`,
-  `keyid` resolution / key discovery. The verifier
+  and network key discovery (JWKS / keystores over HTTP). `keyid`→key
+  resolution *is* supported opt-in: pass `VerifyOptions.keyResolver` and the
+  verifier maps the claimed `keyid` to a `KeyObject` (unknown `keyid` fails
+  with `KEY_RESOLUTION_FAILED`); the resolver itself is caller-provided and
+  runs in-process. The verifier
   checks one signature label per call; `verifyAllLabels` verifies every
   label in the request (one `VerifyResult` per label).
 - **Authority normalization** uses WHATWG `URL` semantics (lowercased, default
@@ -136,8 +152,9 @@ for (const r of results) {
   does not survive restarts and is not shared between verifier instances.
   If you run multiple verifiers, deduplicate nonces in a shared store
   (e.g. Redis) instead of (or in addition to) this cache.
-- **Demo-grade key management.** Keys are passed in directly; there is no
-  keystore, rotation, or `keyid`→key lookup.
+- **Demo-grade key management.** Keys are passed in directly or resolved via a
+  caller-provided `keyResolver`; there is no built-in keystore, key
+  rotation schedule, JWKS fetching, or `keyid`→key lookup over the network.
 
 ## Interoperability
 
@@ -159,9 +176,11 @@ What *has* been verified beyond the sign→verify round-trip tests:
 Known interop hazards (things a foreign implementation may do differently;
 most also appear in [Limitations](#limitations)):
 
-- **Key delivery is out of band.** `keyid` is carried but never resolved —
-  no key discovery, JWKS, or keystore. Both sides must agree on keys and
-  `keyid` values manually.
+- **Key delivery is out of band.** `keyid` is carried and can be resolved
+  opt-in via `VerifyOptions.keyResolver` (a caller-provided in-process
+  lookup; unknown `keyid` fails with `KEY_RESOLUTION_FAILED`) — there is
+  still no key discovery, JWKS, or keystore over the network. Both sides
+  must agree on keys and `keyid` values manually.
 - **Authority normalization.** `@authority` is normalized with WHATWG `URL`
   semantics (lowercased, default ports elided). A peer that normalizes
   differently will build a different signature base.
@@ -237,6 +256,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `VERIFICATION_ERROR` | the crypto layer itself threw (e.g. malformed key material) |
 | `SIGNATURE_MISMATCH` | cryptographic signature does not verify (wrong key or tampering) |
 | `KEYID_MISMATCH` | signature's `keyid` does not match the verifier's `expectedKeyId` (or no `keyid` present) |
+| `KEY_RESOLUTION_FAILED` | `keyResolver` could not map the signature's `keyid` to a key (missing or unknown `keyid`) |
 | `MISSING_CONTENT_DIGEST` | body present but no `sha-512` entry in `content-digest` |
 | `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` digest |
 | `EXPIRED` | `expires` timestamp is in the past (beyond tolerance) |
@@ -260,7 +280,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 92 tests including a golden signature-base vector and a
+`npm test` runs 111 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

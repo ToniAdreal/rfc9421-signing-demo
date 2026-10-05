@@ -20,8 +20,22 @@ export interface VerifyOptions {
   /**
    * ed25519: the signer's public KeyObject.
    * hmac-sha256: the shared secret KeyObject.
+   *
+   * Required unless `keyResolver` is set; mutually exclusive with it.
    */
-  key: KeyObject;
+  key?: KeyObject;
+  /**
+   * Optional `keyid`→key resolution (key discovery / rotation support).
+   * Called with the `keyid` claimed in the signature-input *after* the
+   * header parses and *before* the cryptographic check; the returned
+   * KeyObject is the key the signature is checked against. A signature
+   * with no `keyid`, or a `keyid` the resolver cannot map, fails with
+   * `KEY_RESOLUTION_FAILED` (never a silent fallback to another key).
+   * Mutually exclusive with `key`: passing both throws a configuration
+   * `Error`. Composes with `expectedKeyId` (checked after the crypto
+   * step) and with `verifyAllLabels` (resolved independently per label).
+   */
+  keyResolver?: (keyId: string) => KeyObject | undefined;
   /** Signature label to verify. Defaults to "sig1". */
   label?: string;
   /** Unix seconds. Defaults to now. */
@@ -84,17 +98,35 @@ export interface VerifyResult {
 }
 
 /**
+ * Validate the `key` / `keyResolver` pairing of a verify call. This is a
+ * caller configuration error, not a verification failure, so it throws
+ * rather than returning `{ ok: false }`.
+ */
+function assertKeyConfig(
+  opts: Pick<VerifyOptions, "key" | "keyResolver">,
+): void {
+  if (opts.key !== undefined && opts.keyResolver !== undefined)
+    throw new Error(
+      "verifyRequest: `key` and `keyResolver` are mutually exclusive — pass one or the other",
+    );
+}
+
+/**
  * Verify an RFC 9421 signed request: rebuild the signature base from the
  * covered components, check the cryptographic signature, then enforce
  * freshness (expires / created).
  *
  * Never throws on verification failure: returns `{ ok: false, code, reason }`.
  * For a throwing variant, see `verifyRequestOrThrow`.
+ *
+ * Throws only on caller configuration errors (e.g. both `key` and
+ * `keyResolver` set, or neither set).
  */
 export function verifyRequest(
   req: RequestLike,
   opts: VerifyOptions,
 ): VerifyResult {
+  assertKeyConfig(opts);
   const label = opts.label ?? "sig1";
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   const skew = opts.clockSkewToleranceSec ?? 60;
@@ -157,14 +189,60 @@ export function verifyRequest(
   }
 
   const alg = parsed.params.alg ?? "ed25519";
+
+  // Key resolution: `keyid`→key lookup happens here, after the header
+  // parsed cleanly but before any crypto runs. The `keyid` claim is still
+  // untrusted at this point — the cryptographic check below is what
+  // authenticates it (the params are part of the signature base).
+  let key: KeyObject | undefined = opts.key;
+  if (opts.keyResolver !== undefined) {
+    const claimedKeyId = parsed.params.keyid;
+    if (claimedKeyId === undefined || claimedKeyId === "")
+      return {
+        ok: false,
+        code: "KEY_RESOLUTION_FAILED",
+        reason: "signature carries no keyid to resolve",
+        label,
+        alg: parsed.params.alg,
+        nonce: parsed.params.nonce,
+      };
+    let resolved: KeyObject | undefined;
+    try {
+      resolved = opts.keyResolver(claimedKeyId);
+    } catch (e) {
+      return {
+        ok: false,
+        code: "VERIFICATION_ERROR",
+        reason: `key resolver threw: ${(e as Error).message}`,
+        label,
+        keyId: claimedKeyId,
+        alg: parsed.params.alg,
+        nonce: parsed.params.nonce,
+      };
+    }
+    if (resolved === undefined)
+      return {
+        ok: false,
+        code: "KEY_RESOLUTION_FAILED",
+        reason: `keyid "${claimedKeyId}" could not be resolved to a key`,
+        label,
+        keyId: claimedKeyId,
+        alg: parsed.params.alg,
+        nonce: parsed.params.nonce,
+      };
+    key = resolved;
+  }
+  if (key === undefined)
+    throw new Error(
+      "verifyRequest: either `key` or `keyResolver` must be provided",
+    );
+
   let cryptoOk = false;
   try {
     if (alg === "ed25519") {
-      cryptoOk = edVerify(null, Buffer.from(base, "utf8"), opts.key, sigBytes);
+      cryptoOk = edVerify(null, Buffer.from(base, "utf8"), key, sigBytes);
     } else if (alg === "hmac-sha256") {
-      const expected = createHmac("sha256", opts.key)
-        .update(base, "utf8")
-        .digest();
+      const expected = createHmac("sha256", key).update(base, "utf8").digest();
       cryptoOk =
         sigBytes.length === expected.length &&
         timingSafeEqual(sigBytes, expected);
@@ -333,6 +411,8 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * Per-label verification keys for multi-party signatures (e.g. a
    * merchant signature plus a payment-gateway signature on the same
    * request). A label absent from the map falls back to `key`.
+   * Mutually exclusive with `keyResolver`: passing `keys` (or `key`)
+   * together with `keyResolver` throws a configuration `Error`.
    */
   keys?: Record<string, KeyObject>;
 }
@@ -371,6 +451,10 @@ export function verifyAllLabels(
   }
   return labels.map((label) => {
     const key = opts.keys?.[label] ?? opts.key;
+    if (key !== undefined && opts.keyResolver !== undefined)
+      throw new Error(
+        "verifyAllLabels: `keys`/`key` is mutually exclusive with `keyResolver` — pass one or the other",
+      );
     return verifyRequest(req, { ...opts, label, key });
   });
 }

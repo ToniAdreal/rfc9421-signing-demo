@@ -28,6 +28,12 @@ export type VerifyFailureCode =
    * signature that carries no `keyid` at all.
    */
   | "KEYID_MISMATCH"
+  /**
+   * The `VerifyOptions.keyResolver` lookup could not produce a key: the
+   * signature carried no `keyid`, or the resolver returned `undefined`
+   * for the claimed `keyid`. Only possible when a resolver is configured.
+   */
+  | "KEY_RESOLUTION_FAILED"
   /** Body present but no `sha-512` entry in `content-digest`. */
   | "MISSING_CONTENT_DIGEST"
   /** Body bytes do not match the signed `sha-512` digest. */
