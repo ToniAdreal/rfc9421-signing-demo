@@ -8,6 +8,7 @@ import {
 import {
   buildSignatureBase,
   getHeader,
+  listSignatureLabels,
   parseSignatureField,
   parseSignatureInput,
   type RequestLike,
@@ -262,4 +263,34 @@ export function verifyRequestOrThrow(
     res.reason ?? "verification failed",
     { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce },
   );
+}
+
+export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
+  /**
+   * Per-label verification keys for multi-party signatures (e.g. a
+   * merchant signature plus a payment-gateway signature on the same
+   * request). A label absent from the map falls back to `key`.
+   */
+  keys?: Record<string, KeyObject>;
+}
+
+/**
+ * Verify every signature carried by the request. Parses all labels from
+ * the `Signature-Input` header and verifies each one with
+ * `verifyRequest`, returning one `VerifyResult` per label in wire order.
+ * A failing label never blocks the remaining labels.
+ *
+ * Returns an empty array when the request has no `Signature-Input`
+ * header. Duplicate labels are verified once (first occurrence).
+ */
+export function verifyAllLabels(
+  req: RequestLike,
+  opts: VerifyAllOptions,
+): VerifyResult[] {
+  const sigInput = getHeader(req.headers, "signature-input");
+  if (sigInput === undefined) return [];
+  return listSignatureLabels(sigInput).map((label) => {
+    const key = opts.keys?.[label] ?? opts.key;
+    return verifyRequest(req, { ...opts, label, key });
+  });
 }

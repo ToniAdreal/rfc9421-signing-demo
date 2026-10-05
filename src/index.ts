@@ -1,7 +1,7 @@
 export { signRequest } from "./sign.js";
 export type { SignAlg, SignedHttpRequest, SignOptions } from "./sign.js";
-export { verifyRequest, verifyRequestOrThrow } from "./verify.js";
-export type { VerifyOptions, VerifyResult } from "./verify.js";
+export { verifyAllLabels, verifyRequest, verifyRequestOrThrow } from "./verify.js";
+export type { VerifyAllOptions, VerifyOptions, VerifyResult } from "./verify.js";
 export { isVerifyError, VerifyError } from "./errors.js";
 export type { VerifyErrorOptions, VerifyFailureCode } from "./errors.js";
 export { contentDigest } from "./digest.js";
@@ -16,6 +16,7 @@ export {
 export {
   buildSignatureBase,
   getHeader,
+  listSignatureLabels,
   parseSignatureField,
   parseSignatureInput,
   signatureInputValue,

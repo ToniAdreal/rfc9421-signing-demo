@@ -82,13 +82,35 @@ const result = verifyRequest(signed, { key: secret });
   (the wire-seen value, reported before authenticity is established).
   Tracking seen nonces to detect replays is the caller's job.
 - Minimal `Signature-Input` / `Signature` field parsing for verification.
+- **Multi-signature verification**: `verifyAllLabels(req, { key, keys })`
+  parses every label from the `Signature-Input` header and verifies each
+  one with `verifyRequest`, returning one `VerifyResult` per label in wire
+  order. A failing label never blocks the remaining labels — built for
+  multi-party flows (e.g. a merchant signature plus a payment-gateway
+  signature on the same request). Pass per-label keys via the optional
+  `keys` map; labels missing from it fall back to `key`. Duplicate labels
+  are verified once (first occurrence); a request with no `Signature-Input`
+  header yields an empty array.
+
+```ts
+import { verifyAllLabels } from "./dist/index.js";
+
+const results = verifyAllLabels(signed, {
+  key: merchantPublicKey,
+  keys: { gateway: gatewayPublicKey },
+});
+for (const r of results) {
+  console.log(r.label, r.ok ? "OK" : `FAILED (${r.code})`);
+}
+```
 
 ## Limitations (honest)
 
 - **Subset of RFC 9421.** Not implemented: `ecdsa-p256-sha256`, `rsa-pss-sha512`,
   `hmac-sha512`, `@query`, `@status`, `@request-response`, trailers, `bs`,
   `keyid` resolution / key discovery. The verifier
-  checks one signature label per call.
+  checks one signature label per call; `verifyAllLabels` verifies every
+  label in the request (one `VerifyResult` per label).
 - **Authority normalization** uses WHATWG `URL` semantics (lowercased, default
   ports elided). Both sides of this library agree with each other, but a
   foreign implementation with different normalization would disagree.

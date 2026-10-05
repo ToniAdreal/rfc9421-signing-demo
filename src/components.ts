@@ -207,3 +207,45 @@ export function parseSignatureField(fieldValue: string, label: string): Buffer {
   if (!m) throw new Error(`signature "${label}" not present in Signature field`);
   return Buffer.from(m[1], "base64");
 }
+
+/**
+ * List every signature label present in a `Signature-Input` field value,
+ * in wire order. Splits on top-level commas: commas inside the
+ * parenthesized component list or inside quoted strings do not count.
+ * Duplicate labels are returned once (first occurrence wins), matching
+ * `parseSignatureInput`'s first-match behavior.
+ *
+ * Throws on a member that is not `label=(...)…` shaped.
+ */
+export function listSignatureLabels(fieldValue: string): string[] {
+  const members: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let start = 0;
+  for (let i = 0; i < fieldValue.length; i++) {
+    const c = fieldValue[i];
+    if (inString) {
+      if (c === "\\") i++; // skip escaped character
+      else if (c === '"') inString = false;
+    } else if (c === '"') {
+      inString = true;
+    } else if (c === "(") {
+      depth++;
+    } else if (c === ")") {
+      if (depth > 0) depth--;
+    } else if (c === "," && depth === 0) {
+      members.push(fieldValue.slice(start, i));
+      start = i + 1;
+    }
+  }
+  members.push(fieldValue.slice(start));
+  const labels: string[] = [];
+  for (const member of members) {
+    const m =
+      /^\s*([A-Za-z][A-Za-z0-9!#$%&'*+\-.^_`|~]*)\s*=/.exec(member);
+    if (!m)
+      throw new Error(`malformed Signature-Input member: "${member.trim()}"`);
+    if (!labels.includes(m[1])) labels.push(m[1]);
+  }
+  return labels;
+}
