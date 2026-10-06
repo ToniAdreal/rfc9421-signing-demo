@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 152 tests, all local, no network
+npm test   # 162 tests, all local, no network
 ```
 
 ## Quickstart
@@ -149,7 +149,10 @@ configuration `Error` instead of silently defaulting.
 - **Freshness**: `created` enforced with a configurable clock-skew
   tolerance (`clockSkewToleranceSec`, default 60s); `expires` enforced
   strictly by default, with an optional grace period
-  (`expiredToleranceSec`, default 0s).
+  (`expiredToleranceSec`, default 0s). A verifier can also demand the
+  timestamps exist at all: `requireCreated` / `requireExpires` reject
+  signatures that omit them (`MISSING_CREATED` / `MISSING_EXPIRES`) —
+  for signers you control, `signRequest` always sends `created`.
 - **Nonce (RFC 9421 §2.3)**: pass `nonce` to `signRequest` and it is
   emitted as a `nonce` signature-input parameter — part of the signed
   `@signature-params` line, so a forged nonce fails with
@@ -328,6 +331,8 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` digest |
 | `EXPIRED` | `expires` timestamp is in the past (beyond tolerance) |
 | `CREATED_IN_FUTURE` | `created` timestamp is in the future (beyond clock-skew tolerance) |
+| `MISSING_CREATED` | `requireCreated` is set but the signature carries no `created` |
+| `MISSING_EXPIRES` | `requireExpires` is set but the signature carries no `expires` |
 | `NONCE_REPLAY` | nonce already seen within the replay-cache TTL (`VerifyOptions.replayCache`) |
 
 ```ts
@@ -347,7 +352,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 152 tests including a golden signature-base vector and a
+`npm test` runs 162 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

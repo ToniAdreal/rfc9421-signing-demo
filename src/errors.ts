@@ -43,6 +43,16 @@ export type VerifyFailureCode =
   /** `created` timestamp is in the future (beyond clock-skew tolerance). */
   | "CREATED_IN_FUTURE"
   /**
+   * `VerifyOptions.requireCreated` is set but the signature carries no
+   * `created` parameter. Only possible when the caller opted in.
+   */
+  | "MISSING_CREATED"
+  /**
+   * `VerifyOptions.requireExpires` is set but the signature carries no
+   * `expires` parameter. Only possible when the caller opted in.
+   */
+  | "MISSING_EXPIRES"
+  /**
    * Nonce already seen within the TTL of `VerifyOptions.replayCache`
    * (replayed signature). Only possible when a cache is configured and
    * the signature carries a `nonce`.

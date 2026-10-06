@@ -54,6 +54,24 @@ export interface VerifyOptions {
    */
   expiredToleranceSec?: number;
   /**
+   * Reject signatures that carry no `created` parameter. RFC 9421 leaves
+   * `created` optional and this library's `signRequest` always sends it,
+   * but a hand-rolled or third-party signature may omit it — an omitted
+   * timestamp is a signature with no bounded age, which some verifiers
+   * must not accept. Defaults to false (backwards compatible): no check
+   * is made unless you opt in. Fails with `MISSING_CREATED`, checked
+   * only *after* the cryptographic check, so forgeries are still
+   * reported as `SIGNATURE_MISMATCH`.
+   */
+  requireCreated?: boolean;
+  /**
+   * Reject signatures that carry no `expires` parameter. Same rationale
+   * as `requireCreated`, but for bounded lifetimes. Defaults to false.
+   * Fails with `MISSING_EXPIRES`, checked only *after* the cryptographic
+   * check.
+   */
+  requireExpires?: boolean;
+  /**
    * Optional `keyid` pinning (key-confusion protection): after the
    * cryptographic check passes, the `keyid` claimed in the
    * signature-input must equal this value, otherwise verification
@@ -340,6 +358,33 @@ export function verifyRequest(
         nonce: parsed.params.nonce,
       };
   }
+
+  // Freshness: the `created`/`expires` parameters are optional on the
+  // wire, so the window checks below only apply when the signer sent
+  // them. `requireCreated`/`requireExpires` let a verifier demand their
+  // presence; the check happens here, after the cryptographic check, so
+  // a forged undated signature is still reported as SIGNATURE_MISMATCH
+  // rather than being mistaken for a mere policy violation.
+  if (opts.requireCreated === true && parsed.params.created === undefined)
+    return {
+      ok: false,
+      code: "MISSING_CREATED",
+      reason: "signature carries no `created` timestamp but requireCreated is set",
+      label,
+      keyId: parsed.params.keyid,
+      alg,
+      nonce: parsed.params.nonce,
+    };
+  if (opts.requireExpires === true && parsed.params.expires === undefined)
+    return {
+      ok: false,
+      code: "MISSING_EXPIRES",
+      reason: "signature carries no `expires` timestamp but requireExpires is set",
+      label,
+      keyId: parsed.params.keyid,
+      alg,
+      nonce: parsed.params.nonce,
+    };
 
   if (
     parsed.params.expires !== undefined &&
