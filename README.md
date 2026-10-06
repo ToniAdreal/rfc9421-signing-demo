@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 120 tests, all local, no network
+npm test   # 128 tests, all local, no network
 ```
 
 ## Quickstart
@@ -82,6 +82,21 @@ const store = new Map([["my-key", publicKey], ["old-key", oldPublicKey]]);
 const result = verifyRequest(signed, {
   keyResolver: (keyId) => store.get(keyId), // unknown keyid -> KEY_RESOLUTION_FAILED
 });
+```
+
+JWK public-key distribution (webhook / gateway deployments, where PEM is
+awkward to ship): export the ed25519 public key as a plain RFC 8037 object,
+send it as JSON, and import it on the verifier side. Private JWKs (`"d"`
+present) are refused — this helper is public-key distribution only, so
+private keys stay in PEM on the signer side.
+
+```ts
+import { exportPublicKeyJwk, importPublicKeyJwk } from "./dist/index.js";
+const jwk = exportPublicKeyJwk(publicKey); // { kty: "OKP", crv: "Ed25519", x: "..." }
+const wireKey = JSON.parse(JSON.stringify(jwk)); // what the verifier receives
+verifyRequest(signed, { key: importPublicKeyJwk(wireKey) }); // { ok: true, ... }
+// Malformed JWKs (missing kty/crv/x, wrong curve, corrupt x) throw a clear
+// "invalid JWK: ..." Error; never a verification failure.
 ```
 
 ## What it implements
@@ -287,7 +302,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 120 tests including a golden signature-base vector and a
+`npm test` runs 128 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

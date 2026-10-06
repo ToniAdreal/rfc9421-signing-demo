@@ -76,3 +76,104 @@ export function exportPrivateKeyPem(key: KeyObject): string {
 export function exportPublicKeyPem(key: KeyObject): string {
   return key.export({ format: "pem", type: "spki" }).toString();
 }
+
+/**
+ * Public-key-only JWK view of an ed25519 key, exactly as produced by
+ * `exportPublicKeyJwk`. Deliberately narrow: this demo only needs ed25519
+ * public keys (the public-key-distribution case in webhook / gateway
+ * deployments, where PEM is awkward to ship). Private JWKs (`"d"`
+ * present) are never produced or accepted here.
+ */
+export interface Ed25519PublicJwk {
+  kty: "OKP";
+  crv: "Ed25519";
+  /** Base64url-encoded 32-byte ed25519 public key. */
+  x: string;
+}
+
+/**
+ * Export an ed25519 public key as a plain-object JWK (RFC 8037), ready to
+ * `JSON.stringify` and ship to a verifier. Uses node:crypto's native JWK
+ * support — no third-party dependencies.
+ *
+ * Throws a caller-configuration `Error` for anything that is not an
+ * ed25519 public KeyObject (private keys, symmetric secrets, other
+ * algorithms); this helper is the public-key-distribution case only.
+ */
+export function exportPublicKeyJwk(key: KeyObject): Ed25519PublicJwk {
+  if (key.type !== "public" || key.asymmetricKeyType !== "ed25519")
+    throw new Error(
+      `exportPublicKeyJwk: expected an ed25519 public KeyObject, got ` +
+        `type=${String(key.type)} ` +
+        `asymmetricKeyType=${String(key.asymmetricKeyType)} ` +
+        `(JWK support here is ed25519 public keys only — the public-key-distribution case)`,
+    );
+  const raw = key.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  // Node emits exactly { kty: "OKP", crv: "Ed25519", x: "<base64url>" }.
+  if (
+    raw["kty"] !== "OKP" ||
+    raw["crv"] !== "Ed25519" ||
+    typeof raw["x"] !== "string"
+  )
+    throw new Error(
+      "exportPublicKeyJwk: node:crypto returned an unexpected JWK shape " +
+        `for an ed25519 public key: ${JSON.stringify(Object.keys(raw))}`,
+    );
+  return { kty: "OKP", crv: "Ed25519", x: raw["x"] };
+}
+
+/**
+ * Import an ed25519 public key from a JWK object (RFC 8037), as produced by
+ * {@link exportPublicKeyJwk} and typically received over the wire as JSON.
+ *
+ * Strictly validates before touching node:crypto: the input must be a
+ * plain object with `kty: "OKP"`, `crv: "Ed25519"`, and a non-empty string
+ * `x`. Anything else throws a descriptive `Error` — never a verification
+ * failure, since this is key setup, not signature checking. JWKs carrying
+ * private material (`"d"`) are refused outright: this helper is public-key
+ * distribution only, and silently accepting a private JWK would encourage
+ * shipping secrets around.
+ */
+export function importPublicKeyJwk(jwk: unknown): KeyObject {
+  const fail = (why: string): never => {
+    throw new Error(`importPublicKeyJwk: invalid JWK: ${why}`);
+  };
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk))
+    fail(
+      `expected a JWK object, got ${
+        Array.isArray(jwk) ? "an array" : jwk === null ? "null" : typeof jwk
+      }`,
+    );
+  const o = jwk as Record<string, unknown>;
+  if ("d" in o)
+    fail(
+      'private key material ("d") is not accepted; this helper imports ' +
+        "public keys only (keep private keys in PEM on the signer side)",
+    );
+  if (!("kty" in o)) fail(`missing "kty" parameter`);
+  if (o["kty"] !== "OKP")
+    fail(`expected kty "OKP", got ${JSON.stringify(o["kty"])}`);
+  if (!("crv" in o)) fail(`missing "crv" parameter`);
+  if (o["crv"] !== "Ed25519")
+    fail(`expected crv "Ed25519", got ${JSON.stringify(o["crv"])}`);
+  const x = o["x"];
+  if (typeof x !== "string" || x.length === 0)
+    throw new Error(
+      `importPublicKeyJwk: invalid JWK: missing or empty "x" (the base64url public key parameter)`,
+    );
+  try {
+    return createPublicKey({
+      key: { kty: "OKP", crv: "Ed25519", x },
+      format: "jwk",
+    });
+  } catch (err) {
+    throw new Error(
+      `importPublicKeyJwk: node:crypto rejected the JWK: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}

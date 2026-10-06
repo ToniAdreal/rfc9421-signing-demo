@@ -10,13 +10,16 @@ export { contentDigest } from "./digest.js";
 export {
   assertHmacSecretLength,
   exportPrivateKeyPem,
+  exportPublicKeyJwk,
   exportPublicKeyPem,
   generateEd25519KeyPair,
   importPrivateKey,
   importPublicKey,
+  importPublicKeyJwk,
   MIN_HMAC_SECRET_BYTES,
   secretKey,
 } from "./keys.js";
+export type { Ed25519PublicJwk } from "./keys.js";
 export {
   buildSignatureBase,
   getHeader,
