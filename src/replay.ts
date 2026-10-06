@@ -31,12 +31,39 @@ export interface ReplayCacheOptions {
   now?: () => number;
 }
 
+/**
+ * Observability snapshot of a {@link ReplayCache}.
+ *
+ * - `size`: live (unexpired) entries tracked, computed against the cache's
+ *   injected clock — same reading as the `size` getter.
+ * - `hits`: `check` calls where the nonce was already seen within the TTL
+ *   (i.e. replays).
+ * - `misses`: `check` calls where the nonce was unseen and got recorded
+ *   (including a nonce whose previous record had expired — expiry means
+ *   "unseen").
+ * - `evictions`: entries dropped by `prune` to make room — both
+ *   expired-entry reclamation and LRU eviction count. The delete+re-record
+ *   of an expired nonce inside `check` is part of the miss path and is
+ *   *not* an eviction.
+ *
+ * Counters reset to zero on `clear()`.
+ */
+export interface ReplayCacheStats {
+  size: number;
+  hits: number;
+  misses: number;
+  evictions: number;
+}
+
 export class ReplayCache {
   private readonly maxEntries: number;
   private readonly ttlSec: number;
   private readonly clock: () => number;
   /** nonce -> first-seen-at (unix seconds). Insertion order = LRU order. */
   private readonly seenAt = new Map<string, number>();
+  private hits = 0;
+  private misses = 0;
+  private evictions = 0;
 
   constructor(opts: ReplayCacheOptions = {}) {
     const maxEntries = opts.maxEntries ?? 10_000;
@@ -72,13 +99,17 @@ export class ReplayCache {
         // while keeping the original first-seen timestamp.
         this.seenAt.delete(nonce);
         this.seenAt.set(nonce, prev);
+        this.hits++;
         return true; // replay
       }
       // Expired: drop and fall through to re-record with a fresh timestamp.
+      // This is the miss path (an expired record means "unseen"), not an
+      // eviction — the delete is immediately followed by a re-record.
       this.seenAt.delete(nonce);
     }
     this.prune(t);
     this.seenAt.set(nonce, t);
+    this.misses++;
     return false;
   }
 
@@ -95,26 +126,43 @@ export class ReplayCache {
     return n;
   }
 
-  /** Drop all tracked nonces. */
+  /** Drop all tracked nonces and reset the observability counters. */
   clear(): void {
     this.seenAt.clear();
+    this.hits = 0;
+    this.misses = 0;
+    this.evictions = 0;
+  }
+
+  /**
+   * Point-in-time observability snapshot `{ size, hits, misses, evictions }`
+   * (see {@link ReplayCacheStats}). The returned object is a fresh copy —
+   * mutating it does not affect the cache.
+   */
+  stats(): ReplayCacheStats {
+    return { size: this.size, hits: this.hits, misses: this.misses, evictions: this.evictions };
   }
 
   /**
    * Make room for one new entry: reclaim expired entries first, then evict
    * the least recently seen ones. Map iteration order is insertion order,
-   * so the head is always the oldest entry.
+   * so the head is always the oldest entry. Every entry dropped here
+   * counts as an eviction for observability.
    */
   private prune(t: number): void {
     if (this.seenAt.size < this.maxEntries) return;
     for (const [nonce, at] of this.seenAt) {
-      if (t - at >= this.ttlSec) this.seenAt.delete(nonce);
+      if (t - at >= this.ttlSec) {
+        this.seenAt.delete(nonce);
+        this.evictions++;
+      }
       if (this.seenAt.size < this.maxEntries) return;
     }
     while (this.seenAt.size >= this.maxEntries) {
       const oldest = this.seenAt.keys().next();
       if (oldest.done) break;
       this.seenAt.delete(oldest.value);
+      this.evictions++;
     }
   }
 }

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 128 tests, all local, no network
+npm test   # 143 tests, all local, no network
 ```
 
 ## Quickstart
@@ -161,7 +161,10 @@ configuration `Error` instead of silently defaulting.
   *after* the signature fully verifies, so forgeries can't pollute the
   cache). The cache is in-memory, bounded (LRU + TTL), and per-process —
   multi-verifier deployments still need a shared nonce store (see the
-  Limitations and SECURITY.md).
+  Limitations and SECURITY.md). Call `cache.stats()` for observability:
+  it returns a `{ size, hits, misses, evictions }` snapshot (expired-entry
+  reclamation and LRU eviction both count as evictions); `cache.clear()`
+  also resets the counters.
 - Minimal `Signature-Input` / `Signature` field parsing for verification.
 - **Node http server adapter**: `fromNodeRequest(req, body, opts?)`
   normalizes an `http.IncomingMessage` into a `RequestLike` (absolute URL
@@ -344,7 +347,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 135 tests including a golden signature-base vector and a
+`npm test` runs 143 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).
