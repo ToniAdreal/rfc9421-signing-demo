@@ -3,7 +3,7 @@
  * Signature-Input parsing for a practical subset of RFC 9421
  * (HTTP Message Signatures).
  *
- * Covered components supported: @method, @scheme, @authority, @path,
+ * Covered components supported: @method, @scheme, @authority, @path, @query,
  * @target-uri, @created, @expires, plus any HTTP header field name.
  * Signature algorithms are handled by sign.ts / verify.ts; this module
  * only deals with the canonical bytes that get signed.
@@ -77,6 +77,10 @@ export function resolveComponent(
       return url.host.toLowerCase();
     case "@path":
       return url.pathname || "/";
+    case "@query":
+      // RFC 9421 §2.2.7: the query component of the request target,
+      // including the leading "?" — empty string when the URL has no query.
+      return url.search;
     case "@target-uri":
       return req.url;
     case "@created":

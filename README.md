@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 143 tests, all local, no network
+npm test   # 152 tests, all local, no network
 ```
 
 ## Quickstart
@@ -140,8 +140,8 @@ configuration `Error` instead of silently defaulting.
 
 - **Signature base** (§2.5): `"id": value` lines for each covered component,
   then the `"@signature-params"` line. Covered components: `@method`,
-  `@scheme`, `@authority`, `@path`, `@target-uri`, `@created`, `@expires`,
-  plus any HTTP header field (case-insensitive, multi-values joined).
+  `@scheme`, `@authority`, `@path`, `@query`, `@target-uri`, `@created`,
+  `@expires`, plus any HTTP header field (case-insensitive, multi-values joined).
 - **Algorithms**: `ed25519` and `hmac-sha256` (constant-time compare).
 - **Body binding**: `Content-Digest: sha-512=:…:` is computed when the body
   is covered, and the verifier recomputes it — a swapped body fails even if
@@ -196,7 +196,7 @@ for (const r of results) {
 ## Limitations (honest)
 
 - **Subset of RFC 9421.** Not implemented: `ecdsa-p256-sha256`, `rsa-pss-sha512`,
-  `hmac-sha512`, `@query`, `@status`, `@request-response`, trailers, `bs`,
+  `hmac-sha512`, `@status`, `@request-response`, trailers, `bs`,
   and network key discovery (JWKS / keystores over HTTP). `keyid`→key
   resolution *is* supported opt-in: pass `VerifyOptions.keyResolver` and the
   verifier maps the claimed `keyid` to a `KeyObject` (unknown `keyid` fails
@@ -259,7 +259,7 @@ most also appear in [Limitations](#limitations)):
   least as long as the hash output; sha-256 → 32 bytes). A short key is a
   caller configuration error and throws on both sides — a signer can never
   mint signatures that the verifier would also (correctly) refuse to check.
-- **Components.** Not supported: `@query`, `@status`, `@request-response`,
+- **Components.** Not supported: `@status`, `@request-response`,
   trailers, `bs`, and other derived components beyond the list under
   "What it implements".
 - **Multiple signatures.** `verifyRequest` checks one label per call; for
@@ -347,7 +347,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 143 tests including a golden signature-base vector and a
+`npm test` runs 152 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).
