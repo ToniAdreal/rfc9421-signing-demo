@@ -13,6 +13,7 @@ export {
   exportPublicKeyJwk,
   exportPublicKeyPem,
   generateEd25519KeyPair,
+  generateP256KeyPair,
   importPrivateKey,
   importPublicKey,
   importPublicKeyJwk,

@@ -1,4 +1,9 @@
-import { createHmac, sign as edSign, type KeyObject } from "node:crypto";
+import {
+  createHmac,
+  createSign,
+  sign as edSign,
+  type KeyObject,
+} from "node:crypto";
 import {
   buildSignatureBase,
   signatureInputValue,
@@ -8,13 +13,16 @@ import {
 import { contentDigest } from "./digest.js";
 import { assertHmacSecretLength } from "./keys.js";
 
-export type SignAlg = "ed25519" | "hmac-sha256";
+export type SignAlg = "ed25519" | "hmac-sha256" | "ecdsa-p256-sha256";
 
 export interface SignOptions {
   keyId: string;
   alg: SignAlg;
   /**
    * ed25519: a private KeyObject (see keys.generateEd25519KeyPair).
+   * ecdsa-p256-sha256: a P-256 private KeyObject (see
+   * keys.generateP256KeyPair); signatures are DER-encoded ECDSA values
+   * (RFC 9421 §3.3.2).
    * hmac-sha256: a secret KeyObject (see keys.secretKey).
    */
   key: KeyObject;
@@ -92,6 +100,11 @@ export function signRequest(
   let sig: Buffer;
   if (opts.alg === "ed25519") {
     sig = edSign(null, Buffer.from(base, "utf8"), opts.key);
+  } else if (opts.alg === "ecdsa-p256-sha256") {
+    // RFC 9421 §3.3.2: the signature value is the DER encoding of the
+    // ASN.1 ECDSA structure. node:crypto's createSign emits exactly that
+    // by default, and verifyRequest consumes it with createVerify below.
+    sig = createSign("sha256").update(base, "utf8").sign(opts.key);
   } else if (opts.alg === "hmac-sha256") {
     // Fail fast on weak secrets: a short key must never silently mint
     // signatures the verifier would also (correctly) refuse to check.

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 162 tests, all local, no network
+npm test   # 173 tests, all local, no network
 ```
 
 ## Quickstart
@@ -142,7 +142,9 @@ configuration `Error` instead of silently defaulting.
   then the `"@signature-params"` line. Covered components: `@method`,
   `@scheme`, `@authority`, `@path`, `@query`, `@target-uri`, `@created`,
   `@expires`, plus any HTTP header field (case-insensitive, multi-values joined).
-- **Algorithms**: `ed25519` and `hmac-sha256` (constant-time compare).
+- **Algorithms**: `ed25519`, `ecdsa-p256-sha256` (NIST P-256; DER-encoded
+  ECDSA signatures per RFC 9421 §3.3.2), and `hmac-sha256`
+  (constant-time compare).
 - **Body binding**: `Content-Digest: sha-512=:…:` is computed when the body
   is covered, and the verifier recomputes it — a swapped body fails even if
   the signature itself is valid.
@@ -198,7 +200,7 @@ for (const r of results) {
 
 ## Limitations (honest)
 
-- **Subset of RFC 9421.** Not implemented: `ecdsa-p256-sha256`, `rsa-pss-sha512`,
+- **Subset of RFC 9421.** Not implemented: `rsa-pss-sha512`,
   `hmac-sha512`, `@status`, `@request-response`, trailers, `bs`,
   and network key discovery (JWKS / keystores over HTTP). `keyid`→key
   resolution *is* supported opt-in: pass `VerifyOptions.keyResolver` and the
@@ -253,9 +255,9 @@ most also appear in [Limitations](#limitations)):
   `@method @authority @path`, plus `content-digest` when a body exists.
 - **Digest algorithm.** Body binding only understands `sha-512`. A peer
   sending `sha-256` digests fails with "no sha-512 content-digest present".
-- **Signature algorithms.** Only `ed25519` and `hmac-sha256` are
-  implemented. Not supported: `ecdsa-p256-sha256`, `rsa-pss-sha512`,
-  `hmac-sha512`, or anything else.
+- **Signature algorithms.** Implemented: `ed25519`, `ecdsa-p256-sha256`
+  (DER-encoded, RFC 9421 §3.3.2), `hmac-sha256`. Not supported:
+  `rsa-pss-sha512`, `hmac-sha512`, or anything else.
 - **HMAC secret length.** `secretKey()` refuses secrets shorter than 32
   bytes, and the sign/verify paths enforce the same floor on any
   `KeyObject` used with `hmac-sha256` (RFC 2104 §3: the key SHOULD be at
@@ -352,7 +354,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 162 tests including a golden signature-base vector and a
+`npm test` runs 173 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

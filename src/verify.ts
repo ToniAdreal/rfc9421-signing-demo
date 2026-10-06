@@ -1,6 +1,7 @@
 import {
   createHash,
   createHmac,
+  createVerify,
   timingSafeEqual,
   verify as edVerify,
   type KeyObject,
@@ -20,6 +21,7 @@ import type { ReplayCache } from "./replay.js";
 export interface VerifyOptions {
   /**
    * ed25519: the signer's public KeyObject.
+   * ecdsa-p256-sha256: the signer's P-256 public KeyObject.
    * hmac-sha256: the shared secret KeyObject.
    *
    * Required unless `keyResolver` is set; mutually exclusive with it.
@@ -268,6 +270,12 @@ export function verifyRequest(
   try {
     if (alg === "ed25519") {
       cryptoOk = edVerify(null, Buffer.from(base, "utf8"), key, sigBytes);
+    } else if (alg === "ecdsa-p256-sha256") {
+      // Expects the DER-encoded ECDSA value that createSign produces on
+      // the sign side (RFC 9421 §3.3.2).
+      cryptoOk = createVerify("sha256")
+        .update(base, "utf8")
+        .verify(key, sigBytes);
     } else if (alg === "hmac-sha256") {
       const expected = createHmac("sha256", key).update(base, "utf8").digest();
       cryptoOk =

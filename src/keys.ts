@@ -15,6 +15,20 @@ export function generateEd25519KeyPair(): {
 }
 
 /**
+ * Generate a fresh NIST P-256 (secp256r1) key pair for the
+ * `ecdsa-p256-sha256` algorithm (RFC 9421 §3.3.2). The signatures
+ * produced from this pair are DER-encoded ASN.1 ECDSA values, per the
+ * RFC — `signRequest` / `verifyRequest` both use node:crypto's default
+ * DER encoding, so the wire format stays spec-conformant.
+ */
+export function generateP256KeyPair(): {
+  publicKey: KeyObject;
+  privateKey: KeyObject;
+} {
+  return generateKeyPairSync("ec", { namedCurve: "P-256" });
+}
+
+/**
  * Minimum HMAC shared-secret length in bytes. RFC 2104 §3 advises that the
  * HMAC key be at least as long as the hash output; for hmac-sha256 that is
  * 32 bytes. Shorter keys are brute-forceable and are rejected everywhere
