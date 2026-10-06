@@ -6,6 +6,7 @@ import {
   type SignatureParams,
 } from "./components.js";
 import { contentDigest } from "./digest.js";
+import { assertHmacSecretLength } from "./keys.js";
 
 export type SignAlg = "ed25519" | "hmac-sha256";
 
@@ -92,6 +93,9 @@ export function signRequest(
   if (opts.alg === "ed25519") {
     sig = edSign(null, Buffer.from(base, "utf8"), opts.key);
   } else if (opts.alg === "hmac-sha256") {
+    // Fail fast on weak secrets: a short key must never silently mint
+    // signatures the verifier would also (correctly) refuse to check.
+    assertHmacSecretLength(opts.key);
     sig = createHmac("sha256", opts.key).update(base, "utf8").digest();
   } else {
     throw new Error(`unsupported alg "${opts.alg as string}"`);

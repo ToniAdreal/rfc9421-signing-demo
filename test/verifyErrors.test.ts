@@ -171,7 +171,7 @@ const cases: Array<{
     // digest check compares body vs header and fails.
     build: () => {
       const body = '{"amount":100}';
-      const key = secretKey("s3cret");
+      const key = secretKey("s3cret-replacement-hmac-secret-32b");
       const signed = signRequest(
         {
           method: "POST",

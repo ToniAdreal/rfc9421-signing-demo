@@ -44,7 +44,7 @@ function benchmarkScenario(alg: SignAlg): { signOps: number; verifyOps: number }
     signKey = privateKey;
     verifyKey = publicKey;
   } else {
-    const secret = secretKey("bench-shared-secret");
+    const secret = secretKey("bench-hmac-secret-32-bytes-minimum");
     signKey = secret;
     verifyKey = secret;
   }

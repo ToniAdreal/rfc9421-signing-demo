@@ -71,7 +71,7 @@ test("two ed25519 labels both verify, in wire order", () => {
 
 test("mixed algorithms with per-label keys", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const secret = secretKey("shared-secret");
+  const secret = secretKey("multilabel-test-secret-32-bytes-0");
   const body = JSON.stringify({ amount: 250 });
   const a = signRequest(baseRequest(body), {
     keyId: "ed-key",

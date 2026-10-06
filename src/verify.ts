@@ -14,6 +14,7 @@ import {
   type RequestLike,
 } from "./components.js";
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
+import { assertHmacSecretLength } from "./keys.js";
 import type { ReplayCache } from "./replay.js";
 
 export interface VerifyOptions {
@@ -120,7 +121,9 @@ function assertKeyConfig(
  * For a throwing variant, see `verifyRequestOrThrow`.
  *
  * Throws only on caller configuration errors (e.g. both `key` and
- * `keyResolver` set, or neither set).
+ * `keyResolver` set, or neither set — and a configured `hmac-sha256`
+ * secret shorter than {@link MIN_HMAC_SECRET_BYTES}, which is rejected
+ * loudly on both the sign and verify sides).
  */
 export function verifyRequest(
   req: RequestLike,
@@ -236,6 +239,12 @@ export function verifyRequest(
     throw new Error(
       "verifyRequest: either `key` or `keyResolver` must be provided",
     );
+
+  // HMAC key-length enforcement happens *before* the crypto try/catch on
+  // purpose: a weak configured secret is a caller configuration error
+  // (throw), not a verification failure — symmetric with the sign side,
+  // which also throws. It must not be swallowed into a VERIFICATION_ERROR.
+  if (alg === "hmac-sha256") assertHmacSecretLength(key);
 
   let cryptoOk = false;
   try {

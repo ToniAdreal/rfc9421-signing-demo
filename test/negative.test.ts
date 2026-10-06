@@ -78,12 +78,12 @@ test("wrong hmac secret fails verification", () => {
     {
       keyId: "k",
       alg: "hmac-sha256",
-      key: secretKey("correct-secret"),
+      key: secretKey("correct-hmac-secret-correct-hmac-01"),
       created: CREATED,
     },
   );
   const res = verifyRequest(signed, {
-    key: secretKey("wrong-secret"),
+    key: secretKey("wrong-hmac-secret-wrong-hmac-0002"),
     now: CREATED + 60,
   });
   assert.equal(res.ok, false);

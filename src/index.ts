@@ -8,11 +8,13 @@ export { ReplayCache } from "./replay.js";
 export type { ReplayCacheOptions } from "./replay.js";
 export { contentDigest } from "./digest.js";
 export {
+  assertHmacSecretLength,
   exportPrivateKeyPem,
   exportPublicKeyPem,
   generateEd25519KeyPair,
   importPrivateKey,
   importPublicKey,
+  MIN_HMAC_SECRET_BYTES,
   secretKey,
 } from "./keys.js";
 export {

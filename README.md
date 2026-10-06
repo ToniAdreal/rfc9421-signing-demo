@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 111 tests, all local, no network
+npm test   # 120 tests, all local, no network
 ```
 
 ## Quickstart
@@ -56,7 +56,8 @@ HMAC variant:
 
 ```ts
 import { secretKey } from "./dist/index.js";
-const secret = secretKey("shared-secret");
+// HMAC secrets must be ≥ 32 bytes (RFC 2104: key ≥ hash output length).
+const secret = secretKey("a-shared-hmac-secret-of-32-bytes!!");
 const signed = signRequest(req, { keyId: "k", alg: "hmac-sha256", key: secret });
 const result = verifyRequest(signed, { key: secret });
 ```
@@ -192,6 +193,12 @@ most also appear in [Limitations](#limitations)):
 - **Signature algorithms.** Only `ed25519` and `hmac-sha256` are
   implemented. Not supported: `ecdsa-p256-sha256`, `rsa-pss-sha512`,
   `hmac-sha512`, or anything else.
+- **HMAC secret length.** `secretKey()` refuses secrets shorter than 32
+  bytes, and the sign/verify paths enforce the same floor on any
+  `KeyObject` used with `hmac-sha256` (RFC 2104 §3: the key SHOULD be at
+  least as long as the hash output; sha-256 → 32 bytes). A short key is a
+  caller configuration error and throws on both sides — a signer can never
+  mint signatures that the verifier would also (correctly) refuse to check.
 - **Components.** Not supported: `@query`, `@status`, `@request-response`,
   trailers, `bs`, and other derived components beyond the list under
   "What it implements".
@@ -280,7 +287,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 111 tests including a golden signature-base vector and a
+`npm test` runs 120 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

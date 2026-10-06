@@ -36,7 +36,7 @@ test("ed25519 round-trip with body", () => {
 });
 
 test("hmac-sha256 round-trip without body", () => {
-  const secret = secretKey("top-secret");
+  const secret = secretKey("hmac-test-secret-32-bytes-long-000");
   const signed = signRequest(
     {
       method: "GET",

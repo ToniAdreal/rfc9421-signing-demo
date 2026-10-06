@@ -45,6 +45,12 @@ Read this before using it anywhere that matters.
   the signer, so verification proves integrity but not origin — the
   verifying party could itself have forged the signature. Use `ed25519`
   when the verifier must not be able to mint signatures.
+- **Short HMAC secrets are rejected.** RFC 2104 §3 advises the key be at
+  least as long as the hash output (32 bytes for sha-256). `secretKey()`,
+  `signRequest`, and `verifyRequest` all enforce this floor and throw a
+  configuration error on anything shorter, on both the sign and verify
+  sides, so a weak key fails loudly at setup time instead of minting
+  low-entropy signatures.
 - **Timing.** HMAC comparison uses `timingSafeEqual` after a length check,
   and Ed25519 verification goes through `node:crypto`. No additional
   side-channel analysis has been done.

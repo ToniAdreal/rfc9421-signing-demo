@@ -29,7 +29,7 @@ test("ed25519 nonce round-trip returns the nonce", () => {
 });
 
 test("hmac-sha256 nonce round-trip returns the nonce", () => {
-  const secret = secretKey("shared-secret");
+  const secret = secretKey("nonce-test-hmac-secret-32-bytes-00");
   const signed = signRequest(
     { method: "GET", url: "https://api.example.com/v1/status", headers: {} },
     {
