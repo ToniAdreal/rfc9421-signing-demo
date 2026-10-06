@@ -7,8 +7,11 @@ Read this before using it anywhere that matters.
 ## Demo scope
 
 - Only an RFC 9421 *subset* is implemented: signature algorithms
-  `ed25519` and `hmac-sha256`, a single signature label per verification
-  call, and body binding signs via `Content-Digest: sha-512` only (the
+  `ed25519`, `ecdsa-p256-sha256` (NIST P-256, DER-encoded per
+  RFC 9421 §3.3.2), and `hmac-sha256`; `verifyRequest` checks one
+  signature label per call, while `verifyAllLabels` verifies every label
+  in the request (a failing label never blocks the remaining labels);
+  and body binding signs via `Content-Digest: sha-512` only (the
   verifier additionally accepts a `sha-256` fallback when no `sha-512`
   entry is present). See
   `README.md` → "Limitations (honest)" for the full list of what is not
@@ -16,11 +19,16 @@ Read this before using it anywhere that matters.
 - The implementation has only been tested against itself (see
   `README.md` → "Interoperability"). Wire compatibility with any
   third-party RFC 9421 implementation is untested.
-- **No security audit has been performed.** The signature-input parser has
-  not been fuzz-tested. Treat the parser as adversarial-input-adjacent:
-  it runs entirely in-process on untrusted headers, and while it performs
-  no network or filesystem access, robustness under hostile input has not
-  been systematically established.
+- **No security audit has been performed.** The signature-input parser
+  has been fuzz-tested against a fixed-seed corpus of 1000+ malformed
+  inputs (`test/parserFuzz.test.ts`): `verifyRequest` and
+  `verifyAllLabels` never let a parser exception escape — they return
+  `{ok:false, code}` instead — and each case completes in well under
+  50 ms (no catastrophic backtracking). That covers robustness against
+  malformed headers, not a systematic adversarial analysis: treat the
+  parser as hardening-in-progress rather than proven, it runs
+  entirely in-process on untrusted headers with no network or
+  filesystem access.
 
 ## Assumptions that do not hold in production
 
@@ -39,10 +47,15 @@ Read this before using it anywhere that matters.
   (default 0, strictly enforced). Widening these windows lengthens the
   replay window above; keep both as small as your deployment allows.
 - **Demo-grade key management.** Keys are passed in directly as
-  `KeyObject`s. There is no keystore, no key rotation, no `keyid`→key
-  lookup, and no key discovery (JWKS etc.). `keyid` is an opaque hint;
-  it is carried but never resolved. How keys are generated, stored,
-  rotated, and mapped to `keyid` values is entirely on the caller.
+  `KeyObject`s, or resolved per-call via the opt-in `keyResolver`
+  (`VerifyOptions.keyResolver`: `(keyId) => KeyObject | undefined`,
+  mutually exclusive with the static `key`; an unknown or missing
+  `keyid` fails with `KEY_RESOLUTION_FAILED`, and a resolver that
+  throws is contained to `VERIFICATION_ERROR` — never a silent
+  fallback to another key). There is still no built-in keystore, no
+  key rotation, and no key discovery (JWKS etc.): how keys are
+  generated, stored, rotated, and mapped to `keyid` values is entirely
+  on the caller.
 - **`hmac-sha256` is symmetric.** The "verifier" holds the same secret as
   the signer, so verification proves integrity but not origin — the
   verifying party could itself have forged the signature. Use `ed25519`
