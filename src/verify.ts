@@ -342,18 +342,27 @@ export function verifyRequest(
         : typeof req.body === "string"
           ? Buffer.from(req.body, "utf8")
           : req.body;
-    const dm = /(?:^|,)\s*sha-512\s*=:([A-Za-z0-9+/=]+):/.exec(digestHeader);
+    // Prefer sha-512 when the header carries both algorithms; fall back to
+    // sha-256 when no sha-512 entry is present (RFC 9530 allows either).
+    // Signing still emits sha-512 only (see src/digest.ts); the fallback
+    // exists for foreign signers that only send sha-256.
+    const dm512 = /(?:^|,)\s*sha-512\s*=:([A-Za-z0-9+/=]+):/.exec(digestHeader);
+    const dm256 = /(?:^|,)\s*sha-256\s*=:([A-Za-z0-9+/=]+):/.exec(digestHeader);
+    const dm = dm512 ?? dm256;
     if (!dm)
       return {
         ok: false,
         code: "MISSING_CONTENT_DIGEST",
-        reason: "cannot verify body: no sha-512 content-digest present",
+        reason:
+          "cannot verify body: no sha-512 or sha-256 content-digest present",
         label,
         keyId: parsed.params.keyid,
         alg,
         nonce: parsed.params.nonce,
       };
-    const expected = createHash("sha512").update(bodyBytes).digest();
+    const expected = createHash(dm === dm512 ? "sha512" : "sha256")
+      .update(bodyBytes)
+      .digest();
     const actual = Buffer.from(dm[1], "base64");
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
       return {

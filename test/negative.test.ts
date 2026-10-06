@@ -109,10 +109,10 @@ test("unsupported alg in signature-input is rejected", () => {
   assert.equal(res.code, "UNSUPPORTED_ALG");
 });
 
-test("content-digest without sha-512 cannot be body-verified", () => {
-  // The verifier only knows how to check sha-512 body bindings. A
-  // content-digest header offering only sha-256 must fail cleanly
-  // instead of silently skipping the body check.
+test("content-digest with neither sha-512 nor sha-256 cannot be body-verified", () => {
+  // The verifier only knows how to check sha-512 and sha-256 body bindings.
+  // A content-digest header offering only an unsupported algorithm must fail
+  // cleanly instead of silently skipping the body check.
   const { publicKey, privateKey } = generateEd25519KeyPair();
   const body = '{"amount":100}';
   const signed = signRequest(
@@ -123,19 +123,22 @@ test("content-digest without sha-512 cannot be body-verified", () => {
       key: privateKey,
       created: CREATED,
       // content-digest deliberately NOT covered: the header below is
-      // added after signing and only sha-256 is offered.
+      // added after signing and offers only sha-1.
       coveredComponents: ["@method", "@authority", "@path"],
     },
   );
-  const sha256 = createHash("sha256").update(body, "utf8").digest("base64");
+  const sha1 = createHash("sha1").update(body, "utf8").digest("base64");
   const withDigest: SignedHttpRequest = {
     ...signed,
-    headers: { ...signed.headers, "content-digest": `sha-256=:${sha256}:` },
+    headers: { ...signed.headers, "content-digest": `sha-1=:${sha1}:` },
     body,
   };
   const res = verifyRequest(withDigest, { key: publicKey, now: CREATED + 60 });
   assert.equal(res.ok, false);
-  assert.equal(res.reason, "cannot verify body: no sha-512 content-digest present");
+  assert.equal(
+    res.reason,
+    "cannot verify body: no sha-512 or sha-256 content-digest present",
+  );
   assert.equal(res.code, "MISSING_CONTENT_DIGEST");
 });
 

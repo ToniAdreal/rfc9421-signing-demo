@@ -68,12 +68,87 @@ test("multiple digests with sha-512 first: verifier uses sha-512 only", () => {
   assert.equal(res.ok, true, JSON.stringify(res));
 });
 
-test("only sha-256 present: rejected, no usable sha-512 digest", () => {
+test("only sha-256 present: accepted via sha-256 fallback", () => {
   const body = '{"amount":100}';
   const signed = signedWithDigestHeader(body, digestOf(body, "sha-256"));
   const res = verify(signed);
+  assert.equal(res.ok, true, JSON.stringify(res));
+});
+
+test("sha-256 only with tampered body: explicit body/digest mismatch", () => {
+  const signed = signedWithDigestHeader(
+    '{"amount":100}',
+    digestOf('{"amount":100}', "sha-256"),
+  );
+  const res = verify({ ...signed, body: '{"amount":999999}' });
   assert.equal(res.ok, false);
-  assert.equal(res.reason, "cannot verify body: no sha-512 content-digest present");
+  assert.equal(res.reason, "body does not match content-digest");
+  assert.equal(res.code, "BODY_DIGEST_MISMATCH");
+});
+
+test("sha-256 only with tampered digest header: signature mismatch", () => {
+  const signed = signedWithDigestHeader(
+    '{"amount":100}',
+    digestOf('{"amount":100}', "sha-256"),
+  );
+  const swapped: SignedHttpRequest = {
+    ...signed,
+    headers: {
+      ...signed.headers,
+      "content-digest": digestOf('{"amount":1}', "sha-256"),
+    },
+  };
+  const res = verify(swapped);
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "signature mismatch");
+  assert.equal(res.code, "SIGNATURE_MISMATCH");
+});
+
+test("sha-256 with wrong-length value: rejected as mismatch", () => {
+  const signed = signedWithDigestHeader(
+    '{"amount":100}',
+    `sha-256=:${Buffer.from("too-short").toString("base64")}:`,
+  );
+  const res = verify(signed);
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "body does not match content-digest");
+  assert.equal(res.code, "BODY_DIGEST_MISMATCH");
+});
+
+test("both present but sha-256 is of another body: sha-512 still wins", () => {
+  // Header offers a sha-256 of body B and a sha-512 of body A; the verifier
+  // must check against sha-512, so body A verifies. If the verifier had
+  // picked sha-256, this would fail.
+  const bodyA = '{"amount":100}';
+  const bodyB = '{"amount":1}';
+  const signed = signedWithDigestHeader(
+    bodyA,
+    `${digestOf(bodyB, "sha-256")}, ${digestOf(bodyA, "sha-512")}`,
+  );
+  const res = verify(signed);
+  assert.equal(res.ok, true, JSON.stringify(res));
+});
+
+test("sha-256 of empty body: verifies", () => {
+  const signed = signedWithDigestHeader(
+    undefined,
+    digestOf(Buffer.alloc(0), "sha-256"),
+  );
+  const res = verify(signed);
+  assert.equal(res.ok, true, JSON.stringify(res));
+});
+
+test("digest header with no sha-512 or sha-256 entry: rejected", () => {
+  const signed = signedWithDigestHeader(
+    '{"amount":100}',
+    "sha-1=:not-supported:",
+  );
+  const res = verify(signed);
+  assert.equal(res.ok, false);
+  assert.equal(
+    res.reason,
+    "cannot verify body: no sha-512 or sha-256 content-digest present",
+  );
   assert.equal(res.code, "MISSING_CONTENT_DIGEST");
 });
 

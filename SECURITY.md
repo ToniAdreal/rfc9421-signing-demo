@@ -8,7 +8,9 @@ Read this before using it anywhere that matters.
 
 - Only an RFC 9421 *subset* is implemented: signature algorithms
   `ed25519` and `hmac-sha256`, a single signature label per verification
-  call, and body binding via `Content-Digest: sha-512` only. See
+  call, and body binding signs via `Content-Digest: sha-512` only (the
+  verifier additionally accepts a `sha-256` fallback when no `sha-512`
+  entry is present). See
   `README.md` → "Limitations (honest)" for the full list of what is not
   supported.
 - The implementation has only been tested against itself (see
@@ -62,7 +64,8 @@ Read this before using it anywhere that matters.
   swapped body whose digest header was also swapped) tells you only that
   whoever held the key signed *that* content.
 - Body binding only applies when a `content-digest` header is present, and
-  only the `sha-512` entry is honored. Requests without a digest header
+  only the `sha-512` entry is honored when present, with `sha-256` accepted
+  as a fallback. Requests without a digest header
   verify against headers alone.
 
 ## Why not use this directly in production

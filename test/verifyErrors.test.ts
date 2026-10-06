@@ -193,9 +193,9 @@ const cases: Array<{
   },
   {
     code: "MISSING_CONTENT_DIGEST",
-    reason: "cannot verify body: no sha-512 content-digest present",
+    reason: "cannot verify body: no sha-512 or sha-256 content-digest present",
     build: () => {
-      // Sign with content-digest NOT covered, then present a sha-256-only
+      // Sign with content-digest NOT covered, then present a sha-1-only
       // header: crypto still verifies, but the body binding cannot.
       const { publicKey, privateKey } = generateEd25519KeyPair();
       const body = '{"amount":100}';
@@ -214,15 +214,13 @@ const cases: Array<{
           coveredComponents: ["@method", "@authority", "@path"],
         },
       );
-      const sha256 = createHash("sha256")
-        .update(body, "utf8")
-        .digest("base64");
+      const sha1 = createHash("sha1").update(body, "utf8").digest("base64");
       return {
         signed: {
           ...signed,
           headers: {
             ...signed.headers,
-            "content-digest": `sha-256=:${sha256}:`,
+            "content-digest": `sha-1=:${sha1}:`,
           },
         },
         publicKey,

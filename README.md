@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 173 tests, all local, no network
+npm test   # 179 tests, all local, no network
 ```
 
 ## Quickstart
@@ -147,7 +147,9 @@ configuration `Error` instead of silently defaulting.
   (constant-time compare).
 - **Body binding**: `Content-Digest: sha-512=:…:` is computed when the body
   is covered, and the verifier recomputes it — a swapped body fails even if
-  the signature itself is valid.
+  the signature itself is valid. The verifier prefers `sha-512` but falls
+  back to `sha-256` when the header carries no `sha-512` entry (for foreign
+  signers that only send `sha-256`); signing always emits `sha-512`.
 - **Freshness**: `created` enforced with a configurable clock-skew
   tolerance (`clockSkewToleranceSec`, default 60s); `expires` enforced
   strictly by default, with an optional grace period
@@ -212,7 +214,10 @@ for (const r of results) {
 - **Authority normalization** uses WHATWG `URL` semantics (lowercased, default
   ports elided). Both sides of this library agree with each other, but a
   foreign implementation with different normalization would disagree.
-- **Body binding only understands `sha-512`** digests.
+- **Body binding digest algorithms.** The verifier understands `sha-512`
+  (preferred when present) and `sha-256` (fallback when no `sha-512` entry
+  exists); signing emits `sha-512` only. Other `content-digest` algorithms
+  are rejected with `MISSING_CONTENT_DIGEST`.
 - **In-memory replay cache only.** The optional `ReplayCache` is a
   per-process helper with a configurable TTL and LRU capacity cap — it
   does not survive restarts and is not shared between verifier instances.
@@ -253,8 +258,10 @@ most also appear in [Limitations](#limitations)):
 - **Covered component selection.** Signer and verifier must agree on the
   exact covered components, in the exact order. Defaults here are
   `@method @authority @path`, plus `content-digest` when a body exists.
-- **Digest algorithm.** Body binding only understands `sha-512`. A peer
-  sending `sha-256` digests fails with "no sha-512 content-digest present".
+- **Digest algorithm.** Body binding understands `sha-512` (preferred) and
+  `sha-256` (fallback when no `sha-512` entry is present). A peer sending
+  only other digest algorithms fails with "no sha-512 or sha-256
+  content-digest present".
 - **Signature algorithms.** Implemented: `ed25519`, `ecdsa-p256-sha256`
   (DER-encoded, RFC 9421 §3.3.2), `hmac-sha256`. Not supported:
   `rsa-pss-sha512`, `hmac-sha512`, or anything else.
@@ -329,8 +336,8 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `SIGNATURE_MISMATCH` | cryptographic signature does not verify (wrong key or tampering) |
 | `KEYID_MISMATCH` | signature's `keyid` does not match the verifier's `expectedKeyId` (or no `keyid` present) |
 | `KEY_RESOLUTION_FAILED` | `keyResolver` could not map the signature's `keyid` to a key (missing or unknown `keyid`) |
-| `MISSING_CONTENT_DIGEST` | body present but no `sha-512` entry in `content-digest` |
-| `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` digest |
+| `MISSING_CONTENT_DIGEST` | body present but no `sha-512` or `sha-256` entry in `content-digest` |
+| `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` (or `sha-256` fallback) digest |
 | `EXPIRED` | `expires` timestamp is in the past (beyond tolerance) |
 | `CREATED_IN_FUTURE` | `created` timestamp is in the future (beyond clock-skew tolerance) |
 | `MISSING_CREATED` | `requireCreated` is set but the signature carries no `created` |
@@ -354,7 +361,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 173 tests including a golden signature-base vector and a
+`npm test` runs 179 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).
