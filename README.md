@@ -99,6 +99,43 @@ verifyRequest(signed, { key: importPublicKeyJwk(wireKey) }); // { ok: true, ... 
 // "invalid JWK: ..." Error; never a verification failure.
 ```
 
+Receiving signed webhooks with Node's `http` server — the receive→verify
+chain via `fromNodeRequest`:
+
+```ts
+import { createServer } from "node:http";
+import { fromNodeRequest, verifyRequest } from "./dist/index.js";
+
+const server = createServer((req, res) => {
+  const chunks: Buffer[] = [];
+  req.on("data", (c) => chunks.push(c));
+  req.on("end", () => {
+    // IncomingMessage is a stream: the body must be buffered first and
+    // passed in — the adapter never reads it. Pass the raw bytes, never a
+    // re-serialized object, so the Content-Digest check sees exact bytes.
+    const body = Buffer.concat(chunks);
+    const result = verifyRequest(fromNodeRequest(req, body), {
+      key: gatewayPublicKey, // or keyResolver for keyid-based lookup
+    });
+    if (!result.ok) {
+      res.writeHead(401).end(`bad signature: ${result.code}`);
+      return;
+    }
+    res.writeHead(200).end("ok"); // result.nonce / result.keyId available here
+  });
+});
+```
+
+What `fromNodeRequest` does: rebuilds the absolute URL as
+`<scheme>://<host><path>` (the `host` header, port included, is preserved
+verbatim), lowercases header names, and joins multi-value headers with
+`", "` — the same convention `signRequest`/`getHeader` use. The scheme
+defaults to `https` on a TLS socket, `http` otherwise; behind a
+TLS-terminating proxy pass `{ scheme: "https" }` explicitly, because signer
+and verifier must agree on the exact URL (`@scheme`/`@authority`/`@path`
+are covered components). Missing `method`/`url`/`host` throws a
+configuration `Error` instead of silently defaulting.
+
 ## What it implements
 
 - **Signature base** (§2.5): `"id": value` lines for each covered component,
@@ -126,6 +163,11 @@ verifyRequest(signed, { key: importPublicKeyJwk(wireKey) }); // { ok: true, ... 
   multi-verifier deployments still need a shared nonce store (see the
   Limitations and SECURITY.md).
 - Minimal `Signature-Input` / `Signature` field parsing for verification.
+- **Node http server adapter**: `fromNodeRequest(req, body, opts?)`
+  normalizes an `http.IncomingMessage` into a `RequestLike` (absolute URL
+  rebuilt from the `host` header, lowercased header names, multi-value
+  headers joined with `", "`), so `verifyRequest` plugs straight into a
+  webhook receiver — see the Quickstart receive→verify example.
 - **Multi-signature verification**: `verifyAllLabels(req, { key, keys })`
   parses every label from the `Signature-Input` header and verifies each
   one with `verifyRequest`, returning one `VerifyResult` per label in wire
@@ -302,7 +344,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 128 tests including a golden signature-base vector and a
+`npm test` runs 135 tests including a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).
