@@ -2,14 +2,16 @@
  * Local micro-benchmark for the RFC 9421 signing demo.
  *
  * Measures real, locally-observed sign/verify throughput for each supported
- * algorithm (ed25519, hmac-sha256) on the machine that runs it. Numbers vary
- * with hardware — do not treat them as guaranteed throughput.
+ * algorithm (ed25519, hmac-sha256, ecdsa-p256-sha256) on the machine that
+ * runs it. Numbers vary with hardware — do not treat them as guaranteed
+ * throughput.
  *
  * Run: `npm run bench`
  */
 import { cpus } from "node:os";
 import {
   generateEd25519KeyPair,
+  generateP256KeyPair,
   secretKey,
   signRequest,
   verifyRequest,
@@ -41,6 +43,10 @@ function benchmarkScenario(alg: SignAlg): { signOps: number; verifyOps: number }
 
   if (alg === "ed25519") {
     const { publicKey, privateKey } = generateEd25519KeyPair();
+    signKey = privateKey;
+    verifyKey = publicKey;
+  } else if (alg === "ecdsa-p256-sha256") {
+    const { publicKey, privateKey } = generateP256KeyPair();
     signKey = privateKey;
     verifyKey = publicKey;
   } else {
@@ -80,16 +86,16 @@ console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
 
 const results: Array<{ alg: SignAlg; op: string; ops: number }> = [];
-for (const alg of ["ed25519", "hmac-sha256"] as const) {
+for (const alg of ["ed25519", "hmac-sha256", "ecdsa-p256-sha256"] as const) {
   const { signOps, verifyOps } = benchmarkScenario(alg);
   results.push({ alg, op: "sign", ops: signOps });
   results.push({ alg, op: "verify", ops: verifyOps });
 }
 
-console.log("alg           op      throughput");
-console.log("-----------------------------------------------");
+console.log("alg                op      throughput");
+console.log("-----------------------------------------------------");
 for (const r of results) {
-  console.log(`${r.alg.padEnd(13)} ${r.op.padEnd(7)} ${fmt(r.ops)}`);
+  console.log(`${r.alg.padEnd(18)} ${r.op.padEnd(7)} ${fmt(r.ops)}`);
 }
 console.log("");
 console.log("Numbers are machine-local measurements, not guarantees.");

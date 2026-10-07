@@ -320,14 +320,16 @@ see [SECURITY.md](SECURITY.md).
 
 `npm run bench` measures locally-observed sign/verify throughput per
 algorithm (3000 timed iterations per op after 200 warmup, printing the Node
-version and CPU). One real run on 2026-10-03:
+version and CPU). One real run on 2026-10-07:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519 | sign | ~16,300 ops/sec (~61 µs/op) |
-| ed25519 | verify | ~4,500 ops/sec (~223 µs/op) |
-| hmac-sha256 | sign | ~37,600 ops/sec (~27 µs/op) |
-| hmac-sha256 | verify | ~40,500 ops/sec (~25 µs/op) |
+| ed25519 | sign | ~15,500 ops/sec (~65 µs/op) |
+| ed25519 | verify | ~6,300 ops/sec (~158 µs/op) |
+| hmac-sha256 | sign | ~56,200 ops/sec (~18 µs/op) |
+| hmac-sha256 | verify | ~33,500 ops/sec (~30 µs/op) |
+| ecdsa-p256-sha256 | sign | ~18,700 ops/sec (~54 µs/op) |
+| ecdsa-p256-sha256 | verify | ~7,700 ops/sec (~129 µs/op) |
 
 Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized; shared
 host, so numbers vary run to run). Request fixture: POST with a 31-byte JSON
