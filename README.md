@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 184 tests, all local, no network
+npm test   # 193 tests, all local, no network
 ```
 
 ## Quickstart
@@ -265,6 +265,16 @@ most also appear in [Limitations](#limitations)):
 - **Signature algorithms.** Implemented: `ed25519`, `ecdsa-p256-sha256`
   (DER-encoded, RFC 9421 §3.3.2), `hmac-sha256`. Not supported:
   `rsa-pss-sha512`, `hmac-sha512`, or anything else.
+- **Missing `alg` parameter.** `alg` is optional per RFC 9421 §2.3
+  (Appendix B.2.5's hmac-sha256 vector omits it), but this library
+  historically defaults a missing `alg` to `"ed25519"`, so a foreign
+  signature without `alg` could not be verified end-to-end. Opt-in
+  fallback: `VerifyOptions.algFallback: "infer"` infers the algorithm
+  from the resolved key's shape (`secret` → `hmac-sha256`, ed25519 key
+  → `ed25519`, P-256 EC key → `ecdsa-p256-sha256`) and throws a caller
+  configuration `Error` when a wire-carried `alg` contradicts the key's
+  shape. Automatic detection is opt-in only — without it, a missing
+  `alg` keeps meaning `"ed25519"`, exactly as before.
 - **HMAC secret length.** `secretKey()` refuses secrets shorter than 32
   bytes, and the sign/verify paths enforce the same floor on any
   `KeyObject` used with `hmac-sha256` (RFC 2104 §3: the key SHOULD be at
@@ -361,7 +371,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 184 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 193 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

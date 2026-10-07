@@ -83,6 +83,30 @@ export interface VerifyOptions {
    */
   expectedKeyId?: string;
   /**
+   * Fallback strategy when the `signature-input` carries no `alg`
+   * parameter. RFC 9421 leaves `alg` optional (Appendix B.2.5's
+   * hmac-sha256 vector omits it), while this library historically
+   * defaults a missing `alg` to `"ed25519"` — so a spec-conformant
+   * foreign signature without `alg` could not previously be verified
+   * end-to-end.
+   *
+   * - `"infer"` (explicit opt-in): when `alg` is absent, the verifier
+   *   infers the algorithm from the *resolved* key's shape — a `secret`
+   *   key implies `hmac-sha256`, an ed25519 key implies `ed25519`, a
+   *   P-256 (`prime256v1`) EC key implies `ecdsa-p256-sha256`; an
+   *   unmappable key shape throws a caller configuration `Error`. When
+   *   the wire *does* carry `alg`, the key's shape is checked against
+   *   it and a mismatch (e.g. wire `alg="ed25519"` with a `secret`
+   *   key) throws a caller configuration `Error` instead of surfacing
+   *   as a confusing `VERIFICATION_ERROR` from the crypto layer.
+   * - unset or `false` (default): legacy behavior — a missing `alg`
+   *   defaults to `"ed25519"` and no key-shape checking is done.
+   *
+   * Automatic detection is opt-in only: the default path is untouched
+   * (a missing `alg` without this option keeps meaning `"ed25519"`).
+   */
+  algFallback?: "infer" | false;
+  /**
    * Optional nonce replay cache (see `ReplayCache`). When set and the
    * signature carries a non-empty `nonce`, the cache is consulted *after*
    * every other check has passed: a nonce seen within the cache TTL fails
@@ -130,6 +154,61 @@ function assertKeyConfig(
     throw new Error(
       "verifyRequest: `key` and `keyResolver` are mutually exclusive — pass one or the other",
     );
+}
+
+/** The RFC 9421 signature algorithms this library implements. */
+type SupportedAlg = "ed25519" | "hmac-sha256" | "ecdsa-p256-sha256";
+
+/**
+ * Human-readable description of a KeyObject's shape, used in caller
+ * configuration error messages.
+ */
+function describeKey(key: KeyObject): string {
+  if (key.type === "secret") return "a secret (symmetric) key";
+  const curve = key.asymmetricKeyDetails?.namedCurve;
+  return `an asymmetric ${key.asymmetricKeyType ?? "unknown"} key${
+    curve ? ` (${curve})` : ""
+  }`;
+}
+
+/**
+ * Infer the signature algorithm from the resolved key's shape. Used only
+ * under the explicit `algFallback: "infer"` opt-in, when the
+ * signature-input carries no `alg` parameter. An unmappable key shape is
+ * a caller configuration error (throw), not a verification failure.
+ */
+function inferAlgFromKeyShape(key: KeyObject): SupportedAlg {
+  if (key.type === "secret") return "hmac-sha256";
+  if (key.asymmetricKeyType === "ed25519") return "ed25519";
+  if (
+    key.asymmetricKeyType === "ec" &&
+    key.asymmetricKeyDetails?.namedCurve === "prime256v1"
+  )
+    return "ecdsa-p256-sha256";
+  throw new Error(
+    `verifyRequest: algFallback "infer" cannot infer an algorithm for ${describeKey(key)} — supported key shapes are secret keys (hmac-sha256), ed25519 keys, and P-256 (prime256v1) EC keys`,
+  );
+}
+
+/**
+ * Under the explicit `algFallback: "infer"` opt-in, a wire-carried `alg`
+ * must agree with the resolved key's shape. A mismatch (e.g. wire
+ * `alg="ed25519"` with a `secret` key) is a caller configuration error
+ * (throw) rather than a confusing `VERIFICATION_ERROR` from the crypto
+ * layer. Unknown `alg` values are left alone: they still fail with
+ * `UNSUPPORTED_ALG` in the crypto dispatch below.
+ */
+function assertAlgMatchesKeyShape(alg: SupportedAlg, key: KeyObject): void {
+  const ok =
+    (alg === "ed25519" && key.asymmetricKeyType === "ed25519") ||
+    (alg === "hmac-sha256" && key.type === "secret") ||
+    (alg === "ecdsa-p256-sha256" &&
+      key.asymmetricKeyType === "ec" &&
+      key.asymmetricKeyDetails?.namedCurve === "prime256v1");
+  if (ok) return;
+  throw new Error(
+    `verifyRequest: wire alg "${alg}" is incompatible with the configured key (${describeKey(key)}) — pass a matching key or remove the algFallback "infer" opt-in`,
+  );
 }
 
 /**
@@ -211,7 +290,7 @@ export function verifyRequest(
     };
   }
 
-  const alg = parsed.params.alg ?? "ed25519";
+  const alg = parsed.params.alg;
 
   // Key resolution: `keyid`→key lookup happens here, after the header
   // parsed cleanly but before any crypto runs. The `keyid` claim is still
@@ -260,23 +339,48 @@ export function verifyRequest(
       "verifyRequest: either `key` or `keyResolver` must be provided",
     );
 
+  // Algorithm selection. RFC 9421 leaves `alg` optional, so a
+  // spec-conformant foreign signature may not carry it (RFC 9421
+  // Appendix B.2.5's hmac-sha256 vector omits it). The historical
+  // default for a missing `alg` is "ed25519"; `algFallback: "infer"` is
+  // an explicit opt-in that instead infers the algorithm from the
+  // resolved key's shape — automatic detection never happens silently.
+  // Under the opt-in, a wire-carried `alg` that contradicts the key's
+  // shape is a caller configuration error (throw), not a verification
+  // failure; without the opt-in, that path stays exactly as before.
+  const effectiveAlg: string =
+    alg === undefined
+      ? opts.algFallback === "infer"
+        ? inferAlgFromKeyShape(key)
+        : "ed25519"
+      : alg;
+  if (
+    opts.algFallback === "infer" &&
+    (effectiveAlg === "ed25519" ||
+      effectiveAlg === "hmac-sha256" ||
+      effectiveAlg === "ecdsa-p256-sha256") &&
+    alg !== undefined
+  ) {
+    assertAlgMatchesKeyShape(effectiveAlg, key);
+  }
+
   // HMAC key-length enforcement happens *before* the crypto try/catch on
   // purpose: a weak configured secret is a caller configuration error
   // (throw), not a verification failure — symmetric with the sign side,
   // which also throws. It must not be swallowed into a VERIFICATION_ERROR.
-  if (alg === "hmac-sha256") assertHmacSecretLength(key);
+  if (effectiveAlg === "hmac-sha256") assertHmacSecretLength(key);
 
   let cryptoOk = false;
   try {
-    if (alg === "ed25519") {
+    if (effectiveAlg === "ed25519") {
       cryptoOk = edVerify(null, Buffer.from(base, "utf8"), key, sigBytes);
-    } else if (alg === "ecdsa-p256-sha256") {
+    } else if (effectiveAlg === "ecdsa-p256-sha256") {
       // Expects the DER-encoded ECDSA value that createSign produces on
       // the sign side (RFC 9421 §3.3.2).
       cryptoOk = createVerify("sha256")
         .update(base, "utf8")
         .verify(key, sigBytes);
-    } else if (alg === "hmac-sha256") {
+    } else if (effectiveAlg === "hmac-sha256") {
       const expected = createHmac("sha256", key).update(base, "utf8").digest();
       cryptoOk =
         sigBytes.length === expected.length &&
@@ -285,7 +389,7 @@ export function verifyRequest(
       return {
         ok: false,
         code: "UNSUPPORTED_ALG",
-        reason: `unsupported alg "${alg}"`,
+        reason: `unsupported alg "${effectiveAlg}"`,
         label,
         nonce: parsed.params.nonce,
       };
@@ -306,7 +410,7 @@ export function verifyRequest(
       reason: "signature mismatch",
       label,
       keyId: parsed.params.keyid,
-      alg,
+      alg: effectiveAlg,
       nonce: parsed.params.nonce,
     };
 
@@ -326,7 +430,7 @@ export function verifyRequest(
       }`,
       label,
       keyId: parsed.params.keyid,
-      alg,
+      alg: effectiveAlg,
       nonce: parsed.params.nonce,
     };
 
@@ -357,7 +461,7 @@ export function verifyRequest(
           "cannot verify body: no sha-512 or sha-256 content-digest present",
         label,
         keyId: parsed.params.keyid,
-        alg,
+        alg: effectiveAlg,
         nonce: parsed.params.nonce,
       };
     const expected = createHash(dm === dm512 ? "sha512" : "sha256")
@@ -371,7 +475,7 @@ export function verifyRequest(
         reason: "body does not match content-digest",
         label,
         keyId: parsed.params.keyid,
-        alg,
+        alg: effectiveAlg,
         nonce: parsed.params.nonce,
       };
   }
@@ -389,7 +493,7 @@ export function verifyRequest(
       reason: "signature carries no `created` timestamp but requireCreated is set",
       label,
       keyId: parsed.params.keyid,
-      alg,
+      alg: effectiveAlg,
       nonce: parsed.params.nonce,
     };
   if (opts.requireExpires === true && parsed.params.expires === undefined)
@@ -399,7 +503,7 @@ export function verifyRequest(
       reason: "signature carries no `expires` timestamp but requireExpires is set",
       label,
       keyId: parsed.params.keyid,
-      alg,
+      alg: effectiveAlg,
       nonce: parsed.params.nonce,
     };
 
@@ -413,7 +517,7 @@ export function verifyRequest(
       reason: "signature expired",
       label,
       keyId: parsed.params.keyid,
-      alg,
+      alg: effectiveAlg,
       nonce: parsed.params.nonce,
     };
   if (
@@ -426,7 +530,7 @@ export function verifyRequest(
       reason: "signature created in the future (clock skew)",
       label,
       keyId: parsed.params.keyid,
-      alg,
+      alg: effectiveAlg,
       nonce: parsed.params.nonce,
     };
 
@@ -443,7 +547,7 @@ export function verifyRequest(
         reason: `nonce replay detected: "${nonce}" was already seen`,
         label,
         keyId: parsed.params.keyid,
-        alg,
+        alg: effectiveAlg,
         nonce,
       };
   }
@@ -452,7 +556,7 @@ export function verifyRequest(
     ok: true,
     label,
     keyId: parsed.params.keyid,
-    alg,
+    alg: effectiveAlg,
     nonce,
   };
 }
