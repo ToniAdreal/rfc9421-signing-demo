@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 239 tests, all local, no network
+npm test   # 248 tests, all local, no network
 ```
 
 ## Quickstart
@@ -98,6 +98,11 @@ verifyRequest(signed, { key: importPublicKeyJwk(wireKey) }); // { ok: true, ... 
 // Malformed JWKs (missing kty/crv/x, wrong curve, corrupt x) throw a clear
 // "invalid JWK: ..." Error; never a verification failure.
 ```
+
+P-256 gateways get the same treatment: `exportPublicKeyJwkP256` /
+`importPublicKeyJwkP256` handle the RFC 7518 EC shape
+(`{ kty: "EC", crv: "P-256", x, y }`) for `ecdsa-p256-sha256` verifiers,
+with the same refusal of private (`"d"`) material.
 
 Receiving signed webhooks with Node's `http` server — the receive→verify
 chain via `fromNodeRequest`:
@@ -394,7 +399,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 239 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 248 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

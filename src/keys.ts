@@ -237,3 +237,119 @@ export function importPublicKeyJwk(jwk: unknown): KeyObject {
     );
   }
 }
+
+/**
+ * Public-key-only JWK view of a NIST P-256 key, exactly as produced by
+ * {@link exportPublicKeyJwkP256}. RFC 7518 §6.2: EC public keys carry
+ * `kty: "EC"`, `crv: "P-256"`, and base64url `x` / `y` coordinates.
+ * Private JWKs (`"d"` present) are never produced or accepted here —
+ * same public-key-distribution-only policy as {@link Ed25519PublicJwk}.
+ */
+export interface P256PublicJwk {
+  kty: "EC";
+  crv: "P-256";
+  /** Base64url-encoded 32-byte x coordinate. */
+  x: string;
+  /** Base64url-encoded 32-byte y coordinate. */
+  y: string;
+}
+
+/**
+ * Export a NIST P-256 public key as a plain-object JWK (RFC 7518 §6.2),
+ * ready to `JSON.stringify` and ship to a verifier. Uses node:crypto's
+ * native JWK support — no third-party dependencies.
+ *
+ * Throws a caller-configuration `Error` for anything that is not a P-256
+ * public KeyObject (private keys, symmetric secrets, other curves or
+ * algorithms); this helper is the public-key-distribution case only.
+ */
+export function exportPublicKeyJwkP256(key: KeyObject): P256PublicJwk {
+  const namedCurve = key.asymmetricKeyDetails?.namedCurve;
+  if (
+    key.type !== "public" ||
+    key.asymmetricKeyType !== "ec" ||
+    namedCurve !== "prime256v1"
+  )
+    throw new Error(
+      `exportPublicKeyJwkP256: expected a P-256 public KeyObject, got ` +
+        `type=${String(key.type)} ` +
+        `asymmetricKeyType=${String(key.asymmetricKeyType)} ` +
+        `namedCurve=${String(namedCurve)} ` +
+        `(JWK support here is P-256 public keys only — the public-key-distribution case)`,
+    );
+  const raw = key.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  // Node emits exactly { kty: "EC", crv: "P-256", x: "<base64url>", y: "<base64url>" }.
+  if (
+    raw["kty"] !== "EC" ||
+    raw["crv"] !== "P-256" ||
+    typeof raw["x"] !== "string" ||
+    typeof raw["y"] !== "string"
+  )
+    throw new Error(
+      "exportPublicKeyJwkP256: node:crypto returned an unexpected JWK shape " +
+        `for a P-256 public key: ${JSON.stringify(Object.keys(raw))}`,
+    );
+  return { kty: "EC", crv: "P-256", x: raw["x"], y: raw["y"] };
+}
+
+/**
+ * Import a NIST P-256 public key from a JWK object (RFC 7518 §6.2), as
+ * produced by {@link exportPublicKeyJwkP256} and typically received over
+ * the wire as JSON.
+ *
+ * Strictly validates before touching node:crypto: the input must be a
+ * plain object with `kty: "EC"`, `crv: "P-256"`, and non-empty string
+ * `x` / `y`. Anything else throws a descriptive `Error` — never a
+ * verification failure, since this is key setup, not signature checking.
+ * JWKs carrying private material (`"d"`) are refused outright: this
+ * helper is public-key distribution only, and silently accepting a
+ * private JWK would encourage shipping secrets around.
+ */
+export function importPublicKeyJwkP256(jwk: unknown): KeyObject {
+  const fail = (why: string): never => {
+    throw new Error(`importPublicKeyJwkP256: invalid JWK: ${why}`);
+  };
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk))
+    fail(
+      `expected a JWK object, got ${
+        Array.isArray(jwk) ? "an array" : jwk === null ? "null" : typeof jwk
+      }`,
+    );
+  const o = jwk as Record<string, unknown>;
+  if ("d" in o)
+    fail(
+      'private key material ("d") is not accepted; this helper imports ' +
+        "public keys only (keep private keys in PEM on the signer side)",
+    );
+  if (!("kty" in o)) fail(`missing "kty" parameter`);
+  if (o["kty"] !== "EC")
+    fail(`expected kty "EC", got ${JSON.stringify(o["kty"])}`);
+  if (!("crv" in o)) fail(`missing "crv" parameter`);
+  if (o["crv"] !== "P-256")
+    fail(`expected crv "P-256", got ${JSON.stringify(o["crv"])}`);
+  const x = o["x"];
+  if (typeof x !== "string" || x.length === 0)
+    throw new Error(
+      `importPublicKeyJwkP256: invalid JWK: missing or empty "x" (the base64url x-coordinate)`,
+    );
+  const y = o["y"];
+  if (typeof y !== "string" || y.length === 0)
+    throw new Error(
+      `importPublicKeyJwkP256: invalid JWK: missing or empty "y" (the base64url y-coordinate)`,
+    );
+  try {
+    return createPublicKey({
+      key: { kty: "EC", crv: "P-256", x, y },
+      format: "jwk",
+    });
+  } catch (err) {
+    throw new Error(
+      `importPublicKeyJwkP256: node:crypto rejected the JWK: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
