@@ -132,7 +132,7 @@ const cases: Array<{
   },
   {
     code: "UNSUPPORTED_ALG",
-    reason: 'unsupported alg "rsa-pss-sha512"',
+    reason: 'unsupported alg "rsa-v1_5-sha256"',
     build: () => {
       const { signed, publicKey } = signedEd();
       return {
@@ -142,7 +142,7 @@ const cases: Array<{
             ...signed.headers,
             "signature-input": signed.headers["signature-input"].replace(
               'alg="ed25519"',
-              'alg="rsa-pss-sha512"',
+              'alg="rsa-v1_5-sha256"',
             ),
           },
         },

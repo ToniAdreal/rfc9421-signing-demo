@@ -1,4 +1,5 @@
 import {
+  constants,
   createHash,
   createHmac,
   createVerify,
@@ -22,6 +23,9 @@ export interface VerifyOptions {
   /**
    * ed25519: the signer's public KeyObject.
    * ecdsa-p256-sha256: the signer's P-256 public KeyObject.
+   * rsa-pss-sha512: the signer's RSA public KeyObject (verified with
+   * RSASSA-PSS, SHA-512, MGF1 with SHA-512, 64-byte salt — RFC 9421
+   * §3.3.1).
    * hmac-sha256: the shared secret KeyObject.
    *
    * Required unless `keyResolver` is set; mutually exclusive with it.
@@ -158,7 +162,11 @@ function assertKeyConfig(
 }
 
 /** The RFC 9421 signature algorithms this library implements. */
-type SupportedAlg = "ed25519" | "hmac-sha256" | "ecdsa-p256-sha256";
+type SupportedAlg =
+  | "ed25519"
+  | "hmac-sha256"
+  | "ecdsa-p256-sha256"
+  | "rsa-pss-sha512";
 
 /**
  * Human-readable description of a KeyObject's shape, used in caller
@@ -377,10 +385,24 @@ export function verifyRequest(
       cryptoOk = edVerify(null, Buffer.from(base, "utf8"), key, sigBytes);
     } else if (effectiveAlg === "ecdsa-p256-sha256") {
       // Expects the DER-encoded ECDSA value that createSign produces on
-      // the sign side (RFC 9421 §3.3.2).
+      // the sign side (RFC 9421 §3.3.4).
       cryptoOk = createVerify("sha256")
         .update(base, "utf8")
         .verify(key, sigBytes);
+    } else if (effectiveAlg === "rsa-pss-sha512") {
+      // RSASSA-PSS-VERIFY per RFC 9421 §3.3.1: SHA-512, MGF1 with
+      // SHA-512, 64-byte salt — the same parameters the sign side uses,
+      // so a v1.5 (PKCS#1 padding) signature never verifies here.
+      cryptoOk = createVerify("sha512")
+        .update(base, "utf8")
+        .verify(
+          {
+            key,
+            padding: constants.RSA_PKCS1_PSS_PADDING,
+            saltLength: 64,
+          },
+          sigBytes,
+        );
     } else if (effectiveAlg === "hmac-sha256") {
       const expected = createHmac("sha256", key).update(base, "utf8").digest();
       cryptoOk =

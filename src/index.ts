@@ -14,6 +14,7 @@ export {
   exportPublicKeyPem,
   generateEd25519KeyPair,
   generateP256KeyPair,
+  generateRsaPssKeyPair,
   importPrivateKey,
   importPublicKey,
   importPublicKeyJwk,

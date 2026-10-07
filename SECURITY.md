@@ -8,7 +8,8 @@ Read this before using it anywhere that matters.
 
 - Only an RFC 9421 *subset* is implemented: signature algorithms
   `ed25519`, `ecdsa-p256-sha256` (NIST P-256, DER-encoded per
-  RFC 9421 §3.3.2), and `hmac-sha256`; `verifyRequest` checks one
+  RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS per RFC 9421 §3.3.1),
+  and `hmac-sha256`; `verifyRequest` checks one
   signature label per call, while `verifyAllLabels` verifies every label
   in the request (a failing label never blocks the remaining labels);
   and body binding signs via `Content-Digest: sha-512` only (the

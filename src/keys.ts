@@ -16,7 +16,7 @@ export function generateEd25519KeyPair(): {
 
 /**
  * Generate a fresh NIST P-256 (secp256r1) key pair for the
- * `ecdsa-p256-sha256` algorithm (RFC 9421 §3.3.2). The signatures
+ * `ecdsa-p256-sha256` algorithm (RFC 9421 §3.3.4). The signatures
  * produced from this pair are DER-encoded ASN.1 ECDSA values, per the
  * RFC — `signRequest` / `verifyRequest` both use node:crypto's default
  * DER encoding, so the wire format stays spec-conformant.
@@ -26,6 +26,21 @@ export function generateP256KeyPair(): {
   privateKey: KeyObject;
 } {
   return generateKeyPairSync("ec", { namedCurve: "P-256" });
+}
+
+/**
+ * Generate a fresh RSA key pair for the `rsa-pss-sha512` algorithm
+ * (RFC 9421 §3.3.1: RSASSA-PSS with SHA-512, MGF1 with SHA-512, and a
+ * 64-byte salt). 2048-bit modulus is the minimum recommended size for
+ * this demo; production deployments should prefer ≥3072 bits.
+ * `signRequest` / `verifyRequest` both use PSS padding with
+ * `saltLength: 64` per the RFC, so the wire format stays spec-conformant.
+ */
+export function generateRsaPssKeyPair(): {
+  publicKey: KeyObject;
+  privateKey: KeyObject;
+} {
+  return generateKeyPairSync("rsa", { modulusLength: 2048 });
 }
 
 /**

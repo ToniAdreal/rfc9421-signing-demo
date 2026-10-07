@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 211 tests, all local, no network
+npm test   # 224 tests, all local, no network
 ```
 
 ## Quickstart
@@ -150,8 +150,9 @@ configuration `Error` instead of silently defaulting.
   recognizes integer seconds, so a fractional value would silently diverge
   between signer and verifier). `expires === created` is allowed.
 - **Algorithms**: `ed25519`, `ecdsa-p256-sha256` (NIST P-256; DER-encoded
-  ECDSA signatures per RFC 9421 §3.3.2), and `hmac-sha256`
-  (constant-time compare).
+  ECDSA signatures per RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS with
+  SHA-512, MGF1 with SHA-512, 64-byte salt per RFC 9421 §3.3.1), and
+  `hmac-sha256` (constant-time compare).
 - **Body binding**: `Content-Digest: sha-512=:…:` is computed when the body
   is covered, and the verifier recomputes it — a swapped body fails even if
   the signature itself is valid. The verifier prefers `sha-512` but falls
@@ -212,8 +213,8 @@ for (const r of results) {
 
 ## Limitations (honest)
 
-- **Subset of RFC 9421.** Not implemented: `rsa-pss-sha512`,
-  `hmac-sha512`, `@status`, `@request-response`, trailers, `bs`,
+- **Subset of RFC 9421.** Not implemented: `hmac-sha512`,
+  `rsa-v1_5-sha256`, `@status`, `@request-response`, trailers, `bs`,
   and network key discovery (JWKS / keystores over HTTP). `keyid`→key
   resolution *is* supported opt-in: pass `VerifyOptions.keyResolver` and the
   verifier maps the claimed `keyid` to a `KeyObject` (unknown `keyid` fails
@@ -273,8 +274,11 @@ most also appear in [Limitations](#limitations)):
   only other digest algorithms fails with "no sha-512 or sha-256
   content-digest present".
 - **Signature algorithms.** Implemented: `ed25519`, `ecdsa-p256-sha256`
-  (DER-encoded, RFC 9421 §3.3.2), `hmac-sha256`. Not supported:
-  `rsa-pss-sha512`, `hmac-sha512`, or anything else.
+  (DER-encoded, RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS with
+  SHA-512, MGF1 with SHA-512, and a 64-byte salt per RFC 9421 §3.3.1 —
+  signatures are probabilistic, so verifiers re-verify rather than
+  re-sign-and-compare), `hmac-sha256`. Not supported:
+  `rsa-v1_5-sha256`, `hmac-sha512`, or anything else.
 - **Missing `alg` parameter.** `alg` is optional per RFC 9421 §2.3
   (Appendix B.2.5's hmac-sha256 vector omits it), but this library
   historically defaults a missing `alg` to `"ed25519"`, so a foreign
@@ -383,7 +387,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 211 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 224 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

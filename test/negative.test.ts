@@ -92,6 +92,8 @@ test("wrong hmac secret fails verification", () => {
 });
 
 test("unsupported alg in signature-input is rejected", () => {
+  // rsa-v1_5-sha256 (RFC 9421 §3.3.2) is deliberately unsupported here;
+  // rsa-pss-sha512 is implemented, so it no longer exercises this path.
   const { signed, publicKey } = signedEd('{"amount":100}');
   const tampered: SignedHttpRequest = {
     ...signed,
@@ -99,13 +101,13 @@ test("unsupported alg in signature-input is rejected", () => {
       ...signed.headers,
       "signature-input": signed.headers["signature-input"].replace(
         'alg="ed25519"',
-        'alg="rsa-pss-sha512"',
+        'alg="rsa-v1_5-sha256"',
       ),
     },
   };
   const res = verifyRequest(tampered, { key: publicKey, now: CREATED + 60 });
   assert.equal(res.ok, false);
-  assert.equal(res.reason, 'unsupported alg "rsa-pss-sha512"');
+  assert.equal(res.reason, 'unsupported alg "rsa-v1_5-sha256"');
   assert.equal(res.code, "UNSUPPORTED_ALG");
 });
 
