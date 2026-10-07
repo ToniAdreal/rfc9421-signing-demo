@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 264 tests, all local, no network
+npm test   # 272 tests, all local, no network
 ```
 
 ## Quickstart
@@ -153,7 +153,9 @@ configuration `Error` instead of silently defaulting.
   `coveredComponents` list (would sign nothing), and non-integer
   `created`/`expires` (the verifier's `signature-input` parser only
   recognizes integer seconds, so a fractional value would silently diverge
-  between signer and verifier). `expires === created` is allowed.
+  between signer and verifier), and a non-token `label` (commas/spaces
+  would corrupt the `signature-input` dictionary; the label is the member
+  key `verifyAllLabels` splits on). `expires === created` is allowed.
 - **Optional `keyid`**: RFC 9421 leaves `keyid` optional — `signRequest`'s
   `keyId` is too, and omitting it emits no `keyid` parameter on the wire.
   The verifier reports `keyId: undefined`, and pinning/resolution flows
@@ -432,7 +434,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 264 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 272 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

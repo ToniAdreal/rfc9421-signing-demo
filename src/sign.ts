@@ -95,6 +95,29 @@ function assertTimestamp(name: "created" | "expires", value: number): void {
 }
 
 /**
+ * The label becomes a dictionary member key in the `signature-input` /
+ * `signature` headers. `listSignatureLabels` splits members on top-level
+ * commas and matches keys against a token shape, so a label containing a
+ * comma or a space would emit a header the verifier's own multi-label path
+ * (`verifyAllLabels`) reports as MALFORMED_SIGNATURE_INPUT. Reject anything
+ * that is not a token the library can parse back.
+ *
+ * The shape is the RFC 8941 token shape used by RFC 9421 dictionaries,
+ * minus `:` `/` and a leading `*`: this library's dictionary parser
+ * (`listSignatureLabels`) cannot split members whose keys contain those
+ * characters, so accepting them here would mint signatures
+ * `verifyAllLabels` cannot read back. Labels like `sig1`, `merchant-1`,
+ * or `gateway.key_sig` are accepted.
+ */
+const LABEL_TOKEN_RE = /^[A-Za-z][A-Za-z0-9!#$%&'*+\-.^_`|~]*$/;
+function assertLabelShape(label: string): void {
+  if (!LABEL_TOKEN_RE.test(label))
+    throw new Error(
+      `signRequest: "label" must be an RFC 9421 token (start with a letter, then letters, digits, or one of !#$%&'*+-.^_\`|~ — no commas, spaces, colons, or slashes), got "${label}"`,
+    );
+}
+
+/**
  * Sign an HTTP request per RFC 9421. Returns a copy of the request with
  * `Signature-Input`, `Signature` (and `Content-Digest` when the body is
  * covered) headers attached. The input request is not mutated.
@@ -108,13 +131,19 @@ function assertTimestamp(name: "created" | "expires", value: number): void {
  * - `expires < created` would mint a signature that is already expired, so
  *   it is rejected (`expires === created` is allowed);
  * - `nonce: ""` would be emitted yet bypass the replay cache, so it is
- *   rejected.
+ *   rejected;
+ * - `label` must be an RFC 9421 token the verifier can parse back: commas
+ *   and spaces would corrupt the `signature-input` dictionary (the label
+ *   is the member key `verifyAllLabels` splits on), and `:`/`/`/leading
+ *   `*` are refused because `listSignatureLabels` cannot split members
+ *   whose keys contain them.
  */
 export function signRequest(
   req: RequestLike,
   opts: SignOptions,
 ): SignedHttpRequest {
   const label = opts.label ?? "sig1";
+  assertLabelShape(label);
   const created = opts.created ?? Math.floor(Date.now() / 1000);
   assertTimestamp("created", created);
   if (opts.expires !== undefined) {
