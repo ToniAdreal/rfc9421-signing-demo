@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 248 tests, all local, no network
+npm test   # 256 tests, all local, no network
 ```
 
 ## Quickstart
@@ -218,6 +218,34 @@ for (const r of results) {
 }
 ```
 
+- **Multi-party signing**: `addSignature(signedReq, opts)` appends a second
+  party's signature to an already-signed request, producing a genuine
+  multi-label RFC 9421 §2.4 dictionary — the sign-side twin of
+  `verifyAllLabels`. Both parties sign the same original request content
+  (the existing `Signature-Input` / `Signature` headers are stripped
+  before the second base is built, so dictionaries are never re-signed).
+  Duplicate or empty labels fail fast with a clear error; appending to an
+  unsigned request fails fast too. The input request is never mutated.
+
+```ts
+import { addSignature, signRequest } from "./dist/index.js";
+
+// merchant signs first with its own key
+const merchantSigned = signRequest(req, {
+  keyId: "merchant-key-1",
+  alg: "ed25519",
+  key: merchantPrivateKey,
+  label: "merchant",
+});
+// payment gateway appends its own label without touching the merchant's
+const dual = addSignature(merchantSigned, {
+  keyId: "gateway-key-7",
+  alg: "hmac-sha256",
+  key: gatewaySecret,
+  label: "gateway",
+});
+```
+
 ## Limitations (honest)
 
 - **Subset of RFC 9421.** Not implemented: `rsa-v1_5-sha256`, `@status`, `@request-response`, trailers, `bs`,
@@ -399,7 +427,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 248 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 256 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

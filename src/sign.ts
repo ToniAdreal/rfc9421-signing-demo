@@ -7,6 +7,7 @@ import {
 } from "node:crypto";
 import {
   buildSignatureBase,
+  listSignatureLabels,
   signatureInputValue,
   type RequestLike,
   type SignatureParams,
@@ -183,4 +184,106 @@ export function signRequest(
   headers["signature"] = `${label}=:${sig.toString("base64")}:`;
 
   return { method: req.method, url: req.url, headers, body: req.body };
+}
+
+/**
+ * Append a second party's signature to an already-signed request,
+ * producing a genuine multi-label RFC 9421 §2.4 dictionary — the
+ * sign-side twin of `verifyAllLabels`. The canonical use case is
+ * multi-party payment flows: a merchant signs with its own key (e.g.
+ * ed25519), then a payment gateway appends its own signature (e.g. hmac)
+ * without touching the merchant's entries.
+ *
+ * The second signature base is built over the original message content
+ * (the existing `signature-input` / `signature` headers are stripped
+ * before signing), so both parties sign the same request components.
+ * Parameters, covered components, key id, and nonce are taken from
+ * `opts` exactly as `signRequest` would apply them; `opts.label` names
+ * the appended entry (defaults to `"sig1"` like `signRequest`).
+ *
+ * Fail-fast configuration errors (thrown, never embedded):
+ * - the input has no `signature-input`/`signature` headers (nothing to
+ *   append to — call `signRequest` first);
+ * - the existing `signature-input` header is malformed;
+ * - `opts.label` is empty or already present in the request (RFC 9421
+ *   dictionary labels must be unique).
+ *
+ * The input request is not mutated; a new `SignedHttpRequest` is
+ * returned.
+ */
+export function addSignature(
+  signedReq: SignedHttpRequest,
+  opts: SignOptions,
+): SignedHttpRequest {
+  const label = opts.label ?? "sig1";
+  if (label.length === 0)
+    throw new Error('addSignature: "label" must be a non-empty string');
+
+  let existingInput: string | undefined;
+  let existingSig: string | undefined;
+  for (const [k, v] of Object.entries(signedReq.headers)) {
+    const lower = k.toLowerCase();
+    if (lower === "signature-input") existingInput = v;
+    else if (lower === "signature") existingSig = v;
+  }
+  if (existingInput === undefined || existingSig === undefined)
+    throw new Error(
+      "addSignature: the request has no signature-input/signature headers; sign it with signRequest first",
+    );
+
+  let labels: string[];
+  try {
+    labels = listSignatureLabels(existingInput);
+  } catch (e) {
+    throw new Error(
+      `addSignature: existing signature-input header is malformed (${(e as Error).message})`,
+    );
+  }
+  if (labels.includes(label))
+    throw new Error(
+      `addSignature: label "${label}" is already present; every signature must use a distinct label`,
+    );
+
+  // Strip the signature dictionaries so the second base is computed over
+  // the original message content, exactly as the first signature was.
+  // Covered components are honored from the stripped set, so a caller
+  // explicitly covering "signature-input"/"signature" signs the original
+  // request minus its own (not yet appended) entry — dictionaries are
+  // never re-signed after the fact.
+  const unsignedHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(signedReq.headers)) {
+    const lower = k.toLowerCase();
+    if (lower === "signature-input" || lower === "signature") continue;
+    unsignedHeaders[k] = v;
+  }
+  const fresh = signRequest(
+    {
+      method: signedReq.method,
+      url: signedReq.url,
+      headers: unsignedHeaders,
+      body: signedReq.body,
+    },
+    opts,
+  );
+
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(signedReq.headers)) {
+    const lower = k.toLowerCase();
+    if (lower === "signature-input" || lower === "signature") continue;
+    out[k] = v;
+  }
+  out["signature-input"] = `${existingInput}, ${fresh.headers["signature-input"]}`;
+  out["signature"] = `${existingSig}, ${fresh.headers["signature"]}`;
+  if (
+    fresh.headers["content-digest"] !== undefined &&
+    out["content-digest"] === undefined
+  )
+    out["content-digest"] = fresh.headers["content-digest"];
+
+  return {
+    method: signedReq.method,
+    url: signedReq.url,
+    headers: out,
+    body: signedReq.body,
+  };
 }
