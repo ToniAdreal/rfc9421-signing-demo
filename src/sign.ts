@@ -61,9 +61,31 @@ function defaultCoveredComponents(hasBody: boolean): string[] {
 }
 
 /**
+ * `created`/`expires` are Unix seconds on the wire, and the verifier's
+ * `signature-input` parser only recognizes the `-?\d+` integer shape.
+ * Reject anything else here so the signer can never emit a timestamp the
+ * verifier would silently truncate (e.g. `1759.5` → `1759`).
+ */
+function assertTimestamp(name: "created" | "expires", value: number): void {
+  if (!Number.isInteger(value))
+    throw new Error(
+      `signRequest: "${name}" must be an integer number of Unix seconds, got ${value}`,
+    );
+}
+
+/**
  * Sign an HTTP request per RFC 9421. Returns a copy of the request with
  * `Signature-Input`, `Signature` (and `Content-Digest` when the body is
  * covered) headers attached. The input request is not mutated.
+ *
+ * Fail-fast configuration errors (thrown, not embedded in the signature):
+ * - `coveredComponents: []` signs nothing, so it is rejected;
+ * - `created` / `expires` must be finite integers (Unix seconds) — the
+ *   verifier's `signature-input` parser only recognizes integer values, so
+ *   a fractional timestamp would silently diverge between signer and
+ *   verifier;
+ * - `expires < created` would mint a signature that is already expired, so
+ *   it is rejected (`expires === created` is allowed).
  */
 export function signRequest(
   req: RequestLike,
@@ -71,8 +93,20 @@ export function signRequest(
 ): SignedHttpRequest {
   const label = opts.label ?? "sig1";
   const created = opts.created ?? Math.floor(Date.now() / 1000);
+  assertTimestamp("created", created);
+  if (opts.expires !== undefined) {
+    assertTimestamp("expires", opts.expires);
+    if (opts.expires < created)
+      throw new Error(
+        `signRequest: "expires" (${opts.expires}) must not be earlier than "created" (${created}); the signature would be expired at birth`,
+      );
+  }
   const covered =
     opts.coveredComponents ?? defaultCoveredComponents(req.body !== undefined);
+  if (covered.length === 0)
+    throw new Error(
+      'signRequest: "coveredComponents" must cover at least one component; an empty list would sign nothing',
+    );
 
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(req.headers)) {

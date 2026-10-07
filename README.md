@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 203 tests, all local, no network
+npm test   # 211 tests, all local, no network
 ```
 
 ## Quickstart
@@ -142,6 +142,13 @@ configuration `Error` instead of silently defaulting.
   then the `"@signature-params"` line. Covered components: `@method`,
   `@scheme`, `@authority`, `@path`, `@query`, `@target-uri`, `@created`,
   `@expires`, plus any HTTP header field (case-insensitive, multi-values joined).
+- **Sign-side input guards**: `signRequest` fails fast with a descriptive
+  configuration error instead of minting a broken signature — `expires`
+  earlier than `created` (a signature that is expired at birth), an empty
+  `coveredComponents` list (would sign nothing), and non-integer
+  `created`/`expires` (the verifier's `signature-input` parser only
+  recognizes integer seconds, so a fractional value would silently diverge
+  between signer and verifier). `expires === created` is allowed.
 - **Algorithms**: `ed25519`, `ecdsa-p256-sha256` (NIST P-256; DER-encoded
   ECDSA signatures per RFC 9421 §3.3.2), and `hmac-sha256`
   (constant-time compare).
@@ -374,7 +381,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 203 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 211 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).
