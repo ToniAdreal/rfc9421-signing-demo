@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 256 tests, all local, no network
+npm test   # 261 tests, all local, no network
 ```
 
 ## Quickstart
@@ -154,6 +154,11 @@ configuration `Error` instead of silently defaulting.
   `created`/`expires` (the verifier's `signature-input` parser only
   recognizes integer seconds, so a fractional value would silently diverge
   between signer and verifier). `expires === created` is allowed.
+- **Optional `keyid`**: RFC 9421 leaves `keyid` optional — `signRequest`'s
+  `keyId` is too, and omitting it emits no `keyid` parameter on the wire.
+  The verifier reports `keyId: undefined`, and pinning/resolution flows
+  treat it as a missing claim (e.g. `keyResolver` → `KEY_RESOLUTION_FAILED`,
+  `expectedKeyId` → `KEYID_MISMATCH`).
 - **Algorithms**: `ed25519`, `ecdsa-p256-sha256` (NIST P-256; DER-encoded
   ECDSA signatures per RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS with
   SHA-512, MGF1 with SHA-512, 64-byte salt per RFC 9421 §3.3.1),
@@ -427,7 +432,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 256 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 261 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

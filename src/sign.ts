@@ -23,7 +23,14 @@ export type SignAlg =
   | "rsa-pss-sha512";
 
 export interface SignOptions {
-  keyId: string;
+  /**
+   * Optional per RFC 9421 (§2.3): `keyid` is not a required parameter.
+   * When omitted, no `keyid` parameter is emitted in `signature-input`
+   * (the verifier returns `keyId: undefined`, and `keyResolver`/
+   * `expectedKeyId` flows treat a missing `keyid` the way they already
+   * do — e.g. `keyResolver` reports `KEY_RESOLUTION_FAILED`).
+   */
+  keyId?: string;
   alg: SignAlg;
   /**
    * ed25519: a private KeyObject (see keys.generateEd25519KeyPair).
@@ -132,7 +139,11 @@ export function signRequest(
     headers["content-digest"] = contentDigest(req.body);
   }
 
-  const params: SignatureParams = { created, keyid: opts.keyId, alg: opts.alg };
+  // `keyid` is an optional RFC 9421 parameter: only emit it when the caller
+  // supplies one, so the wire shape is identical to what a keyid-less
+  // signer would produce.
+  const params: SignatureParams = { created, alg: opts.alg };
+  if (opts.keyId !== undefined) params.keyid = opts.keyId;
   if (opts.expires !== undefined) params.expires = opts.expires;
   if (opts.nonce !== undefined) params.nonce = opts.nonce;
 
