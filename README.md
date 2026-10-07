@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 280 tests, all local, no network
+npm test   # 292 tests, all local, no network
 ```
 
 ## Quickstart
@@ -186,7 +186,13 @@ configuration `Error` instead of silently defaulting.
   (`expiredToleranceSec`, default 0s). A verifier can also demand the
   timestamps exist at all: `requireCreated` / `requireExpires` reject
   signatures that omit them (`MISSING_CREATED` / `MISSING_EXPIRES`) —
-  for signers you control, `signRequest` always sends `created`.
+  for signers you control, `signRequest` always sends `created`. And an
+  opt-in maximum age (`maxSignatureAgeSec`, unset by default) rejects a
+  signature whose `created` is older than the window with
+  `SIGNATURE_TOO_OLD` — the webhook-timestamp-window analog (cf.
+  Stripe's few-minutes tolerance), bounding replayability of long-lived
+  signed messages without a nonce replay cache. The age check fires
+  only when `created` is present (orthogonal to `requireCreated`).
 - **Nonce (RFC 9421 §2.3)**: pass `nonce` to `signRequest` and it is
   emitted as a `nonce` signature-input parameter — part of the signed
   `@signature-params` line, so a forged nonce fails with
@@ -421,6 +427,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` (or `sha-256` fallback) digest |
 | `EXPIRED` | `expires` timestamp is in the past (beyond tolerance) |
 | `CREATED_IN_FUTURE` | `created` timestamp is in the future (beyond clock-skew tolerance) |
+| `SIGNATURE_TOO_OLD` | `created` is older than the opt-in `VerifyOptions.maxSignatureAgeSec` window |
 | `MISSING_CREATED` | `requireCreated` is set but the signature carries no `created` |
 | `MISSING_EXPIRES` | `requireExpires` is set but the signature carries no `expires` |
 | `NONCE_REPLAY` | nonce already seen within the replay-cache TTL (`VerifyOptions.replayCache`) |
@@ -442,7 +449,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 280 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 292 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

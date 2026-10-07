@@ -79,6 +79,25 @@ export interface VerifyOptions {
    */
   requireExpires?: boolean;
   /**
+   * Maximum acceptable signature age, in seconds (opt-in). When set, a
+   * signature whose `created` timestamp is older than this is rejected
+   * with `SIGNATURE_TOO_OLD` — even when it carries no `expires` (an old
+   * signature that would otherwise be accepted indefinitely). This is
+   * the webhook-timestamp-window analog (cf. Stripe's few-minutes
+   * tolerance): it bounds replayability of long-lived signed messages
+   * without requiring a nonce replay cache. Must be a non-negative
+   * finite number — anything else throws a caller configuration `Error`.
+   *
+   * Defaults to unset (backwards compatible): no age check is made.
+   * Checked *after* the cryptographic check and the `expires`/`created`
+   * window checks, so forgeries still report `SIGNATURE_MISMATCH`, and
+   * *before* the nonce replay cache. A signature that carries no
+   * `created` parameter never triggers this check — orthogonal to
+   * `requireCreated`: combine the two when an undated signature must be
+   * rejected rather than passed through.
+   */
+  maxSignatureAgeSec?: number;
+  /**
    * Optional `keyid` pinning (key-confusion protection): after the
    * cryptographic check passes, the `keyid` claimed in the
    * signature-input must equal this value, otherwise verification
@@ -160,6 +179,18 @@ function assertKeyConfig(
   if (opts.key !== undefined && opts.keyResolver !== undefined)
     throw new Error(
       "verifyRequest: `key` and `keyResolver` are mutually exclusive — pass one or the other",
+    );
+}
+
+/**
+ * Validate the `maxSignatureAgeSec` option. A bogus window is a caller
+ * configuration error (throw), not a verification failure.
+ */
+function assertMaxSignatureAgeSec(value: number | undefined): void {
+  if (value === undefined) return;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    throw new Error(
+      `verifyRequest: \`maxSignatureAgeSec\` must be a non-negative finite number, got ${typeof value === "number" ? String(value) : typeof value}`,
     );
 }
 
@@ -245,6 +276,7 @@ export function verifyRequest(
   opts: VerifyOptions,
 ): VerifyResult {
   assertKeyConfig(opts);
+  assertMaxSignatureAgeSec(opts.maxSignatureAgeSec);
   const label = opts.label ?? "sig1";
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   const skew = opts.clockSkewToleranceSec ?? 60;
@@ -573,6 +605,28 @@ export function verifyRequest(
       ok: false,
       code: "CREATED_IN_FUTURE",
       reason: "signature created in the future (clock skew)",
+      label,
+      keyId: parsed.params.keyid,
+      alg: effectiveAlg,
+      nonce: parsed.params.nonce,
+    };
+
+  // Maximum signature age (opt-in webhook-timestamp window): an old
+  // `created` with no `expires` would otherwise be accepted forever.
+  // Checked after the crypto and freshness-window checks so forgeries
+  // still report their true failure mode, and before the nonce replay
+  // cache. A signature with no `created` parameter bypasses this check
+  // entirely — orthogonal to `requireCreated`.
+  const maxAge = opts.maxSignatureAgeSec;
+  if (
+    maxAge !== undefined &&
+    parsed.params.created !== undefined &&
+    now - parsed.params.created > maxAge
+  )
+    return {
+      ok: false,
+      code: "SIGNATURE_TOO_OLD",
+      reason: `signature is too old: created ${now - parsed.params.created}s ago, older than maxSignatureAgeSec=${maxAge}`,
       label,
       keyId: parsed.params.keyid,
       alg: effectiveAlg,

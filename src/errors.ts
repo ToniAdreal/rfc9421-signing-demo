@@ -43,6 +43,13 @@ export type VerifyFailureCode =
   /** `created` timestamp is in the future (beyond clock-skew tolerance). */
   | "CREATED_IN_FUTURE"
   /**
+   * `created` timestamp is older than `VerifyOptions.maxSignatureAgeSec`
+   * seconds in the past. Only possible when the caller opted in. A
+   * signature that carries no `created` parameter never triggers this —
+   * the check is orthogonal to `requireCreated`.
+   */
+  | "SIGNATURE_TOO_OLD"
+  /**
    * `VerifyOptions.requireCreated` is set but the signature carries no
    * `created` parameter. Only possible when the caller opted in.
    */
