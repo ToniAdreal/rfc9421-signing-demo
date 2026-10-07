@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  constants,
   createHmac,
   createSign,
   generateKeyPairSync,
@@ -13,6 +14,7 @@ import {
   contentDigest,
   generateEd25519KeyPair,
   generateP256KeyPair,
+  generateRsaPssKeyPair,
   secretKey,
   signatureInputValue,
   signRequest,
@@ -65,7 +67,8 @@ function demoRequest(body?: string): RequestLike {
  * Sign like a foreign signer that never emits the optional `alg`
  * parameter: build the signature base with params that carry no `alg`,
  * then sign with node:crypto directly (mirroring src/sign.ts's crypto
- * choices: ed25519 raw, P-256 DER, hmac-sha256).
+ * choices: ed25519 raw, P-256 DER, RSA-PSS with saltLength 64 per
+ * RFC 9421 §3.3.1, hmac-sha256).
  */
 function signWithoutAlg(
   req: RequestLike,
@@ -101,6 +104,17 @@ function signWithoutAlg(
     sig = createHmac("sha256", key).update(base, "utf8").digest();
   } else if (key.asymmetricKeyType === "ed25519") {
     sig = edSign(null, Buffer.from(base, "utf8"), key);
+  } else if (key.asymmetricKeyType === "rsa") {
+    // RSA-PSS with SHA-512, MGF1 with SHA-512, and a 64-byte salt — the
+    // RFC 9421 §3.3.1 wire shape this library pins on its rsa-pss-sha512
+    // verify branch.
+    sig = createSign("sha512")
+      .update(base, "utf8")
+      .sign({
+        key,
+        padding: constants.RSA_PKCS1_PSS_PADDING,
+        saltLength: 64,
+      });
   } else {
     sig = createSign("sha256").update(base, "utf8").sign(key);
   }
@@ -199,9 +213,47 @@ test("infer: wire alg=\"hmac-sha256\" with an ed25519 key throws a configuration
   );
 });
 
-test("infer: an unmappable key shape (RSA) throws a configuration error", () => {
-  const { publicKey: rsaPublic } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
+test("infer: RSA-PSS signature without alg verifies against an RSA key", () => {
+  const { publicKey, privateKey } = generateRsaPssKeyPair();
+  const wire = signWithoutAlg(demoRequest(JSON.stringify({ amount: 100 })), {
+    keyId: "rsa-merchant",
+    key: privateKey,
+  });
+  const res = verifyRequest(wire, { key: publicKey, algFallback: "infer" });
+  assert.equal(res.ok, true, `expected ok, got ${JSON.stringify(res)}`);
+  assert.equal(res.alg, "rsa-pss-sha512");
+});
+
+test("infer: wire alg=\"rsa-pss-sha512\" with an RSA key does not throw", () => {
+  const { publicKey, privateKey } = generateRsaPssKeyPair();
+  const signed = signRequest(demoRequest(JSON.stringify({ amount: 1 })), {
+    keyId: "rsa-merchant",
+    alg: "rsa-pss-sha512",
+    key: privateKey,
+  });
+  const res = verifyRequest(signed, { key: publicKey, algFallback: "infer" });
+  assert.equal(res.ok, true, `expected ok, got ${JSON.stringify(res)}`);
+  assert.equal(res.alg, "rsa-pss-sha512");
+});
+
+test("infer: wire alg=\"ed25519\" with an RSA key throws a configuration error", () => {
+  const { publicKey: rsaPublic } = generateRsaPssKeyPair();
+  const { privateKey: edPriv } = generateEd25519KeyPair();
+  const signed = signRequest(demoRequest(JSON.stringify({ amount: 1 })), {
+    keyId: "merchant-key",
+    alg: "ed25519",
+    key: edPriv,
+  });
+  assert.throws(
+    () => verifyRequest(signed, { key: rsaPublic, algFallback: "infer" }),
+    /incompatible with the configured key/,
+    "ed25519/RSA shape conflict must be a clear config error",
+  );
+});
+
+test("infer: an unmappable key shape (non-P-256 EC) throws a configuration error", () => {
+  const { publicKey: p384Public } = generateKeyPairSync("ec", {
+    namedCurve: "secp384r1",
   });
   const { privateKey } = generateEd25519KeyPair();
   const wire = signWithoutAlg(demoRequest(JSON.stringify({ amount: 1 })), {
@@ -209,9 +261,9 @@ test("infer: an unmappable key shape (RSA) throws a configuration error", () => 
     key: privateKey,
   });
   assert.throws(
-    () => verifyRequest(wire, { key: rsaPublic, algFallback: "infer" }),
+    () => verifyRequest(wire, { key: p384Public, algFallback: "infer" }),
     /cannot infer an algorithm/,
-    "RSA key has no supported mapping under infer",
+    "secp384r1 key has no supported mapping under infer",
   );
 });
 

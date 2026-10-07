@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 236 tests, all local, no network
+npm test   # 239 tests, all local, no network
 ```
 
 ## Quickstart
@@ -287,7 +287,8 @@ most also appear in [Limitations](#limitations)):
   signature without `alg` could not be verified end-to-end. Opt-in
   fallback: `VerifyOptions.algFallback: "infer"` infers the algorithm
   from the resolved key's shape (`secret` → `hmac-sha256`, ed25519 key
-  → `ed25519`, P-256 EC key → `ecdsa-p256-sha256`) and throws a caller
+  → `ed25519`, P-256 EC key → `ecdsa-p256-sha256`, RSA key →
+  `rsa-pss-sha512`) and throws a caller
   configuration `Error` when a wire-carried `alg` contradicts the key's
   shape. Automatic detection is opt-in only — without it, a missing
   `alg` keeps meaning `"ed25519"`, exactly as before.
@@ -393,7 +394,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 236 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 239 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

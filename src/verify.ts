@@ -99,8 +99,9 @@ export interface VerifyOptions {
    * - `"infer"` (explicit opt-in): when `alg` is absent, the verifier
    *   infers the algorithm from the *resolved* key's shape — a `secret`
    *   key implies `hmac-sha256`, an ed25519 key implies `ed25519`, a
-   *   P-256 (`prime256v1`) EC key implies `ecdsa-p256-sha256`; an
-   *   unmappable key shape throws a caller configuration `Error`. When
+   *   P-256 (`prime256v1`) EC key implies `ecdsa-p256-sha256`, and an
+   *   RSA key implies `rsa-pss-sha512`; an unmappable key shape throws
+   *   a caller configuration `Error`. When
    *   the wire *does* carry `alg`, the key's shape is checked against
    *   it and a mismatch (e.g. wire `alg="ed25519"` with a `secret`
    *   key) throws a caller configuration `Error` instead of surfacing
@@ -196,8 +197,9 @@ function inferAlgFromKeyShape(key: KeyObject): SupportedAlg {
     key.asymmetricKeyDetails?.namedCurve === "prime256v1"
   )
     return "ecdsa-p256-sha256";
+  if (key.asymmetricKeyType === "rsa") return "rsa-pss-sha512";
   throw new Error(
-    `verifyRequest: algFallback "infer" cannot infer an algorithm for ${describeKey(key)} — supported key shapes are secret keys (hmac-sha256), ed25519 keys, and P-256 (prime256v1) EC keys`,
+    `verifyRequest: algFallback "infer" cannot infer an algorithm for ${describeKey(key)} — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, and RSA keys (rsa-pss-sha512)`,
   );
 }
 
@@ -216,7 +218,8 @@ function assertAlgMatchesKeyShape(alg: SupportedAlg, key: KeyObject): void {
     (alg === "hmac-sha512" && key.type === "secret") ||
     (alg === "ecdsa-p256-sha256" &&
       key.asymmetricKeyType === "ec" &&
-      key.asymmetricKeyDetails?.namedCurve === "prime256v1");
+      key.asymmetricKeyDetails?.namedCurve === "prime256v1") ||
+    (alg === "rsa-pss-sha512" && key.asymmetricKeyType === "rsa");
   if (ok) return;
   throw new Error(
     `verifyRequest: wire alg "${alg}" is incompatible with the configured key (${describeKey(key)}) — pass a matching key or remove the algFallback "infer" opt-in`,
@@ -372,7 +375,8 @@ export function verifyRequest(
     (effectiveAlg === "ed25519" ||
       effectiveAlg === "hmac-sha256" ||
       effectiveAlg === "hmac-sha512" ||
-      effectiveAlg === "ecdsa-p256-sha256") &&
+      effectiveAlg === "ecdsa-p256-sha256" ||
+      effectiveAlg === "rsa-pss-sha512") &&
     alg !== undefined
   ) {
     assertAlgMatchesKeyShape(effectiveAlg, key);
