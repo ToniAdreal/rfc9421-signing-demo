@@ -12,6 +12,7 @@ export {
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
+  exportPublicKeyJwkRsa,
   exportPublicKeyPem,
   generateEd25519KeyPair,
   generateP256KeyPair,
@@ -20,11 +21,12 @@ export {
   importPublicKey,
   importPublicKeyJwk,
   importPublicKeyJwkP256,
+  importPublicKeyJwkRsa,
   MIN_HMAC_SECRET_BYTES,
   MIN_HMAC_SHA512_SECRET_BYTES,
   secretKey,
 } from "./keys.js";
-export type { Ed25519PublicJwk, P256PublicJwk } from "./keys.js";
+export type { Ed25519PublicJwk, P256PublicJwk, RsaPublicJwk } from "./keys.js";
 export {
   buildSignatureBase,
   getHeader,

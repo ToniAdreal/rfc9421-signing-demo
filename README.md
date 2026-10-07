@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 272 tests, all local, no network
+npm test   # 280 tests, all local, no network
 ```
 
 ## Quickstart
@@ -103,6 +103,14 @@ P-256 gateways get the same treatment: `exportPublicKeyJwkP256` /
 `importPublicKeyJwkP256` handle the RFC 7518 EC shape
 (`{ kty: "EC", crv: "P-256", x, y }`) for `ecdsa-p256-sha256` verifiers,
 with the same refusal of private (`"d"`) material.
+
+RSA gateways too: `exportPublicKeyJwkRsa` / `importPublicKeyJwkRsa` handle
+the RFC 7518 RSA shape (`{ kty: "RSA", n, e }`) for `rsa-pss-sha512`
+verifiers, with the same refusal of private (`"d"`) material. One honest
+caveat documented in code: node:crypto's RSA JWK importer is lenient, so a
+structurally-valid but degenerate modulus (e.g. all-zero `n`) is accepted
+at import time and fails only at the crypto layer when used — verification
+still fails closed, never silently accepts.
 
 Receiving signed webhooks with Node's `http` server — the receive→verify
 chain via `fromNodeRequest`:
@@ -434,7 +442,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 272 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 280 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

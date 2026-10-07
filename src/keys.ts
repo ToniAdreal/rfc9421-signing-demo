@@ -353,3 +353,116 @@ export function importPublicKeyJwkP256(jwk: unknown): KeyObject {
     );
   }
 }
+
+/**
+ * Public-key-only JWK view of an RSA key, exactly as produced by
+ * {@link exportPublicKeyJwkRsa}. RFC 7518 §6.3: RSA public keys carry
+ * `kty: "RSA"` with base64url `n` (modulus) and `e` (public exponent).
+ * Private JWKs (`"d"` present) are never produced or accepted here —
+ * same public-key-distribution-only policy as {@link Ed25519PublicJwk}.
+ *
+ * Honest caveat: node:crypto's JWK importer is lenient about the RSA
+ * modulus — a structurally-valid but cryptographically degenerate `n`
+ * (e.g. all-zero) is accepted at import time and only fails later, at
+ * the crypto layer, when used to verify a real signature. This helper
+ * validates shape (`kty`/`n`/`e` present, no private material); modulus
+ * *quality* (size, primality) is the caller's responsibility.
+ */
+export interface RsaPublicJwk {
+  kty: "RSA";
+  /** Base64url-encoded modulus. */
+  n: string;
+  /** Base64url-encoded public exponent (typically "AQAB" = 65537). */
+  e: string;
+}
+
+/**
+ * Export an RSA public key as a plain-object JWK (RFC 7518 §6.3), ready
+ * to `JSON.stringify` and ship to a verifier — the `rsa-pss-sha512`
+ * counterpart of {@link exportPublicKeyJwk} / {@link exportPublicKeyJwkP256},
+ * for gateway/verifier deployments that distribute keys as JSON.
+ *
+ * Throws a caller-configuration `Error` for anything that is not an RSA
+ * public KeyObject (private keys, symmetric secrets, other algorithms);
+ * this helper is the public-key-distribution case only.
+ */
+export function exportPublicKeyJwkRsa(key: KeyObject): RsaPublicJwk {
+  if (key.type !== "public" || key.asymmetricKeyType !== "rsa")
+    throw new Error(
+      `exportPublicKeyJwkRsa: expected an RSA public KeyObject, got ` +
+        `type=${String(key.type)} ` +
+        `asymmetricKeyType=${String(key.asymmetricKeyType)} ` +
+        `(JWK support here is RSA public keys only — the public-key-distribution case)`,
+    );
+  const raw = key.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  // Node emits exactly { kty: "RSA", n: "<base64url>", e: "<base64url>" }.
+  if (
+    raw["kty"] !== "RSA" ||
+    typeof raw["n"] !== "string" ||
+    typeof raw["e"] !== "string"
+  )
+    throw new Error(
+      "exportPublicKeyJwkRsa: node:crypto returned an unexpected JWK shape " +
+        `for an RSA public key: ${JSON.stringify(Object.keys(raw))}`,
+    );
+  return { kty: "RSA", n: raw["n"], e: raw["e"] };
+}
+
+/**
+ * Import an RSA public key from a JWK object (RFC 7518 §6.3), as produced
+ * by {@link exportPublicKeyJwkRsa} and typically received over the wire
+ * as JSON.
+ *
+ * Strictly validates before touching node:crypto: the input must be a
+ * plain object with `kty: "RSA"` and non-empty string `n` / `e`.
+ * Anything else throws a descriptive `Error` — never a verification
+ * failure, since this is key setup, not signature checking. JWKs carrying
+ * private material (`"d"` or other private RSA parameters) are refused
+ * outright: this helper is public-key distribution only, and silently
+ * accepting a private JWK would encourage shipping secrets around.
+ */
+export function importPublicKeyJwkRsa(jwk: unknown): KeyObject {
+  const fail = (why: string): never => {
+    throw new Error(`importPublicKeyJwkRsa: invalid JWK: ${why}`);
+  };
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk))
+    fail(
+      `expected a JWK object, got ${
+        Array.isArray(jwk) ? "an array" : jwk === null ? "null" : typeof jwk
+      }`,
+    );
+  const o = jwk as Record<string, unknown>;
+  if ("d" in o)
+    fail(
+      'private key material ("d") is not accepted; this helper imports ' +
+        "public keys only (keep private keys in PEM on the signer side)",
+    );
+  if (!("kty" in o)) fail(`missing "kty" parameter`);
+  if (o["kty"] !== "RSA")
+    fail(`expected kty "RSA", got ${JSON.stringify(o["kty"])}`);
+  const n = o["n"];
+  if (typeof n !== "string" || n.length === 0)
+    throw new Error(
+      `importPublicKeyJwkRsa: invalid JWK: missing or empty "n" (the base64url modulus)`,
+    );
+  const e = o["e"];
+  if (typeof e !== "string" || e.length === 0)
+    throw new Error(
+      `importPublicKeyJwkRsa: invalid JWK: missing or empty "e" (the base64url public exponent)`,
+    );
+  try {
+    return createPublicKey({
+      key: { kty: "RSA", n, e },
+      format: "jwk",
+    });
+  } catch (err) {
+    throw new Error(
+      `importPublicKeyJwkRsa: node:crypto rejected the JWK: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
