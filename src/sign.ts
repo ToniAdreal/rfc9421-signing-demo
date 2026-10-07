@@ -17,6 +17,7 @@ import { assertHmacSecretLength } from "./keys.js";
 export type SignAlg =
   | "ed25519"
   | "hmac-sha256"
+  | "hmac-sha512"
   | "ecdsa-p256-sha256"
   | "rsa-pss-sha512";
 
@@ -31,7 +32,10 @@ export interface SignOptions {
    * rsa-pss-sha512: an RSA private KeyObject (see
    * keys.generateRsaPssKeyPair); signed with RSASSA-PSS (SHA-512, MGF1
    * with SHA-512, 64-byte salt) per RFC 9421 §3.3.1.
-   * hmac-sha256: a secret KeyObject (see keys.secretKey).
+   * hmac-sha256: a secret KeyObject of ≥ 32 bytes (see keys.secretKey).
+   * hmac-sha512: a secret KeyObject of ≥ 64 bytes (RFC 2104 §3 pairs the
+   * floor with the hash output length; a 32–63 byte secret is rejected on
+   * both the sign and verify sides).
    */
   key: KeyObject;
   /** Unix seconds. Defaults to now. */
@@ -164,6 +168,13 @@ export function signRequest(
     // signatures the verifier would also (correctly) refuse to check.
     assertHmacSecretLength(opts.key);
     sig = createHmac("sha256", opts.key).update(base, "utf8").digest();
+  } else if (opts.alg === "hmac-sha512") {
+    // SHA-512 twin of the hmac-sha256 branch above. The floor is paired
+    // with the algorithm (RFC 2104 §3: the key SHOULD be at least as long
+    // as the hash output; sha-512 → 64 bytes), so a secret that is only
+    // adequate for hmac-sha256 is rejected here on both sides.
+    assertHmacSecretLength(opts.key, "hmac-sha512");
+    sig = createHmac("sha512", opts.key).update(base, "utf8").digest();
   } else {
     throw new Error(`unsupported alg "${opts.alg as string}"`);
   }

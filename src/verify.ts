@@ -26,7 +26,8 @@ export interface VerifyOptions {
    * rsa-pss-sha512: the signer's RSA public KeyObject (verified with
    * RSASSA-PSS, SHA-512, MGF1 with SHA-512, 64-byte salt — RFC 9421
    * §3.3.1).
-   * hmac-sha256: the shared secret KeyObject.
+   * hmac-sha256: the shared secret KeyObject (≥ 32 bytes).
+   * hmac-sha512: the shared secret KeyObject (≥ 64 bytes).
    *
    * Required unless `keyResolver` is set; mutually exclusive with it.
    */
@@ -165,6 +166,7 @@ function assertKeyConfig(
 type SupportedAlg =
   | "ed25519"
   | "hmac-sha256"
+  | "hmac-sha512"
   | "ecdsa-p256-sha256"
   | "rsa-pss-sha512";
 
@@ -211,6 +213,7 @@ function assertAlgMatchesKeyShape(alg: SupportedAlg, key: KeyObject): void {
   const ok =
     (alg === "ed25519" && key.asymmetricKeyType === "ed25519") ||
     (alg === "hmac-sha256" && key.type === "secret") ||
+    (alg === "hmac-sha512" && key.type === "secret") ||
     (alg === "ecdsa-p256-sha256" &&
       key.asymmetricKeyType === "ec" &&
       key.asymmetricKeyDetails?.namedCurve === "prime256v1");
@@ -229,9 +232,10 @@ function assertAlgMatchesKeyShape(alg: SupportedAlg, key: KeyObject): void {
  * For a throwing variant, see `verifyRequestOrThrow`.
  *
  * Throws only on caller configuration errors (e.g. both `key` and
- * `keyResolver` set, or neither set — and a configured `hmac-sha256`
- * secret shorter than {@link MIN_HMAC_SECRET_BYTES}, which is rejected
- * loudly on both the sign and verify sides).
+ * `keyResolver` set, or neither set — and a configured HMAC secret shorter
+ * than the per-algorithm floor (≥ 32 bytes for `hmac-sha256`, ≥ 64 bytes
+ * for `hmac-sha512`), which is rejected loudly on both the sign and verify
+ * sides).
  */
 export function verifyRequest(
   req: RequestLike,
@@ -367,6 +371,7 @@ export function verifyRequest(
     opts.algFallback === "infer" &&
     (effectiveAlg === "ed25519" ||
       effectiveAlg === "hmac-sha256" ||
+      effectiveAlg === "hmac-sha512" ||
       effectiveAlg === "ecdsa-p256-sha256") &&
     alg !== undefined
   ) {
@@ -377,7 +382,10 @@ export function verifyRequest(
   // purpose: a weak configured secret is a caller configuration error
   // (throw), not a verification failure — symmetric with the sign side,
   // which also throws. It must not be swallowed into a VERIFICATION_ERROR.
-  if (effectiveAlg === "hmac-sha256") assertHmacSecretLength(key);
+  // The floor is paired with the algorithm (RFC 2104 §3): hmac-sha256 →
+  // ≥ 32 bytes, hmac-sha512 → ≥ 64 bytes.
+  if (effectiveAlg === "hmac-sha256" || effectiveAlg === "hmac-sha512")
+    assertHmacSecretLength(key, effectiveAlg);
 
   let cryptoOk = false;
   try {
@@ -405,6 +413,16 @@ export function verifyRequest(
         );
     } else if (effectiveAlg === "hmac-sha256") {
       const expected = createHmac("sha256", key).update(base, "utf8").digest();
+      cryptoOk =
+        sigBytes.length === expected.length &&
+        timingSafeEqual(sigBytes, expected);
+    } else if (effectiveAlg === "hmac-sha512") {
+      // SHA-512 twin of the hmac-sha256 branch: constant-time compare
+      // against the recomputed MAC. A hmac-sha256 signature never
+      // verifies here and vice versa — the digest lengths differ (32 vs
+      // 64 bytes) and the MAC constructions differ, so the two
+      // algorithms cannot be confused with each other.
+      const expected = createHmac("sha512", key).update(base, "utf8").digest();
       cryptoOk =
         sigBytes.length === expected.length &&
         timingSafeEqual(sigBytes, expected);

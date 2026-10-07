@@ -54,30 +54,61 @@ export function generateRsaPssKeyPair(): {
 export const MIN_HMAC_SECRET_BYTES = 32;
 
 /**
- * Enforce {@link MIN_HMAC_SECRET_BYTES} on an HMAC secret KeyObject.
+ * Minimum HMAC shared-secret length in bytes for `hmac-sha512`. RFC 2104 §3
+ * advises that the HMAC key be at least as long as the hash output; for
+ * sha-512 that is 64 bytes. Each HMAC algorithm enforces its own floor —
+ * {@link MIN_HMAC_SECRET_BYTES} (32 bytes) for `hmac-sha256`, this constant
+ * (64 bytes) for `hmac-sha512` — so a key that is only adequate for one
+ * algorithm is never silently accepted for the other.
+ */
+export const MIN_HMAC_SHA512_SECRET_BYTES = 64;
+
+/**
+ * Enforce the per-algorithm HMAC secret-length floor on an HMAC secret
+ * KeyObject. The floor is paired with the algorithm: `hmac-sha256` → ≥
+ * {@link MIN_HMAC_SECRET_BYTES} (32) bytes, `hmac-sha512` → ≥
+ * {@link MIN_HMAC_SHA512_SECRET_BYTES} (64) bytes (RFC 2104 §3: the key
+ * SHOULD be at least as long as the hash output). `alg` defaults to
+ * `"hmac-sha256"` for backwards compatibility.
  * Throws a caller-configuration `Error` — not a verification failure —
  * so both the sign and verify sides fail identically on a weak key.
  * Asymmetric keys passed here are also rejected (they are never valid
  * HMAC secrets); use {@link secretKey} or `node:crypto`'s
- * `createSecretKey` with ≥ 32 bytes of entropy.
+ * `createSecretKey` with enough entropy for the chosen algorithm.
  */
-export function assertHmacSecretLength(key: KeyObject): void {
+export function assertHmacSecretLength(
+  key: KeyObject,
+  alg: "hmac-sha256" | "hmac-sha512" = "hmac-sha256",
+): void {
+  const minBytes =
+    alg === "hmac-sha512"
+      ? MIN_HMAC_SHA512_SECRET_BYTES
+      : MIN_HMAC_SECRET_BYTES;
   const size = key.symmetricKeySize;
   if (size === undefined)
     throw new Error(
       "assertHmacSecretLength: expected a symmetric secret KeyObject " +
         "(see keys.secretKey), got a non-symmetric key",
     );
-  if (size < MIN_HMAC_SECRET_BYTES)
+  if (size < minBytes)
     throw new Error(
-      `assertHmacSecretLength: hmac-sha256 secret must be at least ` +
-        `${MIN_HMAC_SECRET_BYTES} bytes (RFC 2104: the key SHOULD be at least ` +
-        `as long as the hash output; sha-256 → ${MIN_HMAC_SECRET_BYTES} ` +
+      `assertHmacSecretLength: ${alg} secret must be at least ` +
+        `${minBytes} bytes (RFC 2104: the key SHOULD be at least ` +
+        `as long as the hash output; ${
+          alg === "hmac-sha512" ? "sha-512" : "sha-256"
+        } → ${minBytes} ` +
         `bytes), got ${size} bytes`,
     );
 }
 
-/** Wrap a shared secret for hmac-sha256. */
+/**
+ * Wrap a shared secret for HMAC signing. Enforces the `hmac-sha256` floor
+ * (≥ {@link MIN_HMAC_SECRET_BYTES} bytes); a ≥ 64-byte secret produced here
+ * also satisfies the `hmac-sha512` floor
+ * ({@link MIN_HMAC_SHA512_SECRET_BYTES}). For `hmac-sha512` with a secret
+ * between 32 and 63 bytes, the sign/verify paths throw — the floor is
+ * paired with the algorithm, never silently relaxed.
+ */
 export function secretKey(secret: string | Buffer): KeyObject {
   const bytes =
     typeof secret === "string" ? Buffer.from(secret, "utf8") : secret;

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 224 tests, all local, no network
+npm test   # 236 tests, all local, no network
 ```
 
 ## Quickstart
@@ -151,8 +151,10 @@ configuration `Error` instead of silently defaulting.
   between signer and verifier). `expires === created` is allowed.
 - **Algorithms**: `ed25519`, `ecdsa-p256-sha256` (NIST P-256; DER-encoded
   ECDSA signatures per RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS with
-  SHA-512, MGF1 with SHA-512, 64-byte salt per RFC 9421 §3.3.1), and
-  `hmac-sha256` (constant-time compare).
+  SHA-512, MGF1 with SHA-512, 64-byte salt per RFC 9421 §3.3.1),
+  `hmac-sha256` (≥ 32-byte secrets) and `hmac-sha512` (≥ 64-byte secrets;
+  constant-time compare; floors paired with the algorithm per RFC 2104
+  §3).
 - **Body binding**: `Content-Digest: sha-512=:…:` is computed when the body
   is covered, and the verifier recomputes it — a swapped body fails even if
   the signature itself is valid. The verifier prefers `sha-512` but falls
@@ -213,8 +215,7 @@ for (const r of results) {
 
 ## Limitations (honest)
 
-- **Subset of RFC 9421.** Not implemented: `hmac-sha512`,
-  `rsa-v1_5-sha256`, `@status`, `@request-response`, trailers, `bs`,
+- **Subset of RFC 9421.** Not implemented: `rsa-v1_5-sha256`, `@status`, `@request-response`, trailers, `bs`,
   and network key discovery (JWKS / keystores over HTTP). `keyid`→key
   resolution *is* supported opt-in: pass `VerifyOptions.keyResolver` and the
   verifier maps the claimed `keyid` to a `KeyObject` (unknown `keyid` fails
@@ -277,8 +278,9 @@ most also appear in [Limitations](#limitations)):
   (DER-encoded, RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS with
   SHA-512, MGF1 with SHA-512, and a 64-byte salt per RFC 9421 §3.3.1 —
   signatures are probabilistic, so verifiers re-verify rather than
-  re-sign-and-compare), `hmac-sha256`. Not supported:
-  `rsa-v1_5-sha256`, `hmac-sha512`, or anything else.
+  re-sign-and-compare), `hmac-sha256`, `hmac-sha512` (constant-time
+  compare; ≥ 64-byte secrets per RFC 2104 §3). Not supported:
+  `rsa-v1_5-sha256` or anything else.
 - **Missing `alg` parameter.** `alg` is optional per RFC 9421 §2.3
   (Appendix B.2.5's hmac-sha256 vector omits it), but this library
   historically defaults a missing `alg` to `"ed25519"`, so a foreign
@@ -290,11 +292,13 @@ most also appear in [Limitations](#limitations)):
   shape. Automatic detection is opt-in only — without it, a missing
   `alg` keeps meaning `"ed25519"`, exactly as before.
 - **HMAC secret length.** `secretKey()` refuses secrets shorter than 32
-  bytes, and the sign/verify paths enforce the same floor on any
-  `KeyObject` used with `hmac-sha256` (RFC 2104 §3: the key SHOULD be at
-  least as long as the hash output; sha-256 → 32 bytes). A short key is a
-  caller configuration error and throws on both sides — a signer can never
-  mint signatures that the verifier would also (correctly) refuse to check.
+  bytes (the `hmac-sha256` floor), and the sign/verify paths pair the
+  floor with the chosen algorithm: `hmac-sha256` → ≥ 32 bytes,
+  `hmac-sha512` → ≥ 64 bytes (RFC 2104 §3: the key SHOULD be at least as
+  long as the hash output). A short key is a caller configuration error
+  and throws on both sides — a signer can never mint signatures that the
+  verifier would also (correctly) refuse to check, and a secret adequate
+  only for `hmac-sha256` is never silently accepted for `hmac-sha512`.
 - **Components.** Not supported: `@status`, `@request-response`,
   trailers, `bs`, and other derived components beyond the list under
   "What it implements".
@@ -328,12 +332,14 @@ version and CPU). One real run on 2026-10-07:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519 | sign | ~15,500 ops/sec (~65 µs/op) |
-| ed25519 | verify | ~6,300 ops/sec (~158 µs/op) |
-| hmac-sha256 | sign | ~56,200 ops/sec (~18 µs/op) |
-| hmac-sha256 | verify | ~33,500 ops/sec (~30 µs/op) |
-| ecdsa-p256-sha256 | sign | ~18,700 ops/sec (~54 µs/op) |
-| ecdsa-p256-sha256 | verify | ~7,700 ops/sec (~129 µs/op) |
+| ed25519 | sign | ~8,100 ops/sec (~124 µs/op) |
+| ed25519 | verify | ~4,200 ops/sec (~238 µs/op) |
+| hmac-sha256 | sign | ~41,800 ops/sec (~24 µs/op) |
+| hmac-sha256 | verify | ~28,700 ops/sec (~35 µs/op) |
+| hmac-sha512 | sign | ~24,700 ops/sec (~41 µs/op) |
+| hmac-sha512 | verify | ~28,100 ops/sec (~36 µs/op) |
+| ecdsa-p256-sha256 | sign | ~10,900 ops/sec (~91 µs/op) |
+| ecdsa-p256-sha256 | verify | ~4,200 ops/sec (~240 µs/op) |
 
 Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized; shared
 host, so numbers vary run to run). Request fixture: POST with a 31-byte JSON
@@ -387,7 +393,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 224 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 236 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

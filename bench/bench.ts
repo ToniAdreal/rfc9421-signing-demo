@@ -1,10 +1,11 @@
 /**
  * Local micro-benchmark for the RFC 9421 signing demo.
  *
- * Measures real, locally-observed sign/verify throughput for each supported
- * algorithm (ed25519, hmac-sha256, ecdsa-p256-sha256) on the machine that
- * runs it. Numbers vary with hardware — do not treat them as guaranteed
- * throughput.
+ * Measures real, locally-observed sign/verify throughput for each
+ * algorithm in the benchmark loop below (ed25519, hmac-sha256,
+ * hmac-sha512, ecdsa-p256-sha256) on the machine that runs it. Numbers
+ * vary with hardware — do not treat them as guaranteed throughput.
+ * (rsa-pss-sha512 is supported by the library but not benchmarked here.)
  *
  * Run: `npm run bench`
  */
@@ -50,7 +51,10 @@ function benchmarkScenario(alg: SignAlg): { signOps: number; verifyOps: number }
     signKey = privateKey;
     verifyKey = publicKey;
   } else {
-    const secret = secretKey("bench-hmac-secret-32-bytes-minimum");
+    // Per-algorithm HMAC floors (RFC 2104 §3): hmac-sha256 → ≥ 32 bytes,
+    // hmac-sha512 → ≥ 64 bytes. secretKey() enforces the 32-byte floor;
+    // the 64-byte secret here also satisfies it, so the same helper works.
+    const secret = secretKey(Buffer.alloc(alg === "hmac-sha512" ? 64 : 32, 0x42));
     signKey = secret;
     verifyKey = secret;
   }
@@ -86,7 +90,12 @@ console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
 
 const results: Array<{ alg: SignAlg; op: string; ops: number }> = [];
-for (const alg of ["ed25519", "hmac-sha256", "ecdsa-p256-sha256"] as const) {
+for (const alg of [
+  "ed25519",
+  "hmac-sha256",
+  "hmac-sha512",
+  "ecdsa-p256-sha256",
+] as const) {
   const { signOps, verifyOps } = benchmarkScenario(alg);
   results.push({ alg, op: "sign", ops: signOps });
   results.push({ alg, op: "verify", ops: verifyOps });

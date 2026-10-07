@@ -9,7 +9,7 @@ Read this before using it anywhere that matters.
 - Only an RFC 9421 *subset* is implemented: signature algorithms
   `ed25519`, `ecdsa-p256-sha256` (NIST P-256, DER-encoded per
   RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS per RFC 9421 §3.3.1),
-  and `hmac-sha256`; `verifyRequest` checks one
+  `hmac-sha256`, and `hmac-sha512` (≥ 64-byte secrets, RFC 2104 §3); `verifyRequest` checks one
   signature label per call, while `verifyAllLabels` verifies every label
   in the request (a failing label never blocks the remaining labels);
   and body binding signs via `Content-Digest: sha-512` only (the
@@ -57,16 +57,20 @@ Read this before using it anywhere that matters.
   key rotation, and no key discovery (JWKS etc.): how keys are
   generated, stored, rotated, and mapped to `keyid` values is entirely
   on the caller.
-- **`hmac-sha256` is symmetric.** The "verifier" holds the same secret as
+- **`hmac-sha256` / `hmac-sha512` are symmetric.** The "verifier" holds the same secret as
   the signer, so verification proves integrity but not origin — the
   verifying party could itself have forged the signature. Use `ed25519`
   when the verifier must not be able to mint signatures.
 - **Short HMAC secrets are rejected.** RFC 2104 §3 advises the key be at
-  least as long as the hash output (32 bytes for sha-256). `secretKey()`,
-  `signRequest`, and `verifyRequest` all enforce this floor and throw a
-  configuration error on anything shorter, on both the sign and verify
-  sides, so a weak key fails loudly at setup time instead of minting
-  low-entropy signatures.
+  least as long as the hash output — 32 bytes for sha-256, 64 bytes for
+  sha-512 — and this library pairs the floor with the algorithm:
+  `hmac-sha256` secrets must be ≥ 32 bytes, `hmac-sha512` secrets must be
+  ≥ 64 bytes. `secretKey()`, `signRequest`, and `verifyRequest` all
+  enforce this and throw a configuration error on anything shorter, on
+  both the sign and verify sides, so a weak key fails loudly at setup
+  time instead of minting low-entropy signatures — and a secret that is
+  only adequate for `hmac-sha256` is never silently accepted for
+  `hmac-sha512`.
 - **Timing.** HMAC comparison uses `timingSafeEqual` after a length check,
   and Ed25519 verification goes through `node:crypto`. No additional
   side-channel analysis has been done.
