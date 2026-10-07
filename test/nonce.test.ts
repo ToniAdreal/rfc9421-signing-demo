@@ -157,3 +157,45 @@ test("VerifyError carries nonce on failure", () => {
     },
   );
 });
+
+test('empty-string nonce is rejected with a configuration error', () => {
+  const { privateKey } = generateEd25519KeyPair();
+  assert.throws(
+    () =>
+      signRequest(
+        { method: "GET", url: "https://api.example.com/v1/status", headers: {} },
+        { keyId: "k", alg: "ed25519", key: privateKey, created: CREATED, nonce: "" },
+      ),
+    /must not be an empty string/,
+  );
+});
+
+test("normal nonce path is unaffected by the empty-string guard", () => {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(
+    { method: "GET", url: "https://api.example.com/v1/status", headers: {} },
+    {
+      keyId: "k",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      nonce: "guard-regression",
+    },
+  );
+  assert.match(signed.headers["signature-input"], /;nonce="guard-regression"/);
+  const res = verifyRequest(signed, { key: publicKey, now: CREATED + 60 });
+  assert.equal(res.ok, true);
+  assert.equal(res.nonce, "guard-regression");
+});
+
+test("nonce-less path is unaffected by the empty-string guard", () => {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(
+    { method: "GET", url: "https://api.example.com/v1/status", headers: {} },
+    { keyId: "k", alg: "ed25519", key: privateKey, created: CREATED },
+  );
+  assert.ok(!/nonce=/.test(signed.headers["signature-input"]));
+  const res = verifyRequest(signed, { key: publicKey, now: CREATED + 60 });
+  assert.equal(res.ok, true);
+  assert.equal(res.nonce, undefined);
+});

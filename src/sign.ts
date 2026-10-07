@@ -56,7 +56,8 @@ export interface SignOptions {
    * Optional nonce (RFC 9421 §2.3): emitted as a `nonce` signature-input
    * parameter and therefore covered by the signature. The verifier
    * returns it on `VerifyResult.nonce`; tracking seen nonces to detect
-   * replays is the caller's job.
+   * replays is the caller's job. An empty-string nonce is rejected with
+   * a configuration error (it would silently bypass replay detection).
    */
   nonce?: string;
   /**
@@ -105,7 +106,9 @@ function assertTimestamp(name: "created" | "expires", value: number): void {
  *   a fractional timestamp would silently diverge between signer and
  *   verifier;
  * - `expires < created` would mint a signature that is already expired, so
- *   it is rejected (`expires === created` is allowed).
+ *   it is rejected (`expires === created` is allowed);
+ * - `nonce: ""` would be emitted yet bypass the replay cache, so it is
+ *   rejected.
  */
 export function signRequest(
   req: RequestLike,
@@ -121,6 +124,14 @@ export function signRequest(
         `signRequest: "expires" (${opts.expires}) must not be earlier than "created" (${created}); the signature would be expired at birth`,
       );
   }
+  // An empty-string nonce would be emitted into signature-input yet
+  // silently bypass the verify-side replay cache (which skips empty
+  // nonces) — fail fast rather than minting a signature that looks
+  // replay-protected but isn't.
+  if (opts.nonce !== undefined && opts.nonce === "")
+    throw new Error(
+      'signRequest: "nonce" must not be an empty string; the replay cache skips empty nonces, so this would bypass replay protection',
+    );
   const covered =
     opts.coveredComponents ?? defaultCoveredComponents(req.body !== undefined);
   if (covered.length === 0)
