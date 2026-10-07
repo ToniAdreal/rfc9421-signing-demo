@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 193 tests, all local, no network
+npm test   # 203 tests, all local, no network
 ```
 
 ## Quickstart
@@ -184,9 +184,12 @@ configuration `Error` instead of silently defaulting.
   order. A failing label never blocks the remaining labels — built for
   multi-party flows (e.g. a merchant signature plus a payment-gateway
   signature on the same request). Pass per-label keys via the optional
-  `keys` map; labels missing from it fall back to `key`. Duplicate labels
-  are verified once (first occurrence); a request with no `Signature-Input`
-  header yields an empty array.
+  `keys` map; labels missing from it fall back to `key`. When each party
+  signs with a different key id, pin them per label via the optional
+  `expectedKeyIds` map (label→keyid); labels missing from it fall back to
+  the global `expectedKeyId`. Duplicate labels are verified once (first
+  occurrence); a request with no `Signature-Input` header yields an empty
+  array.
 
 ```ts
 import { verifyAllLabels } from "./dist/index.js";
@@ -371,7 +374,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 193 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 203 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

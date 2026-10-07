@@ -79,7 +79,8 @@ export interface VerifyOptions {
    * signature-input must equal this value, otherwise verification
    * fails with `KEYID_MISMATCH`. A signature that carries no `keyid`
    * also fails when this is set. Defaults to unset: no check is made.
-   * In `verifyAllLabels` the same expectation applies to every label.
+   * In `verifyAllLabels` the same expectation applies to every label,
+   * unless overridden per label via `VerifyAllOptions.expectedKeyIds`.
    */
   expectedKeyId?: string;
   /**
@@ -590,6 +591,36 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * together with `keyResolver` throws a configuration `Error`.
    */
   keys?: Record<string, KeyObject>;
+  /**
+   * Per-label `keyid` pinning for multi-party signatures: maps a
+   * signature label to the `keyid` that label is expected to carry
+   * (key-confusion defense when the merchant and the gateway use
+   * different key ids). A label absent from the map falls back to the
+   * global `expectedKeyId`. Values must be non-empty strings — any
+   * other value is a caller configuration error (throw).
+   */
+  expectedKeyIds?: Record<string, string>;
+}
+
+/**
+ * Validate the per-label `keyid` pinning map. A malformed map is a
+ * caller configuration error, not a verification failure, so it throws
+ * rather than returning `{ ok: false }`.
+ */
+function assertExpectedKeyIds(
+  map: Record<string, string> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `expectedKeyIds` must be a label→keyid object",
+    );
+  for (const [label, keyId] of Object.entries(map)) {
+    if (typeof keyId !== "string" || keyId === "")
+      throw new Error(
+        `verifyAllLabels: \`expectedKeyIds["${label}"]\` must be a non-empty string, got ${typeof keyId === "string" ? '""' : typeof keyId}`,
+      );
+  }
 }
 
 /**
@@ -611,6 +642,7 @@ export function verifyAllLabels(
 ): VerifyResult[] {
   const sigInput = getHeader(req.headers, "signature-input");
   if (sigInput === undefined) return [];
+  assertExpectedKeyIds(opts.expectedKeyIds);
   let labels: string[];
   try {
     labels = listSignatureLabels(sigInput);
@@ -630,6 +662,10 @@ export function verifyAllLabels(
       throw new Error(
         "verifyAllLabels: `keys`/`key` is mutually exclusive with `keyResolver` — pass one or the other",
       );
-    return verifyRequest(req, { ...opts, label, key });
+    // Per-label keyid pinning: a label pinned in `expectedKeyIds` is
+    // checked against its own expectation; every other label falls back
+    // to the global `expectedKeyId` (unset means no pinning for it).
+    const expectedKeyId = opts.expectedKeyIds?.[label] ?? opts.expectedKeyId;
+    return verifyRequest(req, { ...opts, label, key, expectedKeyId });
   });
 }
