@@ -774,6 +774,19 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * other value is a caller configuration error (throw).
    */
   expectedKeyIds?: Record<string, string>;
+  /**
+   * Per-label `keyid`→key resolvers for multi-party signatures (e.g.
+   * the merchant's and the gateway's `keyid`s living in separate
+   * keystores): maps a signature label to its own
+   * `(keyId) => KeyObject | undefined` resolver. A label absent from
+   * the map falls back to the global `keyResolver`. Values must be
+   * functions — any other value is a caller configuration error
+   * (throw). Mutually exclusive with `keys`/`key`: combining them
+   * throws (same fail-fast rule as the global `keyResolver`); it may
+   * freely be combined with the global `keyResolver`, which acts as
+   * the fallback.
+   */
+  keyResolvers?: Record<string, (keyId: string) => KeyObject | undefined>;
 }
 
 /**
@@ -798,6 +811,27 @@ function assertExpectedKeyIds(
 }
 
 /**
+ * Validate the per-label `keyid`→key resolver map. A malformed map is a
+ * caller configuration error, not a verification failure, so it throws
+ * rather than returning `{ ok: false }`.
+ */
+function assertKeyResolvers(
+  map: Record<string, (keyId: string) => KeyObject | undefined> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `keyResolvers` must be a label→resolver-function object",
+    );
+  for (const [label, resolver] of Object.entries(map)) {
+    if (typeof resolver !== "function")
+      throw new Error(
+        `verifyAllLabels: \`keyResolvers["${label}"]\` must be a function, got ${resolver === null ? "null" : typeof resolver}`,
+      );
+  }
+}
+
+/**
  * Verify every signature carried by the request. Parses all labels from
  * the `Signature-Input` header and verifies each one with
  * `verifyRequest`, returning one `VerifyResult` per label in wire order.
@@ -817,6 +851,7 @@ export function verifyAllLabels(
   const sigInput = getHeader(req.headers, "signature-input");
   if (sigInput === undefined) return [];
   assertExpectedKeyIds(opts.expectedKeyIds);
+  assertKeyResolvers(opts.keyResolvers);
   let labels: string[];
   try {
     labels = listSignatureLabels(sigInput);
@@ -832,14 +867,17 @@ export function verifyAllLabels(
   }
   return labels.map((label) => {
     const key = opts.keys?.[label] ?? opts.key;
-    if (key !== undefined && opts.keyResolver !== undefined)
+    // Per-label resolver: the label's dedicated resolver wins; any
+    // other label falls back to the global `keyResolver`.
+    const keyResolver = opts.keyResolvers?.[label] ?? opts.keyResolver;
+    if (key !== undefined && keyResolver !== undefined)
       throw new Error(
-        "verifyAllLabels: `keys`/`key` is mutually exclusive with `keyResolver` — pass one or the other",
+        "verifyAllLabels: `keys`/`key` is mutually exclusive with `keyResolver`/`keyResolvers` — pass one or the other",
       );
     // Per-label keyid pinning: a label pinned in `expectedKeyIds` is
     // checked against its own expectation; every other label falls back
     // to the global `expectedKeyId` (unset means no pinning for it).
     const expectedKeyId = opts.expectedKeyIds?.[label] ?? opts.expectedKeyId;
-    return verifyRequest(req, { ...opts, label, key, expectedKeyId });
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId });
   });
 }

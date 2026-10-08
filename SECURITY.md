@@ -79,7 +79,10 @@ Read this before using it anywhere that matters.
   mutually exclusive with the static `key`; an unknown or missing
   `keyid` fails with `KEY_RESOLUTION_FAILED`, and a resolver that
   throws is contained to `VERIFICATION_ERROR` — never a silent
-  fallback to another key). There is still no built-in keystore, no
+  fallback to another key). `verifyAllLabels` accepts per-label
+  resolvers via `VerifyAllOptions.keyResolvers` (one per label, with
+  the same per-label containment semantics); the same `VERIFICATION_ERROR`
+  containment applies per label. There is still no built-in keystore, no
   key rotation, and no key discovery (JWKS etc.): how keys are
   generated, stored, rotated, and mapped to `keyid` values is entirely
   on the caller.

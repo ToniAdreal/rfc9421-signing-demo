@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 335 tests, all local, no network
+npm test   # 344 tests, all local, no network
 ```
 
 ## Quickstart
@@ -259,9 +259,14 @@ configuration `Error` instead of silently defaulting.
   `keys` map; labels missing from it fall back to `key`. When each party
   signs with a different key id, pin them per label via the optional
   `expectedKeyIds` map (label→keyid); labels missing from it fall back to
-  the global `expectedKeyId`. Duplicate labels are verified once (first
-  occurrence); a request with no `Signature-Input` header yields an empty
-  array.
+  the global `expectedKeyId`. For resolver-based verification, pass
+  per-label resolvers via the optional `keyResolvers` map
+  (label→`(keyId) => KeyObject | undefined`) — handy when the parties'
+  key ids live in separate keystores (merchant store vs gateway store);
+  labels missing from it fall back to the global `keyResolver`.
+  `keys`/`key` cannot be combined with either resolver (configuration
+  error). Duplicate labels are verified once (first occurrence); a
+  request with no `Signature-Input` header yields an empty array.
 
 ```ts
 import { verifyAllLabels } from "./dist/src/index.js";
@@ -400,7 +405,8 @@ most also appear in [Limitations](#limitations)):
   multi-party flows, `verifyAllLabels` verifies every label in the request
   (one `VerifyResult` per label, and a failing label never blocks the
   remaining labels). Per-label key material is still caller-supplied via
-  the optional `keys` map — a peer that expects automatic per-label key
+  the optional `keys` map or the optional `keyResolvers`/`keyResolver`
+  keyid→key lookup — a peer that expects automatic per-label key
   discovery will need keys wired up manually.
 - **Freshness is not automatic replay protection.** `created`/`expires`
   only bound the acceptance window. RFC 9421 `nonce` is supported
@@ -496,7 +502,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 335 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 344 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).
