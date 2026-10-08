@@ -466,3 +466,87 @@ export function importPublicKeyJwkRsa(jwk: unknown): KeyObject {
     );
   }
 }
+
+/**
+ * Options for {@link memoizeKeyResolver}.
+ */
+export interface MemoizeKeyResolverOptions {
+  /**
+   * Cache TTL in seconds for successful `keyid`→key resolutions.
+   * Defaults to 300. Must be a finite number > 0.
+   */
+  ttlSec?: number;
+  /**
+   * Injected clock returning unix seconds — the same convention as
+   * `ReplayCacheOptions.now` — so tests can pin time deterministically.
+   * Defaults to the wall clock.
+   */
+  now?: () => number;
+}
+
+/**
+ * Wrap a `keyid`→key resolver (see `VerifyOptions.keyResolver`) with an
+ * in-memory TTL cache keyed by `keyid`.
+ *
+ * `keyResolver` is called on *every* `verifyRequest` today, so when the
+ * resolver sits in front of a remote or otherwise slow keystore, high-rate
+ * verification hammers the keystore once per signature. This helper is the
+ * library's cache primitive so callers stop hand-rolling expiry semantics:
+ *
+ * - Successful resolutions (`KeyObject` returned) are cached for `ttlSec`
+ *   (default 300s); repeated `verifyRequest` calls with the same `keyid`
+ *   then skip the underlying resolver entirely.
+ * - `undefined` (unknown `keyid`) is deliberately **not** cached — a newly
+ *   rotated-in `keyid` must be discoverable on the very next verify.
+ * - A throwing resolver is not cached either: the error propagates
+ *   unchanged, and `verifyRequest` still converges it to `VERIFICATION_ERROR`
+ *   exactly as it does for an uncached resolver.
+ *
+ * The cache is per-wrapper instance and process-local; deployments with
+ * several verifier processes get one cache each, so `ttlSec` also bounds
+ * cross-instance key staleness. Different `keyid`s have independent
+ * entries; expired entries are evicted on read.
+ *
+ * @example
+ * ```ts
+ * import { memoizeKeyResolver } from "./dist/src/index.js";
+ * const store = new Map([["my-key", publicKey]]);
+ * const keyResolver = memoizeKeyResolver((id) => store.get(id), {
+ *   ttlSec: 300,
+ * });
+ * // pass `keyResolver` to every verifyRequest call
+ * ```
+ */
+export function memoizeKeyResolver(
+  resolver: (keyId: string) => KeyObject | undefined,
+  opts: MemoizeKeyResolverOptions = {},
+): (keyId: string) => KeyObject | undefined {
+  if (typeof resolver !== "function") {
+    throw new Error("memoizeKeyResolver: `resolver` must be a function");
+  }
+  const { ttlSec = 300, now = () => Math.floor(Date.now() / 1000) } = opts;
+  if (typeof ttlSec !== "number" || !Number.isFinite(ttlSec) || ttlSec <= 0) {
+    throw new Error(
+      `memoizeKeyResolver: \`ttlSec\` must be a finite number > 0, got ${String(ttlSec)}`,
+    );
+  }
+  if (typeof now !== "function") {
+    throw new Error(
+      "memoizeKeyResolver: `now` must be a function returning unix seconds",
+    );
+  }
+  const cache = new Map<string, { key: KeyObject; expiresAt: number }>();
+  return (keyId: string): KeyObject | undefined => {
+    const t = now();
+    const hit = cache.get(keyId);
+    if (hit !== undefined) {
+      if (t < hit.expiresAt) return hit.key;
+      cache.delete(keyId);
+    }
+    const resolved = resolver(keyId);
+    if (resolved !== undefined) {
+      cache.set(keyId, { key: resolved, expiresAt: t + ttlSec });
+    }
+    return resolved;
+  };
+}

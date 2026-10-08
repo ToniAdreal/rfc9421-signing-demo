@@ -22,11 +22,17 @@ export {
   importPublicKeyJwk,
   importPublicKeyJwkP256,
   importPublicKeyJwkRsa,
+  memoizeKeyResolver,
   MIN_HMAC_SECRET_BYTES,
   MIN_HMAC_SHA512_SECRET_BYTES,
   secretKey,
 } from "./keys.js";
-export type { Ed25519PublicJwk, P256PublicJwk, RsaPublicJwk } from "./keys.js";
+export type {
+  Ed25519PublicJwk,
+  MemoizeKeyResolverOptions,
+  P256PublicJwk,
+  RsaPublicJwk,
+} from "./keys.js";
 export {
   buildSignatureBase,
   getHeader,

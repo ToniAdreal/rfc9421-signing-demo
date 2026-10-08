@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 303 tests, all local, no network
+npm test   # 317 tests, all local, no network
 ```
 
 ## Quickstart
@@ -82,6 +82,21 @@ const store = new Map([["my-key", publicKey], ["old-key", oldPublicKey]]);
 const result = verifyRequest(signed, {
   keyResolver: (keyId) => store.get(keyId), // unknown keyid -> KEY_RESOLUTION_FAILED
 });
+```
+
+Slow keystore? Wrap the resolver with `memoizeKeyResolver` — successful
+`keyid`→key resolutions are cached in-memory for `ttlSec` (default 300s),
+so high-rate verification stops hitting the keystore once per signature.
+Unknown keyids (`undefined`) and thrown errors are deliberately never
+cached, so rotated-in keys are discoverable on the next verify and outages
+still converge to `VERIFICATION_ERROR`.
+
+```ts
+import { memoizeKeyResolver } from "./dist/src/index.js";
+const keyResolver = memoizeKeyResolver((keyId) => store.get(keyId), {
+  ttlSec: 300,
+});
+// pass `keyResolver` to every verifyRequest call
 ```
 
 JWK public-key distribution (webhook / gateway deployments, where PEM is
@@ -459,7 +474,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 303 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 317 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).
