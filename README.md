@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 292 tests, all local, no network
+npm test   # 303 tests, all local, no network
 ```
 
 ## Quickstart
@@ -193,6 +193,15 @@ configuration `Error` instead of silently defaulting.
   Stripe's few-minutes tolerance), bounding replayability of long-lived
   signed messages without a nonce replay cache. The age check fires
   only when `created` is present (orthogonal to `requireCreated`).
+- **Required components**: `verifyRequest` can demand the signature
+  cover specific components (`VerifyOptions.requiredComponents`) — a
+  signature covering only `"@method"` is cryptographically valid but
+  protects nothing, so a payment-gateway verifier typically requires
+  `content-digest` (body cannot be swapped) and/or `@path` (request
+  target cannot be changed). The check is opt-in, case-insensitive,
+  and fails fast *before* any crypto work with
+  `MISSING_REQUIRED_COMPONENT`; it composes with `verifyAllLabels`
+  (checked per label).
 - **Nonce (RFC 9421 §2.3)**: pass `nonce` to `signRequest` and it is
   emitted as a `nonce` signature-input parameter — part of the signed
   `@signature-params` line, so a forged nonce fails with
@@ -431,6 +440,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `MISSING_CREATED` | `requireCreated` is set but the signature carries no `created` |
 | `MISSING_EXPIRES` | `requireExpires` is set but the signature carries no `expires` |
 | `NONCE_REPLAY` | nonce already seen within the replay-cache TTL (`VerifyOptions.replayCache`) |
+| `MISSING_REQUIRED_COMPONENT` | the signature omits a component required by `VerifyOptions.requiredComponents` |
 
 ```ts
 import { verifyRequestOrThrow, isVerifyError } from "rfc9421-signing-demo";
@@ -449,7 +459,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 292 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 303 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

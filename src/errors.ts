@@ -64,7 +64,15 @@ export type VerifyFailureCode =
    * (replayed signature). Only possible when a cache is configured and
    * the signature carries a `nonce`.
    */
-  | "NONCE_REPLAY";
+  | "NONCE_REPLAY"
+  /**
+   * The signature did not cover one or more components demanded by
+   * `VerifyOptions.requiredComponents` (e.g. a payment-gateway verifier
+   * requiring `content-digest` or `@path`). Only possible when the
+   * caller opted in. Checked *before* the cryptographic check: a missing
+   * component is a policy violation, not an authenticity verdict.
+   */
+  | "MISSING_REQUIRED_COMPONENT";
 
 export interface VerifyErrorOptions {
   label: string;

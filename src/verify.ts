@@ -147,6 +147,27 @@ export interface VerifyOptions {
    * intended usage.
    */
   replayCache?: ReplayCache;
+  /**
+   * Require the signature to cover specific components (opt-in component
+   * coverage policy). A signature covering only `"@method"` is
+   * cryptographically valid, but it protects nothing — a payment-gateway
+   * verifier typically wants `content-digest` (so the body cannot be
+   * swapped) and/or `@path` (so the URL target cannot be changed)
+   * covered. When set and non-empty, every listed component must appear
+   * in the signature's covered component list, otherwise verification
+   * fails with `MISSING_REQUIRED_COMPONENT`. The check is
+   * case-insensitive (matching the `cid.toLowerCase()` convention of
+   * `resolveComponent`) and happens *before* any cryptographic work:
+   * a missing component is a policy violation, not an authenticity
+   * verdict. An empty array disables the check. Defaults to unset:
+   * no check is made (backwards compatible). Composes with
+   * `verifyAllLabels` (checked independently per label).
+   *
+   * A malformed value (non-array, or a non-string / empty-string entry)
+   * is a caller configuration error (throw), in the same style as
+   * `expectedKeyIds`.
+   */
+  requiredComponents?: string[];
 }
 
 export interface VerifyResult {
@@ -258,6 +279,27 @@ function assertAlgMatchesKeyShape(alg: SupportedAlg, key: KeyObject): void {
 }
 
 /**
+ * Validate the `requiredComponents` option. A malformed list is a caller
+ * configuration error, not a verification failure, so it throws rather
+ * than returning `{ ok: false }`.
+ */
+function assertRequiredComponents(
+  components: string[] | undefined,
+): void {
+  if (components === undefined) return;
+  if (!Array.isArray(components))
+    throw new Error(
+      "verifyRequest: `requiredComponents` must be an array of component identifiers",
+    );
+  for (const c of components) {
+    if (typeof c !== "string" || c === "")
+      throw new Error(
+        `verifyRequest: \`requiredComponents\` entries must be non-empty strings, got ${typeof c === "string" ? '""' : typeof c}`,
+      );
+  }
+}
+
+/**
  * Verify an RFC 9421 signed request: rebuild the signature base from the
  * covered components, check the cryptographic signature, then enforce
  * freshness (expires / created).
@@ -277,6 +319,7 @@ export function verifyRequest(
 ): VerifyResult {
   assertKeyConfig(opts);
   assertMaxSignatureAgeSec(opts.maxSignatureAgeSec);
+  assertRequiredComponents(opts.requiredComponents);
   const label = opts.label ?? "sig1";
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   const skew = opts.clockSkewToleranceSec ?? 60;
@@ -312,6 +355,33 @@ export function verifyRequest(
   }
 
   let base: string;
+  // Required covered components (opt-in, fail-fast policy check): a
+  // signature covering only "@method" is cryptographically valid but
+  // protects nothing. This runs *before* any crypto work — a missing
+  // component is a policy violation, not an authenticity verdict — and
+  // is case-insensitive, matching the `cid.toLowerCase()` convention of
+  // `resolveComponent`.
+  const requiredComponents = opts.requiredComponents;
+  if (requiredComponents !== undefined && requiredComponents.length > 0) {
+    const covered = new Set(
+      parsed.componentIds.map((c) => c.toLowerCase()),
+    );
+    const missing = requiredComponents.filter(
+      (r) => !covered.has(r.toLowerCase()),
+    );
+    if (missing.length > 0)
+      return {
+        ok: false,
+        code: "MISSING_REQUIRED_COMPONENT",
+        reason: `signature does not cover required component${missing.length === 1 ? "" : "s"}: ${missing
+          .map((m) => `"${m}"`)
+          .join(", ")}`,
+        label,
+        keyId: parsed.params.keyid,
+        alg: parsed.params.alg,
+        nonce: parsed.params.nonce,
+      };
+  }
   try {
     base = buildSignatureBase(parsed.componentIds, req, parsed.params);
   } catch (e) {
