@@ -25,7 +25,7 @@ import {
   generateEd25519KeyPair,
   signRequest,
   verifyRequest,
-} from "./dist/index.js";
+} from "./dist/src/index.js";
 
 const { publicKey, privateKey } = generateEd25519KeyPair();
 
@@ -55,7 +55,7 @@ fails with a specific `reason` (`"body does not match content-digest"`,
 HMAC variant:
 
 ```ts
-import { secretKey } from "./dist/index.js";
+import { secretKey } from "./dist/src/index.js";
 // HMAC secrets must be ≥ 32 bytes (RFC 2104: key ≥ hash output length).
 const secret = secretKey("a-shared-hmac-secret-of-32-bytes!!");
 const signed = signRequest(req, { keyId: "k", alg: "hmac-sha256", key: secret });
@@ -91,7 +91,7 @@ present) are refused — this helper is public-key distribution only, so
 private keys stay in PEM on the signer side.
 
 ```ts
-import { exportPublicKeyJwk, importPublicKeyJwk } from "./dist/index.js";
+import { exportPublicKeyJwk, importPublicKeyJwk } from "./dist/src/index.js";
 const jwk = exportPublicKeyJwk(publicKey); // { kty: "OKP", crv: "Ed25519", x: "..." }
 const wireKey = JSON.parse(JSON.stringify(jwk)); // what the verifier receives
 verifyRequest(signed, { key: importPublicKeyJwk(wireKey) }); // { ok: true, ... }
@@ -117,7 +117,7 @@ chain via `fromNodeRequest`:
 
 ```ts
 import { createServer } from "node:http";
-import { fromNodeRequest, verifyRequest } from "./dist/index.js";
+import { fromNodeRequest, verifyRequest } from "./dist/src/index.js";
 
 const server = createServer((req, res) => {
   const chunks: Buffer[] = [];
@@ -237,7 +237,7 @@ configuration `Error` instead of silently defaulting.
   array.
 
 ```ts
-import { verifyAllLabels } from "./dist/index.js";
+import { verifyAllLabels } from "./dist/src/index.js";
 
 const results = verifyAllLabels(signed, {
   key: merchantPublicKey,
@@ -258,7 +258,7 @@ for (const r of results) {
   unsigned request fails fast too. The input request is never mutated.
 
 ```ts
-import { addSignature, signRequest } from "./dist/index.js";
+import { addSignature, signRequest } from "./dist/src/index.js";
 
 // merchant signs first with its own key
 const merchantSigned = signRequest(req, {
