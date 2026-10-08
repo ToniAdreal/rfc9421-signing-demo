@@ -17,7 +17,7 @@ import {
 } from "./components.js";
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
 import { assertHmacSecretLength } from "./keys.js";
-import type { ReplayCache } from "./replay.js";
+import type { NonceStore } from "./replay.js";
 
 export interface VerifyOptions {
   /**
@@ -133,20 +133,26 @@ export interface VerifyOptions {
    */
   algFallback?: "infer" | false;
   /**
-   * Optional nonce replay cache (see `ReplayCache`). When set and the
-   * signature carries a non-empty `nonce`, the cache is consulted *after*
-   * every other check has passed: a nonce seen within the cache TTL fails
-   * with `NONCE_REPLAY`, otherwise the nonce is recorded. Failed
+   * Optional nonce replay store (see `NonceStore`). When set and the
+   * signature carries a non-empty `nonce`, the store is consulted *after*
+   * every other check has passed: a nonce already seen fails with
+   * `NONCE_REPLAY`, otherwise the nonce is recorded. Failed
    * verifications never record anything, so forgeries cannot pollute the
-   * cache. A signature without a nonce bypasses the cache entirely.
+   * store. A signature without a nonce bypasses the store entirely.
    * Defaults to unset: no replay detection (backwards compatible).
    *
-   * Note: the cache is shared across `verifyAllLabels` labels and across
-   * calls, so re-verifying the *same* request with the same cache is
-   * itself reported as a replay — one cache per verifier lifetime is the
+   * `ReplayCache` is the built-in in-memory implementation; implement
+   * `NonceStore` over shared storage (e.g. Redis) for multi-instance
+   * deployments — see SECURITY.md for an example. The call is
+   * synchronous, so an async backend must be checked in the caller's own
+   * layer, not inside `check`.
+   *
+   * Note: the store is shared across `verifyAllLabels` labels and across
+   * calls, so re-verifying the *same* request with the same store is
+   * itself reported as a replay — one store per verifier lifetime is the
    * intended usage.
    */
-  replayCache?: ReplayCache;
+  replayCache?: NonceStore;
   /**
    * Require the signature to cover specific components (opt-in component
    * coverage policy). A signature covering only `"@method"` is

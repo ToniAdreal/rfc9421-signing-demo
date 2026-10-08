@@ -5,7 +5,7 @@ export type { VerifyAllOptions, VerifyOptions, VerifyResult } from "./verify.js"
 export { isVerifyError, VerifyError } from "./errors.js";
 export type { VerifyErrorOptions, VerifyFailureCode } from "./errors.js";
 export { ReplayCache } from "./replay.js";
-export type { ReplayCacheOptions, ReplayCacheStats } from "./replay.js";
+export type { NonceStore, ReplayCacheOptions, ReplayCacheStats } from "./replay.js";
 export { contentDigest } from "./digest.js";
 export {
   assertHmacSecretLength,

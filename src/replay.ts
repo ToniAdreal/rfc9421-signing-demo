@@ -8,10 +8,34 @@
  * seen inside the window.
  *
  * Honest scope: this is a single-process, in-memory helper. It does not
- * survive restarts and is not shared between verifier instances. A
- * deployment with multiple verifier processes still needs a shared nonce
- * store (e.g. Redis) for real replay protection — see SECURITY.md.
+ * survive restarts and is not shared between verifier instances. The
+ * `NonceStore` interface below makes the store pluggable — `ReplayCache`
+ * is the built-in in-memory implementation; a deployment with multiple
+ * verifier processes should implement `NonceStore` over shared storage
+ * (e.g. Redis) for real replay protection — see SECURITY.md.
  */
+
+/**
+ * Pluggable nonce store for replay detection (zero dependencies).
+ *
+ * `check` has the same check-and-record contract as `ReplayCache.check`:
+ * returns `true` when the nonce was already seen within the tracking
+ * window (i.e. this is a replay); otherwise records the nonce and returns
+ * `false`. `verifyRequest` invokes it synchronously with the nonce and the
+ * verification time (unix seconds), so an implementation that needs an
+ * async backend (e.g. a Redis client) cannot be awaited inside `check`:
+ * do the async check-and-record in the caller's own layer instead
+ * (see SECURITY.md for the pattern).
+ *
+ * `ReplayCache` is the built-in in-memory implementation of this
+ * interface. Implementations must never report a replay for a nonce they
+ * have never recorded — verification fails closed only on
+ * explicitly-seen nonces — and should reject empty nonces the way
+ * `ReplayCache.check` does.
+ */
+export interface NonceStore {
+  check(nonce: string, now?: number): boolean;
+}
 
 export interface ReplayCacheOptions {
   /**
@@ -55,7 +79,7 @@ export interface ReplayCacheStats {
   evictions: number;
 }
 
-export class ReplayCache {
+export class ReplayCache implements NonceStore {
   private readonly maxEntries: number;
   private readonly ttlSec: number;
   private readonly clock: () => number;

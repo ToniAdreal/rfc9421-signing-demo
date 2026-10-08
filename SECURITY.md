@@ -33,14 +33,40 @@ Read this before using it anywhere that matters.
 
 ## Assumptions that do not hold in production
 
-- **Replay protection is opt-in and single-process.** `created`/`expires`
+- **Replay protection is opt-in and pluggable.** `created`/`expires`
   only bound the acceptance window; a signature captured inside its
-  validity window can be replayed unless the caller opts into the
-  in-memory `ReplayCache` (`VerifyOptions.replayCache`), which tracks
-  seen nonces with a TTL and an LRU capacity cap. The cache does not
+  validity window can be replayed unless the caller opts into nonce
+  replay detection (`VerifyOptions.replayCache`), which consults a
+  `NonceStore` — `ReplayCache` is the built-in single-process,
+  in-memory implementation (TTL + LRU capacity cap). The store does not
   survive restarts and is not shared across verifier instances, so a
-  multi-instance deployment must still deduplicate nonces in a shared
-  store — that part remains the caller's job.
+  multi-instance deployment should implement `NonceStore` over shared
+  storage:
+  ```ts
+  // Out-of-process store example (compile-tested in test/nonceStore.test.ts).
+  // `backend` stands in for shared storage visible to every verifier
+  // instance; the TTL/LRU bookkeeping is the implementer's job.
+  class SharedNonceStore implements NonceStore {
+    constructor(
+      private readonly backend: Map<string, number>,
+      private readonly ttlSec = 3600,
+    ) {}
+    check(nonce: string, now: number = Math.floor(Date.now() / 1000)): boolean {
+      const prev = this.backend.get(nonce);
+      if (prev !== undefined && now - prev < this.ttlSec) return true; // replay
+      this.backend.set(nonce, now); // record
+      return false;
+    }
+  }
+  verifyRequest(req, { key, replayCache: new SharedNonceStore(sharedMap) });
+  ```
+  Honest limit: `verifyRequest` calls `check` **synchronously**, so a
+  real async client (Redis) cannot be awaited inside it — keep the
+  async check-and-record in your own layer, e.g. `SET key 1 EX 3600 NX`
+  before calling `verifyRequest` (a `null` reply means "already seen":
+  reject as replay), or wrap its outcome in a `NonceStore`-shaped
+  adapter. TTL expiry, cross-process clock skew, and crash recovery are
+  the caller's responsibility.
 - **Fixed, configurable tolerance windows.** `verifyRequest` accepts
   `created` timestamps up to `clockSkewToleranceSec` seconds in the future
   (default 60 — generous, shrink it if your clocks are trustworthy) and
