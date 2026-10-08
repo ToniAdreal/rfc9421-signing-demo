@@ -207,6 +207,7 @@ export function signRequest(
     url: req.url,
     headers,
     body: req.body,
+    status: req.status,
   };
   const base = buildSignatureBase(covered, signingInput, params);
 

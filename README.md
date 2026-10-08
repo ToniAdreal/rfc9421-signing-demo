@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 344 tests, all local, no network
+npm test   # 351 tests, all local, no network
 ```
 
 ## Quickstart
@@ -175,8 +175,13 @@ configuration `Error` instead of silently defaulting.
 
 - **Signature base** (§2.5): `"id": value` lines for each covered component,
   then the `"@signature-params"` line. Covered components: `@method`,
-  `@scheme`, `@authority`, `@path`, `@query`, `@target-uri`, `@created`,
+  `@scheme`, `@authority`, `@path`, `@query`, `@status`, `@target-uri`, `@created`,
   `@expires`, plus any HTTP header field (case-insensitive, multi-values joined).
+  `@status` (response verification, e.g. webhook callbacks or signed API
+  responses) binds the response status code: set `RequestLike.status` on
+  both `signRequest` and `verifyRequest` — a covered `@status` with no status
+  is a caller configuration error (fail-fast on the sign side,
+  `SIGNATURE_BASE_BUILD_FAILED` on the verify side).
 - **Sign-side input guards**: `signRequest` fails fast with a descriptive
   configuration error instead of minting a broken signature — `expires`
   earlier than `created` (a signature that is expired at birth), an empty
@@ -310,7 +315,7 @@ const dual = addSignature(merchantSigned, {
 
 ## Limitations (honest)
 
-- **Subset of RFC 9421.** Not implemented: `rsa-v1_5-sha256`, `@status`, `@request-response`, trailers, `bs`,
+- **Subset of RFC 9421.** Not implemented: `rsa-v1_5-sha256`, `@request-response`, trailers, `bs`,
   and network key discovery (JWKS / keystores over HTTP). `keyid`→key
   resolution *is* supported opt-in: pass `VerifyOptions.keyResolver` and the
   verifier maps the claimed `keyid` to a `KeyObject` (unknown `keyid` fails
@@ -398,7 +403,8 @@ most also appear in [Limitations](#limitations)):
   and throws on both sides — a signer can never mint signatures that the
   verifier would also (correctly) refuse to check, and a secret adequate
   only for `hmac-sha256` is never silently accepted for `hmac-sha512`.
-- **Components.** Not supported: `@status`, `@request-response`,
+- **Components.** Not supported: `@request-response` (binding a response
+  signature to the request that caused it),
   trailers, `bs`, and other derived components beyond the list under
   "What it implements".
 - **Multiple signatures.** `verifyRequest` checks one label per call; for
@@ -502,7 +508,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 344 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 351 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

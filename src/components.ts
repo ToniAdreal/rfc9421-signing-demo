@@ -4,7 +4,7 @@
  * (HTTP Message Signatures).
  *
  * Covered components supported: @method, @scheme, @authority, @path, @query,
- * @target-uri, @created, @expires, plus any HTTP header field name.
+ * @status, @target-uri, @created, @expires, plus any HTTP header field name.
  * Signature algorithms are handled by sign.ts / verify.ts; this module
  * only deals with the canonical bytes that get signed.
  */
@@ -14,6 +14,12 @@ export interface RequestLike {
   url: string;
   headers: Record<string, string | string[] | undefined>;
   body?: string | Buffer;
+  /**
+   * HTTP response status code. Only consulted when `"@status"` is covered
+   * (RFC 9421 §2.2.8) — signing/verifying responses, e.g. webhook
+   * callbacks or signed API responses. Plain request flows leave it unset.
+   */
+  status?: number;
 }
 
 export interface SignatureParams {
@@ -91,6 +97,13 @@ export function resolveComponent(
       if (params.expires === undefined)
         throw new Error('"@expires" is covered but no expires parameter was given');
       return String(params.expires);
+    case "@status":
+      // RFC 9421 §2.2.8: the status code of the response. There is no
+      // sensible default — a covered @status with no status to bind is a
+      // caller configuration error, same fail-fast style as @created/@expires.
+      if (req.status === undefined)
+        throw new Error('"@status" is covered but no status was given');
+      return String(req.status);
     default: {
       const v = getHeader(req.headers, cid);
       if (v === undefined)
