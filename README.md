@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 324 tests, all local, no network
+npm test   # 335 tests, all local, no network
 ```
 
 ## Quickstart
@@ -201,7 +201,9 @@ configuration `Error` instead of silently defaulting.
   is covered, and the verifier recomputes it — a swapped body fails even if
   the signature itself is valid. The verifier prefers `sha-512` but falls
   back to `sha-256` when the header carries no `sha-512` entry (for foreign
-  signers that only send `sha-256`); signing always emits `sha-512`.
+  signers that only send `sha-256`); signing emits `sha-512` by default and
+  `sha-256` when `SignOptions.contentDigestAlg` is set to `"sha-256"` (for
+  peers that only accept sha-256 digests).
 - **Freshness**: `created` enforced with a configurable clock-skew
   tolerance (`clockSkewToleranceSec`, default 60s); `expires` enforced
   strictly by default, with an optional grace period
@@ -316,7 +318,8 @@ const dual = addSignature(merchantSigned, {
   foreign implementation with different normalization would disagree.
 - **Body binding digest algorithms.** The verifier understands `sha-512`
   (preferred when present) and `sha-256` (fallback when no `sha-512` entry
-  exists); signing emits `sha-512` only. Other `content-digest` algorithms
+  exists); signing emits `sha-512` by default, `sha-256` with
+  `contentDigestAlg: "sha-256"`. Other `content-digest` algorithms
   are rejected with `MISSING_CONTENT_DIGEST`.
 - **In-memory replay cache only.** The optional `ReplayCache` is a
   per-process helper with a configurable TTL and LRU capacity cap — it
@@ -359,7 +362,9 @@ most also appear in [Limitations](#limitations)):
   exact covered components, in the exact order. Defaults here are
   `@method @authority @path`, plus `content-digest` when a body exists.
 - **Digest algorithm.** Body binding understands `sha-512` (preferred) and
-  `sha-256` (fallback when no `sha-512` entry is present). A peer sending
+  `sha-256` (fallback when no `sha-512` entry is present). Signing defaults
+  to `sha-512`; set `SignOptions.contentDigestAlg: "sha-256"` for a peer
+  that only accepts sha-256 digests. A peer sending
   only other digest algorithms fails with "no sha-512 or sha-256
   content-digest present".
 - **Signature algorithms.** Implemented: `ed25519`, `ecdsa-p256-sha256`
@@ -491,7 +496,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 324 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 335 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

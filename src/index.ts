@@ -6,7 +6,8 @@ export { isVerifyError, VerifyError } from "./errors.js";
 export type { VerifyErrorOptions, VerifyFailureCode } from "./errors.js";
 export { ReplayCache } from "./replay.js";
 export type { NonceStore, ReplayCacheOptions, ReplayCacheStats } from "./replay.js";
-export { contentDigest } from "./digest.js";
+export { assertContentDigestAlg, contentDigest } from "./digest.js";
+export type { ContentDigestAlg } from "./digest.js";
 export {
   assertHmacSecretLength,
   exportPrivateKeyPem,

@@ -12,7 +12,8 @@ import {
   type RequestLike,
   type SignatureParams,
 } from "./components.js";
-import { contentDigest } from "./digest.js";
+import { contentDigest, assertContentDigestAlg, contentDigestAlgOf } from "./digest.js";
+import type { ContentDigestAlg } from "./digest.js";
 import { assertHmacSecretLength } from "./keys.js";
 
 export type SignAlg =
@@ -66,6 +67,16 @@ export interface SignOptions {
    * is present.
    */
   coveredComponents?: string[];
+  /**
+   * Content-Digest hash algorithm emitted when `content-digest` is
+   * covered and the request has a body. Defaults to `"sha-512"`; pass
+   * `"sha-256"` when the peer (e.g. a payment gateway webhook endpoint)
+   * only accepts sha-256 digests. Any other value is a configuration
+   * error, thrown before any crypto runs. The verifier already accepts
+   * both algorithms, so a sha-256 signature round-trips through
+   * `verifyRequest` unchanged.
+   */
+  contentDigestAlg?: ContentDigestAlg;
 }
 
 export interface SignedHttpRequest {
@@ -137,6 +148,8 @@ function assertLabelShape(label: string): void {
  *   is the member key `verifyAllLabels` splits on), and `:`/`/`/leading
  *   `*` are refused because `listSignatureLabels` cannot split members
  *   whose keys contain them.
+ * - `contentDigestAlg` must be `"sha-512"` or `"sha-256"` — anything else
+ *   would emit a digest the verifier cannot name.
  */
 export function signRequest(
   req: RequestLike,
@@ -167,6 +180,8 @@ export function signRequest(
     throw new Error(
       'signRequest: "coveredComponents" must cover at least one component; an empty list would sign nothing',
     );
+  const digestAlg = opts.contentDigestAlg ?? "sha-512";
+  assertContentDigestAlg(digestAlg);
 
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(req.headers)) {
@@ -176,7 +191,7 @@ export function signRequest(
   if (covered.map((c) => c.toLowerCase()).includes("content-digest")) {
     if (req.body === undefined)
       throw new Error('content-digest is covered but the request has no body');
-    headers["content-digest"] = contentDigest(req.body);
+    headers["content-digest"] = contentDigest(req.body, digestAlg);
   }
 
   // `keyid` is an optional RFC 9421 parameter: only emit it when the caller
@@ -252,6 +267,16 @@ export function signRequest(
  * `opts` exactly as `signRequest` would apply them; `opts.label` names
  * the appended entry (defaults to `"sig1"` like `signRequest`).
  *
+ * One Content-Digest header constraint: a request carries a single
+ * `content-digest` header, and every label's signature base covers the
+ * wire value. If the existing request already has one, the second
+ * signature is built with the same digest algorithm — the algorithm of
+ * the existing header wins over `opts.contentDigestAlg` (an explicitly
+ * contradictory choice is a configuration error), and an existing header
+ * whose digest algorithm this library cannot emit is a configuration
+ * error too. Without this, the appended signature's base would cover a
+ * value that is never on the wire and `verifyAllLabels` would reject it.
+ *
  * Fail-fast configuration errors (thrown, never embedded):
  * - the input has no `signature-input`/`signature` headers (nothing to
  *   append to — call `signRequest` first);
@@ -307,6 +332,25 @@ export function addSignature(
     if (lower === "signature-input" || lower === "signature") continue;
     unsignedHeaders[k] = v;
   }
+  // Pin the digest algorithm to the existing Content-Digest header, if
+  // any: the second signature's base must cover the value that stays on
+  // the wire (see the JSDoc above).
+  let digestAlg = opts.contentDigestAlg;
+  const existingDigest = Object.entries(unsignedHeaders).find(
+    ([k]) => k.toLowerCase() === "content-digest",
+  )?.[1];
+  if (existingDigest !== undefined) {
+    const wireAlg = contentDigestAlgOf(existingDigest);
+    if (wireAlg === undefined)
+      throw new Error(
+        `addSignature: the request carries a content-digest header with a digest algorithm this library cannot emit (${JSON.stringify(existingDigest.slice(0, existingDigest.indexOf("="))) || JSON.stringify(existingDigest)}); the second signature cannot cover it`,
+      );
+    if (digestAlg !== undefined && digestAlg !== wireAlg)
+      throw new Error(
+        `addSignature: the request already carries a content-digest header emitted with "${wireAlg}"; contentDigestAlg "${digestAlg}" would build the second signature base over a different value than the wire one`,
+      );
+    digestAlg = wireAlg;
+  }
   const fresh = signRequest(
     {
       method: signedReq.method,
@@ -314,7 +358,7 @@ export function addSignature(
       headers: unsignedHeaders,
       body: signedReq.body,
     },
-    opts,
+    { ...opts, contentDigestAlg: digestAlg },
   );
 
   const out: Record<string, string> = {};
