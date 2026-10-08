@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 351 tests, all local, no network
+npm test   # 358 tests, all local, no network
 ```
 
 ## Quickstart
@@ -272,6 +272,10 @@ configuration `Error` instead of silently defaulting.
   `keys`/`key` cannot be combined with either resolver (configuration
   error). Duplicate labels are verified once (first occurrence); a
   request with no `Signature-Input` header yields an empty array.
+  A repeated signature-input parameter (e.g. two `created=` values, case
+  variants included) is ambiguous authenticated input and is rejected as
+  `MALFORMED_SIGNATURE_INPUT` before any crypto runs — the parser never
+  silently lets the later value win.
 
 ```ts
 import { verifyAllLabels } from "./dist/src/index.js";
@@ -508,7 +512,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 351 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 358 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

@@ -175,10 +175,20 @@ function parseQuotedStrings(inner: string): string[] {
 
 function parseParamList(segment: string): SignatureParams {
   const params: SignatureParams = {};
+  // A repeated parameter is ambiguous authenticated input: a verifier must
+  // not silently let the later value win (signature ambiguity /
+  // malleability). Every parsed parameter name is recorded; the second
+  // occurrence — case variants included ("Created" vs "created", names are
+  // matched case-insensitively per RFC 9421 §2.4) — is a hard parse error
+  // that verifyRequest converges to MALFORMED_SIGNATURE_INPUT.
+  const seen = new Set<string>();
   const re = /;\s*([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|(-?\d+))/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(segment)) !== null) {
     const key = m[1].toLowerCase();
+    if (seen.has(key))
+      throw new Error(`duplicate signature-input parameter ";${key}"`);
+    seen.add(key);
     if (m[2] !== undefined) {
       const s = unquoteString(m[2]);
       if (key === "keyid") params.keyid = s;
