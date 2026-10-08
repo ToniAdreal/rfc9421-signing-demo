@@ -3,18 +3,22 @@
  *
  * Measures real, locally-observed sign/verify throughput for each
  * algorithm in the benchmark loop below (ed25519, hmac-sha256,
- * hmac-sha512, ecdsa-p256-sha256) on the machine that runs it. Numbers
- * vary with hardware — do not treat them as guaranteed throughput.
- * (rsa-pss-sha512 is supported by the library but not benchmarked here.)
+ * hmac-sha512, ecdsa-p256-sha256, rsa-pss-sha512) on the machine that
+ * runs it, plus a multi-party scenario (merchant ed25519 + gateway
+ * hmac-sha256 dual labels via verifyAllLabels). Numbers vary with
+ * hardware — do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
  */
 import { cpus } from "node:os";
 import {
+  addSignature,
   generateEd25519KeyPair,
   generateP256KeyPair,
+  generateRsaPssKeyPair,
   secretKey,
   signRequest,
+  verifyAllLabels,
   verifyRequest,
   type SignAlg,
   type SignedHttpRequest,
@@ -50,6 +54,10 @@ function benchmarkScenario(alg: SignAlg): { signOps: number; verifyOps: number }
     const { publicKey, privateKey } = generateP256KeyPair();
     signKey = privateKey;
     verifyKey = publicKey;
+  } else if (alg === "rsa-pss-sha512") {
+    const { publicKey, privateKey } = generateRsaPssKeyPair();
+    signKey = privateKey;
+    verifyKey = publicKey;
   } else {
     // Per-algorithm HMAC floors (RFC 2104 §3): hmac-sha256 → ≥ 32 bytes,
     // hmac-sha512 → ≥ 64 bytes. secretKey() enforces the 32-byte floor;
@@ -76,6 +84,44 @@ function benchmarkScenario(alg: SignAlg): { signOps: number; verifyOps: number }
   return { signOps, verifyOps };
 }
 
+/**
+ * The canonical multi-party scenario from test/addSignature.test.ts:
+ * the merchant signs the request with its ed25519 key, then the payment
+ * gateway appends its own hmac-sha256 signature under a second label.
+ * Measures the steady-state throughput of verifyAllLabels (both labels
+ * verified independently per call).
+ */
+function benchmarkMultiLabel(): number {
+  const { publicKey: merchantPublic, privateKey: merchantPrivate } =
+    generateEd25519KeyPair();
+  const gatewaySecret = secretKey("gateway-shared-secret-32-bytes-0!");
+
+  const merchantSigned = signRequest(fixture, {
+    keyId: "merchant-key",
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: "gateway-key",
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    label: "gateway",
+  });
+
+  return measure(() => {
+    const results = verifyAllLabels(dual, {
+      key: merchantPublic,
+      keys: { gateway: gatewaySecret },
+    });
+    if (results.length !== 2 || results.some((r) => !r.ok)) {
+      throw new Error(
+        `benchmark self-check failed: ${JSON.stringify(results)}`,
+      );
+    }
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -89,22 +135,28 @@ console.log(`Request: POST with JSON body (${Buffer.byteLength(fixture.body)} by
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
 
-const results: Array<{ alg: SignAlg; op: string; ops: number }> = [];
+const results: Array<{ alg: string; op: string; ops: number }> = [];
 for (const alg of [
   "ed25519",
   "hmac-sha256",
   "hmac-sha512",
   "ecdsa-p256-sha256",
+  "rsa-pss-sha512",
 ] as const) {
   const { signOps, verifyOps } = benchmarkScenario(alg);
   results.push({ alg, op: "sign", ops: signOps });
   results.push({ alg, op: "verify", ops: verifyOps });
 }
+results.push({
+  alg: "verifyAllLabels (2 labels)",
+  op: "verify",
+  ops: benchmarkMultiLabel(),
+});
 
-console.log("alg                op      throughput");
-console.log("-----------------------------------------------------");
+console.log("alg                         op      throughput");
+console.log("-------------------------------------------------------------");
 for (const r of results) {
-  console.log(`${r.alg.padEnd(18)} ${r.op.padEnd(7)} ${fmt(r.ops)}`);
+  console.log(`${r.alg.padEnd(27)} ${r.op.padEnd(7)} ${fmt(r.ops)}`);
 }
 console.log("");
 console.log("Numbers are machine-local measurements, not guarantees.");
