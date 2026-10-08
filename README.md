@@ -454,7 +454,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `SIGNATURE_MISMATCH` | cryptographic signature does not verify (wrong key or tampering) |
 | `KEYID_MISMATCH` | signature's `keyid` does not match the verifier's `expectedKeyId` (or no `keyid` present) |
 | `KEY_RESOLUTION_FAILED` | `keyResolver` could not map the signature's `keyid` to a key (missing or unknown `keyid`) |
-| `MISSING_CONTENT_DIGEST` | body present but no `sha-512` or `sha-256` entry in `content-digest` |
+| `MISSING_CONTENT_DIGEST` | body present but no `sha-512` (preferred) or `sha-256` (fallback) entry in `content-digest` |
 | `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` (or `sha-256` fallback) digest |
 | `EXPIRED` | `expires` timestamp is in the past (beyond tolerance) |
 | `CREATED_IN_FUTURE` | `created` timestamp is in the future (beyond clock-skew tolerance) |

@@ -34,7 +34,7 @@ export type VerifyFailureCode =
    * for the claimed `keyid`. Only possible when a resolver is configured.
    */
   | "KEY_RESOLUTION_FAILED"
-  /** Body present but no `sha-512` entry in `content-digest`. */
+  /** Body present but no `sha-512` (preferred) or `sha-256` (fallback) entry in `content-digest`. */
   | "MISSING_CONTENT_DIGEST"
   /** Body bytes do not match the signed `sha-512` digest. */
   | "BODY_DIGEST_MISMATCH"
