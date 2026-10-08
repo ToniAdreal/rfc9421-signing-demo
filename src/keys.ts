@@ -3,6 +3,7 @@ import {
   createPublicKey,
   createSecretKey,
   generateKeyPairSync,
+  randomBytes,
   type KeyObject,
 } from "node:crypto";
 
@@ -465,6 +466,52 @@ export function importPublicKeyJwkRsa(jwk: unknown): KeyObject {
       }`,
     );
   }
+}
+
+/**
+ * Generate a cryptographically-secure random nonce for the `nonce`
+ * option of `signRequest` (RFC 9421 §2.3), base64url-encoded.
+ *
+ * Why this exists instead of letting callers hand-roll one:
+ * `signRequest`'s `nonce` is caller-supplied, and hand-rolled nonces
+ * (`Math.random()` / `Date.now()` concatenation) are predictable — a
+ * predictable nonce space makes the `NONCE_REPLAY` line of defense
+ * (see `VerifyOptions.replayCache` / SECURITY.md) meaningless, because
+ * an attacker can pre-claim the nonce values they intend to replay.
+ * This helper draws from `node:crypto` `randomBytes` (the CSPRNG), so
+ * each nonce is unpredictable.
+ *
+ * The output uses the base64url alphabet (`A–Z a–z 0–9 - _`), which is
+ * safe inside the `signature-input` quoted-string parameter and also
+ * URL-safe for logging and transport. `bytes` defaults to 16 (128 bits
+ * of entropy — the standard nonce strength); it must be a positive
+ * integer, anything else throws a configuration `Error` fail-fast.
+ * The result is never empty, so it always passes `signRequest`'s
+ * empty-nonce guard.
+ *
+ * @example
+ * ```ts
+ * const signed = signRequest(req, {
+ *   keyId: "my-key",
+ *   alg: "ed25519",
+ *   key: privateKey,
+ *   nonce: generateNonce(),
+ * });
+ * ```
+ */
+export function generateNonce(bytes = 16): string {
+  if (
+    typeof bytes !== "number" ||
+    !Number.isInteger(bytes) ||
+    bytes <= 0
+  ) {
+    throw new Error(
+      `generateNonce: \`bytes\` must be a positive integer, got ${String(
+        bytes,
+      )}`,
+    );
+  }
+  return randomBytes(bytes).toString("base64url");
 }
 
 /**

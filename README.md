@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 317 tests, all local, no network
+npm test   # 324 tests, all local, no network
 ```
 
 ## Quickstart
@@ -60,6 +60,13 @@ import { secretKey } from "./dist/src/index.js";
 const secret = secretKey("a-shared-hmac-secret-of-32-bytes!!");
 const signed = signRequest(req, { keyId: "k", alg: "hmac-sha256", key: secret });
 const result = verifyRequest(signed, { key: secret });
+```
+
+Nonce for replay detection (CSPRNG-backed base64url, default 128 bits — never hand-roll with `Math.random`):
+
+```ts
+import { generateNonce } from "./dist/src/index.js";
+const signed = signRequest(req, { keyId: "k", alg: "ed25519", key: privateKey, nonce: generateNonce() });
 ```
 
 Optional `keyid` pinning (key-confusion defense): pass `expectedKeyId` and
@@ -220,7 +227,10 @@ configuration `Error` instead of silently defaulting.
 - **Nonce (RFC 9421 §2.3)**: pass `nonce` to `signRequest` and it is
   emitted as a `nonce` signature-input parameter — part of the signed
   `@signature-params` line, so a forged nonce fails with
-  `SIGNATURE_MISMATCH`. `verifyRequest` returns it as `result.nonce`
+  `SIGNATURE_MISMATCH`. Generate the value with `generateNonce()`
+  (CSPRNG-backed base64url, default 128 bits): a hand-rolled
+  `Math.random()` nonce is predictable and makes the replay-cache
+  defense below meaningless. `verifyRequest` returns it as `result.nonce`
   (the wire-seen value, reported before authenticity is established).
   For replay detection, pass a `ReplayCache` via
   `verifyRequest(req, { key, replayCache })`: a nonce already seen within
@@ -481,7 +491,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 317 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 324 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).
