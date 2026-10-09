@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 404 tests, all local, no network
+npm test   # 415 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 ## Quickstart
@@ -133,6 +133,30 @@ caveat documented in code: node:crypto's RSA JWK importer is lenient, so a
 structurally-valid but degenerate modulus (e.g. all-zero `n`) is accepted
 at import time and fails only at the crypto layer when used — verification
 still fails closed, never silently accepts.
+
+Network key discovery (JWKS): when a signer's keys live behind a JWKS
+endpoint — the gateway/webhook standard for public-key distribution and
+rotation — `JwksKeyStore` fetches the document, imports every key by
+`kid` (ed25519 / P-256 / RSA, the three JWK shapes above), and exposes a
+synchronous `resolve` that drops straight into `keyResolver`:
+
+```ts
+import { JwksKeyStore } from "./dist/src/index.js";
+const store = new JwksKeyStore("https://gateway.example.com/.well-known/jwks.json");
+await store.refresh(); // the async fetch stays in your layer; verifyRequest stays synchronous
+const result = verifyRequest(signed, { keyResolver: store.resolve }); // unknown kid -> KEY_RESOLUTION_FAILED
+if (store.isStale()) void store.refresh(); // rotation = re-fetch; the cadence is the caller's choice
+```
+
+A failed `refresh()` (HTTP error, non-JSON body, a malformed JWKS
+document, or an entry carrying private `"d"` material) throws and leaves
+the previous snapshot untouched, so a JWKS outage degrades to staleness
+instead of becoming a verification outage; entries without a `kid` are
+skipped. The fetch is injectable (`fetchImpl`) and the staleness clock
+is injectable (`now`, `ttlSec` default 300s). Trusting the endpoint is
+the caller's responsibility — whatever it serves becomes a verification
+key, with no TLS pinning or response-signature check here (see
+SECURITY.md).
 
 Receiving signed webhooks with Node's `http` server — the receive→verify
 chain via `fromNodeRequest`:
@@ -345,7 +369,9 @@ const dual = addSignature(merchantSigned, {
 
 - **Subset of RFC 9421.** Not implemented: `rsa-v1_5-sha256`, trailers, the `bs`
   component parameter (and other component parameters besides `;req` —
-  `;key`, `;sf`, …), and network key discovery (JWKS / keystores over HTTP).
+  `;key`, `;sf`, …), and generic keystores over HTTP. Network key
+  discovery *is* implemented for JWKS endpoints: `JwksKeyStore` fetches a
+  JWKS document and resolves `keyid`s against the fetched snapshot.
   Response-to-request binding *is* implemented, via the §2.4 `;req`
   component parameter (there is no `@request-response` derived component
   in RFC 9421 — earlier versions of this README listed it in error). `keyid`→key
@@ -368,9 +394,12 @@ const dual = addSignature(merchantSigned, {
   does not survive restarts and is not shared between verifier instances.
   If you run multiple verifiers, deduplicate nonces in a shared store
   (e.g. Redis) instead of (or in addition to) this cache.
-- **Demo-grade key management.** Keys are passed in directly or resolved via a
-  caller-provided `keyResolver`; there is no built-in keystore, key
-  rotation schedule, JWKS fetching, or `keyid`→key lookup over the network.
+- **Demo-grade key management.** Keys are passed in directly, resolved via a
+  caller-provided `keyResolver`, or fetched from a JWKS endpoint via
+  `JwksKeyStore`; there is still no built-in persistent keystore and no
+  automatic rotation schedule — re-fetching when `isStale()` reports the
+  snapshot old (i.e. rotation uptake) is the caller's loop, and trusting
+  the JWKS endpoint is the caller's responsibility (see SECURITY.md).
 
 ## Interoperability
 
@@ -392,11 +421,12 @@ What *has* been verified beyond the sign→verify round-trip tests:
 Known interop hazards (things a foreign implementation may do differently;
 most also appear in [Limitations](#limitations)):
 
-- **Key delivery is out of band.** `keyid` is carried and can be resolved
+- **Key delivery is mostly out of band.** `keyid` is carried and can be resolved
   opt-in via `VerifyOptions.keyResolver` (a caller-provided in-process
-  lookup; unknown `keyid` fails with `KEY_RESOLUTION_FAILED`) — there is
-  still no key discovery, JWKS, or keystore over the network. Both sides
-  must agree on keys and `keyid` values manually.
+  lookup; unknown `keyid` fails with `KEY_RESOLUTION_FAILED`), and
+  `JwksKeyStore` adds opt-in JWKS fetching over HTTP for signers that
+  publish a JWKS endpoint. There is still no generic keystore protocol
+  support, and both sides must agree on `keyid` values.
 - **Authority normalization.** `@authority` is normalized with WHATWG `URL`
   semantics (lowercased, default ports elided). A peer that normalizes
   differently will build a different signature base.
@@ -547,10 +577,12 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 404 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 415 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
-No network access, no randomness in assertions (keys are generated per-test
-but only round-trip properties are asserted).
+No external network access (the JWKS tests serve their key documents from
+a loopback-only `http` server on an ephemeral port), no randomness in
+assertions (keys are generated per-test but only round-trip properties
+are asserted).
 
 ## License
 

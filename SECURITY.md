@@ -82,10 +82,23 @@ Read this before using it anywhere that matters.
   fallback to another key). `verifyAllLabels` accepts per-label
   resolvers via `VerifyAllOptions.keyResolvers` (one per label, with
   the same per-label containment semantics); the same `VERIFICATION_ERROR`
-  containment applies per label. There is still no built-in keystore, no
-  key rotation, and no key discovery (JWKS etc.): how keys are
-  generated, stored, rotated, and mapped to `keyid` values is entirely
-  on the caller.
+  containment applies per label. JWKS network key discovery *is*
+  implemented via the opt-in `JwksKeyStore`: `refresh()` fetches a JWKS
+  document and imports its keys by `kid` (ed25519 / P-256 / RSA only;
+  entries carrying private `"d"` material make the refresh throw), and
+  its synchronous `resolve` plugs into `keyResolver`. There is still
+  no built-in persistent keystore and no automatic rotation schedule:
+  how keys are generated and stored, how often the JWKS snapshot is
+  re-fetched, and the mapping of `keyid` values are on the caller.
+  Rotation uptake is bounded by that re-fetch cadence — a revoked key
+  keeps verifying until the next successful `refresh()` replaces the
+  snapshot — and a failed refresh never replaces the last good
+  snapshot, so a JWKS outage degrades to staleness rather than to
+  accepting new keys. Endpoint trust is also the caller's
+  responsibility: `JwksKeyStore` performs no TLS pinning and no
+  response-signature verification, so whatever a compromised or
+  misconfigured endpoint serves becomes a verification key — point it
+  only at trusted origins, over HTTPS.
 - **`hmac-sha256` / `hmac-sha512` are symmetric.** The "verifier" holds the same secret as
   the signer, so verification proves integrity but not origin — the
   verifying party could itself have forged the signature. Use `ed25519`
@@ -119,7 +132,8 @@ Read this before using it anywhere that matters.
 
 In short: untested cross-implementation compatibility, no replay
 protection out of the box (opt-in, single-process cache only), no key
-lifecycle story, unaudited parser, and a deliberately
+lifecycle story beyond JWKS fetching (no persistent keystore, no
+automatic rotation schedule), unaudited parser, and a deliberately
 narrow feature subset. If you need production message signatures, use a
 maintained, audited implementation of the full RFC 9421 with replay
 handling and key management, and validate it against independent
