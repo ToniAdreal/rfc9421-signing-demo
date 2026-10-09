@@ -84,6 +84,13 @@ export interface SignedHttpRequest {
   url: string;
   headers: Record<string, string>;
   body?: string | Buffer;
+  /**
+   * HTTP response status code, carried through from the signed
+   * `RequestLike` when present. Only consulted when `"@status"` is
+   * covered; preserved so `addSignature` can rebuild the second
+   * signature base for multi-party response signing without losing it.
+   */
+  status?: number;
 }
 
 function defaultCoveredComponents(hasBody: boolean): string[] {
@@ -250,7 +257,13 @@ export function signRequest(
   headers["signature-input"] = signatureInputValue(label, covered, params);
   headers["signature"] = `${label}=:${sig.toString("base64")}:`;
 
-  return { method: req.method, url: req.url, headers, body: req.body };
+  return {
+    method: req.method,
+    url: req.url,
+    headers,
+    body: req.body,
+    ...(req.status !== undefined ? { status: req.status } : {}),
+  };
 }
 
 /**
@@ -358,6 +371,9 @@ export function addSignature(
       url: signedReq.url,
       headers: unsignedHeaders,
       body: signedReq.body,
+      ...(signedReq.status !== undefined
+        ? { status: signedReq.status }
+        : {}),
     },
     { ...opts, contentDigestAlg: digestAlg },
   );
@@ -381,5 +397,6 @@ export function addSignature(
     url: signedReq.url,
     headers: out,
     body: signedReq.body,
+    ...(signedReq.status !== undefined ? { status: signedReq.status } : {}),
   };
 }

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 358 tests, all local, no network
+npm test   # 366 tests, all local, no network
 ```
 
 ## Quickstart
@@ -297,6 +297,10 @@ for (const r of results) {
   before the second base is built, so dictionaries are never re-signed).
   Duplicate or empty labels fail fast with a clear error; appending to an
   unsigned request fails fast too. The input request is never mutated.
+  A signed response's `status` is preserved on the returned object and
+  passed through to the appended signature, so multi-party signing also
+  works when `@status` is covered (merchant signs a response, gateway
+  appends its own label over the same status).
 
 ```ts
 import { addSignature, signRequest } from "./dist/src/index.js";
@@ -512,7 +516,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 358 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 366 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).
