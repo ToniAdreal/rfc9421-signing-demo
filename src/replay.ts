@@ -7,12 +7,16 @@
  * cache additionally detects a signature whose *valid* nonce has already been
  * seen inside the window.
  *
- * Honest scope: this is a single-process, in-memory helper. It does not
- * survive restarts and is not shared between verifier instances. The
- * `NonceStore` interface below makes the store pluggable — `ReplayCache`
- * is the built-in in-memory implementation; a deployment with multiple
- * verifier processes should implement `NonceStore` over shared storage
- * (e.g. Redis) for real replay protection — see SECURITY.md.
+ * Honest scope: this is a single-process, in-memory helper. It is not
+ * shared between verifier instances. A single process *can* carry its
+ * tracked nonces across its own restart: `exportSnapshot()` before
+ * shutdown and `ReplayCache.restore()` at startup (see
+ * {@link ReplayCacheSnapshot}) — but that covers only the process that
+ * saved the snapshot, never a fleet. The `NonceStore` interface below
+ * makes the store pluggable — `ReplayCache` is the built-in in-memory
+ * implementation; a deployment with multiple verifier processes should
+ * implement `NonceStore` over shared storage (e.g. Redis) for real
+ * replay protection — see SECURITY.md.
  */
 
 /**
@@ -77,6 +81,33 @@ export interface ReplayCacheStats {
   hits: number;
   misses: number;
   evictions: number;
+}
+
+/**
+ * Serializable snapshot of a {@link ReplayCache}, produced by
+ * `exportSnapshot()` and consumed by `ReplayCache.restore()`.
+ *
+ * - `v`: snapshot format version. Only `1` exists; `restore` rejects
+ *   any other value (including a missing `v`) instead of guessing.
+ * - `entries`: `[nonce, seenAt]` pairs in LRU order (least recently
+ *   seen first). `seenAt` is a unix-seconds timestamp in the same unit
+ *   as `ReplayCacheOptions.now` / the `now` argument of `check` — the
+ *   original first-seen time, *not* the export time, so a restored
+ *   nonce keeps counting down its original TTL instead of getting a
+ *   fresh window. Only entries still live at export time are included.
+ *
+ * The observability counters (`hits`/`misses`/`evictions`) are *not*
+ * part of the snapshot: a restored cache starts them at zero.
+ *
+ * The snapshot is plain JSON data (`JSON.stringify` it to persist it),
+ * but it is not a shared store: two processes restoring the same
+ * snapshot afterwards diverge, and nonces recorded by one are invisible
+ * to the other. Multi-instance deployments still need shared storage
+ * behind the `NonceStore` interface.
+ */
+export interface ReplayCacheSnapshot {
+  v: 1;
+  entries: Array<[nonce: string, seenAt: number]>;
 }
 
 export class ReplayCache implements NonceStore {
@@ -165,6 +196,113 @@ export class ReplayCache implements NonceStore {
    */
   stats(): ReplayCacheStats {
     return { size: this.size, hits: this.hits, misses: this.misses, evictions: this.evictions };
+  }
+
+  /**
+   * Export the live tracked nonces as a detached, JSON-serializable
+   * {@link ReplayCacheSnapshot}: persist it before a restart and pass
+   * it to `ReplayCache.restore()` at startup so the restart does not
+   * reopen the replay window for nonces seen inside their TTL.
+   *
+   * Entries already expired against this cache's clock are excluded.
+   * The returned object (including every entry pair) is a fresh copy —
+   * mutating it does not affect this cache.
+   */
+  exportSnapshot(): ReplayCacheSnapshot {
+    const t = this.clock();
+    const entries: Array<[string, number]> = [];
+    for (const [nonce, at] of this.seenAt) {
+      if (t - at < this.ttlSec) entries.push([nonce, at]);
+    }
+    return { v: 1, entries };
+  }
+
+  /**
+   * Rebuild a cache from a snapshot produced by `exportSnapshot()`
+   * (typically after a `JSON.parse` of the persisted form). `opts`
+   * configures the *new* cache (`maxEntries`/`ttlSec`/`now`) and is
+   * validated exactly like the constructor's.
+   *
+   * The input is untrusted data and is validated strictly: a non-object
+   * snapshot, an unknown top-level field, a `v` other than `1`, a
+   * non-array `entries`, or a malformed entry (not a `[nonce, seenAt]`
+   * pair, an empty/non-string nonce, a non-finite or negative `seenAt`)
+   * throws a configuration `Error` — a corrupt snapshot fails loudly at
+   * startup rather than silently disabling replay protection.
+   *
+   * Entries already expired against the new cache's clock are dropped.
+   * If the surviving entries exceed `maxEntries`, the oldest by
+   * `seenAt` are evicted first until the cache fits (ties break by
+   * snapshot order, least recently seen first). Duplicate nonces
+   * collapse to their last occurrence. TTLs keep counting from each
+   * entry's original `seenAt` — restoring never extends a nonce's
+   * tracking window. Observability counters start at zero: the load-time
+   * drops above are not counted as `evictions`.
+   *
+   * This covers a single process across its own restart only; see
+   * {@link ReplayCacheSnapshot} for the multi-instance limit.
+   */
+  static restore(snapshot: unknown, opts: ReplayCacheOptions = {}): ReplayCache {
+    const fail = (detail: string): never => {
+      throw new Error(`ReplayCache: invalid snapshot: ${detail}`);
+    };
+    if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot))
+      fail("expected an object of the form { v: 1, entries: [...] }");
+    const record = snapshot as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key !== "v" && key !== "entries") fail(`unknown field "${key}"`);
+    }
+    if (record.v !== 1)
+      fail(
+        `unsupported snapshot version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1)`,
+      );
+    const rawEntries: unknown = record.entries;
+    if (!Array.isArray(rawEntries)) fail("entries must be an array");
+    const entriesList = rawEntries as unknown[];
+    const parsed: Array<[string, number]> = [];
+    for (let i = 0; i < entriesList.length; i++) {
+      const entry: unknown = entriesList[i];
+      if (!Array.isArray(entry) || entry.length !== 2)
+        fail(`entries[${i}] must be a [nonce, seenAt] pair`);
+      const pair = entry as unknown[];
+      const nonce: unknown = pair[0];
+      const seenAt: unknown = pair[1];
+      if (typeof nonce !== "string" || nonce === "")
+        fail(`entries[${i}]: nonce must be a non-empty string`);
+      if (typeof seenAt !== "number" || !Number.isFinite(seenAt) || seenAt < 0)
+        fail(`entries[${i}]: seenAt must be a finite non-negative number (unix seconds)`);
+      parsed.push([nonce as string, seenAt as number]);
+    }
+
+    const cache = new ReplayCache(opts);
+    const t = cache.clock();
+    // Drop entries whose TTL already ran out against the new clock, and
+    // collapse duplicate nonces to their last occurrence (position and
+    // timestamp), mirroring the recency refresh in `check`.
+    const live = new Map<string, number>();
+    for (const [nonce, at] of parsed) {
+      if (t - at >= cache.ttlSec) continue;
+      live.delete(nonce);
+      live.set(nonce, at);
+    }
+    let kept = [...live.entries()];
+    if (kept.length > cache.maxEntries) {
+      const excess = kept.length - cache.maxEntries;
+      const drop = new Set(
+        kept
+          .map((_, i) => i)
+          .sort((a, b) => kept[a][1] - kept[b][1] || a - b)
+          .slice(0, excess),
+      );
+      kept = kept.filter((_, i) => !drop.has(i));
+    }
+    for (const [nonce, at] of kept) cache.seenAt.set(nonce, at);
+    return cache;
+  }
+
+  /** Alias of {@link ReplayCache.restore} (snapshot naming). */
+  static fromSnapshot(snapshot: unknown, opts: ReplayCacheOptions = {}): ReplayCache {
+    return ReplayCache.restore(snapshot, opts);
   }
 
   /**

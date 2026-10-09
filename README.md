@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 437 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 449 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 ## Quickstart
@@ -310,7 +310,16 @@ configuration `Error` instead of silently defaulting.
   Limitations and SECURITY.md). Call `cache.stats()` for observability:
   it returns a `{ size, hits, misses, evictions }` snapshot (expired-entry
   reclamation and LRU eviction both count as evictions); `cache.clear()`
-  also resets the counters.
+  also resets the counters. A single process can carry the cache across
+  its own restart: `cache.exportSnapshot()` returns a detached,
+  JSON-serializable `{ v: 1, entries }` snapshot of the live nonces with
+  their original first-seen timestamps, and
+  `ReplayCache.restore(snapshot, opts)` reloads it after strictly
+  validating the shape (a corrupt snapshot throws a configuration error
+  at startup instead of silently disabling replay protection). Expired
+  entries are dropped at load, an over-capacity snapshot keeps the
+  newest entries, TTLs keep counting from first sight rather than from
+  the restore, and the observability counters restart at zero.
 - Minimal `Signature-Input` / `Signature` field parsing for verification.
 - **Node http server adapter**: `fromNodeRequest(req, body, opts?)`
   normalizes an `http.IncomingMessage` into a `RequestLike` (absolute URL
@@ -409,9 +418,12 @@ const dual = addSignature(merchantSigned, {
   `contentDigestAlg: "sha-256"`. Other `content-digest` algorithms
   are rejected with `MISSING_CONTENT_DIGEST`.
 - **In-memory replay cache only.** The optional `ReplayCache` is a
-  per-process helper with a configurable TTL and LRU capacity cap — it
-  does not survive restarts and is not shared between verifier instances.
-  If you run multiple verifiers, deduplicate nonces in a shared store
+  per-process helper with a configurable TTL and LRU capacity cap. It
+  can survive its *own* process's restart — export a snapshot before
+  shutdown and restore it at startup — but it is not shared between
+  verifier instances, and two processes restoring the same snapshot
+  diverge immediately afterwards. If you run multiple verifiers,
+  deduplicate nonces in a shared store
   (e.g. Redis) instead of (or in addition to) this cache.
 - **Demo-grade key management.** Keys are passed in directly, resolved via a
   caller-provided `keyResolver`, or fetched from a JWKS endpoint via
@@ -599,7 +611,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 437 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 449 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in

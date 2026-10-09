@@ -49,8 +49,12 @@ Read this before using it anywhere that matters.
   validity window can be replayed unless the caller opts into nonce
   replay detection (`VerifyOptions.replayCache`), which consults a
   `NonceStore` — `ReplayCache` is the built-in single-process,
-  in-memory implementation (TTL + LRU capacity cap). The store does not
-  survive restarts and is not shared across verifier instances, so a
+  in-memory implementation (TTL + LRU capacity cap). A `ReplayCache`
+  can be carried across its own process's restart via
+  `exportSnapshot()` / `ReplayCache.restore()` (the snapshot is
+  strictly validated at load, TTLs keep counting from each nonce's
+  original first-seen time, and the observability counters restart at
+  zero), but it is not shared across verifier instances, so a
   multi-instance deployment should implement `NonceStore` over shared
   storage:
   ```ts
