@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 392 tests, all local, no network
+npm test   # 404 tests, all local, no network
 ```
 
 ## Quickstart
@@ -182,6 +182,20 @@ configuration `Error` instead of silently defaulting.
   both `signRequest` and `verifyRequest` — a covered `@status` with no status
   is a caller configuration error (fail-fast on the sign side,
   `SIGNATURE_BASE_BUILD_FAILED` on the verify side).
+- **Request binding for response signatures (§2.4 `;req`)**: any covered
+  component may carry the `;req` component parameter — `"@method";req`,
+  `"@authority";req`, `"content-digest";req`, … — which resolves that
+  component against the *associated request* (`RequestLike.request`)
+  instead of the response carrying the signature. That is what binds a
+  signed response (e.g. a payment gateway's settlement callback) to the
+  request that triggered it: transplanting the response onto a different
+  request fails verification. Set `request` on both `signRequest` and
+  `verifyRequest` (the signed object carries it through); using `;req`
+  with no associated request fails fast on the sign side and with
+  `SIGNATURE_BASE_BUILD_FAILED` on the verify side. A plain component and
+  its `;req` twin may coexist in one signature (`"@method"` and
+  `"@method";req` are distinct lines). Only `;req` is supported — other
+  component parameters (`;key`, `;bs`, `;sf`, …) fail closed.
 - **Sign-side input guards**: `signRequest` fails fast with a descriptive
   configuration error instead of minting a broken signature — `expires`
   earlier than `created` (a signature that is expired at birth), an empty
@@ -329,8 +343,12 @@ const dual = addSignature(merchantSigned, {
 
 ## Limitations (honest)
 
-- **Subset of RFC 9421.** Not implemented: `rsa-v1_5-sha256`, `@request-response`, trailers, `bs`,
-  and network key discovery (JWKS / keystores over HTTP). `keyid`→key
+- **Subset of RFC 9421.** Not implemented: `rsa-v1_5-sha256`, trailers, the `bs`
+  component parameter (and other component parameters besides `;req` —
+  `;key`, `;sf`, …), and network key discovery (JWKS / keystores over HTTP).
+  Response-to-request binding *is* implemented, via the §2.4 `;req`
+  component parameter (there is no `@request-response` derived component
+  in RFC 9421 — earlier versions of this README listed it in error). `keyid`→key
   resolution *is* supported opt-in: pass `VerifyOptions.keyResolver` and the
   verifier maps the claimed `keyid` to a `KeyObject` (unknown `keyid` fails
   with `KEY_RESOLUTION_FAILED`); the resolver itself is caller-provided and
@@ -417,9 +435,12 @@ most also appear in [Limitations](#limitations)):
   and throws on both sides — a signer can never mint signatures that the
   verifier would also (correctly) refuse to check, and a secret adequate
   only for `hmac-sha256` is never silently accepted for `hmac-sha512`.
-- **Components.** Not supported: `@request-response` (binding a response
-  signature to the request that caused it),
-  trailers, `bs`, and other derived components beyond the list under
+- **Components.** Binding a response signature to the request that caused
+  it is supported via the `;req` component parameter (§2.4) — there is no
+  `@request-response` derived component in RFC 9421 (earlier versions of
+  this README named one in error). Not supported: trailers, the `bs`
+  component parameter (and other component parameters besides `;req`),
+  and other derived components beyond the list under
   "What it implements".
 - **Multiple signatures.** `verifyRequest` checks one label per call; for
   multi-party flows, `verifyAllLabels` verifies every label in the request
@@ -526,7 +547,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 392 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 404 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

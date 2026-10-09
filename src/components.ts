@@ -5,6 +5,12 @@
  *
  * Covered components supported: @method, @scheme, @authority, @path, @query,
  * @status, @target-uri, @created, @expires, plus any HTTP header field name.
+ * Any of them may carry the RFC 9421 §2.4 `;req` component parameter
+ * (e.g. `"@method";req`), which resolves the component against the
+ * associated request (`RequestLike.request`) instead of the message
+ * being signed — the mechanism that binds a response signature to the
+ * request that triggered it. Other component parameters (`;key`,
+ * `;bs`, `;sf`, …) are not supported and fail closed.
  * Signature algorithms are handled by sign.ts / verify.ts; this module
  * only deals with the canonical bytes that get signed.
  */
@@ -20,6 +26,16 @@ export interface RequestLike {
    * callbacks or signed API responses. Plain request flows leave it unset.
    */
   status?: number;
+  /**
+   * The request that triggered this message, when this message is a
+   * response. Only consulted when a covered component carries the
+   * RFC 9421 §2.4 `;req` parameter (e.g. `"@method";req`): such a
+   * component resolves against this associated request instead of the
+   * response itself, binding the response signature to that request so
+   * the response cannot be transplanted onto a different request.
+   * Plain request flows leave it unset.
+   */
+  request?: RequestLike;
 }
 
 export interface SignatureParams {
@@ -85,17 +101,60 @@ function normalizeFieldValue(value: string): string {
   return value.replace(/^[ \t]+|[ \t]+$/g, "").replace(/\r\n[ \t]+/g, " ");
 }
 
+interface ComponentIdParts {
+  /** Bare component name, lowercased (e.g. `@method`, `content-digest`). */
+  base: string;
+  /** True when the identifier carries the RFC 9421 §2.4 `;req` parameter. */
+  req: boolean;
+}
+
+/**
+ * Split a covered component identifier into its bare name and its
+ * component parameters. Only `;req` (no value) is supported; any other
+ * parameter (`;key`, `;bs`, `;sf`, a valued `;req=…`, or a second
+ * parameter after `;req`) is a hard error — silently ignoring an
+ * unknown parameter would build a different signature base than the
+ * signer intended, so this fails closed on both sides.
+ */
+function parseComponentId(raw: string): ComponentIdParts {
+  const parts = raw.trim().split(";");
+  const base = parts[0].trim().toLowerCase();
+  if (parts.length === 1) return { base, req: false };
+  const params = parts.slice(1).map((p) => p.trim().toLowerCase());
+  if (params.length === 1 && params[0] === "req") return { base, req: true };
+  const bad = params.find((p) => p !== "req") ?? params[1];
+  throw new Error(
+    `unsupported component parameter ";${bad}" on component "${base}": only ";req" is supported`,
+  );
+}
+
+/** Canonical wire form of one component identifier: `"base"` or `"base";req`. */
+function serializeComponentId(raw: string): string {
+  const { base, req } = parseComponentId(raw);
+  return req ? `${quoteString(base)};req` : quoteString(base);
+}
+
 /** Resolve one covered component identifier to its canonical string value. */
 export function resolveComponent(
   id: string,
   req: RequestLike,
   params: SignatureParams,
 ): string {
-  const cid = id.toLowerCase();
-  const url = new URL(req.url);
+  const { base: cid, req: isReq } = parseComponentId(id);
+  // RFC 9421 §2.4: a `;req` component resolves against the associated
+  // request, not the message carrying the signature. Without an
+  // associated request there is nothing to bind to — fail fast on the
+  // sign side; on the verify side buildSignatureBase's throw converges
+  // to SIGNATURE_BASE_BUILD_FAILED.
+  if (isReq && req.request === undefined)
+    throw new Error(
+      `"${cid}";req is covered but no associated request was given (set RequestLike.request)`,
+    );
+  const target: RequestLike = isReq ? (req.request as RequestLike) : req;
+  const url = new URL(target.url);
   switch (cid) {
     case "@method":
-      return req.method.toUpperCase();
+      return target.method.toUpperCase();
     case "@scheme":
       return url.protocol.replace(/:$/, "").toLowerCase();
     case "@authority":
@@ -107,7 +166,7 @@ export function resolveComponent(
       // including the leading "?" — empty string when the URL has no query.
       return url.search;
     case "@target-uri":
-      return req.url;
+      return target.url;
     case "@created":
       if (params.created === undefined)
         throw new Error('"@created" is covered but no created parameter was given');
@@ -120,11 +179,11 @@ export function resolveComponent(
       // RFC 9421 §2.2.8: the status code of the response. There is no
       // sensible default — a covered @status with no status to bind is a
       // caller configuration error, same fail-fast style as @created/@expires.
-      if (req.status === undefined)
+      if (target.status === undefined)
         throw new Error('"@status" is covered but no status was given');
-      return String(req.status);
+      return String(target.status);
     default: {
-      const v = getHeader(req.headers, cid);
+      const v = getHeader(target.headers, cid);
       if (v === undefined)
         throw new Error(`covered header field "${cid}" is missing from the request`);
       return normalizeFieldValue(v);
@@ -137,7 +196,7 @@ export function serializeSignatureParams(
   componentIds: string[],
   params: SignatureParams,
 ): string {
-  const items = componentIds.map((c) => quoteString(c.toLowerCase())).join(" ");
+  const items = componentIds.map((c) => serializeComponentId(c)).join(" ");
   let out = `(${items})`;
   if (params.created !== undefined) out += `;created=${params.created}`;
   if (params.expires !== undefined) out += `;expires=${params.expires}`;
@@ -168,7 +227,7 @@ export function buildSignatureBase(
 ): string {
   const lines = componentIds.map((id) => {
     const value = resolveComponent(id, req, params);
-    return `${quoteString(id.toLowerCase())}: ${value}`;
+    return `${serializeComponentId(id)}: ${value}`;
   });
   lines.push(`"@signature-params": ${serializeSignatureParams(componentIds, params)}`);
   return lines.join("\n");
@@ -184,11 +243,62 @@ export interface ParsedSignatureInput {
   params: SignatureParams;
 }
 
-function parseQuotedStrings(inner: string): string[] {
+/**
+ * Parse the inside of a covered-components inner list, preserving any
+ * component parameters that follow a quoted identifier (the old
+ * quoted-strings-only scan silently swallowed a `;req` suffix, which
+ * rebuilt a different signature base than the signer signed). Each id
+ * is returned in the canonical stored form `base` or `base;req`;
+ * parameters other than a bare `;req` are preserved verbatim in the
+ * stored form (name lowercased, value as-is) so `resolveComponent`
+ * can reject them fail-closed instead of ignoring them.
+ */
+function parseComponentIds(inner: string): string[] {
   const ids: string[] = [];
-  const re = /"((?:[^"\\]|\\.)*)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(inner)) !== null) ids.push(unquoteString(m[1]));
+  let i = 0;
+  while (i < inner.length) {
+    while (i < inner.length && /\s/.test(inner[i])) i++;
+    if (i >= inner.length) break;
+    if (inner[i] !== '"')
+      throw new Error(
+        `malformed covered component at offset ${i}: expected a quoted string`,
+      );
+    let j = i + 1;
+    let raw = "";
+    let closed = false;
+    while (j < inner.length) {
+      const c = inner[j];
+      if (c === "\\" && j + 1 < inner.length) {
+        raw += inner[j + 1];
+        j += 2;
+      } else if (c === '"') {
+        closed = true;
+        j++;
+        break;
+      } else {
+        raw += c;
+        j++;
+      }
+    }
+    if (!closed)
+      throw new Error("malformed covered component: unterminated quoted string");
+    let suffix = "";
+    // Component parameters: `;name` or `;name=value` sequences directly
+    // following the quoted identifier (RFC 9421 §2.4 / RFC 8941 §3.1.2).
+    while (j < inner.length && inner[j] === ";") {
+      const pm = /^;([A-Za-z][A-Za-z0-9_-]*)(?:=("(?:[^"\\]|\\.)*"|[^\s;]+))?/.exec(
+        inner.slice(j),
+      );
+      if (!pm)
+        throw new Error(
+          `malformed component parameter at offset ${j} in covered components`,
+        );
+      suffix += `;${pm[1].toLowerCase()}${pm[2] !== undefined ? `=${pm[2]}` : ""}`;
+      j += pm[0].length;
+    }
+    ids.push(raw.toLowerCase() + suffix);
+    i = j;
+  }
   return ids;
 }
 
@@ -236,7 +346,7 @@ export function parseSignatureInput(
   const close = rest.indexOf(")");
   if (close === -1)
     throw new Error("malformed Signature-Input: unterminated inner list");
-  const componentIds = parseQuotedStrings(rest.slice(1, close));
+  const componentIds = parseComponentIds(rest.slice(1, close));
   const after = rest.slice(close + 1);
   // Parameters run until the next top-level comma (start of another signature).
   const nextSig = after.search(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/);

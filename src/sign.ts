@@ -92,6 +92,14 @@ export interface SignedHttpRequest {
    * signature base for multi-party response signing without losing it.
    */
   status?: number;
+  /**
+   * Associated request, carried through from the signed `RequestLike`
+   * when present. Only consulted when a covered component carries
+   * `;req`; preserved so a signed response can be verified (and
+   * `addSignature` can rebuild a second base) without the caller
+   * re-attaching the triggering request by hand.
+   */
+  request?: RequestLike;
 }
 
 function defaultCoveredComponents(hasBody: boolean): string[] {
@@ -216,6 +224,7 @@ export function signRequest(
     headers,
     body: req.body,
     status: req.status,
+    request: req.request,
   };
   const base = buildSignatureBase(covered, signingInput, params);
 
@@ -264,6 +273,7 @@ export function signRequest(
     headers,
     body: req.body,
     ...(req.status !== undefined ? { status: req.status } : {}),
+    ...(req.request !== undefined ? { request: req.request } : {}),
   };
 }
 
@@ -375,6 +385,9 @@ export function addSignature(
       ...(signedReq.status !== undefined
         ? { status: signedReq.status }
         : {}),
+      ...(signedReq.request !== undefined
+        ? { request: signedReq.request }
+        : {}),
     },
     { ...opts, contentDigestAlg: digestAlg },
   );
@@ -399,5 +412,6 @@ export function addSignature(
     headers: out,
     body: signedReq.body,
     ...(signedReq.status !== undefined ? { status: signedReq.status } : {}),
+    ...(signedReq.request !== undefined ? { request: signedReq.request } : {}),
   };
 }
