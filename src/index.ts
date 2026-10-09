@@ -38,6 +38,7 @@ export type {
 export {
   buildSignatureBase,
   getHeader,
+  joinHeaderValues,
   listSignatureLabels,
   parseSignatureField,
   parseSignatureInput,

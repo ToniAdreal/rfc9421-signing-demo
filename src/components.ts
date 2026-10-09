@@ -43,8 +43,27 @@ function escapeRegExp(s: string): string {
 }
 
 /**
+ * Combine the values of a multi-value header field into its canonical
+ * single string: each element is trimmed of surrounding whitespace and
+ * the elements are joined with ", " (RFC 9421 §2.5 field-value
+ * combination, with optional whitespace around each element discarded).
+ *
+ * This is the ONE place that combination happens. The signer
+ * (`signRequest`), the verifier (`getHeader`), and the Node adapter
+ * (`fromNodeRequest`) all call this helper, so the same logical header
+ * can never canonicalize to different bytes on different paths — before
+ * it was shared, the signer joined without trimming while the verifier
+ * trimmed, and a value like `["  a  ", "b "]` signed as `"a ,  b"` but
+ * verified as `"a, b"`, failing its own round-trip with
+ * SIGNATURE_MISMATCH.
+ */
+export function joinHeaderValues(values: string[]): string {
+  return values.map((x) => x.trim()).join(", ");
+}
+
+/**
  * Case-insensitive header lookup. Multi-value headers are joined with
- * ", " per RFC 9421 §2.5.
+ * ", " per RFC 9421 §2.5 (see `joinHeaderValues`).
  */
 export function getHeader(
   headers: Record<string, string | string[] | undefined>,
@@ -55,7 +74,7 @@ export function getHeader(
     if (k.toLowerCase() === want) {
       const v = headers[k];
       if (v === undefined) return undefined;
-      return Array.isArray(v) ? v.map((x) => x.trim()).join(", ") : v;
+      return Array.isArray(v) ? joinHeaderValues(v) : v;
     }
   }
   return undefined;

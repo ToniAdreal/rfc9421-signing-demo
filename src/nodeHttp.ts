@@ -14,7 +14,7 @@
  * re-serialized one.
  */
 
-import type { RequestLike } from "./components.js";
+import { joinHeaderValues, type RequestLike } from "./components.js";
 
 /**
  * The `IncomingMessage` fields this adapter actually reads. A real
@@ -52,9 +52,14 @@ function normalizeHeaders(
   for (const [name, value] of Object.entries(headers)) {
     if (value === undefined) continue;
     // Multi-value headers (e.g. repeated fields, which Node exposes as
-    // arrays) are joined with ", " — the same convention `signRequest`
-    // and `getHeader` use for RFC 9421 §2.5 field-value combination.
-    out[name.toLowerCase()] = Array.isArray(value) ? value.join(", ") : value;
+    // arrays) are combined via the shared `joinHeaderValues` helper —
+    // the exact same canonicalization `signRequest` and `getHeader`
+    // apply for RFC 9421 §2.5 field-value combination (per-element trim
+    // + ", " join), so signer and verifier can never diverge on
+    // whitespace around individual values.
+    out[name.toLowerCase()] = Array.isArray(value)
+      ? joinHeaderValues(value)
+      : value;
   }
   return out;
 }

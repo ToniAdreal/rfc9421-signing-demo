@@ -7,6 +7,7 @@ import {
 } from "node:crypto";
 import {
   buildSignatureBase,
+  joinHeaderValues,
   listSignatureLabels,
   signatureInputValue,
   type RequestLike,
@@ -193,7 +194,7 @@ export function signRequest(
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(req.headers)) {
     if (v === undefined) continue;
-    headers[k] = Array.isArray(v) ? v.join(", ") : v;
+    headers[k] = Array.isArray(v) ? joinHeaderValues(v) : v;
   }
   if (covered.map((c) => c.toLowerCase()).includes("content-digest")) {
     if (req.body === undefined)
