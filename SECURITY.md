@@ -9,6 +9,7 @@ Read this before using it anywhere that matters.
 - Only an RFC 9421 *subset* is implemented: signature algorithms
   `ed25519`, `ecdsa-p256-sha256` (NIST P-256, DER-encoded per
   RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS per RFC 9421 §3.3.1),
+  `rsa-v1_5-sha256` (RSASSA-PKCS1-v1_5 per RFC 9421 §3.3.2),
   `hmac-sha256`, and `hmac-sha512` (≥ 64-byte secrets, RFC 2104 §3); `verifyRequest` checks one
   signature label per call, while `verifyAllLabels` verifies every label
   in the request (a failing label never blocks the remaining labels);
@@ -17,6 +18,16 @@ Read this before using it anywhere that matters.
   entry is present). See
   `README.md` → "Limitations (honest)" for the full list of what is not
   supported.
+- **`rsa-v1_5-sha256` is for interoperability, not preference.**
+  PKCS#1 v1.5 signature padding is deterministic (no randomization,
+  unlike PSS) and the v1.5 family has a long history of padding-oracle
+  attacks in *encryption* contexts; it is implemented here only so
+  signatures from legacy gateway/webhook signers that cannot do PSS
+  can be verified. Prefer `rsa-pss-sha512` or `ed25519` for anything
+  new. The verifier picks the padding strictly from the declared
+  `alg` parameter — never from the key's shape — so the two RSA
+  paddings cannot be confused for each other, and a ≥ 2048-bit modulus
+  floor is enforced on both the sign and verify sides.
 - The implementation has only been tested against itself (see
   `README.md` → "Interoperability"). Wire compatibility with any
   third-party RFC 9421 implementation is untested.

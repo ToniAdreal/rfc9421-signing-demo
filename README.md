@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 415 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 427 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 ## Quickstart
@@ -127,8 +127,10 @@ P-256 gateways get the same treatment: `exportPublicKeyJwkP256` /
 with the same refusal of private (`"d"`) material.
 
 RSA gateways too: `exportPublicKeyJwkRsa` / `importPublicKeyJwkRsa` handle
-the RFC 7518 RSA shape (`{ kty: "RSA", n, e }`) for `rsa-pss-sha512`
-verifiers, with the same refusal of private (`"d"`) material. One honest
+the RFC 7518 RSA shape (`{ kty: "RSA", n, e }`) for RSA verifiers, with
+the same refusal of private (`"d"`) material. One JWK serves both RSA
+algorithms (`rsa-pss-sha512` and `rsa-v1_5-sha256`): the JWK carries no
+`alg`, so the distinction lives only in each signature's `alg` parameter. One honest
 caveat documented in code: node:crypto's RSA JWK importer is lenient, so a
 structurally-valid but degenerate modulus (e.g. all-zero `n`) is accepted
 at import time and fails only at the crypto layer when used — verification
@@ -237,6 +239,10 @@ configuration `Error` instead of silently defaulting.
 - **Algorithms**: `ed25519`, `ecdsa-p256-sha256` (NIST P-256; DER-encoded
   ECDSA signatures per RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS with
   SHA-512, MGF1 with SHA-512, 64-byte salt per RFC 9421 §3.3.1),
+  `rsa-v1_5-sha256` (RSASSA-PKCS1-v1_5 with SHA-256 per RFC 9421 §3.3.2 —
+  deterministic signatures, same RSA key material as PSS, ≥ 2048-bit
+  modulus enforced on both sides; included for legacy gateway/webhook
+  interoperability, PSS or ed25519 preferred for new deployments),
   `hmac-sha256` (≥ 32-byte secrets) and `hmac-sha512` (≥ 64-byte secrets;
   constant-time compare; floors paired with the algorithm per RFC 2104
   §3).
@@ -367,7 +373,7 @@ const dual = addSignature(merchantSigned, {
 
 ## Limitations (honest)
 
-- **Subset of RFC 9421.** Not implemented: `rsa-v1_5-sha256`, trailers, the `bs`
+- **Subset of RFC 9421.** Not implemented: trailers, the `bs`
   component parameter (and other component parameters besides `;req` —
   `;key`, `;sf`, …), and generic keystores over HTTP. Network key
   discovery *is* implemented for JWKS endpoints: `JwksKeyStore` fetches a
@@ -443,9 +449,12 @@ most also appear in [Limitations](#limitations)):
   (DER-encoded, RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS with
   SHA-512, MGF1 with SHA-512, and a 64-byte salt per RFC 9421 §3.3.1 —
   signatures are probabilistic, so verifiers re-verify rather than
-  re-sign-and-compare), `hmac-sha256`, `hmac-sha512` (constant-time
-  compare; ≥ 64-byte secrets per RFC 2104 §3). Not supported:
-  `rsa-v1_5-sha256` or anything else.
+  re-sign-and-compare), `rsa-v1_5-sha256` (RSASSA-PKCS1-v1_5 with
+  SHA-256 per RFC 9421 §3.3.2 — deterministic; the verifier dispatches
+  on the declared `alg`, never on the key's shape, so a PSS signature
+  never verifies as v1.5 or vice versa), `hmac-sha256`, `hmac-sha512`
+  (constant-time compare; ≥ 64-byte secrets per RFC 2104 §3). Anything
+  else is not supported.
 - **Missing `alg` parameter.** `alg` is optional per RFC 9421 §2.3
   (Appendix B.2.5's hmac-sha256 vector omits it), but this library
   historically defaults a missing `alg` to `"ed25519"`, so a foreign
@@ -453,7 +462,8 @@ most also appear in [Limitations](#limitations)):
   fallback: `VerifyOptions.algFallback: "infer"` infers the algorithm
   from the resolved key's shape (`secret` → `hmac-sha256`, ed25519 key
   → `ed25519`, P-256 EC key → `ecdsa-p256-sha256`, RSA key →
-  `rsa-pss-sha512`) and throws a caller
+  `rsa-pss-sha512` — never `rsa-v1_5-sha256`, since key shape cannot
+  distinguish the two RSA paddings) and throws a caller
   configuration `Error` when a wire-carried `alg` contradicts the key's
   shape. Automatic detection is opt-in only — without it, a missing
   `alg` keeps meaning `"ed25519"`, exactly as before.
@@ -577,7 +587,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 415 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 427 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in

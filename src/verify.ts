@@ -16,7 +16,7 @@ import {
   type RequestLike,
 } from "./components.js";
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
-import { assertHmacSecretLength } from "./keys.js";
+import { assertHmacSecretLength, assertRsaModulusLength } from "./keys.js";
 import type { NonceStore } from "./replay.js";
 
 export interface VerifyOptions {
@@ -26,6 +26,12 @@ export interface VerifyOptions {
    * rsa-pss-sha512: the signer's RSA public KeyObject (verified with
    * RSASSA-PSS, SHA-512, MGF1 with SHA-512, 64-byte salt — RFC 9421
    * §3.3.1).
+   * rsa-v1_5-sha256: the signer's RSA public KeyObject (verified with
+   * RSASSA-PKCS1-v1_5, SHA-256 — RFC 9421 §3.3.2). Dispatch is driven
+   * by the signature's declared `alg`, never by the key's shape, so a
+   * PSS signature can never verify as v1.5 or vice versa. A non-RSA
+   * key (or a sub-2048-bit modulus) paired with this `alg` throws a
+   * caller configuration `Error`, symmetric with the sign side.
    * hmac-sha256: the shared secret KeyObject (≥ 32 bytes).
    * hmac-sha512: the shared secret KeyObject (≥ 64 bytes).
    *
@@ -135,7 +141,9 @@ export interface VerifyOptions {
    *   key implies `hmac-sha256`, an ed25519 key implies `ed25519`, a
    *   P-256 (`prime256v1`) EC key implies `ecdsa-p256-sha256`, and an
    *   RSA key implies `rsa-pss-sha512`; an unmappable key shape throws
-   *   a caller configuration `Error`. When
+   *   a caller configuration `Error`. (An RSA key is never inferred as
+   *   `rsa-v1_5-sha256`: the key shape cannot distinguish the two RSA
+   *   paddings, so v1.5 signatures must declare their `alg`.) When
    *   the wire *does* carry `alg`, the key's shape is checked against
    *   it and a mismatch (e.g. wire `alg="ed25519"` with a `secret`
    *   key) throws a caller configuration `Error` instead of surfacing
@@ -244,7 +252,8 @@ type SupportedAlg =
   | "hmac-sha256"
   | "hmac-sha512"
   | "ecdsa-p256-sha256"
-  | "rsa-pss-sha512";
+  | "rsa-pss-sha512"
+  | "rsa-v1_5-sha256";
 
 /**
  * Human-readable description of a KeyObject's shape, used in caller
@@ -294,7 +303,8 @@ function assertAlgMatchesKeyShape(alg: SupportedAlg, key: KeyObject): void {
     (alg === "ecdsa-p256-sha256" &&
       key.asymmetricKeyType === "ec" &&
       key.asymmetricKeyDetails?.namedCurve === "prime256v1") ||
-    (alg === "rsa-pss-sha512" && key.asymmetricKeyType === "rsa");
+    (alg === "rsa-pss-sha512" && key.asymmetricKeyType === "rsa") ||
+    (alg === "rsa-v1_5-sha256" && key.asymmetricKeyType === "rsa");
   if (ok) return;
   throw new Error(
     `verifyRequest: wire alg "${alg}" is incompatible with the configured key (${describeKey(key)}) — pass a matching key or remove the algFallback "infer" opt-in`,
@@ -501,7 +511,8 @@ export function verifyRequest(
       effectiveAlg === "hmac-sha256" ||
       effectiveAlg === "hmac-sha512" ||
       effectiveAlg === "ecdsa-p256-sha256" ||
-      effectiveAlg === "rsa-pss-sha512") &&
+      effectiveAlg === "rsa-pss-sha512" ||
+      effectiveAlg === "rsa-v1_5-sha256") &&
     alg !== undefined
   ) {
     assertAlgMatchesKeyShape(effectiveAlg, key);
@@ -516,6 +527,16 @@ export function verifyRequest(
   if (effectiveAlg === "hmac-sha256" || effectiveAlg === "hmac-sha512")
     assertHmacSecretLength(key, effectiveAlg);
 
+  // RSA key-shape/modulus enforcement for rsa-v1_5-sha256, also before
+  // the crypto try/catch and for the same reason: pairing this `alg`
+  // with a non-RSA key (or a sub-floor modulus) is a caller
+  // configuration error, symmetric with the sign side — it must not be
+  // swallowed into a VERIFICATION_ERROR. Note the padding dispatch
+  // itself is driven by the declared `alg` (effectiveAlg), never by
+  // the key's shape: an RSA key alone does not imply either padding.
+  if (effectiveAlg === "rsa-v1_5-sha256")
+    assertRsaModulusLength(key, 'verifyRequest: alg "rsa-v1_5-sha256"');
+
   let cryptoOk = false;
   try {
     if (effectiveAlg === "ed25519") {
@@ -526,6 +547,15 @@ export function verifyRequest(
       cryptoOk = createVerify("sha256")
         .update(base, "utf8")
         .verify(key, sigBytes);
+    } else if (effectiveAlg === "rsa-v1_5-sha256") {
+      // RSASSA-PKCS1-v1_5-VERIFY per RFC 9421 §3.3.2: SHA-256 with
+      // PKCS#1 v1.5 padding — the exact inverse of the sign side. A PSS
+      // signature never verifies here (different padding *and* a
+      // different hash), and a v1.5 signature never verifies under the
+      // PSS branch below: the declared `alg` picks exactly one branch.
+      cryptoOk = createVerify("sha256")
+        .update(base, "utf8")
+        .verify({ key, padding: constants.RSA_PKCS1_PADDING }, sigBytes);
     } else if (effectiveAlg === "rsa-pss-sha512") {
       // RSASSA-PSS-VERIFY per RFC 9421 §3.3.1: SHA-512, MGF1 with
       // SHA-512, 64-byte salt — the same parameters the sign side uses,

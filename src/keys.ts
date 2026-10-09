@@ -30,14 +30,72 @@ export function generateP256KeyPair(): {
 }
 
 /**
+ * Minimum RSA modulus size in bits accepted by this library's RSA
+ * signature algorithms (`rsa-pss-sha512`, `rsa-v1_5-sha256`). The key
+ * generators below mint exactly this size; production deployments
+ * should prefer ≥3072 bits. The sign and verify paths for
+ * `rsa-v1_5-sha256` enforce this floor via
+ * {@link assertRsaModulusLength} so a sub-floor key fails loudly as a
+ * caller configuration error instead of minting weak signatures.
+ */
+export const MIN_RSA_MODULUS_BITS = 2048;
+
+/**
+ * Enforce the RSA key-shape and modulus floor for an RSA signature
+ * algorithm. Throws a caller-configuration `Error` — not a verification
+ * failure — when `key` is not an RSA key at all (e.g. a P-256 key paired
+ * with `alg: "rsa-v1_5-sha256"`) or when its modulus is shorter than
+ * {@link MIN_RSA_MODULUS_BITS}. Shared by the sign and verify paths so
+ * both sides reject the same bad configuration identically.
+ */
+export function assertRsaModulusLength(key: KeyObject, context: string): void {
+  if (key.asymmetricKeyType !== "rsa")
+    throw new Error(
+      `${context}: expected an RSA key, got ${
+        key.type === "secret"
+          ? "a secret (symmetric) key"
+          : `an asymmetric ${key.asymmetricKeyType ?? "unknown"} key`
+      }`,
+    );
+  const bits = key.asymmetricKeyDetails?.modulusLength;
+  if (bits !== undefined && bits < MIN_RSA_MODULUS_BITS)
+    throw new Error(
+      `${context}: RSA modulus must be at least ${MIN_RSA_MODULUS_BITS} bits, got ${bits} bits`,
+    );
+}
+
+/**
  * Generate a fresh RSA key pair for the `rsa-pss-sha512` algorithm
  * (RFC 9421 §3.3.1: RSASSA-PSS with SHA-512, MGF1 with SHA-512, and a
  * 64-byte salt). 2048-bit modulus is the minimum recommended size for
  * this demo; production deployments should prefer ≥3072 bits.
  * `signRequest` / `verifyRequest` both use PSS padding with
  * `saltLength: 64` per the RFC, so the wire format stays spec-conformant.
+ *
+ * The pair is plain RSA key material: the same keys can also sign with
+ * `rsa-v1_5-sha256` (see {@link generateRsaV15KeyPair}) — padding and
+ * hash are chosen per signature by the `alg` parameter, never by the
+ * key, and verifiers dispatch on the declared `alg` for the same reason.
  */
 export function generateRsaPssKeyPair(): {
+  publicKey: KeyObject;
+  privateKey: KeyObject;
+} {
+  return generateKeyPairSync("rsa", { modulusLength: 2048 });
+}
+
+/**
+ * Generate a fresh RSA key pair for the `rsa-v1_5-sha256` algorithm
+ * (RFC 9421 §3.3.2: RSASSA-PKCS1-v1_5 with SHA-256). This is the exact
+ * same RSA key material {@link generateRsaPssKeyPair} produces — one
+ * RSA key can serve both algorithms, and the JWK export
+ * ({@link exportPublicKeyJwkRsa}) is shared too: a JWK carries no `alg`,
+ * so the two algorithms are distinguished solely by the `alg` parameter
+ * in `signature-input`, which the verifier uses to pick the padding.
+ * Prefer `rsa-pss-sha512` or `ed25519` for new deployments; v1.5 exists
+ * here for interoperability with legacy gateway/webhook signers.
+ */
+export function generateRsaV15KeyPair(): {
   publicKey: KeyObject;
   privateKey: KeyObject;
 } {
@@ -379,9 +437,12 @@ export interface RsaPublicJwk {
 
 /**
  * Export an RSA public key as a plain-object JWK (RFC 7518 §6.3), ready
- * to `JSON.stringify` and ship to a verifier — the `rsa-pss-sha512`
- * counterpart of {@link exportPublicKeyJwk} / {@link exportPublicKeyJwkP256},
- * for gateway/verifier deployments that distribute keys as JSON.
+ * to `JSON.stringify` and ship to a verifier — the RSA counterpart of
+ * {@link exportPublicKeyJwk} / {@link exportPublicKeyJwkP256},
+ * for gateway/verifier deployments that distribute keys as JSON. The
+ * same exported JWK serves both RSA algorithms (`rsa-pss-sha512` and
+ * `rsa-v1_5-sha256`): the JWK shape carries no `alg`, so the algorithm
+ * distinction lives only in each signature's `alg` parameter.
  *
  * Throws a caller-configuration `Error` for anything that is not an RSA
  * public KeyObject (private keys, symmetric secrets, other algorithms);

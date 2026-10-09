@@ -15,14 +15,15 @@ import {
 } from "./components.js";
 import { contentDigest, assertContentDigestAlg, contentDigestAlgOf } from "./digest.js";
 import type { ContentDigestAlg } from "./digest.js";
-import { assertHmacSecretLength } from "./keys.js";
+import { assertHmacSecretLength, assertRsaModulusLength } from "./keys.js";
 
 export type SignAlg =
   | "ed25519"
   | "hmac-sha256"
   | "hmac-sha512"
   | "ecdsa-p256-sha256"
-  | "rsa-pss-sha512";
+  | "rsa-pss-sha512"
+  | "rsa-v1_5-sha256";
 
 export interface SignOptions {
   /**
@@ -42,6 +43,11 @@ export interface SignOptions {
    * rsa-pss-sha512: an RSA private KeyObject (see
    * keys.generateRsaPssKeyPair); signed with RSASSA-PSS (SHA-512, MGF1
    * with SHA-512, 64-byte salt) per RFC 9421 §3.3.1.
+   * rsa-v1_5-sha256: an RSA private KeyObject (see
+   * keys.generateRsaV15KeyPair — the same RSA key material as PSS);
+   * signed with RSASSA-PKCS1-v1_5 (SHA-256) per RFC 9421 §3.3.2. The
+   * key must be RSA with a ≥ 2048-bit modulus; anything else throws a
+   * configuration error before any crypto runs.
    * hmac-sha256: a secret KeyObject of ≥ 32 bytes (see keys.secretKey).
    * hmac-sha512: a secret KeyObject of ≥ 64 bytes (RFC 2104 §3 pairs the
    * floor with the hash output length; a 32–63 byte secret is rejected on
@@ -236,6 +242,16 @@ export function signRequest(
     // ASN.1 ECDSA structure. node:crypto's createSign emits exactly that
     // by default, and verifyRequest consumes it with createVerify below.
     sig = createSign("sha256").update(base, "utf8").sign(opts.key);
+  } else if (opts.alg === "rsa-v1_5-sha256") {
+    // RFC 9421 §3.3.2: RSASSA-PKCS1-v1_5 with SHA-256. v1.5 padding is
+    // deterministic — the same base and key always produce the same
+    // signature bytes (unlike PSS). The key-shape/modulus check runs
+    // first so a non-RSA key or a sub-2048-bit modulus is a clear
+    // configuration error rather than a node:crypto complaint.
+    assertRsaModulusLength(opts.key, 'signRequest: alg "rsa-v1_5-sha256"');
+    sig = createSign("sha256")
+      .update(base, "utf8")
+      .sign({ key: opts.key, padding: constants.RSA_PKCS1_PADDING });
   } else if (opts.alg === "rsa-pss-sha512") {
     // RFC 9421 §3.3.1: RSASSA-PSS-SIGN with SHA-512, MGF1 with SHA-512,
     // and a fixed 64-byte salt. PSS is probabilistic — the same base

@@ -12,6 +12,7 @@ export { assertContentDigestAlg, contentDigest } from "./digest.js";
 export type { ContentDigestAlg } from "./digest.js";
 export {
   assertHmacSecretLength,
+  assertRsaModulusLength,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -21,6 +22,7 @@ export {
   generateNonce,
   generateP256KeyPair,
   generateRsaPssKeyPair,
+  generateRsaV15KeyPair,
   importPrivateKey,
   importPublicKey,
   importPublicKeyJwk,
@@ -29,6 +31,7 @@ export {
   memoizeKeyResolver,
   MIN_HMAC_SECRET_BYTES,
   MIN_HMAC_SHA512_SECRET_BYTES,
+  MIN_RSA_MODULUS_BITS,
   secretKey,
 } from "./keys.js";
 export type {
