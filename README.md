@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 449 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 462 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 ## Quickstart
@@ -231,9 +231,31 @@ configuration `Error` instead of silently defaulting.
   `;req` (either order; canonical wire form `;req;bs`), is rejected on
   derived components (`"@method";bs` fails fast on the sign side and
   with `SIGNATURE_BASE_BUILD_FAILED` on the verify side), and other
-  component parameters (`;key`, `;sf`, …) still fail closed. For a
+  component parameters (`;key`, `;tr`, …) still fail closed. For a
   multi-value field, `;bs` joins the raw (untrimmed) elements with
   ", " before encoding.
+- **Strict Structured Field serialization (§2.1.1 `;sf`)**: a header
+  field component may carry `;sf` — `"x-quota";sf` — in which case the
+  field value is parsed as an HTTP Structured Field (RFC 8941) and
+  re-serialized with the strict rules of RFC 8941 §4 before entering
+  the signature base: separator whitespace collapses to the canonical
+  form and decimals gain their three-digit fraction, so a value and
+  its re-spaced wire twin verify identically under `;sf` (without it
+  they are different signatures). Honest scope: the RFC 8941 core
+  types are supported (Dictionary, List, Item and Inner List;
+  Integer, Decimal, String, Token, Byte Sequence, Boolean, and
+  parameters); the RFC 9651 extensions (Date, Display String) are
+  not, and a value that parses as no supported type fails closed on
+  both sides. RFC 9421 expects the application to know the field's
+  type; this library keeps no per-field type registry — the parser
+  tries Dictionary, then List, then Item and takes the first type
+  that consumes the whole value, which yields the RFC's strict bytes
+  for every well-typed value (ambiguous shapes such as a lone token
+  serialize identically under each candidate type). `;sf` combines
+  with `;req` (canonical wire form `;req;sf`), is rejected on derived
+  components like `;bs`, and is incompatible with `;bs` (raw bytes
+  vs. parsed value — the pair fails closed). The strict serializer
+  is also exported as `canonicalizeStructuredFieldValue`.
 - **Sign-side input guards**: `signRequest` fails fast with a descriptive
   configuration error instead of minting a broken signature — `expires`
   earlier than `created` (a signature that is expired at birth), an empty
@@ -395,9 +417,11 @@ const dual = addSignature(merchantSigned, {
 ## Limitations (honest)
 
 - **Subset of RFC 9421.** Not implemented: trailers and component
-  parameters besides `;req`/`;bs` (`;key`, `;sf`, …), and generic
-  keystores over HTTP. The `bs` component parameter *is* implemented
-  for header fields (see "What it implements"). Network key
+  parameters besides `;req`/`;bs`/`;sf` (`;key`, `;tr`, …), and generic
+  keystores over HTTP. The `bs` and `sf` component parameters *are*
+  implemented for header fields (see "What it implements"; `;sf`
+  covers the RFC 8941 core types only, with no per-field type
+  registry). Network key
   discovery *is* implemented for JWKS endpoints: `JwksKeyStore` fetches a
   JWKS document and resolves `keyid`s against the fetched snapshot.
   Response-to-request binding *is* implemented, via the §2.4 `;req`
@@ -611,7 +635,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 449 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 462 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in

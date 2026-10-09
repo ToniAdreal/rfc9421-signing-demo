@@ -16,11 +16,24 @@
  * whitespace or other bytes a plain string join would erase are
  * distinguished. `;bs` and `;req` may combine (in either order; the
  * canonical wire form is `;req;bs`). `;bs` on a derived component
- * (`"@method";bs`, …) is rejected on both sides. Other component
- * parameters (`;key`, `;sf`, …) are not supported and fail closed.
+ * (`"@method";bs`, …) is rejected on both sides. Header field
+ * components may also carry the §2.1.1 `;sf` (strict serialization)
+ * parameter: the field value is parsed as an HTTP Structured Field
+ * (RFC 8941) and re-serialized with the strict rules of RFC 8941 §4
+ * before entering the signature base, so insignificant wire
+ * whitespace canonicalizes identically on both sides (see
+ * structuredFields.ts for the supported types and the honest
+ * type-selection rule). `;sf` combines with `;req` (canonical wire
+ * form `;req;sf`) but is incompatible with `;bs` — `;bs` binds the
+ * raw field bytes while `;sf` binds the parsed value, so the pair
+ * fails closed on both sides, as does `;sf` on a derived component.
+ * Other component parameters (`;key`, `;tr`, …) are not supported
+ * and fail closed.
  * Signature algorithms are handled by sign.ts / verify.ts; this module
  * only deals with the canonical bytes that get signed.
  */
+
+import { canonicalizeStructuredFieldValue } from "./structuredFields.js";
 
 export interface RequestLike {
   method: string;
@@ -137,42 +150,57 @@ interface ComponentIdParts {
   req: boolean;
   /** True when the identifier carries the RFC 9421 §2.1.2 `;bs` parameter. */
   bs: boolean;
+  /** True when the identifier carries the RFC 9421 §2.1.1 `;sf` parameter. */
+  sf: boolean;
 }
 
 /**
  * Split a covered component identifier into its bare name and its
- * component parameters. Only the bare (valueless) parameters `;req`
- * and `;bs` are supported, each at most once, in either order; any
- * other parameter (`;key`, `;sf`, a valued `;req=…`/`;bs=…`, or a
- * duplicate) is a hard error — silently ignoring an unknown parameter
- * would build a different signature base than the signer intended, so
- * this fails closed on both sides.
+ * component parameters. Only the bare (valueless) parameters `;req`,
+ * `;bs`, and `;sf` are supported, each at most once, in any order; any
+ * other parameter (`;key`, `;tr`, a valued `;req=…`/`;bs=…`/`;sf=…`,
+ * or a duplicate) is a hard error — silently ignoring an unknown
+ * parameter would build a different signature base than the signer
+ * intended, so this fails closed on both sides. `;bs` and `;sf`
+ * together are likewise a hard error: RFC 9421 §2.1 notes the pair is
+ * incompatible (`;bs` needs the raw field bytes, `;sf` needs the
+ * parsed field value).
  */
 function parseComponentId(raw: string): ComponentIdParts {
   const parts = raw.trim().split(";");
   const base = parts[0].trim().toLowerCase();
-  if (parts.length === 1) return { base, req: false, bs: false };
+  if (parts.length === 1) return { base, req: false, bs: false, sf: false };
   const params = parts.slice(1).map((p) => p.trim().toLowerCase());
-  const bad = params.find((p) => p !== "req" && p !== "bs");
+  const bad = params.find((p) => p !== "req" && p !== "bs" && p !== "sf");
   if (bad !== undefined)
     throw new Error(
-      `unsupported component parameter ";${bad}" on component "${base}": only ";req" and ";bs" are supported`,
+      `unsupported component parameter ";${bad}" on component "${base}": only ";req", ";bs" and ";sf" are supported`,
     );
   if (new Set(params).size !== params.length)
     throw new Error(
-      `duplicate component parameter on component "${base}": ";req" and ";bs" may each appear at most once`,
+      `duplicate component parameter on component "${base}": ";req", ";bs" and ";sf" may each appear at most once`,
     );
-  return { base, req: params.includes("req"), bs: params.includes("bs") };
+  if (params.includes("bs") && params.includes("sf"))
+    throw new Error(
+      `component parameters ";bs" and ";sf" are not compatible on component "${base}": ";bs" binds the raw field bytes, ";sf" binds the parsed Structured Field value`,
+    );
+  return {
+    base,
+    req: params.includes("req"),
+    bs: params.includes("bs"),
+    sf: params.includes("sf"),
+  };
 }
 
 /**
  * Canonical wire form of one component identifier: `"base"`, optionally
- * followed by `;req` then `;bs` (canonical order, regardless of the
- * order the caller wrote them in).
+ * followed by `;req`, `;bs`, then `;sf` (canonical order, regardless
+ * of the order the caller wrote them in; `;bs` and `;sf` never
+ * co-occur — the pair is rejected by `parseComponentId`).
  */
 function serializeComponentId(raw: string): string {
-  const { base, req, bs } = parseComponentId(raw);
-  return `${quoteString(base)}${req ? ";req" : ""}${bs ? ";bs" : ""}`;
+  const { base, req, bs, sf } = parseComponentId(raw);
+  return `${quoteString(base)}${req ? ";req" : ""}${bs ? ";bs" : ""}${sf ? ";sf" : ""}`;
 }
 
 /** Resolve one covered component identifier to its canonical string value. */
@@ -181,7 +209,7 @@ export function resolveComponent(
   req: RequestLike,
   params: SignatureParams,
 ): string {
-  const { base: cid, req: isReq, bs: isBs } = parseComponentId(id);
+  const { base: cid, req: isReq, bs: isBs, sf: isSf } = parseComponentId(id);
   // RFC 9421 §2.4: a `;req` component resolves against the associated
   // request, not the message carrying the signature. Without an
   // associated request there is nothing to bind to — fail fast on the
@@ -206,6 +234,27 @@ export function resolveComponent(
     if (raw === undefined)
       throw new Error(`covered header field "${cid}" is missing from the request`);
     return `:${Buffer.from(raw, "utf8").toString("base64")}:`;
+  }
+  // RFC 9421 §2.1.1: `;sf` re-serializes a *field value* with the
+  // strict Structured Field rules. As with `;bs`, a derived component
+  // has no field value to parse, so `;sf` on one is a hard error on
+  // both sides. A field value that is not a valid Structured Field
+  // fails closed the same way — never silently signed as-is.
+  if (isSf) {
+    if (cid.startsWith("@"))
+      throw new Error(
+        `unsupported component parameter ";sf" on derived component "${cid}": ";sf" is only supported on header field components`,
+      );
+    const v = getHeader(target.headers, cid);
+    if (v === undefined)
+      throw new Error(`covered header field "${cid}" is missing from the request`);
+    try {
+      return canonicalizeStructuredFieldValue(normalizeFieldValue(v));
+    } catch (err) {
+      throw new Error(
+        `covered header field "${cid}" cannot be serialized with ";sf": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
   const url = new URL(target.url);
   switch (cid) {
@@ -309,7 +358,8 @@ export interface ParsedSignatureInput {
  * `;req`/`;bs` suffix (`;req` before `;bs`) when the base is
  * rebuilt, and unsupported parameters are preserved verbatim in
  * the stored form so `resolveComponent` can reject them
- * fail-closed instead of ignoring them.
+ * fail-closed instead of ignoring them. (Wording covers `;sf` the
+ * same way: a supported bare suffix is canonicalized on rebuild.)
  */
 function parseComponentIds(inner: string): string[] {
   const ids: string[] = [];
