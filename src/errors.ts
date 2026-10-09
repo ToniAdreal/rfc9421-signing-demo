@@ -60,6 +60,16 @@ export type VerifyFailureCode =
    */
   | "MISSING_EXPIRES"
   /**
+   * Both `created` and `expires` are present but `expires` is earlier
+   * than `created`: the signature was already expired at birth. The
+   * signing side rejects this (`signRequest`); this code covers
+   * third-party / hand-built signatures. `expires === created` is
+   * allowed, mirroring the signing side. Checked only *after* the
+   * cryptographic check, so forgeries still report
+   * `SIGNATURE_MISMATCH`.
+   */
+  | "INVALID_TIME_WINDOW"
+  /**
    * Nonce already seen within the TTL of `VerifyOptions.replayCache`
    * (replayed signature). Only possible when a cache is configured and
    * the signature carries a `nonce`.

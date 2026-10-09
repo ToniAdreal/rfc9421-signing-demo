@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 366 tests, all local, no network
+npm test   # 375 tests, all local, no network
 ```
 
 ## Quickstart
@@ -496,6 +496,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `SIGNATURE_TOO_OLD` | `created` is older than the opt-in `VerifyOptions.maxSignatureAgeSec` window |
 | `MISSING_CREATED` | `requireCreated` is set but the signature carries no `created` |
 | `MISSING_EXPIRES` | `requireExpires` is set but the signature carries no `expires` |
+| `INVALID_TIME_WINDOW` | both timestamps present but `expires` is earlier than `created` (signature already expired at birth; `expires === created` is allowed) |
 | `NONCE_REPLAY` | nonce already seen within the replay-cache TTL (`VerifyOptions.replayCache`) |
 | `MISSING_REQUIRED_COMPONENT` | the signature omits a component required by `VerifyOptions.requiredComponents` |
 
@@ -516,7 +517,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 366 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 375 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

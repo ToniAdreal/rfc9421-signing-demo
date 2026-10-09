@@ -660,6 +660,31 @@ export function verifyRequest(
       nonce: parsed.params.nonce,
     };
 
+  // Self-contradictory window: `expires` earlier than `created` means the
+  // signature was already expired at birth. `signRequest` refuses to mint
+  // such a signature, but a third-party / hand-built one can carry it —
+  // and the individual checks below would let it through whenever the
+  // tolerances are wide enough (e.g. created=1000, expires=900,
+  // expiredToleranceSec=120, now=950 passes both). Checked here, after
+  // the cryptographic check, so forgeries still report
+  // SIGNATURE_MISMATCH. `expires === created` is allowed, mirroring the
+  // signing side; a signature missing either timestamp never triggers
+  // this.
+  if (
+    parsed.params.created !== undefined &&
+    parsed.params.expires !== undefined &&
+    parsed.params.expires < parsed.params.created
+  )
+    return {
+      ok: false,
+      code: "INVALID_TIME_WINDOW",
+      reason: `signature expires (${parsed.params.expires}) is earlier than its created (${parsed.params.created}): the signature was already expired at birth`,
+      label,
+      keyId: parsed.params.keyid,
+      alg: effectiveAlg,
+      nonce: parsed.params.nonce,
+    };
+
   if (
     parsed.params.expires !== undefined &&
     now > parsed.params.expires + expiredTolerance
