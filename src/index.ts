@@ -43,6 +43,7 @@ export type {
 export {
   buildSignatureBase,
   getHeader,
+  getHeaderRaw,
   joinHeaderValues,
   listSignatureLabels,
   parseSignatureField,

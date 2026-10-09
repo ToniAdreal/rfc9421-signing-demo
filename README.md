@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 427 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 437 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 ## Quickstart
@@ -220,8 +220,20 @@ configuration `Error` instead of silently defaulting.
   with no associated request fails fast on the sign side and with
   `SIGNATURE_BASE_BUILD_FAILED` on the verify side. A plain component and
   its `;req` twin may coexist in one signature (`"@method"` and
-  `"@method";req` are distinct lines). Only `;req` is supported — other
-  component parameters (`;key`, `;bs`, `;sf`, …) fail closed.
+  `"@method";req` are distinct lines).
+- **Byte-sequence header values (§2.1.2 `;bs`)**: a header field
+  component may carry `;bs` — `"x-charge-ref";bs` — in which case the
+  field value enters the signature base as its raw bytes serialized
+  `:base64:`, with no whitespace trimming or normalization. That binds
+  bytes a plain string component would erase: a value and the same
+  value with its trailing space stripped verify identically without
+  `;bs`, but are different signatures with it. `;bs` combines with
+  `;req` (either order; canonical wire form `;req;bs`), is rejected on
+  derived components (`"@method";bs` fails fast on the sign side and
+  with `SIGNATURE_BASE_BUILD_FAILED` on the verify side), and other
+  component parameters (`;key`, `;sf`, …) still fail closed. For a
+  multi-value field, `;bs` joins the raw (untrimmed) elements with
+  ", " before encoding.
 - **Sign-side input guards**: `signRequest` fails fast with a descriptive
   configuration error instead of minting a broken signature — `expires`
   earlier than `created` (a signature that is expired at birth), an empty
@@ -373,9 +385,10 @@ const dual = addSignature(merchantSigned, {
 
 ## Limitations (honest)
 
-- **Subset of RFC 9421.** Not implemented: trailers, the `bs`
-  component parameter (and other component parameters besides `;req` —
-  `;key`, `;sf`, …), and generic keystores over HTTP. Network key
+- **Subset of RFC 9421.** Not implemented: trailers and component
+  parameters besides `;req`/`;bs` (`;key`, `;sf`, …), and generic
+  keystores over HTTP. The `bs` component parameter *is* implemented
+  for header fields (see "What it implements"). Network key
   discovery *is* implemented for JWKS endpoints: `JwksKeyStore` fetches a
   JWKS document and resolves `keyid`s against the fetched snapshot.
   Response-to-request binding *is* implemented, via the §2.4 `;req`
@@ -478,10 +491,9 @@ most also appear in [Limitations](#limitations)):
 - **Components.** Binding a response signature to the request that caused
   it is supported via the `;req` component parameter (§2.4) — there is no
   `@request-response` derived component in RFC 9421 (earlier versions of
-  this README named one in error). Not supported: trailers, the `bs`
-  component parameter (and other component parameters besides `;req`),
-  and other derived components beyond the list under
-  "What it implements".
+  this README named one in error). Not supported: trailers, component
+  parameters besides `;req`/`;bs`, and other derived components beyond
+  the list under "What it implements".
 - **Multiple signatures.** `verifyRequest` checks one label per call; for
   multi-party flows, `verifyAllLabels` verifies every label in the request
   (one `VerifyResult` per label, and a failing label never blocks the
@@ -587,7 +599,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 427 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 437 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in
