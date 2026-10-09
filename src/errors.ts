@@ -76,6 +76,16 @@ export type VerifyFailureCode =
    */
   | "NONCE_REPLAY"
   /**
+   * `VerifyOptions.requireNonce` is set but the signature carries no
+   * `nonce` parameter, or carries an empty-string one (treated as
+   * missing: the signing side rejects empty nonces, so one on the wire
+   * can only come from a third party). Only possible when the caller
+   * opted in. Checked only *after* the cryptographic check and *before*
+   * the nonce replay store, so forgeries still report
+   * `SIGNATURE_MISMATCH`.
+   */
+  | "MISSING_NONCE"
+  /**
    * The signature did not cover one or more components demanded by
    * `VerifyOptions.requiredComponents` (e.g. a payment-gateway verifier
    * requiring `content-digest` or `@path`). Only possible when the

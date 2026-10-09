@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 383 tests, all local, no network
+npm test   # 392 tests, all local, no network
 ```
 
 ## Quickstart
@@ -243,7 +243,13 @@ configuration `Error` instead of silently defaulting.
   `verifyRequest(req, { key, replayCache })`: a nonce already seen within
   the cache TTL fails with `NONCE_REPLAY` (fresh nonces are recorded only
   *after* the signature fully verifies, so forgeries can't pollute the
-  cache). The cache is in-memory, bounded (LRU + TTL), and per-process —
+  cache). The cache is only consulted when a signature actually carries
+  a nonce, so a nonce-less signature bypasses it silently — set
+  `requireNonce: true` alongside it when such signatures must be
+  rejected instead: they then fail with `MISSING_NONCE` (an empty-string
+  nonce counts as missing), checked after the cryptographic check and
+  before the cache query. The cache itself is shared across
+  `verifyAllLabels` labels, while `requireNonce` is judged per label. The cache is in-memory, bounded (LRU + TTL), and per-process —
   multi-verifier deployments still need a shared nonce store (see the
   Limitations and SECURITY.md). Call `cache.stats()` for observability:
   it returns a `{ size, hits, misses, evictions }` snapshot (expired-entry
@@ -426,7 +432,9 @@ most also appear in [Limitations](#limitations)):
   only bound the acceptance window. RFC 9421 `nonce` is supported
   (`signRequest` accepts a `nonce` option; `verifyRequest` echoes it back
   as `result.nonce`), and an opt-in per-process in-memory `ReplayCache`
-  (LRU + TTL) rejects a replayed nonce with `NONCE_REPLAY`. There is no
+  (LRU + TTL) rejects a replayed nonce with `NONCE_REPLAY`; the opt-in
+  `requireNonce` rejects nonce-less signatures with `MISSING_NONCE`
+  instead of letting them bypass the cache. There is no
   shared or distributed nonce store — multi-verifier deployments still
   need one (see Limitations).
 
@@ -498,6 +506,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `MISSING_EXPIRES` | `requireExpires` is set but the signature carries no `expires` |
 | `INVALID_TIME_WINDOW` | both timestamps present but `expires` is earlier than `created` (signature already expired at birth; `expires === created` is allowed) |
 | `NONCE_REPLAY` | nonce already seen within the replay-cache TTL (`VerifyOptions.replayCache`) |
+| `MISSING_NONCE` | `requireNonce` is set but the signature carries no `nonce` (or an empty-string one) |
 | `MISSING_REQUIRED_COMPONENT` | the signature omits a component required by `VerifyOptions.requiredComponents` |
 
 ```ts
@@ -517,7 +526,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 383 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 392 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No network access, no randomness in assertions (keys are generated per-test
 but only round-trip properties are asserted).

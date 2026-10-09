@@ -79,6 +79,21 @@ export interface VerifyOptions {
    */
   requireExpires?: boolean;
   /**
+   * Reject signatures that carry no (non-empty) `nonce` parameter.
+   * Same rationale as `requireCreated`, but for replay protection: the
+   * `replayCache` is only consulted when a signature actually carries a
+   * nonce, so configuring a cache alone silently leaves nonce-less
+   * signatures unprotected — a signer (or its misconfiguration) that
+   * omits the nonce disables the defense without any signal. Defaults
+   * to false (backwards compatible): no check is made unless you opt
+   * in. An empty-string nonce counts as missing (the signing side
+   * rejects empty nonces, so one on the wire can only come from a
+   * third party). Fails with `MISSING_NONCE`, checked only *after*
+   * the cryptographic check and *before* the replay store, so
+   * forgeries are still reported as `SIGNATURE_MISMATCH`.
+   */
+  requireNonce?: boolean;
+  /**
    * Maximum acceptable signature age, in seconds (opt-in). When set, a
    * signature whose `created` timestamp is older than this is rejected
    * with `SIGNATURE_TOO_OLD` — even when it carries no `expires` (an old
@@ -138,7 +153,9 @@ export interface VerifyOptions {
    * every other check has passed: a nonce already seen fails with
    * `NONCE_REPLAY`, otherwise the nonce is recorded. Failed
    * verifications never record anything, so forgeries cannot pollute the
-   * store. A signature without a nonce bypasses the store entirely.
+   * store. A signature without a nonce bypasses the store entirely —
+   * set `requireNonce` as well when nonce-less signatures must be
+   * rejected (`MISSING_NONCE`) instead of bypassing.
    * Defaults to unset: no replay detection (backwards compatible).
    *
    * `ReplayCache` is the built-in in-memory implementation; implement
@@ -728,6 +745,28 @@ export function verifyRequest(
       ok: false,
       code: "SIGNATURE_TOO_OLD",
       reason: `signature is too old: created ${now - parsed.params.created}s ago, older than maxSignatureAgeSec=${maxAge}`,
+      label,
+      keyId: parsed.params.keyid,
+      alg: effectiveAlg,
+      nonce: parsed.params.nonce,
+    };
+
+  // Required nonce (opt-in): the replay store below is only consulted
+  // when a signature carries a non-empty nonce, so without this check a
+  // nonce-less signature silently bypasses replay protection even when
+  // the caller configured a store. Checked here, after the
+  // cryptographic check (forgeries still report SIGNATURE_MISMATCH)
+  // and before the store query. An empty-string nonce counts as
+  // missing — `signRequest` refuses to mint one, so it can only arrive
+  // from a third party.
+  if (
+    opts.requireNonce === true &&
+    (parsed.params.nonce === undefined || parsed.params.nonce === "")
+  )
+    return {
+      ok: false,
+      code: "MISSING_NONCE",
+      reason: "signature carries no `nonce` but requireNonce is set",
       label,
       keyId: parsed.params.keyid,
       alg: effectiveAlg,
