@@ -346,6 +346,43 @@ function serializeDictionary(entries: SfDictEntry[]): string {
  * valid Structured Field of any supported type; see the module header
  * for the Dictionary → List → Item selection rule and its limits.
  */
+/**
+ * Parse `value` as a Dictionary Structured Field and return the strict
+ * serialization of the single member named `key` — the component value
+ * a RFC 9421 §2.1.1 `;key="…"` covered component contributes to the
+ * signature base. Per RFC 9421 §2.1.2.1.2 the member value is
+ * serialized as an Item or Inner List (RFC 8941 §4.1.2) WITHOUT the
+ * Dictionary key itself, so a bare key (a Boolean-true member)
+ * serializes as `?1`, parameters stay attached to the member value,
+ * and members other than `key` contribute nothing.
+ *
+ * Throws a descriptive `Error` when the value is not a Dictionary or
+ * the named member is absent — the caller (sign/verify) fails closed
+ * rather than signing an empty or whole-field value by mistake.
+ */
+export function serializeDictionaryMemberValue(value: string, key: string): string {
+  const input = value.replace(/^[ \t]+|[ \t]+$/g, "");
+  if (input.length === 0) {
+    throw new Error("empty value is not a valid Dictionary Structured Field");
+  }
+  const p = new SfParser(input);
+  let entries: SfDictEntry[];
+  try {
+    entries = p.parseDictionary();
+    p.skipOws();
+    if (!p.atEnd) throw new Error("trailing characters after dictionary");
+  } catch (err) {
+    throw new Error(
+      `not a valid Dictionary Structured Field value: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const entry = entries.find((e) => e.key === key);
+  if (entry === undefined) {
+    throw new Error(`dictionary member "${key}" is not present in the field value`);
+  }
+  return serializeMember(entry.member);
+}
+
 export function canonicalizeStructuredFieldValue(value: string): string {
   const input = value.replace(/^[ \t]+|[ \t]+$/g, "");
   if (input.length === 0) {

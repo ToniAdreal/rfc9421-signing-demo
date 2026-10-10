@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 462 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 479 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 ## Quickstart
@@ -231,7 +231,7 @@ configuration `Error` instead of silently defaulting.
   `;req` (either order; canonical wire form `;req;bs`), is rejected on
   derived components (`"@method";bs` fails fast on the sign side and
   with `SIGNATURE_BASE_BUILD_FAILED` on the verify side), and other
-  component parameters (`;key`, `;tr`, …) still fail closed. For a
+  component parameters (`;tr`, …) still fail closed. For a
   multi-value field, `;bs` joins the raw (untrimmed) elements with
   ", " before encoding.
 - **Strict Structured Field serialization (§2.1.1 `;sf`)**: a header
@@ -256,6 +256,27 @@ configuration `Error` instead of silently defaulting.
   components like `;bs`, and is incompatible with `;bs` (raw bytes
   vs. parsed value — the pair fails closed). The strict serializer
   is also exported as `canonicalizeStructuredFieldValue`.
+- **Dictionary member selection (§2.1.1 `;key`)**: a header field
+  component may carry `;key="<name>"` — `"x-dict";key="b"` — in which
+  case the field value is parsed as a Dictionary Structured Field and
+  only the named member enters the signature base, serialized
+  strictly as an Item or Inner List *without* the key itself
+  (RFC 8941 §4.1.2; a bare key serializes as `?1`). The other members
+  are deliberately not bound: editing an unselected member leaves
+  the signature valid, while editing, re-parameterizing, or deleting
+  the selected member fails verification — the fine-grained binding
+  gateways use for structured fields such as `content-digest`
+  (`"content-digest";key="sha-512"`). A member that does not exist
+  fails fast on the sign side and with
+  `SIGNATURE_BASE_BUILD_FAILED` on the verify side — never an
+  empty-string component value. The parameter value must be a quoted
+  string naming a valid Dictionary key (missing, unquoted, or
+  non-key values fail closed). `;key` combines with `;req`
+  (canonical wire form `;req;key="…"`), is rejected on derived
+  components, and is incompatible with both `;bs` and `;sf` (raw
+  bytes / whole-field serialization vs. one strictly serialized
+  member — the pairs fail closed). The member extractor is also
+  exported as `serializeDictionaryMemberValue`.
 - **Sign-side input guards**: `signRequest` fails fast with a descriptive
   configuration error instead of minting a broken signature — `expires`
   earlier than `created` (a signature that is expired at birth), an empty
@@ -417,11 +438,12 @@ const dual = addSignature(merchantSigned, {
 ## Limitations (honest)
 
 - **Subset of RFC 9421.** Not implemented: trailers and component
-  parameters besides `;req`/`;bs`/`;sf` (`;key`, `;tr`, …), and generic
-  keystores over HTTP. The `bs` and `sf` component parameters *are*
-  implemented for header fields (see "What it implements"; `;sf`
+  parameters besides `;req`/`;bs`/`;sf`/`;key` (`;tr`, …), and generic
+  keystores over HTTP. The `bs`, `sf`, and `key` component parameters
+  *are* implemented for header fields (see "What it implements"; `;sf`
   covers the RFC 8941 core types only, with no per-field type
-  registry). Network key
+  registry, and `;key` selects Dictionary members of those same core
+  types). Network key
   discovery *is* implemented for JWKS endpoints: `JwksKeyStore` fetches a
   JWKS document and resolves `keyid`s against the fetched snapshot.
   Response-to-request binding *is* implemented, via the §2.4 `;req`
@@ -528,7 +550,7 @@ most also appear in [Limitations](#limitations)):
   it is supported via the `;req` component parameter (§2.4) — there is no
   `@request-response` derived component in RFC 9421 (earlier versions of
   this README named one in error). Not supported: trailers, component
-  parameters besides `;req`/`;bs`, and other derived components beyond
+  parameters besides `;req`/`;bs`/`;sf`/`;key`, and other derived components beyond
   the list under "What it implements".
 - **Multiple signatures.** `verifyRequest` checks one label per call; for
   multi-party flows, `verifyAllLabels` verifies every label in the request
@@ -635,7 +657,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 462 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 479 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in

@@ -184,6 +184,6 @@ test("unsupported component parameter ;tr fails closed on the sign side", () => 
         created: CREATED,
         coveredComponents: ["@status", "content-digest;tr"],
       }),
-    /unsupported component parameter ";tr".*only ";req", ";bs" and ";sf" are supported/,
+    /unsupported component parameter ";tr".*only ";req", ";bs", ";sf" and ";key" are supported/,
   );
 });

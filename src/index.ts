@@ -60,6 +60,9 @@ export type {
   RequestLike,
   SignatureParams,
 } from "./components.js";
-export { canonicalizeStructuredFieldValue } from "./structuredFields.js";
+export {
+  canonicalizeStructuredFieldValue,
+  serializeDictionaryMemberValue,
+} from "./structuredFields.js";
 export { fromNodeRequest } from "./nodeHttp.js";
 export type { FromNodeRequestOptions, IncomingRequestLike } from "./nodeHttp.js";

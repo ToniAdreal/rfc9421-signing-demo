@@ -27,13 +27,26 @@
  * form `;req;sf`) but is incompatible with `;bs` — `;bs` binds the
  * raw field bytes while `;sf` binds the parsed value, so the pair
  * fails closed on both sides, as does `;sf` on a derived component.
- * Other component parameters (`;key`, `;tr`, …) are not supported
- * and fail closed.
+ * Header field components may also carry the §2.1.1 `;key="…"`
+ * parameter: the field value is parsed as a Dictionary Structured
+ * Field and only the named member enters the signature base, as its
+ * strict member serialization (Item or Inner List, without the key
+ * itself) — other members are deliberately NOT bound, so they may
+ * change without breaking the signature. `;key` combines with `;req`
+ * (canonical wire form `;req;key="…"`) but not with `;bs` or `;sf`:
+ * `;bs` binds the raw field bytes and `;sf` re-serializes the whole
+ * field, while `;key` already applies the strict serialization to
+ * the selected member alone, so both pairs fail closed, as does
+ * `;key` on a derived component. Other component parameters
+ * (`;tr`, …) are not supported and fail closed.
  * Signature algorithms are handled by sign.ts / verify.ts; this module
  * only deals with the canonical bytes that get signed.
  */
 
-import { canonicalizeStructuredFieldValue } from "./structuredFields.js";
+import {
+  canonicalizeStructuredFieldValue,
+  serializeDictionaryMemberValue,
+} from "./structuredFields.js";
 
 export interface RequestLike {
   method: string;
@@ -152,55 +165,160 @@ interface ComponentIdParts {
   bs: boolean;
   /** True when the identifier carries the RFC 9421 §2.1.1 `;sf` parameter. */
   sf: boolean;
+  /**
+   * The Dictionary member name carried by the RFC 9421 §2.1.1
+   * `;key="…"` parameter, or `undefined` when the parameter is absent.
+   */
+  key?: string;
+}
+
+/** A Dictionary key (RFC 8941 §3.1.3): lowercase letter or `*`, then key chars. */
+const DICTIONARY_KEY_RE = /^[a-z*][a-z0-9_\-.*]*$/;
+
+interface RawParam {
+  name: string;
+  /** Unquoted value text, or `undefined` for a bare (valueless) parameter. */
+  value?: string;
+  /** True when the value arrived as a quoted string (`;key="a"`). */
+  quoted: boolean;
 }
 
 /**
  * Split a covered component identifier into its bare name and its
- * component parameters. Only the bare (valueless) parameters `;req`,
- * `;bs`, and `;sf` are supported, each at most once, in any order; any
- * other parameter (`;key`, `;tr`, a valued `;req=…`/`;bs=…`/`;sf=…`,
- * or a duplicate) is a hard error — silently ignoring an unknown
- * parameter would build a different signature base than the signer
- * intended, so this fails closed on both sides. `;bs` and `;sf`
- * together are likewise a hard error: RFC 9421 §2.1 notes the pair is
- * incompatible (`;bs` needs the raw field bytes, `;sf` needs the
- * parsed field value).
+ * component parameters. The bare (valueless) parameters `;req`,
+ * `;bs`, and `;sf` are supported, each at most once, in any order, as
+ * is the valued parameter `;key="<name>"` whose value must be a
+ * quoted string naming a Dictionary key. Any other parameter
+ * (`;tr`, a valued `;req=…`/`;bs=…`/`;sf=…`, a valueless,
+ * unquoted, or non-key `;key` value, or a duplicate) is a hard
+ * error — silently ignoring an unknown parameter would build a
+ * different signature base than the signer intended, so this fails
+ * closed on both sides. Incompatible pairs are likewise hard errors:
+ * `;bs` with `;sf` (RFC 9421 §2.1: raw field bytes vs. parsed field
+ * value) and `;key` with either of them (`;key` selects one member
+ * and already serializes it strictly, so a whole-field `;sf` or a
+ * raw-bytes `;bs` cannot also apply).
  */
 function parseComponentId(raw: string): ComponentIdParts {
-  const parts = raw.trim().split(";");
-  const base = parts[0].trim().toLowerCase();
-  if (parts.length === 1) return { base, req: false, bs: false, sf: false };
-  const params = parts.slice(1).map((p) => p.trim().toLowerCase());
-  const bad = params.find((p) => p !== "req" && p !== "bs" && p !== "sf");
-  if (bad !== undefined)
+  const input = raw.trim();
+  const semi = input.indexOf(";");
+  const base = (semi === -1 ? input : input.slice(0, semi)).trim().toLowerCase();
+  const params: RawParam[] = [];
+  let i = semi;
+  while (i !== -1 && i < input.length) {
+    // Invariant: input[i] is the ";" opening the next parameter.
+    i++;
+    while (input[i] === " " || input[i] === "\t") i++;
+    const nameMatch = /^[A-Za-z][A-Za-z0-9_-]*/.exec(input.slice(i));
+    if (!nameMatch)
+      throw new Error(
+        `malformed component parameter on component "${base}" at offset ${i}`,
+      );
+    const name = nameMatch[0].toLowerCase();
+    i += nameMatch[0].length;
+    while (input[i] === " " || input[i] === "\t") i++;
+    let value: string | undefined;
+    let quoted = false;
+    if (input[i] === "=") {
+      i++;
+      while (input[i] === " " || input[i] === "\t") i++;
+      if (input[i] === '"') {
+        quoted = true;
+        i++;
+        let out = "";
+        let closed = false;
+        while (i < input.length) {
+          const c = input[i];
+          if (c === "\\" && i + 1 < input.length) {
+            out += input[i + 1];
+            i += 2;
+          } else if (c === '"') {
+            closed = true;
+            i++;
+            break;
+          } else {
+            out += c;
+            i++;
+          }
+        }
+        if (!closed)
+          throw new Error(
+            `unterminated string value for component parameter ";${name}" on component "${base}"`,
+          );
+        value = out;
+      } else {
+        const start = i;
+        while (i < input.length && input[i] !== ";" && input[i] !== " " && input[i] !== "\t") i++;
+        value = input.slice(start, i);
+      }
+    }
+    params.push({ name, value, quoted });
+    while (input[i] === " " || input[i] === "\t") i++;
+    if (i < input.length && input[i] !== ";")
+      throw new Error(
+        `malformed component parameter ";${name}" on component "${base}" at offset ${i}`,
+      );
+  }
+  for (const p of params) {
+    if (p.name !== "req" && p.name !== "bs" && p.name !== "sf" && p.name !== "key")
+      throw new Error(
+        `unsupported component parameter ";${p.name}" on component "${base}": only ";req", ";bs", ";sf" and ";key" are supported`,
+      );
+    if (p.name !== "key" && p.value !== undefined)
+      throw new Error(
+        `component parameter ";${p.name}" on component "${base}" does not take a value`,
+      );
+  }
+  const names = params.map((p) => p.name);
+  if (new Set(names).size !== names.length)
     throw new Error(
-      `unsupported component parameter ";${bad}" on component "${base}": only ";req", ";bs" and ";sf" are supported`,
+      `duplicate component parameter on component "${base}": ";req", ";bs", ";sf" and ";key" may each appear at most once`,
     );
-  if (new Set(params).size !== params.length)
-    throw new Error(
-      `duplicate component parameter on component "${base}": ";req", ";bs" and ";sf" may each appear at most once`,
-    );
-  if (params.includes("bs") && params.includes("sf"))
+  const keyParam = params.find((p) => p.name === "key");
+  let key: string | undefined;
+  if (keyParam !== undefined) {
+    if (keyParam.value === undefined || !keyParam.quoted)
+      throw new Error(
+        `component parameter ";key" on component "${base}" requires a quoted string value: write it as ;key="<name>"`,
+      );
+    if (!DICTIONARY_KEY_RE.test(keyParam.value))
+      throw new Error(
+        `invalid ";key" value "${keyParam.value}" on component "${base}": not a valid Dictionary key`,
+      );
+    key = keyParam.value;
+  }
+  const has = (n: string) => names.includes(n);
+  if (has("bs") && has("sf"))
     throw new Error(
       `component parameters ";bs" and ";sf" are not compatible on component "${base}": ";bs" binds the raw field bytes, ";sf" binds the parsed Structured Field value`,
     );
+  if (key !== undefined && has("bs"))
+    throw new Error(
+      `component parameters ";key" and ";bs" are not compatible on component "${base}": ";key" binds one parsed Dictionary member, ";bs" binds the raw field bytes`,
+    );
+  if (key !== undefined && has("sf"))
+    throw new Error(
+      `component parameters ";key" and ";sf" are not compatible on component "${base}": ";key" already serializes the selected Dictionary member with the strict rules, so a whole-field ";sf" cannot also apply`,
+    );
   return {
     base,
-    req: params.includes("req"),
-    bs: params.includes("bs"),
-    sf: params.includes("sf"),
+    req: has("req"),
+    bs: has("bs"),
+    sf: has("sf"),
+    key,
   };
 }
 
 /**
  * Canonical wire form of one component identifier: `"base"`, optionally
- * followed by `;req`, `;bs`, then `;sf` (canonical order, regardless
- * of the order the caller wrote them in; `;bs` and `;sf` never
- * co-occur — the pair is rejected by `parseComponentId`).
+ * followed by `;req`, `;key="…"`, `;bs`, then `;sf` (canonical order,
+ * regardless of the order the caller wrote them in; `;key` never
+ * co-occurs with `;bs`/`;sf` and `;bs`/`;sf` never co-occur — those
+ * pairs are rejected by `parseComponentId`).
  */
 function serializeComponentId(raw: string): string {
-  const { base, req, bs, sf } = parseComponentId(raw);
-  return `${quoteString(base)}${req ? ";req" : ""}${bs ? ";bs" : ""}${sf ? ";sf" : ""}`;
+  const { base, req, bs, sf, key } = parseComponentId(raw);
+  return `${quoteString(base)}${req ? ";req" : ""}${key !== undefined ? `;key=${quoteString(key)}` : ""}${bs ? ";bs" : ""}${sf ? ";sf" : ""}`;
 }
 
 /** Resolve one covered component identifier to its canonical string value. */
@@ -209,7 +327,7 @@ export function resolveComponent(
   req: RequestLike,
   params: SignatureParams,
 ): string {
-  const { base: cid, req: isReq, bs: isBs, sf: isSf } = parseComponentId(id);
+  const { base: cid, req: isReq, bs: isBs, sf: isSf, key: dictKey } = parseComponentId(id);
   // RFC 9421 §2.4: a `;req` component resolves against the associated
   // request, not the message carrying the signature. Without an
   // associated request there is nothing to bind to — fail fast on the
@@ -253,6 +371,29 @@ export function resolveComponent(
     } catch (err) {
       throw new Error(
         `covered header field "${cid}" cannot be serialized with ";sf": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  // RFC 9421 §2.1.1: `;key` selects one member of a Dictionary
+  // field value. A derived component has no field value to select
+  // from, so `;key` on one is a hard error on both sides, like
+  // `;bs`/`;sf`. The selected member is serialized strictly WITHOUT
+  // its key (a missing member or a non-Dictionary value fails closed
+  // — never an empty string, which would let distinct field values
+  // collide onto one signature base).
+  if (dictKey !== undefined) {
+    if (cid.startsWith("@"))
+      throw new Error(
+        `unsupported component parameter ";key" on derived component "${cid}": ";key" is only supported on header field components`,
+      );
+    const v = getHeader(target.headers, cid);
+    if (v === undefined)
+      throw new Error(`covered header field "${cid}" is missing from the request`);
+    try {
+      return serializeDictionaryMemberValue(normalizeFieldValue(v), dictKey);
+    } catch (err) {
+      throw new Error(
+        `covered header field "${cid}" cannot be serialized with ";key=\"${dictKey}\"": ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -358,8 +499,9 @@ export interface ParsedSignatureInput {
  * `;req`/`;bs` suffix (`;req` before `;bs`) when the base is
  * rebuilt, and unsupported parameters are preserved verbatim in
  * the stored form so `resolveComponent` can reject them
- * fail-closed instead of ignoring them. (Wording covers `;sf` the
- * same way: a supported bare suffix is canonicalized on rebuild.)
+ * fail-closed instead of ignoring them. (Wording covers `;sf` and
+ * `;key="…"` the same way: a supported suffix is canonicalized on
+ * rebuild, with the `;key` string value preserved as-is.)
  */
 function parseComponentIds(inner: string): string[] {
   const ids: string[] = [];
