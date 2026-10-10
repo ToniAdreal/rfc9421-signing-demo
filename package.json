@@ -15,14 +15,25 @@
   ],
   "license": "MIT",
   "main": "dist/src/index.js",
-  "name": "rfc9421-signing-demo",
+  "name": "@toniadreal/rfc9421-signing-demo",
   "scripts": {
     "bench": "npm run build && node dist/bench/bench.js",
     "build": "tsc",
     "clean": "rm -rf dist",
-    "test": "npm run build && node --test dist/test/*.test.js"
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "prepack": "npm run build"
   },
   "type": "module",
   "types": "dist/src/index.d.ts",
-  "version": "0.1.0"
+  "version": "0.1.0",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ToniAdreal/rfc9421-signing-demo.git"
+  },
+  "files": [
+    "dist"
+  ]
 }
