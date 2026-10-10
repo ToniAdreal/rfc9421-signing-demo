@@ -101,7 +101,12 @@ Read this before using it anywhere that matters.
   implemented via the opt-in `JwksKeyStore`: `refresh()` fetches a JWKS
   document and imports its keys by `kid` (ed25519 / P-256 / RSA only;
   entries carrying private `"d"` material make the refresh throw), and
-  its synchronous `resolve` plugs into `keyResolver`. There is still
+  its synchronous `resolve` plugs into `keyResolver`. A fetched snapshot
+  can be exported (`exportSnapshot()`) and restored
+  (`JwksKeyStore.restore()`) across the same process's restart, but the
+  exported snapshot is unsigned — anyone who can rewrite it can
+  substitute verification keys, so treat it as trusted configuration —
+  and the library never persists it itself. There is still
   no built-in persistent keystore and no automatic rotation schedule:
   how keys are generated and stored, how often the JWKS snapshot is
   re-fetched, and the mapping of `keyid` values are on the caller.

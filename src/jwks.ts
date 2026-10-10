@@ -1,8 +1,14 @@
 import type { KeyObject } from "node:crypto";
 import {
+  exportPublicKeyJwk,
+  exportPublicKeyJwkP256,
+  exportPublicKeyJwkRsa,
   importPublicKeyJwk,
   importPublicKeyJwkP256,
   importPublicKeyJwkRsa,
+  type Ed25519PublicJwk,
+  type P256PublicJwk,
+  type RsaPublicJwk,
 } from "./keys.js";
 
 /**
@@ -49,6 +55,129 @@ export interface JwksKeyStoreOptions {
    * tests can pin time deterministically. Defaults to the wall clock.
    */
   now?: () => number;
+}
+
+/**
+ * One key in a {@link JwksKeyStoreSnapshot}: a public-key-only JWK in
+ * exactly one of the three shapes this library's JWK importers accept
+ * (ed25519 / P-256 / RSA), tagged with the `kid` it resolves under.
+ * Private material never appears here — the store only ever holds
+ * imported *public* keys, and the exporters refuse anything else.
+ */
+export type JwksSnapshotKey =
+  | (Ed25519PublicJwk & { kid: string })
+  | (P256PublicJwk & { kid: string })
+  | (RsaPublicJwk & { kid: string });
+
+/**
+ * Serializable snapshot of a {@link JwksKeyStore}, produced by
+ * `exportSnapshot()` and consumed by `JwksKeyStore.restore()` /
+ * `JwksKeyStore.fromSnapshot()` / `restoreSnapshot()`.
+ *
+ * - `v`: snapshot format version. Only `1` exists; restore rejects
+ *   any other value (including a missing `v`) instead of guessing.
+ * - `fetchedAtSec`: unix seconds of the successful `refresh()` that
+ *   produced the snapshotted keys — the *original* fetch time, not
+ *   the export time. A restored store's `isStale()` counts from this
+ *   timestamp, so restoring never renews freshness: a snapshot taken
+ *   just before its TTL expires is stale almost immediately after a
+ *   restart, exactly as if no restart had happened.
+ * - `keys`: the snapshot's public keys, each carrying its `kid`.
+ *
+ * The snapshot is plain JSON data (`JSON.stringify` it to persist
+ * it), but it is **not signed and not integrity-protected**: anyone
+ * who can rewrite the persisted snapshot can substitute their own
+ * verification keys. Treat it as trusted configuration — store and
+ * transport it only where you would store the JWKS endpoint's own
+ * trust decision — and the endpoint-trust responsibility described on
+ * {@link JwksKeyStore} is unchanged: whatever keys are restored
+ * become verification keys.
+ *
+ * A snapshot covers a single process across its own restart only:
+ * two processes restoring the same snapshot afterwards diverge, and
+ * rotations fetched by one are invisible to the other.
+ */
+export interface JwksKeyStoreSnapshot {
+  v: 1;
+  fetchedAtSec: number;
+  keys: JwksSnapshotKey[];
+}
+
+/**
+ * Strictly validate untrusted snapshot data and import every key it
+ * carries, returning the parsed freshness timestamp and key map.
+ * Shared by the static and instance restore paths so both fail
+ * identically. Throws a descriptive configuration `Error` on any
+ * defect — restore is fail-closed, never partially applied.
+ *
+ * Deliberate semantic difference from `refresh()`: a JWKS entry
+ * without a usable `kid` is *skipped* by `refresh()` (the document
+ * may legitimately publish keys for other protocols), but a snapshot
+ * entry without a `kid` is *fatal* here. A snapshot is this store's
+ * own export format, so a kid-less entry means corrupt or tampered
+ * data, not a foreign key — silently dropping it could retire a key
+ * the operator believes is still being served.
+ */
+function parseJwksSnapshot(snapshot: unknown): {
+  fetchedAtSec: number;
+  keysByKid: Map<string, KeyObject>;
+} {
+  const fail = (detail: string): never => {
+    throw new Error(`JwksKeyStore: invalid snapshot: ${detail}`);
+  };
+  if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot))
+    fail("expected an object of the form { v: 1, fetchedAtSec, keys: [...] }");
+  const record = snapshot as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "v" && key !== "fetchedAtSec" && key !== "keys")
+      fail(`unknown field "${key}"`);
+  }
+  if (record["v"] !== 1)
+    fail(
+      `unsupported snapshot version ${JSON.stringify(record["v"]) ?? String(record["v"])} (expected 1)`,
+    );
+  const fetchedAtSec = record["fetchedAtSec"];
+  if (
+    typeof fetchedAtSec !== "number" ||
+    !Number.isFinite(fetchedAtSec) ||
+    fetchedAtSec < 0
+  )
+    fail("fetchedAtSec must be a finite non-negative number (unix seconds)");
+  const rawKeysUnknown: unknown = record["keys"];
+  if (!Array.isArray(rawKeysUnknown)) fail(`"keys" must be an array`);
+  const rawKeys = rawKeysUnknown as unknown[];
+  const keysByKid = new Map<string, KeyObject>();
+  for (let i = 0; i < rawKeys.length; i++) {
+    const entry: unknown = rawKeys[i];
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry))
+      fail(`keys[${i}] must be a JWK object`);
+    const o = entry as Record<string, unknown>;
+    const kid = o["kid"];
+    if (typeof kid !== "string" || kid.length === 0)
+      fail(
+        `keys[${i}]: kid must be a non-empty string ` +
+          `(snapshot restore is fail-closed: unlike refresh(), kid-less entries are not skipped)`,
+      );
+    let key: KeyObject;
+    try {
+      if (o["kty"] === "OKP") key = importPublicKeyJwk(entry);
+      else if (o["kty"] === "EC") key = importPublicKeyJwkP256(entry);
+      else if (o["kty"] === "RSA") key = importPublicKeyJwkRsa(entry);
+      else
+        throw new Error(
+          `unsupported kty ${JSON.stringify(o["kty"])} (supported: "OKP", "EC", "RSA")`,
+        );
+    } catch (err) {
+      throw new Error(
+        `JwksKeyStore: invalid snapshot: keys[${i}] for kid ${JSON.stringify(kid)}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    // Duplicate kids: the later entry wins, matching refresh().
+    keysByKid.set(kid as string, key);
+  }
+  return { fetchedAtSec: fetchedAtSec as number, keysByKid };
 }
 
 /**
@@ -107,7 +236,14 @@ export interface JwksKeyStoreOptions {
  * revoked key keeps verifying until the next successful `refresh()`
  * replaces the snapshot, bounded by how often the caller refreshes
  * (see `ttlSec` / `isStale()`). The snapshot is per-process and
- * in-memory only; multiple verifier processes each keep their own.
+ * in-memory only; multiple verifier processes each keep their own. A
+ * single process *can* carry its snapshot across its own restart —
+ * `exportSnapshot()` before shutdown, `JwksKeyStore.restore()` at
+ * startup — so a cold start during a JWKS outage can still verify
+ * with the last fetched keys (staleness still counted from the
+ * original fetch time; see {@link JwksKeyStoreSnapshot}). This
+ * library never writes the snapshot anywhere itself: persisting it,
+ * and protecting its integrity, is the caller's job.
  */
 export class JwksKeyStore {
   private readonly url: string;
@@ -293,6 +429,110 @@ export class JwksKeyStore {
     }
     this.keysByKid = next;
     this.lastRefreshAtSec = this.clock();
+  }
+
+  /**
+   * Export the current snapshot as detached, JSON-serializable data
+   * (see {@link JwksKeyStoreSnapshot}): persist it before a restart
+   * and restore it at startup so the new process can verify offline
+   * with the last fetched keys instead of being unable to verify
+   * until its first successful `refresh()`.
+   *
+   * Only public key material is exported — the store holds nothing
+   * else — each key re-exported through the same JWK exporter for
+   * its `kty` and tagged with its `kid`. The returned object
+   * (including every key) is a fresh copy: mutating it does not
+   * affect this store.
+   *
+   * Throws when no `refresh()` has ever succeeded: there is no
+   * meaningful `fetchedAtSec` for keys that were never fetched, and
+   * exporting an empty placeholder would let a caller persist a
+   * keyless snapshot that looks legitimate. (A store whose refresh
+   * succeeded but imported zero keys — every entry was kid-less —
+   * exports a valid snapshot with `keys: []`.)
+   */
+  exportSnapshot(): JwksKeyStoreSnapshot {
+    if (this.lastRefreshAtSec === null)
+      throw new Error(
+        "JwksKeyStore: cannot export a snapshot before a successful refresh() " +
+          "(no keys have been fetched yet)",
+      );
+    const keys: JwksSnapshotKey[] = [];
+    for (const [kid, key] of this.keysByKid) {
+      if (key.asymmetricKeyType === "ed25519")
+        keys.push({ ...exportPublicKeyJwk(key), kid });
+      else if (key.asymmetricKeyType === "ec")
+        keys.push({ ...exportPublicKeyJwkP256(key), kid });
+      else if (key.asymmetricKeyType === "rsa")
+        keys.push({ ...exportPublicKeyJwkRsa(key), kid });
+      else
+        // Unreachable: refresh()/restore only import the three types
+        // above. Fail loudly rather than silently dropping a key.
+        throw new Error(
+          `JwksKeyStore: cannot export key for kid ${JSON.stringify(kid)}: ` +
+            `unsupported asymmetricKeyType ${String(key.asymmetricKeyType)}`,
+        );
+    }
+    return { v: 1, fetchedAtSec: this.lastRefreshAtSec, keys };
+  }
+
+  /**
+   * Atomically replace this store's snapshot with one produced by
+   * `exportSnapshot()` (typically after a `JSON.parse` of the
+   * persisted form), without any network access. On success the
+   * store's endpoint, `fetchImpl`, TTL and clock are unchanged; only
+   * the keys and the freshness timestamp are replaced, and the
+   * timestamp is the snapshot's original `fetchedAtSec` — restoring
+   * never renews freshness, so `isStale()` may immediately report
+   * `true` and the caller's normal refresh loop takes it from there.
+   *
+   * The input is untrusted data and is validated strictly (see
+   * {@link JwksKeyStoreSnapshot} and the note on `parseJwksSnapshot`):
+   * a malformed snapshot, an entry carrying private `"d"` material,
+   * an unsupported `kty`/curve, or a kid-less entry throws a
+   * descriptive `Error` and leaves the current snapshot and freshness
+   * timestamp exactly as they were — restore is fail-closed and
+   * never partially applied.
+   *
+   * The snapshot is not signed: treat it as trusted configuration
+   * (see {@link JwksKeyStoreSnapshot}).
+   */
+  restoreSnapshot(snapshot: unknown): void {
+    const { fetchedAtSec, keysByKid } = parseJwksSnapshot(snapshot);
+    this.keysByKid = keysByKid;
+    this.lastRefreshAtSec = fetchedAtSec;
+  }
+
+  /**
+   * Build a new store for `url` pre-loaded with a snapshot produced
+   * by `exportSnapshot()` — the cold-start path: the returned store
+   * resolves and verifies immediately, with no network access, and
+   * its staleness counts from the snapshot's original `fetchedAtSec`.
+   * `opts` configures the new store (`fetchImpl`/`ttlSec`/`now`) and
+   * is validated exactly like the constructor's; the endpoint is
+   * still needed because later `refresh()` calls fetch from it.
+   *
+   * Snapshot validation is identical to
+   * {@link JwksKeyStore.restoreSnapshot}: any defect throws and no
+   * store is produced.
+   */
+  static restore(
+    snapshot: unknown,
+    url: string,
+    opts: JwksKeyStoreOptions = {},
+  ): JwksKeyStore {
+    const store = new JwksKeyStore(url, opts);
+    store.restoreSnapshot(snapshot);
+    return store;
+  }
+
+  /** Alias of {@link JwksKeyStore.restore} (snapshot naming). */
+  static fromSnapshot(
+    snapshot: unknown,
+    url: string,
+    opts: JwksKeyStoreOptions = {},
+  ): JwksKeyStore {
+    return JwksKeyStore.restore(snapshot, url, opts);
   }
 
   /**

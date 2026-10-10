@@ -12,7 +12,13 @@ export type {
   ReplayCacheStats,
 } from "./replay.js";
 export { JwksKeyStore } from "./jwks.js";
-export type { JwksFetchImpl, JwksFetchResponse, JwksKeyStoreOptions } from "./jwks.js";
+export type {
+  JwksFetchImpl,
+  JwksFetchResponse,
+  JwksKeyStoreOptions,
+  JwksKeyStoreSnapshot,
+  JwksSnapshotKey,
+} from "./jwks.js";
 export { assertContentDigestAlg, contentDigest } from "./digest.js";
 export type { ContentDigestAlg } from "./digest.js";
 export {

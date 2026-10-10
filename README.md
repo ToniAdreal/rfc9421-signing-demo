@@ -173,6 +173,34 @@ the caller's responsibility — whatever it serves becomes a verification
 key, with no TLS pinning or response-signature check here (see
 SECURITY.md).
 
+Snapshot export/restore: a single process can carry its fetched keys
+across its own restart — `store.exportSnapshot()` returns a detached,
+JSON-serializable `{ v: 1, fetchedAtSec, keys }` of public-key JWKs
+(each tagged with its `kid`), and `JwksKeyStore.restore(snapshot, url)`
+(or `store.restoreSnapshot(snapshot)`) rebuilds a store that resolves
+offline, with no fetch:
+
+```ts
+const persisted = JSON.parse(fs.readFileSync("jwks-snapshot.json", "utf8"));
+const store = JwksKeyStore.restore(persisted, "https://gateway.example.com/.well-known/jwks.json");
+const result = verifyRequest(signed, { keyResolver: store.resolve }); // works before any refresh()
+```
+
+Staleness counts from the snapshot's original `fetchedAtSec` —
+restoring never renews freshness, so the caller's refresh loop should
+still run. Restore is fail-closed, deliberately stricter than
+`refresh()`: a malformed snapshot, an entry carrying private `"d"`
+material, an unsupported `kty`, or a kid-less entry (skipped by
+`refresh()`, fatal here — a snapshot is this store's own export format,
+so a kid-less entry means corrupt data) throws and leaves any existing
+snapshot untouched. Honest caveats: the snapshot is **not signed** —
+treat the persisted form as trusted configuration, since whoever can
+rewrite it can substitute their own verification keys — and it covers
+one process across its own restart only; two processes restoring the
+same snapshot diverge immediately afterwards. Exporting before any
+successful `refresh()` throws rather than persisting a keyless
+placeholder.
+
 Receiving signed webhooks with Node's `http` server — the receive→verify
 chain via `fromNodeRequest`:
 
@@ -526,9 +554,12 @@ const dual = addSignature(merchantSigned, {
 - **Demo-grade key management.** Keys are passed in directly, resolved via a
   caller-provided `keyResolver`, or fetched from a JWKS endpoint via
   `JwksKeyStore`; there is still no built-in persistent keystore and no
-  automatic rotation schedule — deciding *when* to re-fetch is the
+  automatic rotation schedule — a `JwksKeyStore` snapshot can be exported
+  and restored across a single process's restart, but the library never
+  writes it anywhere itself, its persisted form is unsigned (trusted
+  configuration only), and deciding *when* to re-fetch remains the
   caller's loop (`refreshIfStale()` performs the `isStale()` check and
-  the re-fetch in one call, but nothing calls it for you), and trusting
+  the re-fetch in one call, but nothing calls it for you). Trusting
   the JWKS endpoint is the caller's responsibility (see SECURITY.md).
 
 ## Interoperability
