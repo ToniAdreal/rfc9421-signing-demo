@@ -117,6 +117,7 @@ export interface SignatureParams {
   keyid?: string;
   alg?: string;
   nonce?: string;
+  tag?: string;
 }
 
 function quoteString(s: string): string {
@@ -616,6 +617,7 @@ export function serializeSignatureParams(
   if (params.keyid !== undefined) out += `;keyid=${quoteString(params.keyid)}`;
   if (params.alg !== undefined) out += `;alg=${quoteString(params.alg)}`;
   if (params.nonce !== undefined) out += `;nonce=${quoteString(params.nonce)}`;
+  if (params.tag !== undefined) out += `;tag=${quoteString(params.tag)}`;
   return out;
 }
 
@@ -741,6 +743,7 @@ function parseParamList(segment: string): SignatureParams {
       if (key === "keyid") params.keyid = s;
       else if (key === "alg") params.alg = s;
       else if (key === "nonce") params.nonce = s;
+      else if (key === "tag") params.tag = s;
     } else if (m[3] !== undefined) {
       const n = parseInt(m[3], 10);
       if (key === "created") params.created = n;

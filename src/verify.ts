@@ -129,6 +129,20 @@ export interface VerifyOptions {
    */
   expectedKeyId?: string;
   /**
+   * Optional application-tag pinning (cross-protocol replay
+   * protection, RFC 9421 §2.3): after the cryptographic check passes,
+   * the `tag` claimed in the signature-input must equal this value,
+   * otherwise verification fails with `TAG_MISMATCH`. A signature
+   * that carries no `tag` also fails when this is set. This binds a
+   * signature to the application protocol it was minted for — e.g. a
+   * payment webhook verifier sets `expectedTag: "payment-webhook-v1"`
+   * so a signature minted for a different protocol that happens to
+   * share the same key cannot be replayed into it. Defaults to unset:
+   * no check is made (backwards compatible). In `verifyAllLabels`
+   * the same expectation applies to every label.
+   */
+  expectedTag?: string;
+  /**
    * Fallback strategy when the `signature-input` carries no `alg`
    * parameter. RFC 9421 leaves `alg` optional (Appendix B.2.5's
    * hmac-sha256 vector omits it), while this library historically
@@ -218,6 +232,12 @@ export interface VerifyResult {
    * its authenticity). Absent when the signer did not send one.
    */
   nonce?: string;
+  /**
+   * The `tag` signature-input parameter parsed from the request, as
+   * seen on the wire (i.e. *before* signature verification establishes
+   * its authenticity). Absent when the signer did not send one.
+   */
+  tag?: string;
 }
 
 /**
@@ -413,6 +433,7 @@ export function verifyRequest(
         keyId: parsed.params.keyid,
         alg: parsed.params.alg,
         nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
       };
   }
   try {
@@ -438,6 +459,7 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: parsed.params.alg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
   }
 
@@ -458,6 +480,7 @@ export function verifyRequest(
         label,
         alg: parsed.params.alg,
         nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
       };
     let resolved: KeyObject | undefined;
     try {
@@ -471,6 +494,7 @@ export function verifyRequest(
         keyId: claimedKeyId,
         alg: parsed.params.alg,
         nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
       };
     }
     if (resolved === undefined)
@@ -482,6 +506,7 @@ export function verifyRequest(
         keyId: claimedKeyId,
         alg: parsed.params.alg,
         nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
       };
     key = resolved;
   }
@@ -592,6 +617,7 @@ export function verifyRequest(
         reason: `unsupported alg "${effectiveAlg}"`,
         label,
         nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
       };
     }
   } catch (e) {
@@ -601,6 +627,7 @@ export function verifyRequest(
       reason: `verification error: ${(e as Error).message}`,
       label,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
   }
   if (!cryptoOk)
@@ -612,6 +639,7 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
 
   // Key-id pinning (key-confusion defense): the signature is already
@@ -632,6 +660,28 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+    };
+
+  // Application-tag pinning (cross-protocol replay defense, RFC 9421
+  // §2.3): the signature is already authenticated by the crypto check
+  // above, and `tag` is part of the signed params, so the claim here
+  // is trustworthy. Reject when it is not the application protocol
+  // this verifier serves — a signature minted for another protocol
+  // must not verify here just because it shares the same key.
+  const expectedTag = opts.expectedTag;
+  if (expectedTag !== undefined && parsed.params.tag !== expectedTag)
+    return {
+      ok: false,
+      code: "TAG_MISMATCH",
+      reason: `tag mismatch: expected "${expectedTag}", got ${
+        parsed.params.tag === undefined ? "no tag" : `"${parsed.params.tag}"`
+      }`,
+      label,
+      keyId: parsed.params.keyid,
+      alg: effectiveAlg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
 
   // Body binding (RFC 9530): the signature only covers the *value* of the
@@ -663,6 +713,7 @@ export function verifyRequest(
         keyId: parsed.params.keyid,
         alg: effectiveAlg,
         nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
       };
     const expected = createHash(dm === dm512 ? "sha512" : "sha256")
       .update(bodyBytes)
@@ -677,6 +728,7 @@ export function verifyRequest(
         keyId: parsed.params.keyid,
         alg: effectiveAlg,
         nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
       };
   }
 
@@ -695,6 +747,7 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
   if (opts.requireExpires === true && parsed.params.expires === undefined)
     return {
@@ -705,6 +758,7 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
 
   // Self-contradictory window: `expires` earlier than `created` means the
@@ -730,6 +784,7 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
 
   if (
@@ -744,6 +799,7 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
   if (
     parsed.params.created !== undefined &&
@@ -757,6 +813,7 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
 
   // Maximum signature age (opt-in webhook-timestamp window): an old
@@ -779,6 +836,7 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
 
   // Required nonce (opt-in): the replay store below is only consulted
@@ -801,6 +859,7 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
     };
 
   // Nonce replay detection: consulted only *after* the signature has
@@ -818,6 +877,7 @@ export function verifyRequest(
         keyId: parsed.params.keyid,
         alg: effectiveAlg,
         nonce,
+        tag: parsed.params.tag,
       };
   }
 
@@ -827,6 +887,7 @@ export function verifyRequest(
     keyId: parsed.params.keyid,
     alg: effectiveAlg,
     nonce,
+    tag: parsed.params.tag,
   };
 }
 
@@ -839,14 +900,14 @@ export function verifyRequest(
 export function verifyRequestOrThrow(
   req: RequestLike,
   opts: VerifyOptions,
-): { label: string; keyId?: string; alg?: string; nonce?: string } {
+): { label: string; keyId?: string; alg?: string; nonce?: string; tag?: string } {
   const res = verifyRequest(req, opts);
   if (res.ok)
-    return { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce };
+    return { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce, tag: res.tag };
   throw new VerifyError(
     res.code ?? "VERIFICATION_ERROR",
     res.reason ?? "verification failed",
-    { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce },
+    { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce, tag: res.tag },
   );
 }
 

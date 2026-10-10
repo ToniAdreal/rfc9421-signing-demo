@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 517 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 536 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 ## Quickstart
@@ -440,6 +440,21 @@ configuration `Error` instead of silently defaulting.
   entries are dropped at load, an over-capacity snapshot keeps the
   newest entries, TTLs keep counting from first sight rather than from
   the restore, and the observability counters restart at zero.
+- **Application tag (RFC 9421 §2.3)**: pass `tag` to `signRequest` and it
+  is emitted as a `tag` signature-input parameter — part of the signed
+  `@signature-params` line, so a forged tag fails with
+  `SIGNATURE_MISMATCH`. The tag binds the signature to one application
+  protocol (e.g. `"payment-webhook-v1"`), which is the cross-protocol
+  replay defense: protocols that share a key (a payment webhook and an
+  admin API signed with the same gateway key, say) cannot replay each
+  other's signatures when the verifier pins its protocol with
+  `verifyRequest(req, { key, expectedTag: "payment-webhook-v1" })` —
+  a different tag, or no tag at all, then fails with `TAG_MISMATCH`,
+  checked after the cryptographic check so forgeries still report
+  `SIGNATURE_MISMATCH`. `verifyRequest` returns the wire tag as
+  `result.tag`; in `verifyAllLabels` the same expectation is judged
+  per label. An empty-string tag is rejected by `signRequest` as a
+  configuration error (it would bind nothing).
 - Minimal `Signature-Input` / `Signature` field parsing for verification.
 - **Node http server adapter**: `fromNodeRequest(req, body, opts?)`
   normalizes an `http.IncomingMessage` into a `RequestLike` (absolute URL
@@ -715,6 +730,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `VERIFICATION_ERROR` | the crypto layer itself threw (e.g. malformed key material) |
 | `SIGNATURE_MISMATCH` | cryptographic signature does not verify (wrong key or tampering) |
 | `KEYID_MISMATCH` | signature's `keyid` does not match the verifier's `expectedKeyId` (or no `keyid` present) |
+| `TAG_MISMATCH` | signature's `tag` does not match the verifier's `expectedTag` (or no `tag` present) |
 | `KEY_RESOLUTION_FAILED` | `keyResolver` could not map the signature's `keyid` to a key (missing or unknown `keyid`) |
 | `MISSING_CONTENT_DIGEST` | body present but no `sha-512` (preferred) or `sha-256` (fallback) entry in `content-digest` |
 | `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` (or `sha-256` fallback) digest |
@@ -745,7 +761,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 517 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 536 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in

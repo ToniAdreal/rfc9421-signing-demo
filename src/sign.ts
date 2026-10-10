@@ -69,6 +69,20 @@ export interface SignOptions {
    */
   nonce?: string;
   /**
+   * Optional application tag (RFC 9421 §2.3): emitted as a `tag`
+   * signature-input parameter and therefore covered by the signature.
+   * The tag binds the signature to one application protocol (e.g.
+   * `"payment-webhook-v1"`), so a signature minted for one protocol
+   * cannot be replayed into another that happens to share a key: the
+   * verifier pins its expected protocol with
+   * `VerifyOptions.expectedTag` and mismatches fail with
+   * `TAG_MISMATCH`. The verifier returns the wire tag on
+   * `VerifyResult.tag`. An empty-string tag is rejected with a
+   * configuration error (it binds nothing and is indistinguishable
+   * from a signer that forgot to set one).
+   */
+  tag?: string;
+  /**
    * Covered components, in order. Defaults to
    * ["@method", "@authority", "@path"] plus "content-digest" when a body
    * is present.
@@ -173,6 +187,8 @@ function assertLabelShape(label: string): void {
  *   it is rejected (`expires === created` is allowed);
  * - `nonce: ""` would be emitted yet bypass the replay cache, so it is
  *   rejected;
+ * - `tag: ""` would bind the signature to no application protocol, so
+ *   it is rejected;
  * - `label` must be an RFC 9421 token the verifier can parse back: commas
  *   and spaces would corrupt the `signature-input` dictionary (the label
  *   is the member key `verifyAllLabels` splits on), and `:`/`/`/leading
@@ -204,6 +220,13 @@ export function signRequest(
     throw new Error(
       'signRequest: "nonce" must not be an empty string; the replay cache skips empty nonces, so this would bypass replay protection',
     );
+  // An empty-string tag binds the signature to no application protocol
+  // at all — fail fast rather than minting a signature that looks
+  // protocol-bound but isn't.
+  if (opts.tag !== undefined && opts.tag === "")
+    throw new Error(
+      'signRequest: "tag" must not be an empty string; an empty tag binds the signature to no application protocol',
+    );
   const covered =
     opts.coveredComponents ?? defaultCoveredComponents(req.body !== undefined);
   if (covered.length === 0)
@@ -231,6 +254,7 @@ export function signRequest(
   if (opts.keyId !== undefined) params.keyid = opts.keyId;
   if (opts.expires !== undefined) params.expires = opts.expires;
   if (opts.nonce !== undefined) params.nonce = opts.nonce;
+  if (opts.tag !== undefined) params.tag = opts.tag;
 
   const signingInput: RequestLike = {
     method: req.method,

@@ -29,6 +29,16 @@ export type VerifyFailureCode =
    */
   | "KEYID_MISMATCH"
   /**
+   * The `tag` signature parameter (RFC 9421 §2.3) does not match the
+   * verifier's `expectedTag`: the signature was minted for a different
+   * application protocol than the one this verifier serves. Includes a
+   * signature that carries no `tag` at all. Only possible when the
+   * caller opted in with `expectedTag`. Checked only *after* the
+   * cryptographic check, so forgeries still report
+   * `SIGNATURE_MISMATCH`.
+   */
+  | "TAG_MISMATCH"
+  /**
    * The `VerifyOptions.keyResolver` lookup could not produce a key: the
    * signature carried no `keyid`, or the resolver returned `undefined`
    * for the claimed `keyid`. Only possible when a resolver is configured.
@@ -99,6 +109,7 @@ export interface VerifyErrorOptions {
   keyId?: string;
   alg?: string;
   nonce?: string;
+  tag?: string;
 }
 
 /**
@@ -113,6 +124,7 @@ export class VerifyError extends Error {
   readonly keyId?: string;
   readonly alg?: string;
   readonly nonce?: string;
+  readonly tag?: string;
 
   constructor(
     code: VerifyFailureCode,
@@ -127,6 +139,7 @@ export class VerifyError extends Error {
     this.keyId = opts.keyId;
     this.alg = opts.alg;
     this.nonce = opts.nonce;
+    this.tag = opts.tag;
   }
 }
 
