@@ -37,8 +37,23 @@
  * `;bs` binds the raw field bytes and `;sf` re-serializes the whole
  * field, while `;key` already applies the strict serialization to
  * the selected member alone, so both pairs fail closed, as does
- * `;key` on a derived component. Other component parameters
- * (`;tr`, …) are not supported and fail closed.
+ * `;key` on a derived component. Header field components may also
+ * carry the §2.1.4 `;tr` (trailer) parameter: the field value is
+ * taken from the message's trailers (`RequestLike.trailers`) instead
+ * of its headers, reusing the same multi-value join / normalization
+ * as header fields. Without `;tr`, trailers never participate — a
+ * header and a trailer with the same field name are independent.
+ * `;tr` is orthogonal to the value transforms: it combines with
+ * `;req` (the trailer is then read from the associated request;
+ * canonical wire form `;req;tr`), with `;bs`, with `;sf`, and with
+ * `;key` (each still subject to its own incompatibilities: `;bs`
+ * with `;sf`/`;key` still fail closed). `;tr` on a derived component
+ * (`"@method";tr`, …) is rejected on both sides, since derived
+ * components have no field value in either headers or trailers.
+ * A covered `;tr` field with no matching trailer fails fast on the
+ * sign side and fails closed on the verify side — never an empty
+ * string. Other component parameters are not supported and fail
+ * closed.
  * Signature algorithms are handled by sign.ts / verify.ts; this module
  * only deals with the canonical bytes that get signed.
  */
@@ -52,6 +67,14 @@ export interface RequestLike {
   method: string;
   url: string;
   headers: Record<string, string | string[] | undefined>;
+  /**
+   * Trailer fields of the message (RFC 9110 §6.5), with the same shape
+   * as `headers`. Only consulted when a covered field component
+   * carries the RFC 9421 §2.1.4 `;tr` parameter: such a component
+   * resolves against `trailers`, never `headers`. Plain (non-`;tr`)
+   * components never consult this field.
+   */
+  trailers?: Record<string, string | string[] | undefined>;
   body?: string | Buffer;
   /**
    * HTTP response status code. Only consulted when `"@status"` is covered
@@ -165,6 +188,8 @@ interface ComponentIdParts {
   bs: boolean;
   /** True when the identifier carries the RFC 9421 §2.1.1 `;sf` parameter. */
   sf: boolean;
+  /** True when the identifier carries the RFC 9421 §2.1.4 `;tr` parameter. */
+  tr: boolean;
   /**
    * The Dictionary member name carried by the RFC 9421 §2.1.1
    * `;key="…"` parameter, or `undefined` when the parameter is absent.
@@ -186,10 +211,11 @@ interface RawParam {
 /**
  * Split a covered component identifier into its bare name and its
  * component parameters. The bare (valueless) parameters `;req`,
- * `;bs`, and `;sf` are supported, each at most once, in any order, as
+ * `;bs`, `;sf`, and `;tr` are supported, each at most once, in any
+ * order, as
  * is the valued parameter `;key="<name>"` whose value must be a
  * quoted string naming a Dictionary key. Any other parameter
- * (`;tr`, a valued `;req=…`/`;bs=…`/`;sf=…`, a valueless,
+ * (a valued `;req=…`/`;bs=…`/`;sf=…`/`;tr=…`, a valueless,
  * unquoted, or non-key `;key` value, or a duplicate) is a hard
  * error — silently ignoring an unknown parameter would build a
  * different signature base than the signer intended, so this fails
@@ -197,7 +223,10 @@ interface RawParam {
  * `;bs` with `;sf` (RFC 9421 §2.1: raw field bytes vs. parsed field
  * value) and `;key` with either of them (`;key` selects one member
  * and already serializes it strictly, so a whole-field `;sf` or a
- * raw-bytes `;bs` cannot also apply).
+ * raw-bytes `;bs` cannot also apply). `;tr` introduces no new
+ * incompatibility: it only selects trailers as the field source, so
+ * it combines with `;req`, `;bs`, `;sf`, and `;key` (subject to the
+ * pairs above).
  */
 function parseComponentId(raw: string): ComponentIdParts {
   const input = raw.trim();
@@ -260,9 +289,9 @@ function parseComponentId(raw: string): ComponentIdParts {
       );
   }
   for (const p of params) {
-    if (p.name !== "req" && p.name !== "bs" && p.name !== "sf" && p.name !== "key")
+    if (p.name !== "req" && p.name !== "bs" && p.name !== "sf" && p.name !== "key" && p.name !== "tr")
       throw new Error(
-        `unsupported component parameter ";${p.name}" on component "${base}": only ";req", ";bs", ";sf" and ";key" are supported`,
+        `unsupported component parameter ";${p.name}" on component "${base}": only ";req", ";bs", ";sf", ";key" and ";tr" are supported`,
       );
     if (p.name !== "key" && p.value !== undefined)
       throw new Error(
@@ -272,7 +301,7 @@ function parseComponentId(raw: string): ComponentIdParts {
   const names = params.map((p) => p.name);
   if (new Set(names).size !== names.length)
     throw new Error(
-      `duplicate component parameter on component "${base}": ";req", ";bs", ";sf" and ";key" may each appear at most once`,
+      `duplicate component parameter on component "${base}": ";req", ";bs", ";sf", ";key" and ";tr" may each appear at most once`,
     );
   const keyParam = params.find((p) => p.name === "key");
   let key: string | undefined;
@@ -305,20 +334,22 @@ function parseComponentId(raw: string): ComponentIdParts {
     req: has("req"),
     bs: has("bs"),
     sf: has("sf"),
+    tr: has("tr"),
     key,
   };
 }
 
 /**
  * Canonical wire form of one component identifier: `"base"`, optionally
- * followed by `;req`, `;key="…"`, `;bs`, then `;sf` (canonical order,
- * regardless of the order the caller wrote them in; `;key` never
+ * followed by `;req`, `;tr`, `;key="…"`, `;bs`, then `;sf` (canonical
+ * order, regardless of the order the caller wrote them in — so
+ * `;req` always precedes `;tr`, e.g. `;req;tr`; `;key` never
  * co-occurs with `;bs`/`;sf` and `;bs`/`;sf` never co-occur — those
  * pairs are rejected by `parseComponentId`).
  */
 function serializeComponentId(raw: string): string {
-  const { base, req, bs, sf, key } = parseComponentId(raw);
-  return `${quoteString(base)}${req ? ";req" : ""}${key !== undefined ? `;key=${quoteString(key)}` : ""}${bs ? ";bs" : ""}${sf ? ";sf" : ""}`;
+  const { base, req, bs, sf, key, tr } = parseComponentId(raw);
+  return `${quoteString(base)}${req ? ";req" : ""}${tr ? ";tr" : ""}${key !== undefined ? `;key=${quoteString(key)}` : ""}${bs ? ";bs" : ""}${sf ? ";sf" : ""}`;
 }
 
 /** Resolve one covered component identifier to its canonical string value. */
@@ -327,7 +358,7 @@ export function resolveComponent(
   req: RequestLike,
   params: SignatureParams,
 ): string {
-  const { base: cid, req: isReq, bs: isBs, sf: isSf, key: dictKey } = parseComponentId(id);
+  const { base: cid, req: isReq, bs: isBs, sf: isSf, key: dictKey, tr: isTr } = parseComponentId(id);
   // RFC 9421 §2.4: a `;req` component resolves against the associated
   // request, not the message carrying the signature. Without an
   // associated request there is nothing to bind to — fail fast on the
@@ -338,6 +369,19 @@ export function resolveComponent(
       `"${cid}";req is covered but no associated request was given (set RequestLike.request)`,
     );
   const target: RequestLike = isReq ? (req.request as RequestLike) : req;
+  // RFC 9421 §2.1.4: `;tr` selects the message's trailers as the field
+  // source instead of its headers. Derived components have no field
+  // value in either place, so `;tr` on one is a hard error on both
+  // sides, like `;bs`/`;sf`/`;key`. With `;req`, the trailers are
+  // those of the associated request (target already resolved above).
+  if (isTr && cid.startsWith("@"))
+    throw new Error(
+      `unsupported component parameter ";tr" on derived component "${cid}": ";tr" is only supported on header field components`,
+    );
+  const fieldSource: Record<string, string | string[] | undefined> = isTr
+    ? (target.trailers ?? {})
+    : target.headers;
+  const fieldKind = isTr ? "trailer" : "header";
   // RFC 9421 §2.1.2: `;bs` serializes a *field value* as a byte
   // sequence. Derived components have no field value — their values
   // are already canonical strings — so `;bs` on one is a hard error
@@ -348,9 +392,9 @@ export function resolveComponent(
       throw new Error(
         `unsupported component parameter ";bs" on derived component "${cid}": ";bs" is only supported on header field components`,
       );
-    const raw = getHeaderRaw(target.headers, cid);
+    const raw = getHeaderRaw(fieldSource, cid);
     if (raw === undefined)
-      throw new Error(`covered header field "${cid}" is missing from the request`);
+      throw new Error(`covered ${fieldKind} field "${cid}" is missing from the request`);
     return `:${Buffer.from(raw, "utf8").toString("base64")}:`;
   }
   // RFC 9421 §2.1.1: `;sf` re-serializes a *field value* with the
@@ -363,14 +407,14 @@ export function resolveComponent(
       throw new Error(
         `unsupported component parameter ";sf" on derived component "${cid}": ";sf" is only supported on header field components`,
       );
-    const v = getHeader(target.headers, cid);
+    const v = getHeader(fieldSource, cid);
     if (v === undefined)
-      throw new Error(`covered header field "${cid}" is missing from the request`);
+      throw new Error(`covered ${fieldKind} field "${cid}" is missing from the request`);
     try {
       return canonicalizeStructuredFieldValue(normalizeFieldValue(v));
     } catch (err) {
       throw new Error(
-        `covered header field "${cid}" cannot be serialized with ";sf": ${err instanceof Error ? err.message : String(err)}`,
+        `covered ${fieldKind} field "${cid}" cannot be serialized with ";sf": ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -386,14 +430,14 @@ export function resolveComponent(
       throw new Error(
         `unsupported component parameter ";key" on derived component "${cid}": ";key" is only supported on header field components`,
       );
-    const v = getHeader(target.headers, cid);
+    const v = getHeader(fieldSource, cid);
     if (v === undefined)
-      throw new Error(`covered header field "${cid}" is missing from the request`);
+      throw new Error(`covered ${fieldKind} field "${cid}" is missing from the request`);
     try {
       return serializeDictionaryMemberValue(normalizeFieldValue(v), dictKey);
     } catch (err) {
       throw new Error(
-        `covered header field "${cid}" cannot be serialized with ";key=\"${dictKey}\"": ${err instanceof Error ? err.message : String(err)}`,
+        `covered ${fieldKind} field "${cid}" cannot be serialized with ";key=\"${dictKey}\"": ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -429,9 +473,9 @@ export function resolveComponent(
         throw new Error('"@status" is covered but no status was given');
       return String(target.status);
     default: {
-      const v = getHeader(target.headers, cid);
+      const v = getHeader(fieldSource, cid);
       if (v === undefined)
-        throw new Error(`covered header field "${cid}" is missing from the request`);
+        throw new Error(`covered ${fieldKind} field "${cid}" is missing from the request`);
       return normalizeFieldValue(v);
     }
   }
@@ -499,7 +543,8 @@ export interface ParsedSignatureInput {
  * `;req`/`;bs` suffix (`;req` before `;bs`) when the base is
  * rebuilt, and unsupported parameters are preserved verbatim in
  * the stored form so `resolveComponent` can reject them
- * fail-closed instead of ignoring them. (Wording covers `;sf` and
+ * fail-closed instead of ignoring them. (Wording covers `;sf`,
+ * `;tr`, and
  * `;key="…"` the same way: a supported suffix is canonicalized on
  * rebuild, with the `;key` string value preserved as-is.)
  */

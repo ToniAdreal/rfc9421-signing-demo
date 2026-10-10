@@ -173,7 +173,7 @@ test("component id and ;req parameter are case-insensitive: '@METHOD;REQ' works"
   assert.equal(res.ok, true);
 });
 
-test("unsupported component parameter ;tr fails closed on the sign side", () => {
+test("unsupported component parameter fails closed on the sign side", () => {
   const { privateKey } = generateEd25519KeyPair();
   assert.throws(
     () =>
@@ -182,8 +182,8 @@ test("unsupported component parameter ;tr fails closed on the sign side", () => 
         alg: "ed25519",
         key: privateKey,
         created: CREATED,
-        coveredComponents: ["@status", "content-digest;tr"],
+        coveredComponents: ["@status", "content-digest;zz"],
       }),
-    /unsupported component parameter ";tr".*only ";req", ";bs", ";sf" and ";key" are supported/,
+    /unsupported component parameter ";zz".*only ";req", ";bs", ";sf", ";key" and ";tr" are supported/,
   );
 });

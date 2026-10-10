@@ -238,7 +238,7 @@ configuration `Error` instead of silently defaulting.
   `;req` (either order; canonical wire form `;req;bs`), is rejected on
   derived components (`"@method";bs` fails fast on the sign side and
   with `SIGNATURE_BASE_BUILD_FAILED` on the verify side), and other
-  component parameters (`;tr`, …) still fail closed. For a
+  component parameters still fail closed. For a
   multi-value field, `;bs` joins the raw (untrimmed) elements with
   ", " before encoding.
 - **Strict Structured Field serialization (§2.1.1 `;sf`)**: a header
@@ -284,6 +284,24 @@ configuration `Error` instead of silently defaulting.
   bytes / whole-field serialization vs. one strictly serialized
   member — the pairs fail closed). The member extractor is also
   exported as `serializeDictionaryMemberValue`.
+- **Trailer fields (§2.1.4 `;tr`)**: a header field component may
+  carry `;tr` — `"x-checksum";tr` — in which case the field value is
+  taken from the message's trailers (`RequestLike.trailers`, same
+  shape as `headers`) instead of its headers, with the same
+  multi-value join and normalization. Without `;tr`, trailers never
+  participate: a header and a trailer sharing a field name are
+  independent, and a plain component and its `;tr` twin may coexist
+  in one signature. Set `trailers` on both `signRequest` and
+  `verifyRequest` (the signed object carries it through). A covered
+  `;tr` field with no matching trailer fails fast on the sign side
+  and with `SIGNATURE_BASE_BUILD_FAILED` on the verify side — never
+  an empty-string component value. `;tr` is orthogonal to the value
+  transforms: it combines with `;req` (the trailer is then read from
+  the associated request; canonical wire form `;req;tr`), with
+  `;bs`, with `;sf`, and with `;key` (each still subject to its own
+  incompatibilities — `;bs` with `;sf`/`;key` still fails closed),
+  and is rejected on derived components like the other field-only
+  parameters.
 - **Sign-side input guards**: `signRequest` fails fast with a descriptive
   configuration error instead of minting a broken signature — `expires`
   earlier than `created` (a signature that is expired at birth), an empty
@@ -444,13 +462,15 @@ const dual = addSignature(merchantSigned, {
 
 ## Limitations (honest)
 
-- **Subset of RFC 9421.** Not implemented: trailers and component
-  parameters besides `;req`/`;bs`/`;sf`/`;key` (`;tr`, …), and generic
-  keystores over HTTP. The `bs`, `sf`, and `key` component parameters
+- **Subset of RFC 9421.** Not implemented: component
+  parameters besides `;req`/`;bs`/`;sf`/`;key`/`;tr`, and generic
+  keystores over HTTP. The `bs`, `sf`, `key`, and `tr` component parameters
   *are* implemented for header fields (see "What it implements"; `;sf`
   covers the RFC 8941 core types only, with no per-field type
   registry, and `;key` selects Dictionary members of those same core
-  types). Network key
+  types; `;tr` reads the field value from caller-supplied
+  `RequestLike.trailers` — this library does not parse raw HTTP
+  trailer sections off the wire). Network key
   discovery *is* implemented for JWKS endpoints: `JwksKeyStore` fetches a
   JWKS document and resolves `keyid`s against the fetched snapshot.
   Response-to-request binding *is* implemented, via the §2.4 `;req`
@@ -557,8 +577,10 @@ most also appear in [Limitations](#limitations)):
 - **Components.** Binding a response signature to the request that caused
   it is supported via the `;req` component parameter (§2.4) — there is no
   `@request-response` derived component in RFC 9421 (earlier versions of
-  this README named one in error). Not supported: trailers, component
-  parameters besides `;req`/`;bs`/`;sf`/`;key`, and other derived components beyond
+  this README named one in error). Trailer fields *are* supported via
+  the `;tr` component parameter (§2.1.4), reading caller-supplied
+  `RequestLike.trailers`. Not supported: component
+  parameters besides `;req`/`;bs`/`;sf`/`;key`/`;tr`, and other derived components beyond
   the list under "What it implements".
 - **Multiple signatures.** `verifyRequest` checks one label per call; for
   multi-party flows, `verifyAllLabels` verifies every label in the request

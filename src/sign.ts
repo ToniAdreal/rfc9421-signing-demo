@@ -106,6 +106,14 @@ export interface SignedHttpRequest {
    * re-attaching the triggering request by hand.
    */
   request?: RequestLike;
+  /**
+   * Trailer fields, carried through from the signed `RequestLike`
+   * when present. Only consulted when a covered component carries
+   * `;tr`; preserved so the signed message can be verified (and
+   * `addSignature` can rebuild a second base) without the caller
+   * re-attaching the trailers by hand.
+   */
+  trailers?: Record<string, string | string[] | undefined>;
 }
 
 function defaultCoveredComponents(hasBody: boolean): string[] {
@@ -231,6 +239,7 @@ export function signRequest(
     body: req.body,
     status: req.status,
     request: req.request,
+    trailers: req.trailers,
   };
   const base = buildSignatureBase(covered, signingInput, params);
 
@@ -290,6 +299,7 @@ export function signRequest(
     body: req.body,
     ...(req.status !== undefined ? { status: req.status } : {}),
     ...(req.request !== undefined ? { request: req.request } : {}),
+    ...(req.trailers !== undefined ? { trailers: req.trailers } : {}),
   };
 }
 
@@ -404,6 +414,9 @@ export function addSignature(
       ...(signedReq.request !== undefined
         ? { request: signedReq.request }
         : {}),
+      ...(signedReq.trailers !== undefined
+        ? { trailers: signedReq.trailers }
+        : {}),
     },
     { ...opts, contentDigestAlg: digestAlg },
   );
@@ -429,5 +442,6 @@ export function addSignature(
     body: signedReq.body,
     ...(signedReq.status !== undefined ? { status: signedReq.status } : {}),
     ...(signedReq.request !== undefined ? { request: signedReq.request } : {}),
+    ...(signedReq.trailers !== undefined ? { trailers: signedReq.trailers } : {}),
   };
 }
