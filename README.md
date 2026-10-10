@@ -636,21 +636,23 @@ see [SECURITY.md](SECURITY.md).
 
 `npm run bench` measures locally-observed sign/verify throughput per
 algorithm (3000 timed iterations per op after 200 warmup, printing the Node
-version and CPU). One real run on 2026-10-08:
+version and CPU). One real run on 2026-10-10:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519 | sign | ~11,400 ops/sec (~88 µs/op) |
-| ed25519 | verify | ~4,100 ops/sec (~247 µs/op) |
-| hmac-sha256 | sign | ~36,100 ops/sec (~28 µs/op) |
-| hmac-sha256 | verify | ~32,700 ops/sec (~31 µs/op) |
-| hmac-sha512 | sign | ~47,200 ops/sec (~21 µs/op) |
-| hmac-sha512 | verify | ~34,000 ops/sec (~29 µs/op) |
-| ecdsa-p256-sha256 | sign | ~14,500 ops/sec (~69 µs/op) |
-| ecdsa-p256-sha256 | verify | ~7,800 ops/sec (~129 µs/op) |
-| rsa-pss-sha512 | sign | ~1,600 ops/sec (~609 µs/op) |
-| rsa-pss-sha512 | verify | ~11,700 ops/sec (~85 µs/op) |
-| verifyAllLabels (2 labels) | verify | ~4,900 ops/sec (~204 µs/op) |
+| ed25519 | sign | ~3,500 ops/sec (~284 µs/op) |
+| ed25519 | verify | ~4,100 ops/sec (~241 µs/op) |
+| hmac-sha256 | sign | ~45,300 ops/sec (~22 µs/op) |
+| hmac-sha256 | verify | ~33,400 ops/sec (~30 µs/op) |
+| hmac-sha512 | sign | ~45,900 ops/sec (~22 µs/op) |
+| hmac-sha512 | verify | ~37,600 ops/sec (~27 µs/op) |
+| ecdsa-p256-sha256 | sign | ~18,400 ops/sec (~54 µs/op) |
+| ecdsa-p256-sha256 | verify | ~7,500 ops/sec (~133 µs/op) |
+| rsa-pss-sha512 | sign | ~1,600 ops/sec (~618 µs/op) |
+| rsa-pss-sha512 | verify | ~11,700 ops/sec (~86 µs/op) |
+| rsa-v1_5-sha256 | sign | ~1,600 ops/sec (~607 µs/op) |
+| rsa-v1_5-sha256 | verify | ~9,000 ops/sec (~111 µs/op) |
+| verifyAllLabels (2 labels) | verify | ~5,100 ops/sec (~196 µs/op) |
 
 The `verifyAllLabels` row covers the multi-party scenario: the merchant signs
 with ed25519 and the payment gateway appends its own hmac-sha256 signature

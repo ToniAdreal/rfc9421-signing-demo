@@ -3,7 +3,7 @@
  *
  * Measures real, locally-observed sign/verify throughput for each
  * algorithm in the benchmark loop below (ed25519, hmac-sha256,
- * hmac-sha512, ecdsa-p256-sha256, rsa-pss-sha512) on the machine that
+ * hmac-sha512, ecdsa-p256-sha256, rsa-pss-sha512, rsa-v1_5-sha256) on the machine that
  * runs it, plus a multi-party scenario (merchant ed25519 + gateway
  * hmac-sha256 dual labels via verifyAllLabels). Numbers vary with
  * hardware — do not treat them as guaranteed throughput.
@@ -16,6 +16,7 @@ import {
   generateEd25519KeyPair,
   generateP256KeyPair,
   generateRsaPssKeyPair,
+  generateRsaV15KeyPair,
   secretKey,
   signRequest,
   verifyAllLabels,
@@ -56,6 +57,10 @@ function benchmarkScenario(alg: SignAlg): { signOps: number; verifyOps: number }
     verifyKey = publicKey;
   } else if (alg === "rsa-pss-sha512") {
     const { publicKey, privateKey } = generateRsaPssKeyPair();
+    signKey = privateKey;
+    verifyKey = publicKey;
+  } else if (alg === "rsa-v1_5-sha256") {
+    const { publicKey, privateKey } = generateRsaV15KeyPair();
     signKey = privateKey;
     verifyKey = publicKey;
   } else {
@@ -142,6 +147,7 @@ for (const alg of [
   "hmac-sha512",
   "ecdsa-p256-sha256",
   "rsa-pss-sha512",
+  "rsa-v1_5-sha256",
 ] as const) {
   const { signOps, verifyOps } = benchmarkScenario(alg);
   results.push({ alg, op: "sign", ops: signOps });
