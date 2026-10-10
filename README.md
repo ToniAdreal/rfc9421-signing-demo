@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 511 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 517 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 ## Quickstart
@@ -96,12 +96,18 @@ Slow keystore? Wrap the resolver with `memoizeKeyResolver` — successful
 so high-rate verification stops hitting the keystore once per signature.
 Unknown keyids (`undefined`) and thrown errors are deliberately never
 cached, so rotated-in keys are discoverable on the next verify and outages
-still converge to `VERIFICATION_ERROR`.
+still converge to `VERIFICATION_ERROR`. The cache is bounded by
+`maxEntries` (default 10_000, matching `ReplayCache`): inserting into a
+full cache first reclaims expired entries, then evicts the least
+recently used one, so a stream of one-off `keyid`s cannot grow it
+without bound. A hit refreshes recency but never extends the entry's
+TTL.
 
 ```ts
 import { memoizeKeyResolver } from "./dist/src/index.js";
 const keyResolver = memoizeKeyResolver((keyId) => store.get(keyId), {
   ttlSec: 300,
+  maxEntries: 10_000, // the default
 });
 // pass `keyResolver` to every verifyRequest call
 ```
@@ -706,7 +712,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 511 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 517 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in

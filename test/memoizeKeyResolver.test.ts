@@ -216,3 +216,156 @@ test("memoizeKeyResolver: invalid resolver/options throw configuration errors", 
     /`now` must be a function/,
   );
 });
+
+test("memoizeKeyResolver: maxEntries cap is enforced (underlying call counts)", () => {
+  const { k1 } = countingStore();
+  const store = new Map<string, KeyObject>([
+    ["a", k1.publicKey],
+    ["b", k1.publicKey],
+    ["c", k1.publicKey],
+  ]);
+  let calls = 0;
+  const resolver = (id: string): KeyObject | undefined => {
+    calls++;
+    return store.get(id);
+  };
+  const memoized = memoizeKeyResolver(resolver, {
+    ttlSec: 60,
+    maxEntries: 2,
+    now: () => 1_700_000_000,
+  });
+  memoized("a");
+  memoized("b");
+  assert.equal(calls, 2);
+  memoized("a");
+  memoized("b");
+  assert.equal(calls, 2); // both cached
+  memoized("c"); // fills beyond cap -> evicts the LRU entry (a)
+  assert.equal(calls, 3);
+  memoized("b");
+  memoized("c");
+  assert.equal(calls, 3); // b and c retained
+  memoized("a");
+  assert.equal(calls, 4); // a was evicted
+});
+
+test("memoizeKeyResolver: LRU eviction keeps the most recently hit entry", () => {
+  const { k1 } = countingStore();
+  const store = new Map<string, KeyObject>([
+    ["a", k1.publicKey],
+    ["b", k1.publicKey],
+    ["c", k1.publicKey],
+  ]);
+  let calls = 0;
+  const resolver = (id: string): KeyObject | undefined => {
+    calls++;
+    return store.get(id);
+  };
+  const memoized = memoizeKeyResolver(resolver, {
+    ttlSec: 60,
+    maxEntries: 2,
+    now: () => 1_700_000_000,
+  });
+  memoized("a");
+  memoized("b");
+  assert.equal(calls, 2);
+  memoized("a"); // hit: a becomes most recently used
+  assert.equal(calls, 2);
+  memoized("c"); // must evict b (LRU), not a
+  assert.equal(calls, 3);
+  memoized("a");
+  assert.equal(calls, 3); // a retained
+  memoized("c");
+  assert.equal(calls, 3); // c retained
+  memoized("b");
+  assert.equal(calls, 4); // b was evicted
+});
+
+test("memoizeKeyResolver: expired entries are reclaimed before LRU eviction", () => {
+  let t = 1_000;
+  const { k1 } = countingStore();
+  const store = new Map<string, KeyObject>([
+    ["a", k1.publicKey],
+    ["b", k1.publicKey],
+    ["c", k1.publicKey],
+  ]);
+  let calls = 0;
+  const resolver = (id: string): KeyObject | undefined => {
+    calls++;
+    return store.get(id);
+  };
+  const memoized = memoizeKeyResolver(resolver, {
+    ttlSec: 10,
+    maxEntries: 2,
+    now: () => t,
+  });
+  memoized("a"); // expires at 1010
+  t = 1_001;
+  memoized("b"); // expires at 1011
+  t = 1_009;
+  memoized("a"); // hit: a is now MRU, but still expires at 1010
+  assert.equal(calls, 2);
+  t = 1_010; // a expired, b still live but is the LRU entry
+  memoized("c"); // must reclaim expired a, not evict live b
+  assert.equal(calls, 3);
+  memoized("b");
+  assert.equal(calls, 3); // b survived
+  memoized("c");
+  assert.equal(calls, 3);
+  memoized("a");
+  assert.equal(calls, 4); // a was reclaimed
+});
+
+test("memoizeKeyResolver: a hit does not extend the entry TTL", () => {
+  let t = 2_000;
+  const { resolver, calls } = countingStore();
+  const memoized = memoizeKeyResolver(resolver, { ttlSec: 10, now: () => t });
+  memoized("merchant-key-1");
+  assert.equal(calls(), 1);
+  t = 2_009;
+  memoized("merchant-key-1"); // hit just before expiry
+  assert.equal(calls(), 1);
+  t = 2_010; // original expiry, despite the hit at 2009
+  memoized("merchant-key-1");
+  assert.equal(calls(), 2);
+});
+
+test("memoizeKeyResolver: invalid maxEntries throws a configuration error", () => {
+  const { resolver, calls } = countingStore();
+  for (const bad of [0, -1, 1.5, NaN, Infinity]) {
+    assert.throws(
+      () => memoizeKeyResolver(resolver, { maxEntries: bad }),
+      /`maxEntries` must be a positive integer/,
+    );
+  }
+  // Boundary: 1 is valid and holds exactly one entry.
+  const before = calls();
+  const single = memoizeKeyResolver(resolver, {
+    maxEntries: 1,
+    ttlSec: 60,
+    now: () => 1_700_000_000,
+  });
+  single("merchant-key-1");
+  single("merchant-key-2");
+  single("merchant-key-1"); // evicted by merchant-key-2, re-resolved
+  assert.equal(calls(), before + 3);
+});
+
+test("memoizeKeyResolver: default maxEntries is 10000", () => {
+  const { k1 } = countingStore();
+  let calls = 0;
+  const resolver = (id: string): KeyObject | undefined => {
+    calls++;
+    return id.startsWith("k") ? k1.publicKey : undefined;
+  };
+  const memoized = memoizeKeyResolver(resolver, {
+    ttlSec: 60,
+    now: () => 1_700_000_000,
+  });
+  for (let i = 0; i < 10_001; i++) memoized(`k${i}`);
+  assert.equal(calls, 10_001);
+  memoized("k10000"); // newest entry retained
+  assert.equal(calls, 10_001);
+  memoized("k0"); // oldest entry evicted by the 10001st insert
+  assert.equal(calls, 10_002);
+});

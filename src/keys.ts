@@ -585,6 +585,18 @@ export interface MemoizeKeyResolverOptions {
    */
   ttlSec?: number;
   /**
+   * Maximum number of cached `keyid`→key entries. Defaults to 10_000 —
+   * the same bound as `ReplayCache` — so a long-lived verifier facing
+   * many one-off `keyid`s (multi-tenant gateways, fast-rotating webhook
+   * signers) cannot grow the cache without bound: inserting a new entry
+   * into a full cache first reclaims expired entries, then evicts the
+   * least recently used entry. Must be a positive integer. Wrappers
+   * created before this option existed were unbounded; the default is
+   * a deliberate behaviour change, bounded so high that ordinary
+   * keystores never notice it.
+   */
+  maxEntries?: number;
+  /**
    * Injected clock returning unix seconds — the same convention as
    * `ReplayCacheOptions.now` — so tests can pin time deterministically.
    * Defaults to the wall clock.
@@ -615,6 +627,13 @@ export interface MemoizeKeyResolverOptions {
  * cross-instance key staleness. Different `keyid`s have independent
  * entries; expired entries are evicted on read.
  *
+ * The cache is bounded by `maxEntries` (default 10_000, matching
+ * `ReplayCache`): inserting into a full cache first reclaims expired
+ * entries, then evicts least-recently-used ones. A cache hit refreshes
+ * an entry's recency but never extends its TTL — a hit cannot keep a
+ * rotated-out key alive past its original expiry, mirroring
+ * `ReplayCache`'s "hit does not renew" semantics.
+ *
  * @example
  * ```ts
  * import { memoizeKeyResolver } from "./dist/src/index.js";
@@ -632,10 +651,19 @@ export function memoizeKeyResolver(
   if (typeof resolver !== "function") {
     throw new Error("memoizeKeyResolver: `resolver` must be a function");
   }
-  const { ttlSec = 300, now = () => Math.floor(Date.now() / 1000) } = opts;
+  const {
+    ttlSec = 300,
+    maxEntries = 10_000,
+    now = () => Math.floor(Date.now() / 1000),
+  } = opts;
   if (typeof ttlSec !== "number" || !Number.isFinite(ttlSec) || ttlSec <= 0) {
     throw new Error(
       `memoizeKeyResolver: \`ttlSec\` must be a finite number > 0, got ${String(ttlSec)}`,
+    );
+  }
+  if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+    throw new Error(
+      `memoizeKeyResolver: \`maxEntries\` must be a positive integer, got ${String(maxEntries)}`,
     );
   }
   if (typeof now !== "function") {
@@ -643,16 +671,38 @@ export function memoizeKeyResolver(
       "memoizeKeyResolver: `now` must be a function returning unix seconds",
     );
   }
+  // Insertion order = LRU order: hits re-insert their entry at the tail.
   const cache = new Map<string, { key: KeyObject; expiresAt: number }>();
+  // Make room for one new entry: reclaim expired entries first, then
+  // evict least recently used (head of the Map) until there is room.
+  const makeRoom = (t: number): void => {
+    if (cache.size < maxEntries) return;
+    for (const [id, entry] of cache) {
+      if (t >= entry.expiresAt) cache.delete(id);
+      if (cache.size < maxEntries) return;
+    }
+    while (cache.size >= maxEntries) {
+      const oldest = cache.keys().next();
+      if (oldest.done) break;
+      cache.delete(oldest.value);
+    }
+  };
   return (keyId: string): KeyObject | undefined => {
     const t = now();
     const hit = cache.get(keyId);
     if (hit !== undefined) {
-      if (t < hit.expiresAt) return hit.key;
+      if (t < hit.expiresAt) {
+        // Refresh recency only — expiresAt is kept, so the hit does
+        // not extend the entry's TTL.
+        cache.delete(keyId);
+        cache.set(keyId, hit);
+        return hit.key;
+      }
       cache.delete(keyId);
     }
     const resolved = resolver(keyId);
     if (resolved !== undefined) {
+      makeRoom(t);
       cache.set(keyId, { key: resolved, expiresAt: t + ttlSec });
     }
     return resolved;
