@@ -184,6 +184,32 @@ export class JwksKeyStore {
   }
 
   /**
+   * Refresh only when the snapshot is stale: the convenience form of
+   * the caller's `if (store.isStale()) await store.refresh()` loop.
+   *
+   * Returns `false` — and never calls the configured `fetchImpl` —
+   * when {@link JwksKeyStore.isStale} reports the snapshot fresh.
+   * Returns `true` after delegating to {@link JwksKeyStore.refresh}
+   * when the snapshot is stale (including when no refresh has ever
+   * succeeded), inheriting all of `refresh()`'s atomic semantics: on
+   * failure this method throws the same descriptive `Error` and the
+   * previous snapshot and freshness timestamp are left untouched, so
+   * the store remains stale and a later call will retry.
+   *
+   * Concurrency: concurrent calls are NOT deduplicated — there is no
+   * in-flight promise sharing, so two overlapping calls that both
+   * observe a stale snapshot may each perform a fetch (the later
+   * successful snapshot simply replaces the earlier one, exactly as
+   * with two overlapping `refresh()` calls). Callers that need
+   * single-flight behaviour must serialize calls themselves.
+   */
+  async refreshIfStale(): Promise<boolean> {
+    if (!this.isStale()) return false;
+    await this.refresh();
+    return true;
+  }
+
+  /**
    * Fetch the JWKS document and atomically replace the key snapshot.
    *
    * Throws a descriptive configuration `Error` — and leaves the

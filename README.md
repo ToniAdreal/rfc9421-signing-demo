@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 479 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 484 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 ## Quickstart
@@ -147,8 +147,15 @@ import { JwksKeyStore } from "./dist/src/index.js";
 const store = new JwksKeyStore("https://gateway.example.com/.well-known/jwks.json");
 await store.refresh(); // the async fetch stays in your layer; verifyRequest stays synchronous
 const result = verifyRequest(signed, { keyResolver: store.resolve }); // unknown kid -> KEY_RESOLUTION_FAILED
-if (store.isStale()) void store.refresh(); // rotation = re-fetch; the cadence is the caller's choice
+await store.refreshIfStale(); // rotation = re-fetch when stale; returns false (and fetches nothing) while fresh
 ```
+
+`refreshIfStale()` is the one-call form of the `if (store.isStale()) await store.refresh()`
+check: a fresh snapshot returns `false` without touching the network, a stale
+one (or a store that has never refreshed) delegates to `refresh()` with all of
+its atomic semantics and returns `true`. Concurrent calls are deliberately not
+deduplicated — two overlapping calls may each fetch; serialize them yourself
+if you need single-flight behaviour.
 
 A failed `refresh()` (HTTP error, non-JSON body, a malformed JWKS
 document, or an entry carrying private `"d"` material) throws and leaves
@@ -474,8 +481,9 @@ const dual = addSignature(merchantSigned, {
 - **Demo-grade key management.** Keys are passed in directly, resolved via a
   caller-provided `keyResolver`, or fetched from a JWKS endpoint via
   `JwksKeyStore`; there is still no built-in persistent keystore and no
-  automatic rotation schedule — re-fetching when `isStale()` reports the
-  snapshot old (i.e. rotation uptake) is the caller's loop, and trusting
+  automatic rotation schedule — deciding *when* to re-fetch is the
+  caller's loop (`refreshIfStale()` performs the `isStale()` check and
+  the re-fetch in one call, but nothing calls it for you), and trusting
   the JWKS endpoint is the caller's responsibility (see SECURITY.md).
 
 ## Interoperability
@@ -657,7 +665,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 479 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 484 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in
