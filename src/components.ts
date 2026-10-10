@@ -4,7 +4,8 @@
  * (HTTP Message Signatures).
  *
  * Covered components supported: @method, @scheme, @authority, @path, @query,
- * @status, @target-uri, @created, @expires, plus any HTTP header field name.
+ * @query-param, @status, @target-uri, @created, @expires, plus any HTTP
+ * header field name.
  * Any of them may carry the RFC 9421 §2.4 `;req` component parameter
  * (e.g. `"@method";req`), which resolves the component against the
  * associated request (`RequestLike.request`) instead of the message
@@ -52,7 +53,23 @@
  * components have no field value in either headers or trailers.
  * A covered `;tr` field with no matching trailer fails fast on the
  * sign side and fails closed on the verify side — never an empty
- * string. Other component parameters are not supported and fail
+ * string. The §2.2.8 `@query-param` derived component binds ONE named
+ * query parameter instead of the whole query string: it REQUIRES the
+ * `;name="<param>"` component parameter, whose value is the parameter's
+ * name in its percent-encoded form. The query is parsed as
+ * `application/x-www-form-urlencoded` (percent-decoding, `+` as space);
+ * the component value is the parameter's decoded value re-encoded with
+ * the RFC's percent-encode-after-encoding process (UTF-8 bytes, only
+ * the unreserved characters `A-Z a-z 0-9 - . _ ~` left literal), so
+ * differently-spelled encodings of the same value (`%20` vs `+`)
+ * canonicalize identically while other parameters may be added,
+ * removed, or reordered freely. A named parameter with an empty value
+ * (with or without `=`) has the empty string as its component value; a
+ * named parameter that does not occur is an error on both sides, and
+ * a name that occurs more than once MUST NOT be covered (RFC 9421
+ * §2.2.8) — cover `@query` instead. `;name` combines with `;req`
+ * (canonical wire form `;req;name="…"`) and with nothing else.
+ * Other component parameters are not supported and fail
  * closed.
  * Signature algorithms are handled by sign.ts / verify.ts; this module
  * only deals with the canonical bytes that get signed.
@@ -195,6 +212,13 @@ interface ComponentIdParts {
    * `;key="…"` parameter, or `undefined` when the parameter is absent.
    */
   key?: string;
+  /**
+   * The percent-encoded query-parameter name carried by the RFC 9421
+   * §2.2.8 `;name="…"` parameter of `@query-param`, or `undefined`
+   * when the parameter is absent. Only valid on `@query-param`,
+   * where it is REQUIRED.
+   */
+  name?: string;
 }
 
 /** A Dictionary key (RFC 8941 §3.1.3): lowercase letter or `*`, then key chars. */
@@ -213,8 +237,11 @@ interface RawParam {
  * component parameters. The bare (valueless) parameters `;req`,
  * `;bs`, `;sf`, and `;tr` are supported, each at most once, in any
  * order, as
- * is the valued parameter `;key="<name>"` whose value must be a
- * quoted string naming a Dictionary key. Any other parameter
+ * are the valued parameters `;key="<name>"` (whose value must be a
+ * quoted string naming a Dictionary key) and `;name="<param>"` (whose
+ * value must be a quoted, non-empty, printable-ASCII string holding
+ * the percent-encoded name of a query parameter; only valid on —
+ * and required by — the `@query-param` derived component). Any other parameter
  * (a valued `;req=…`/`;bs=…`/`;sf=…`/`;tr=…`, a valueless,
  * unquoted, or non-key `;key` value, or a duplicate) is a hard
  * error — silently ignoring an unknown parameter would build a
@@ -226,7 +253,11 @@ interface RawParam {
  * raw-bytes `;bs` cannot also apply). `;tr` introduces no new
  * incompatibility: it only selects trailers as the field source, so
  * it combines with `;req`, `;bs`, `;sf`, and `;key` (subject to the
- * pairs above).
+ * pairs above). `;name` introduces its own incompatibilities: it
+ * selects one query parameter of the request target, so it cannot
+ * combine with the field-value parameters `;bs`/`;sf`/`;key`/`;tr`,
+ * and `@query-param` without `;name` names nothing at all, so the
+ * pair (component, parameter) is validated together here.
  */
 function parseComponentId(raw: string): ComponentIdParts {
   const input = raw.trim();
@@ -289,11 +320,11 @@ function parseComponentId(raw: string): ComponentIdParts {
       );
   }
   for (const p of params) {
-    if (p.name !== "req" && p.name !== "bs" && p.name !== "sf" && p.name !== "key" && p.name !== "tr")
+    if (p.name !== "req" && p.name !== "bs" && p.name !== "sf" && p.name !== "key" && p.name !== "tr" && p.name !== "name")
       throw new Error(
-        `unsupported component parameter ";${p.name}" on component "${base}": only ";req", ";bs", ";sf", ";key" and ";tr" are supported`,
+        `unsupported component parameter ";${p.name}" on component "${base}": only ";req", ";bs", ";sf", ";key", ";tr" and ";name" are supported`,
       );
-    if (p.name !== "key" && p.value !== undefined)
+    if (p.name !== "key" && p.name !== "name" && p.value !== undefined)
       throw new Error(
         `component parameter ";${p.name}" on component "${base}" does not take a value`,
       );
@@ -301,7 +332,7 @@ function parseComponentId(raw: string): ComponentIdParts {
   const names = params.map((p) => p.name);
   if (new Set(names).size !== names.length)
     throw new Error(
-      `duplicate component parameter on component "${base}": ";req", ";bs", ";sf", ";key" and ";tr" may each appear at most once`,
+      `duplicate component parameter on component "${base}": ";req", ";bs", ";sf", ";key", ";tr" and ";name" may each appear at most once`,
     );
   const keyParam = params.find((p) => p.name === "key");
   let key: string | undefined;
@@ -329,6 +360,37 @@ function parseComponentId(raw: string): ComponentIdParts {
     throw new Error(
       `component parameters ";key" and ";sf" are not compatible on component "${base}": ";key" already serializes the selected Dictionary member with the strict rules, so a whole-field ";sf" cannot also apply`,
     );
+  const nameParam = params.find((p) => p.name === "name");
+  let name: string | undefined;
+  if (nameParam !== undefined) {
+    if (nameParam.value === undefined || !nameParam.quoted)
+      throw new Error(
+        `component parameter ";name" on component "${base}" requires a quoted string value: write it as ;name="<param>"`,
+      );
+    // The ;name value holds the parameter name in its percent-encoded
+    // form (RFC 9421 §2.2.8), which is printable ASCII with no spaces:
+    // a raw space or non-ASCII byte would be a decoded name smuggled
+    // into the identifier, and an empty value names nothing.
+    if (!/^[\x21-\x7e]+$/.test(nameParam.value))
+      throw new Error(
+        `invalid ";name" value "${nameParam.value}" on component "${base}": not a non-empty percent-encoded query parameter name`,
+      );
+    name = nameParam.value;
+    if (base !== "@query-param")
+      throw new Error(
+        `component parameter ";name" is only supported on the "@query-param" derived component, not on component "${base}"`,
+      );
+    for (const other of ["bs", "sf", "key", "tr"] as const) {
+      if (has(other))
+        throw new Error(
+          `component parameters ";name" and ";${other}" are not compatible on component "${base}": ";name" selects one query parameter of the request target, ";${other}" transforms an HTTP field value`,
+        );
+    }
+  }
+  if (base === "@query-param" && name === undefined)
+    throw new Error(
+      `derived component "@query-param" requires the ";name" component parameter: write it as "@query-param";name="<param>"`,
+    );
   return {
     base,
     req: has("req"),
@@ -336,20 +398,72 @@ function parseComponentId(raw: string): ComponentIdParts {
     sf: has("sf"),
     tr: has("tr"),
     key,
+    name,
   };
 }
 
 /**
  * Canonical wire form of one component identifier: `"base"`, optionally
- * followed by `;req`, `;tr`, `;key="…"`, `;bs`, then `;sf` (canonical
+ * followed by `;req`, `;tr`, `;name="…"`, `;key="…"`, `;bs`, then `;sf` (canonical
  * order, regardless of the order the caller wrote them in — so
  * `;req` always precedes `;tr`, e.g. `;req;tr`; `;key` never
  * co-occurs with `;bs`/`;sf` and `;bs`/`;sf` never co-occur — those
  * pairs are rejected by `parseComponentId`).
  */
 function serializeComponentId(raw: string): string {
-  const { base, req, bs, sf, key, tr } = parseComponentId(raw);
-  return `${quoteString(base)}${req ? ";req" : ""}${tr ? ";tr" : ""}${key !== undefined ? `;key=${quoteString(key)}` : ""}${bs ? ";bs" : ""}${sf ? ";sf" : ""}`;
+  const { base, req, bs, sf, key, tr, name } = parseComponentId(raw);
+  return `${quoteString(base)}${req ? ";req" : ""}${tr ? ";tr" : ""}${name !== undefined ? `;name=${quoteString(name)}` : ""}${key !== undefined ? `;key=${quoteString(key)}` : ""}${bs ? ";bs" : ""}${sf ? ";sf" : ""}`;
+}
+
+/** Characters RFC 3986 calls unreserved; everything else is percent-encoded. */
+const QUERY_UNRESERVED_RE = /^[A-Za-z0-9\-._~]$/;
+
+/**
+ * The "percent-encode after encoding" step of RFC 9421 §2.2.8: the
+ * string is encoded as UTF-8 and every byte that is not an unreserved
+ * ASCII character is percent-encoded with uppercase hex. A space
+ * therefore becomes `%20` (never `+`), and a decoded `+` — which the
+ * form parser reads as a space — re-encodes to `%20` as well, so the
+ * two spellings of the same value canonicalize identically.
+ */
+function percentEncodeAfterEncoding(s: string): string {
+  let out = "";
+  for (const b of new TextEncoder().encode(s)) {
+    const ch = String.fromCharCode(b);
+    out += QUERY_UNRESERVED_RE.test(ch)
+      ? ch
+      : `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+/**
+ * Resolve the RFC 9421 §2.2.8 `@query-param` component value for the
+ * parameter whose percent-encoded name is `encodedName`: parse the
+ * target URL's query as `application/x-www-form-urlencoded`
+ * (`URLSearchParams`: percent-decoding, `+` as space, a parameter
+ * without `=` has the empty string as its value), match on the
+ * re-encoded name, and return the re-encoded value. A name that does
+ * not occur is an error, and so is a name that occurs more than once
+ * — the RFC states such a parameter MUST NOT be included as a
+ * `@query-param` component (cover `@query` instead); neither case is
+ * ever silently signed as an empty or first-wins value.
+ */
+function resolveQueryParamValue(target: RequestLike, encodedName: string): string {
+  const url = new URL(target.url);
+  const rawQuery = url.search.startsWith("?") ? url.search.slice(1) : url.search;
+  const matches = [...new URLSearchParams(rawQuery).entries()].filter(
+    ([n]) => percentEncodeAfterEncoding(n) === encodedName,
+  );
+  if (matches.length === 0)
+    throw new Error(
+      `covered query parameter "${encodedName}" does not occur in the request target's query string`,
+    );
+  if (matches.length > 1)
+    throw new Error(
+      `covered query parameter "${encodedName}" occurs ${matches.length} times in the request target's query string: a repeated parameter must not be covered with "@query-param" (RFC 9421 §2.2.8) — cover "@query" instead`,
+    );
+  return percentEncodeAfterEncoding(matches[0][1]);
 }
 
 /** Resolve one covered component identifier to its canonical string value. */
@@ -358,7 +472,7 @@ export function resolveComponent(
   req: RequestLike,
   params: SignatureParams,
 ): string {
-  const { base: cid, req: isReq, bs: isBs, sf: isSf, key: dictKey, tr: isTr } = parseComponentId(id);
+  const { base: cid, req: isReq, bs: isBs, sf: isSf, key: dictKey, tr: isTr, name: queryParamName } = parseComponentId(id);
   // RFC 9421 §2.4: a `;req` component resolves against the associated
   // request, not the message carrying the signature. Without an
   // associated request there is nothing to bind to — fail fast on the
@@ -455,6 +569,15 @@ export function resolveComponent(
       // RFC 9421 §2.2.7: the query component of the request target,
       // including the leading "?" — empty string when the URL has no query.
       return url.search;
+    case "@query-param":
+      // RFC 9421 §2.2.8: one named query parameter, addressed by the
+      // REQUIRED ;name parameter (parseComponentId has already
+      // rejected a missing or malformed one, so this is defensive).
+      if (queryParamName === undefined)
+        throw new Error(
+          'derived component "@query-param" requires the ";name" component parameter',
+        );
+      return resolveQueryParamValue(target, queryParamName);
     case "@target-uri":
       return target.url;
     case "@created":
@@ -466,7 +589,7 @@ export function resolveComponent(
         throw new Error('"@expires" is covered but no expires parameter was given');
       return String(params.expires);
     case "@status":
-      // RFC 9421 §2.2.8: the status code of the response. There is no
+      // RFC 9421 §2.2.9: the status code of the response. There is no
       // sensible default — a covered @status with no status to bind is a
       // caller configuration error, same fail-fast style as @created/@expires.
       if (target.status === undefined)
@@ -544,9 +667,9 @@ export interface ParsedSignatureInput {
  * rebuilt, and unsupported parameters are preserved verbatim in
  * the stored form so `resolveComponent` can reject them
  * fail-closed instead of ignoring them. (Wording covers `;sf`,
- * `;tr`, and
+ * `;tr`, `;name="…"`, and
  * `;key="…"` the same way: a supported suffix is canonicalized on
- * rebuild, with the `;key` string value preserved as-is.)
+ * rebuild, with the `;key`/`;name` string value preserved as-is.)
  */
 function parseComponentIds(inner: string): string[] {
   const ids: string[] = [];

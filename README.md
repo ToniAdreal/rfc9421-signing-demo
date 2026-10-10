@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 484 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 511 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 ## Quickstart
@@ -208,13 +208,31 @@ configuration `Error` instead of silently defaulting.
 
 - **Signature base** (§2.5): `"id": value` lines for each covered component,
   then the `"@signature-params"` line. Covered components: `@method`,
-  `@scheme`, `@authority`, `@path`, `@query`, `@status`, `@target-uri`, `@created`,
+  `@scheme`, `@authority`, `@path`, `@query`, `@query-param`, `@status`, `@target-uri`, `@created`,
   `@expires`, plus any HTTP header field (case-insensitive, multi-values joined).
   `@status` (response verification, e.g. webhook callbacks or signed API
   responses) binds the response status code: set `RequestLike.status` on
   both `signRequest` and `verifyRequest` — a covered `@status` with no status
   is a caller configuration error (fail-fast on the sign side,
   `SIGNATURE_BASE_BUILD_FAILED` on the verify side).
+- **Single query parameters (§2.2.8 `@query-param`)**: `"@query-param";name="amount"`
+  binds one named query parameter instead of the whole query string —
+  the payment-callback shape where only `amount` must be tamper-proof
+  while unrelated parameters may be added, removed, or reordered by
+  intermediaries. The `;name` parameter is required and holds the
+  parameter's name in percent-encoded form. The query is parsed as
+  `application/x-www-form-urlencoded`; the bound value is the decoded
+  value re-encoded with the RFC's percent-encode-after-encoding rules
+  (UTF-8, only unreserved bytes left literal), so `%20` and `+`
+  spellings of a space canonicalize identically on both sides. A
+  parameter present with an empty value binds the empty string; a
+  parameter that does not occur is an error on both sides (fail-fast
+  when signing, `SIGNATURE_BASE_BUILD_FAILED` when verifying), and a
+  name that occurs more than once must not be covered this way — the
+  RFC directs that case to `@query`, and this library throws instead
+  of picking a winner. `;name` combines with `;req` (canonical wire
+  form `;req;name="…"`); combining it with `;bs`/`;sf`/`;key`/`;tr`
+  is rejected.
 - **Request binding for response signatures (§2.4 `;req`)**: any covered
   component may carry the `;req` component parameter — `"@method";req`,
   `"@authority";req`, `"content-digest";req`, … — which resolves that
@@ -463,9 +481,10 @@ const dual = addSignature(merchantSigned, {
 ## Limitations (honest)
 
 - **Subset of RFC 9421.** Not implemented: component
-  parameters besides `;req`/`;bs`/`;sf`/`;key`/`;tr`, and generic
+  parameters besides `;req`/`;bs`/`;sf`/`;key`/`;tr`/`;name`, and generic
   keystores over HTTP. The `bs`, `sf`, `key`, and `tr` component parameters
-  *are* implemented for header fields (see "What it implements"; `;sf`
+  *are* implemented for header fields, and `;name` *is* implemented for
+  the `@query-param` derived component (see "What it implements"; `;sf`
   covers the RFC 8941 core types only, with no per-field type
   registry, and `;key` selects Dictionary members of those same core
   types; `;tr` reads the field value from caller-supplied
@@ -687,7 +706,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 484 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 511 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in
