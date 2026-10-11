@@ -707,8 +707,10 @@ see [SECURITY.md](SECURITY.md).
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
-algorithm (3000 timed iterations per op after 200 warmup, printing the Node
-version and CPU). One real run on 2026-10-10:
+algorithm plus the key-resolution paths below (3000 timed iterations per op
+after 200 warmup, printing the Node version and CPU). One real run on
+2026-10-10 (the three `resolve` rows were added from a real run on
+2026-10-11, same environment):
 
 | alg | op | throughput |
 |-----|--------|------------|
@@ -725,10 +727,23 @@ version and CPU). One real run on 2026-10-10:
 | rsa-v1_5-sha256 | sign | ~1,600 ops/sec (~607 µs/op) |
 | rsa-v1_5-sha256 | verify | ~9,000 ops/sec (~111 µs/op) |
 | verifyAllLabels (2 labels) | verify | ~5,100 ops/sec (~196 µs/op) |
+| JwksKeyStore.resolve (hit) | resolve | ~7,950,000 ops/sec (~0.13 µs/op) |
+| memoizeKeyResolver (hit) | resolve | ~4,750,000 ops/sec (~0.21 µs/op) |
+| memoizeKeyResolver (miss) | resolve | ~7,790,000 ops/sec (~0.13 µs/op) |
 
 The `verifyAllLabels` row covers the multi-party scenario: the merchant signs
 with ed25519 and the payment gateway appends its own hmac-sha256 signature
 (`addSignature`) — both labels are verified independently on every call.
+
+The `resolve` rows cover the keyid→key hot path: the `JwksKeyStore` is
+restored offline from a snapshot (the bench performs zero network I/O), a
+hit is a plain Map lookup, a `memoizeKeyResolver` hit is served from its
+TTL cache, and a miss uses an unknown keyid, which is never cached and so
+penetrates to the store on every call. On the 2026-10-11 run a memoized
+hit measured *slower* than a raw resolve: against an already in-memory
+store, the wrapper's TTL check and LRU recency refresh cost more than the
+Map lookup they save — memoizing pays off when the underlying resolver is
+slow or remote, which this offline fixture deliberately is not.
 
 Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized; shared
 host, so numbers vary run to run). Request fixture: POST with a 31-byte JSON

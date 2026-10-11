@@ -11,6 +11,11 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark now also measures the key-resolution hot path:
+  `JwksKeyStore.resolve` hits on an offline-restored store (zero
+  network), and `memoizeKeyResolver` cache hits and misses (unknown
+  keyids, which are never cached), with self-checks on the underlying
+  resolver call counts.
 - `fromNodeRequest` now populates `RequestLike.trailers` from a Node
   `IncomingMessage` (`rawTrailers` when present, else `trailers`;
   names lowercased, multi-values joined like headers), so RFC 9421
