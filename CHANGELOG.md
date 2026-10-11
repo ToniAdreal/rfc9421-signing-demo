@@ -9,7 +9,12 @@ change type; no entry describes a feature that is not in the history.
 
 ## [Unreleased]
 
-No unreleased changes yet.
+### Changed
+
+- `JwksKeyStore` refreshes are now single-flight: concurrent
+  `refresh()` / stale `refreshIfStale()` calls share one in-flight
+  fetch and its atomic snapshot replacement instead of each fetching;
+  a settled refresh is never reused and a failure is never cached.
 
 ## [0.1.0]
 

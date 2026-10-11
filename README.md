@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 548 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 555 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -174,9 +174,13 @@ await store.refreshIfStale(); // rotation = re-fetch when stale; returns false (
 `refreshIfStale()` is the one-call form of the `if (store.isStale()) await store.refresh()`
 check: a fresh snapshot returns `false` without touching the network, a stale
 one (or a store that has never refreshed) delegates to `refresh()` with all of
-its atomic semantics and returns `true`. Concurrent calls are deliberately not
-deduplicated — two overlapping calls may each fetch; serialize them yourself
-if you need single-flight behaviour.
+its atomic semantics and returns `true`. Refreshes are single-flight:
+concurrent `refresh()` calls — and stale `refreshIfStale()` calls — share one
+in-flight fetch and its single atomic snapshot replacement (on failure every
+waiter receives the same error), so a burst of verifiers hitting a stale
+window together cannot thundering-herd the endpoint. Only overlapping calls
+merge: once a refresh settles, the next call fetches again, and a failure is
+never cached.
 
 A failed `refresh()` (HTTP error, non-JSON body, a malformed JWKS
 document, or an entry carrying private `"d"` material) throws and leaves
@@ -776,7 +780,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 548 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 555 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in

@@ -227,6 +227,12 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   nastier surprise than a loud setup error.
  * - **Duplicate `kid`s** within one document: the later entry wins
  *   (ordinary dictionary semantics).
+ * - **Refreshes are single-flight.** Concurrent `refresh()` calls —
+ *   and stale `refreshIfStale()` calls — share one in-flight fetch
+ *   and its single atomic snapshot replacement, so a burst of
+ *   verifiers hitting a stale window together cannot thundering-herd
+ *   the JWKS endpoint. A settled refresh is never reused: the next
+ *   call fetches again, and a failure is never cached.
  *
  * Honest limits: trusting the endpoint is the caller's responsibility —
  * this store performs no TLS pinning, no response-signature check, and
@@ -254,6 +260,14 @@ export class JwksKeyStore {
   private keysByKid = new Map<string, KeyObject>();
   /** Unix seconds of the last successful refresh, or null if none. */
   private lastRefreshAtSec: number | null = null;
+  /**
+   * The single in-flight refresh, if any (single-flight). Concurrent
+   * `refresh()` / stale `refreshIfStale()` calls all await this same
+   * promise instead of each fetching. Cleared as soon as the refresh
+   * settles — success or failure — so a later call always starts a
+   * fresh fetch (a failure is never cached).
+   */
+  private inFlightRefresh: Promise<void> | null = null;
 
   constructor(url: string, opts: JwksKeyStoreOptions = {}) {
     if (typeof url !== "string" || url.length === 0)
@@ -332,12 +346,10 @@ export class JwksKeyStore {
    * previous snapshot and freshness timestamp are left untouched, so
    * the store remains stale and a later call will retry.
    *
-   * Concurrency: concurrent calls are NOT deduplicated — there is no
-   * in-flight promise sharing, so two overlapping calls that both
-   * observe a stale snapshot may each perform a fetch (the later
-   * successful snapshot simply replaces the earlier one, exactly as
-   * with two overlapping `refresh()` calls). Callers that need
-   * single-flight behaviour must serialize calls themselves.
+   * Concurrency: refreshes are single-flight — overlapping calls
+   * that observe a stale snapshot share the one in-flight fetch (see
+   * {@link JwksKeyStore.refresh}) instead of each fetching, and all
+   * of them settle with that fetch's outcome.
    */
   async refreshIfStale(): Promise<boolean> {
     if (!this.isStale()) return false;
@@ -348,6 +360,16 @@ export class JwksKeyStore {
   /**
    * Fetch the JWKS document and atomically replace the key snapshot.
    *
+   * Single-flight: while one refresh is in flight, concurrent
+   * `refresh()` calls (and stale `refreshIfStale()` calls, which
+   * delegate here) do not fetch again — they all await the same
+   * in-flight promise, share its one atomic snapshot replacement on
+   * success, and receive the same error on failure. Only overlapping
+   * calls are merged: once the in-flight refresh settles, the next
+   * `refresh()` performs a real fetch again, so a failure is never
+   * cached and can be retried immediately. While a refresh is in
+   * flight, `resolve` keeps serving the previous complete snapshot.
+   *
    * Throws a descriptive configuration `Error` — and leaves the
    * previous snapshot and freshness timestamp untouched — when the
    * fetch itself fails, the response is not `ok`, the body is not
@@ -356,7 +378,18 @@ export class JwksKeyStore {
    * unsupported `kty`, or private `"d"` material). Entries with a
    * missing or empty `kid` are skipped (see class documentation).
    */
-  async refresh(): Promise<void> {
+  refresh(): Promise<void> {
+    if (this.inFlightRefresh !== null) return this.inFlightRefresh;
+    let flight: Promise<void>;
+    flight = this.performRefresh().finally(() => {
+      if (this.inFlightRefresh === flight) this.inFlightRefresh = null;
+    });
+    this.inFlightRefresh = flight;
+    return flight;
+  }
+
+  /** The actual fetch-and-swap behind {@link JwksKeyStore.refresh}. */
+  private async performRefresh(): Promise<void> {
     let res: JwksFetchResponse;
     try {
       res = await this.fetchImpl(this.url);
