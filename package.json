@@ -19,6 +19,7 @@
   "scripts": {
     "bench": "npm run build && node dist/bench/bench.js",
     "build": "tsc",
+    "demo": "npm run build && node dist/src/demo.js",
     "clean": "rm -rf dist",
     "test": "npm run build && node --test dist/test/*.test.js",
     "prepack": "npm run build"

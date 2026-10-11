@@ -15,8 +15,23 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 536 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 541 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
+
+Or run the bundled demo — one command generates a fresh ed25519 key
+pair, signs a fixed payment request (with `Content-Digest` and a
+`nonce`), prints the `Signature-Input` / `Signature` headers, and
+verifies it; then it tampers the body by one byte and shows the
+verifier rejecting it with `BODY_DIGEST_MISMATCH`:
+
+```bash
+npm run demo
+```
+
+The request data (method, URL, body, `created` timestamp, key id, and
+nonce) is fixed in `src/demo.ts` — no network, no wall clock — so every
+line except the freshly generated signature itself is identical
+between runs.
 
 ## Quickstart
 
@@ -761,7 +776,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 536 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 541 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in
