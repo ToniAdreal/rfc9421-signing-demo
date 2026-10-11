@@ -15,6 +15,13 @@
   ],
   "license": "MIT",
   "main": "dist/src/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js",
+      "default": "./dist/src/index.js"
+    }
+  },
   "name": "@toniadreal/rfc9421-signing-demo",
   "scripts": {
     "bench": "npm run build && node dist/bench/bench.js",
