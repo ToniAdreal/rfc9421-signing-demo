@@ -12,6 +12,16 @@
  * `Content-Digest` header plus a digest recomputation over the body, so
  * the exact bytes matter — pass the raw buffered body, never a
  * re-serialized one.
+ *
+ * Trailers are carried over too: a real `IncomingMessage` exposes them
+ * as `req.trailers` (parsed object) and `req.rawTrailers` (flat
+ * wire-order array). Honest caveats: trailers only exist at all when
+ * the peer actually sends them (on a chunked message), and on a real
+ * `IncomingMessage` they are only complete after the `end` event —
+ * which is the same moment the buffered body is ready, so calling this
+ * adapter after `end` (as the README example does) is both necessary
+ * and sufficient. Before `end`, `trailers` is empty even for a message
+ * that will carry trailers.
  */
 
 import { joinHeaderValues, type RequestLike } from "./components.js";
@@ -26,6 +36,23 @@ export interface IncomingRequestLike {
   /** Origin-form path+query on real servers (e.g. "/webhook?event=push"). */
   url?: string;
   headers: Record<string, string | string[] | undefined>;
+  /**
+   * Parsed trailer fields, as Node exposes them on
+   * `IncomingMessage.trailers`. Read only when `rawTrailers` is absent
+   * or empty. A real message has this set to `{}` when the peer sent
+   * no trailers; the adapter normalizes that to "no trailers".
+   */
+  trailers?: Record<string, string | string[] | undefined>;
+  /**
+   * Raw trailer fields, as Node exposes them on
+   * `IncomingMessage.rawTrailers`: a flat `[name, value, name, value,
+   * …]` array in wire order, with the sender's original name casing.
+   * When non-empty it takes precedence over `trailers`, because it is
+   * the lossless form (duplicate fields are still separate entries).
+   * The normalized output lowercases names exactly like headers — the
+   * original casing is NOT preserved in `RequestLike.trailers`.
+   */
+  rawTrailers?: string[];
   /** Only `encrypted` is read, to infer the URL scheme. */
   socket?: { encrypted?: boolean } | null | undefined;
 }
@@ -62,6 +89,46 @@ function normalizeHeaders(
       : value;
   }
   return out;
+}
+
+/**
+ * Normalize an incoming message's trailers into the
+ * `RequestLike.trailers` shape: names lowercased, multi-value fields
+ * combined via `joinHeaderValues` — the exact header conventions, so a
+ * `;tr` covered component (RFC 9421 §2.1.4) canonicalizes identically
+ * whether the signer built its `RequestLike` by hand or the verifier
+ * received the message through this adapter.
+ *
+ * Returns `undefined` when the message carries no trailers (absent,
+ * empty object, empty raw array, or only `undefined` values), so the
+ * resulting `RequestLike` gains no `trailers` field at all and plain
+ * request flows keep their exact previous shape. A non-empty
+ * `rawTrailers` wins over the parsed `trailers` object; duplicate raw
+ * names merge into one field. An unpaired trailing raw entry (a name
+ * with no value — Node never produces one) is ignored.
+ */
+function normalizeTrailers(
+  req: IncomingRequestLike,
+): Record<string, string> | undefined {
+  if (Array.isArray(req.rawTrailers) && req.rawTrailers.length > 0) {
+    const grouped = new Map<string, string[]>();
+    for (let i = 0; i + 1 < req.rawTrailers.length; i += 2) {
+      const name = (req.rawTrailers[i] as string).toLowerCase();
+      const value = req.rawTrailers[i + 1] as string;
+      const list = grouped.get(name);
+      if (list) list.push(value);
+      else grouped.set(name, [value]);
+    }
+    if (grouped.size === 0) return undefined;
+    const out: Record<string, string> = {};
+    for (const [name, values] of grouped) {
+      out[name] = values.length === 1 ? (values[0] as string) : joinHeaderValues(values);
+    }
+    return out;
+  }
+  if (req.trailers === undefined) return undefined;
+  const normalized = normalizeHeaders(req.trailers);
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 /**
@@ -102,5 +169,11 @@ export function fromNodeRequest(
     ? path
     : `${scheme}://${host}${path}`;
 
-  return { method, url, headers, body };
+  // Trailers are only attached when the message actually carries
+  // them; on a real server they are complete only after the `end`
+  // event, which is when the caller has the buffered body anyway.
+  const trailers = normalizeTrailers(req);
+  return trailers === undefined
+    ? { method, url, headers, body }
+    : { method, url, headers, body, trailers };
 }

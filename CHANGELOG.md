@@ -9,6 +9,14 @@ change type; no entry describes a feature that is not in the history.
 
 ## [Unreleased]
 
+### Added
+
+- `fromNodeRequest` now populates `RequestLike.trailers` from a Node
+  `IncomingMessage` (`rawTrailers` when present, else `trailers`;
+  names lowercased, multi-values joined like headers), so RFC 9421
+  `;tr` covered components verify on a real server. Messages without
+  trailers produce no `trailers` field, as before.
+
 ### Changed
 
 - `JwksKeyStore` refreshes are now single-flight: concurrent

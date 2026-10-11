@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 555 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 562 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -255,7 +255,14 @@ defaults to `https` on a TLS socket, `http` otherwise; behind a
 TLS-terminating proxy pass `{ scheme: "https" }` explicitly, because signer
 and verifier must agree on the exact URL (`@scheme`/`@authority`/`@path`
 are covered components). Missing `method`/`url`/`host` throws a
-configuration `Error` instead of silently defaulting.
+configuration `Error` instead of silently defaulting. The adapter also
+carries the message's trailers into `RequestLike.trailers` (from
+`req.rawTrailers` when present, else `req.trailers`; names lowercased,
+multi-values joined with `", "` — the header conventions), so covered
+`;tr` components verify on a real server; note trailers only exist on
+chunked messages and are complete only after the request's `end`
+event, which is when the example above calls the adapter. A message
+with no trailers produces no `trailers` field at all.
 
 ## What it implements
 
@@ -780,7 +787,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 555 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
+`npm test` runs 562 tests including the RFC 9421 Appendix B.2.5 independent interop vector, a golden signature-base vector and a
 golden `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in
