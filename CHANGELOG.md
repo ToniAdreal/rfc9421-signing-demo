@@ -29,6 +29,16 @@ change type; no entry describes a feature that is not in the history.
   fetch and its atomic snapshot replacement instead of each fetching;
   a settled refresh is never reused and a failure is never cached.
 
+### Tests
+
+- Independent RFC 9421 Appendix vectors added: B.2.6 (ed25519)
+  verifies end-to-end, and B.2.4 (ecdsa-p256-sha256) reproduces the
+  published signature base byte-for-byte. The B.2.4 check also pins a
+  known divergence: the published value verifies under the encoding
+  RFC 9421 §3.3.4 defines, but this library's ECDSA path expects
+  DER-encoded values, so the official vector does not yet verify
+  end-to-end (see the README Interoperability section).
+
 ## [0.1.0]
 
 The only version declared in `package.json`. Entries cover the commit
