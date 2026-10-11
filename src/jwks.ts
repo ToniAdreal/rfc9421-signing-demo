@@ -58,6 +58,37 @@ export interface JwksKeyStoreOptions {
 }
 
 /**
+ * Point-in-time observability counters for a {@link JwksKeyStore},
+ * returned by {@link JwksKeyStore.stats} (mirroring `ReplayCache`'s
+ * `stats()`).
+ *
+ * - `refreshes`: successful fetches — one per actual fetch performed,
+ *   so concurrent calls merged by the single-flight mechanism count
+ *   once, not once per waiter.
+ * - `refreshFailures`: failed fetches, under the same once-per-actual-
+ *   fetch counting (a failed refresh shared by N waiters counts once).
+ * - `hits`: `resolve()` calls that returned a key.
+ * - `misses`: `resolve()` calls that returned `undefined` — an unknown
+ *   keyid, any keyid before the first successful refresh, or an
+ *   invalid (non-string / empty) keyid. `hits + misses` therefore
+ *   equals the total number of `resolve()` calls.
+ *
+ * Counters start at zero, run for the lifetime of the store, and are
+ * deliberately NOT part of a snapshot: `exportSnapshot()` does not
+ * carry them and `restoreSnapshot()` does not reset them, so a
+ * process that carries its keys across its own restart keeps one
+ * continuous count. (A store built by the static
+ * `JwksKeyStore.restore()` is a new store and starts at zero, like
+ * any freshly constructed store.)
+ */
+export interface JwksKeyStoreStats {
+  refreshes: number;
+  refreshFailures: number;
+  hits: number;
+  misses: number;
+}
+
+/**
  * One key in a {@link JwksKeyStoreSnapshot}: a public-key-only JWK in
  * exactly one of the three shapes this library's JWK importers accept
  * (ed25519 / P-256 / RSA), tagged with the `kid` it resolves under.
@@ -233,6 +264,12 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   verifiers hitting a stale window together cannot thundering-herd
  *   the JWKS endpoint. A settled refresh is never reused: the next
  *   call fetches again, and a failure is never cached.
+ * - **Observable via `stats()`.** Successful/failed refreshes and
+ *   `resolve()` hits/misses are counted for the store's lifetime (see
+ *   {@link JwksKeyStoreStats} for the exact counting rules, including
+ *   the single-flight rule that merged calls count once), so an
+ *   operator can tell whether rotation is taking effect and whether
+ *   misses look like misconfiguration or retired keys.
  *
  * Honest limits: trusting the endpoint is the caller's responsibility —
  * this store performs no TLS pinning, no response-signature check, and
@@ -268,6 +305,14 @@ export class JwksKeyStore {
    * fresh fetch (a failure is never cached).
    */
   private inFlightRefresh: Promise<void> | null = null;
+  /** Successful actual fetches (single-flight merges count once). */
+  private refreshCount = 0;
+  /** Failed actual fetches (single-flight merges count once). */
+  private refreshFailureCount = 0;
+  /** `resolve()` calls that returned a key. */
+  private hitCount = 0;
+  /** `resolve()` calls that returned `undefined`. */
+  private missCount = 0;
 
   constructor(url: string, opts: JwksKeyStoreOptions = {}) {
     if (typeof url !== "string" || url.length === 0)
@@ -334,6 +379,21 @@ export class JwksKeyStore {
   }
 
   /**
+   * Point-in-time observability snapshot `{ refreshes, refreshFailures,
+   * hits, misses }` (see {@link JwksKeyStoreStats} for the exact
+   * counting rules). The returned object is a fresh copy — mutating
+   * it does not affect the store's counters.
+   */
+  stats(): JwksKeyStoreStats {
+    return {
+      refreshes: this.refreshCount,
+      refreshFailures: this.refreshFailureCount,
+      hits: this.hitCount,
+      misses: this.missCount,
+    };
+  }
+
+  /**
    * Refresh only when the snapshot is stale: the convenience form of
    * the caller's `if (store.isStale()) await store.refresh()` loop.
    *
@@ -388,8 +448,25 @@ export class JwksKeyStore {
     return flight;
   }
 
-  /** The actual fetch-and-swap behind {@link JwksKeyStore.refresh}. */
+  /**
+   * The actual fetch-and-swap behind {@link JwksKeyStore.refresh},
+   * with the {@link JwksKeyStoreStats} counting applied here — inside
+   * the single-flight body — so a refresh shared by any number of
+   * concurrent waiters counts exactly once, as a success or as a
+   * failure.
+   */
   private async performRefresh(): Promise<void> {
+    try {
+      await this.fetchAndSwap();
+      this.refreshCount++;
+    } catch (err) {
+      this.refreshFailureCount++;
+      throw err;
+    }
+  }
+
+  /** Fetch the JWKS document and build/swap the next snapshot. */
+  private async fetchAndSwap(): Promise<void> {
     let res: JwksFetchResponse;
     try {
       res = await this.fetchImpl(this.url);
@@ -518,6 +595,8 @@ export class JwksKeyStore {
    * timestamp is the snapshot's original `fetchedAtSec` — restoring
    * never renews freshness, so `isStale()` may immediately report
    * `true` and the caller's normal refresh loop takes it from there.
+   * Restoring also does not reset the `stats()` counters: they are
+   * not part of the snapshot and keep running across a restore.
    *
    * The input is untrusted data and is validated strictly (see
    * {@link JwksKeyStoreSnapshot} and the note on `parseJwksSnapshot`):
@@ -578,9 +657,18 @@ export class JwksKeyStore {
    * Returns `undefined` for unknown keyids (and before the first
    * successful `refresh()`), which `verifyRequest` fails closed as
    * `KEY_RESOLUTION_FAILED`. Never throws and never performs I/O.
+   * Every call is counted by {@link JwksKeyStore.stats}: returning a
+   * key is a hit, returning `undefined` (including for an invalid
+   * keyid) is a miss.
    */
   resolve = (keyId: string): KeyObject | undefined => {
-    if (typeof keyId !== "string" || keyId.length === 0) return undefined;
-    return this.keysByKid.get(keyId);
+    if (typeof keyId !== "string" || keyId.length === 0) {
+      this.missCount++;
+      return undefined;
+    }
+    const key = this.keysByKid.get(keyId);
+    if (key === undefined) this.missCount++;
+    else this.hitCount++;
+    return key;
   };
 }

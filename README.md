@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 571 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 579 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -181,6 +181,16 @@ waiter receives the same error), so a burst of verifiers hitting a stale
 window together cannot thundering-herd the endpoint. Only overlapping calls
 merge: once a refresh settles, the next call fetches again, and a failure is
 never cached.
+
+Observability: `store.stats()` returns a detached `{ refreshes,
+refreshFailures, hits, misses }` snapshot (mirroring `ReplayCache.stats()`).
+Refresh counts are once per actual fetch — a single-flight refresh shared by
+many waiters counts once, as a success or as a failure — and every `resolve()`
+call counts as exactly one hit (returned a key) or miss (returned `undefined`:
+an unknown keyid, any keyid before the first successful refresh, or an invalid
+keyid), so `hits + misses` is the total number of resolutions. The counters
+run for the store's lifetime and are not part of a snapshot: exporting or
+restoring one does not reset them.
 
 A failed `refresh()` (HTTP error, non-JSON body, a malformed JWKS
 document, or an entry carrying private `"d"` material) throws and leaves
@@ -820,7 +830,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 571 tests including the RFC 9421 Appendix B.2.5 and B.2.6 independent interop vectors (both verify end-to-end), the
+`npm test` runs 579 tests including the RFC 9421 Appendix B.2.5 and B.2.6 independent interop vectors (both verify end-to-end), the
 B.2.4 vector (base byte-for-byte; its end-to-end divergence is pinned —
 see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).

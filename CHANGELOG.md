@@ -11,6 +11,11 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore.stats()` observability: detached `{ refreshes,
+  refreshFailures, hits, misses }` counters for the store's lifetime —
+  refreshes counted once per actual fetch (single-flight merges count
+  once), every `resolve()` counted as one hit or miss, and snapshot
+  export/restore does not reset the counts.
 - The benchmark now also measures the key-resolution hot path:
   `JwksKeyStore.resolve` hits on an offline-restored store (zero
   network), and `memoizeKeyResolver` cache hits and misses (unknown
