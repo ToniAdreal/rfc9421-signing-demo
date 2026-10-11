@@ -786,3 +786,5 @@ are asserted).
 ## License
 
 MIT
+
+See [CHANGELOG.md](CHANGELOG.md) for the release history.
