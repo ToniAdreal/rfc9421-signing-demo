@@ -1,5 +1,5 @@
 {
-  "description": "Sign and verify HTTP messages per RFC 9421 (ed25519 / hmac-sha256), with RFC 9530 Content-Digest body binding",
+  "description": "Sign and verify HTTP messages per RFC 9421 (ed25519 / hmac-sha256 / hmac-sha512 / ecdsa-p256-sha256 / rsa-pss-sha512 / rsa-v1_5-sha256), with RFC 9530 Content-Digest body binding",
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.0.0"
@@ -11,7 +11,13 @@
     "http-signatures",
     "rfc9421",
     "ed25519",
-    "api-security"
+    "api-security",
+    "cryptography",
+    "payments",
+    "security",
+    "typescript",
+    "webhooks",
+    "zero-dependency"
   ],
   "license": "MIT",
   "main": "dist/src/index.js",
