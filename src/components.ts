@@ -4,8 +4,8 @@
  * (HTTP Message Signatures).
  *
  * Covered components supported: @method, @scheme, @authority, @path, @query,
- * @query-param, @status, @target-uri, @created, @expires, plus any HTTP
- * header field name.
+ * @query-param, @status, @target-uri, @request-target, @created, @expires,
+ * plus any HTTP header field name.
  * Any of them may carry the RFC 9421 §2.4 `;req` component parameter
  * (e.g. `"@method";req`), which resolves the component against the
  * associated request (`RequestLike.request`) instead of the message
@@ -69,6 +69,20 @@
  * a name that occurs more than once MUST NOT be covered (RFC 9421
  * §2.2.8) — cover `@query` instead. `;name` combines with `;req`
  * (canonical wire form `;req;name="…"`) and with nothing else.
+ * The §2.2.5 `@request-target` derived component binds the request
+ * target in its origin form: the path plus, when present, `?` and the
+ * query — exactly the part that appears in an HTTP/1.1 request line.
+ * It is reconstructed from `RequestLike.url` as `pathname + search`,
+ * so it never contains the scheme or authority and a URL fragment
+ * never participates. That distinguishes it from `@target-uri` (the
+ * full absolute URI, scheme and authority included) and from `@path`
+ * (the path alone, query excluded): a signature covering only
+ * `@request-target` is unaffected by a scheme/authority change, and
+ * one covering it is broken by any path or query change. Because
+ * `RequestLike` only carries an absolute URL, the absolute-form,
+ * authority-form, and asterisk-form request targets of §2.2.5 cannot
+ * be represented here and are not produced. Like the other derived
+ * components it combines with `;req` and with nothing else.
  * Other component parameters are not supported and fail
  * closed.
  * Signature algorithms are handled by sign.ts / verify.ts; this module
@@ -581,6 +595,14 @@ export function resolveComponent(
       return resolveQueryParamValue(target, queryParamName);
     case "@target-uri":
       return target.url;
+    case "@request-target":
+      // RFC 9421 §2.2.5: the request target in origin form — the
+      // path and, when present, the query (url.search already carries
+      // its leading "?", and is empty when there is no query, so no
+      // trailing "?" is ever produced). Scheme, authority, and any
+      // fragment are not part of it (see the module header for the
+      // forms this URL-based reconstruction cannot represent).
+      return (url.pathname || "/") + url.search;
     case "@created":
       if (params.created === undefined)
         throw new Error('"@created" is covered but no created parameter was given');

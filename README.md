@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 594 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 605 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -278,13 +278,26 @@ with no trailers produces no `trailers` field at all.
 
 - **Signature base** (§2.5): `"id": value` lines for each covered component,
   then the `"@signature-params"` line. Covered components: `@method`,
-  `@scheme`, `@authority`, `@path`, `@query`, `@query-param`, `@status`, `@target-uri`, `@created`,
+  `@scheme`, `@authority`, `@path`, `@query`, `@query-param`, `@status`, `@target-uri`, `@request-target`, `@created`,
   `@expires`, plus any HTTP header field (case-insensitive, multi-values joined).
   `@status` (response verification, e.g. webhook callbacks or signed API
   responses) binds the response status code: set `RequestLike.status` on
   both `signRequest` and `verifyRequest` — a covered `@status` with no status
   is a caller configuration error (fail-fast on the sign side,
   `SIGNATURE_BASE_BUILD_FAILED` on the verify side).
+- **Request target (§2.2.5 `@request-target`)**: `"@request-target"` binds
+  the request target in its origin form — the path plus, when present,
+  `?` and the query, exactly as it appears in an HTTP/1.1 request line
+  (no trailing `?` when there is no query). That is the component a
+  legacy gateway that signed the request line needs: unlike
+  `@target-uri` it contains no scheme or authority, and unlike `@path`
+  it does not drop the query, so any path or query change breaks the
+  signature while a scheme/authority change alone does not. The value
+  is reconstructed from `RequestLike.url`, so the absolute-form,
+  authority-form, and asterisk-form request targets cannot be
+  represented and are not produced, and a URL fragment never
+  participates. It combines with `;req` like the other derived
+  components.
 - **Single query parameters (§2.2.8 `@query-param`)**: `"@query-param";name="amount"`
   binds one named query parameter instead of the whole query string —
   the payment-callback shape where only `amount` must be tamper-proof
@@ -576,7 +589,11 @@ const dual = addSignature(merchantSigned, {
   registry, and `;key` selects Dictionary members of those same core
   types; `;tr` reads the field value from caller-supplied
   `RequestLike.trailers` — this library does not parse raw HTTP
-  trailer sections off the wire). Network key
+  trailer sections off the wire). `@request-target` *is* implemented
+  (§2.2.5), reconstructed from the absolute `RequestLike.url` in
+  origin form only (path + query): the absolute-form, authority-form,
+  and asterisk-form request targets cannot be expressed through that
+  URL and are not produced. Network key
   discovery *is* implemented for JWKS endpoints: `JwksKeyStore` fetches a
   JWKS document and resolves `keyid`s against the fetched snapshot.
   Response-to-request binding *is* implemented, via the §2.4 `;req`
@@ -846,7 +863,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 594 tests including the RFC 9421 Appendix B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all four verify end-to-end;
+`npm test` runs 605 tests including the RFC 9421 Appendix B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all four verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
