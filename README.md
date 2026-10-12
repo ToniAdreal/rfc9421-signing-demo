@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 579 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 582 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -404,10 +404,10 @@ with no trailers produces no `trailers` field at all.
   The verifier reports `keyId: undefined`, and pinning/resolution flows
   treat it as a missing claim (e.g. `keyResolver` → `KEY_RESOLUTION_FAILED`,
   `expectedKeyId` → `KEYID_MISMATCH`).
-- **Algorithms**: `ed25519`, `ecdsa-p256-sha256` (NIST P-256; DER-encoded
-  ECDSA signatures — a known divergence from RFC 9421 §3.3.4, which
-  defines the signature value as the raw concatenation of its two
-  integers; see [Interoperability](#interoperability)), `rsa-pss-sha512` (RSASSA-PSS with
+- **Algorithms**: `ed25519`, `ecdsa-p256-sha256` (NIST P-256; ECDSA
+  signature values are the raw concatenation of the two integers r and
+  s, each padded to 32 octets — 64 octets total — exactly as RFC 9421
+  §3.3.4 defines; see [Interoperability](#interoperability)), `rsa-pss-sha512` (RSASSA-PSS with
   SHA-512, MGF1 with SHA-512, 64-byte salt per RFC 9421 §3.3.1),
   `rsa-v1_5-sha256` (RSASSA-PKCS1-v1_5 with SHA-256 per RFC 9421 §3.3.2 —
   deterministic signatures, same RSA key material as PSS, ≥ 2048-bit
@@ -632,19 +632,15 @@ What *has* been verified beyond the sign→verify round-trip tests:
 - The `Content-Digest: sha-512` value is plain SHA-512; the golden vector
   was cross-checked against `openssl dgst -sha512` output for the same
   input.
-- RFC 9421 Appendix B.2.5 (hmac-sha256) and B.2.6 (ed25519) vectors in
-  `test/rfc9421AppendixB.test.ts`: the signature base matches the
-  published bytes exactly and the published signature value verifies
-  end-to-end through `verifyRequest`.
-- RFC 9421 Appendix B.2.4 (ecdsa-p256-sha256) vector: the signature base
-  matches the published bytes exactly, and the published signature
-  value verifies against the published key with `node:crypto` alone
-  when read in the encoding RFC 9421 §3.3.4 defines (the raw
-  concatenation of the two ECDSA integers, 64 octets). It does **not**
-  verify end-to-end through this library today: the library's
-  ecdsa-p256-sha256 path expects DER-encoded values instead — a known
-  divergence from §3.3.4, pinned by a test in the same file so fixing
-  the encoding flips that test deliberately.
+- RFC 9421 Appendix B.2.5 (hmac-sha256), B.2.6 (ed25519), and B.2.4
+  (ecdsa-p256-sha256) vectors in `test/rfc9421AppendixB.test.ts`: the
+  signature base matches the published bytes exactly and the published
+  signature value verifies end-to-end through `verifyRequest`. For
+  B.2.4 that includes the encoding RFC 9421 §3.3.4 defines — the raw
+  concatenation of the two ECDSA integers, 64 octets — which the
+  library's sign side now also emits (earlier versions emitted and
+  expected DER instead; DER signatures from those versions are
+  rejected, with no compatibility fallback).
 
 Known interop hazards (things a foreign implementation may do differently;
 most also appear in [Limitations](#limitations)):
@@ -668,9 +664,10 @@ most also appear in [Limitations](#limitations)):
   only other digest algorithms fails with "no sha-512 or sha-256
   content-digest present".
 - **Signature algorithms.** Implemented: `ed25519`, `ecdsa-p256-sha256`
-  (DER-encoded in this library — divergent from the raw encoding
-  RFC 9421 §3.3.4 defines, so the official B.2.4 vector does not verify
-  end-to-end; see the verified list above), `rsa-pss-sha512` (RSASSA-PSS with
+  (raw r‖s encoding per RFC 9421 §3.3.4, so the official B.2.4 vector
+  verifies end-to-end; see the verified list above — note the breaking
+  change from earlier versions of this library, which used DER: their
+  ECDSA signatures no longer verify here), `rsa-pss-sha512` (RSASSA-PSS with
   SHA-512, MGF1 with SHA-512, and a 64-byte salt per RFC 9421 §3.3.1 —
   signatures are probabilistic, so verifiers re-verify rather than
   re-sign-and-compare), `rsa-v1_5-sha256` (RSASSA-PKCS1-v1_5 with
@@ -830,9 +827,8 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 579 tests including the RFC 9421 Appendix B.2.5 and B.2.6 independent interop vectors (both verify end-to-end), the
-B.2.4 vector (base byte-for-byte; its end-to-end divergence is pinned —
-see Interoperability), a golden signature-base vector and a golden
+`npm test` runs 582 tests including the RFC 9421 Appendix B.2.4, B.2.5 and B.2.6 independent interop vectors (all three verify end-to-end;
+B.2.4's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
 a loopback-only `http` server on an ephemeral port), no randomness in

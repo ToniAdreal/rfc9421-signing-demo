@@ -7,7 +7,7 @@ Read this before using it anywhere that matters.
 ## Demo scope
 
 - Only an RFC 9421 *subset* is implemented: signature algorithms
-  `ed25519`, `ecdsa-p256-sha256` (NIST P-256, DER-encoded per
+  `ed25519`, `ecdsa-p256-sha256` (NIST P-256, raw r‖s encoding per
   RFC 9421 §3.3.4), `rsa-pss-sha512` (RSASSA-PSS per RFC 9421 §3.3.1),
   `rsa-v1_5-sha256` (RSASSA-PKCS1-v1_5 per RFC 9421 §3.3.2),
   `hmac-sha256`, and `hmac-sha512` (≥ 64-byte secrets, RFC 2104 §3); `verifyRequest` checks one

@@ -18,9 +18,11 @@ export function generateEd25519KeyPair(): {
 /**
  * Generate a fresh NIST P-256 (secp256r1) key pair for the
  * `ecdsa-p256-sha256` algorithm (RFC 9421 §3.3.4). The signatures
- * produced from this pair are DER-encoded ASN.1 ECDSA values, per the
- * RFC — `signRequest` / `verifyRequest` both use node:crypto's default
- * DER encoding, so the wire format stays spec-conformant.
+ * produced from this pair are the raw concatenation of the two ECDSA
+ * integers r and s, each padded to 32 octets (64 octets in total), as
+ * §3.3.4 defines — `signRequest` / `verifyRequest` both pass
+ * `dsaEncoding: "ieee-p1363"` to node:crypto, so the wire format stays
+ * spec-conformant.
  */
 export function generateP256KeyPair(): {
   publicKey: KeyObject;

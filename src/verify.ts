@@ -567,11 +567,18 @@ export function verifyRequest(
     if (effectiveAlg === "ed25519") {
       cryptoOk = edVerify(null, Buffer.from(base, "utf8"), key, sigBytes);
     } else if (effectiveAlg === "ecdsa-p256-sha256") {
-      // Expects the DER-encoded ECDSA value that createSign produces on
-      // the sign side (RFC 9421 §3.3.4).
-      cryptoOk = createVerify("sha256")
-        .update(base, "utf8")
-        .verify(key, sigBytes);
+      // Expects the raw r‖s ECDSA value RFC 9421 §3.3.4 defines (each
+      // integer padded to 32 octets, 64 octets total), consumed via
+      // `dsaEncoding: "ieee-p1363"` — the same encoding the sign side
+      // emits. The length guard comes first: a value that is not
+      // exactly 64 octets (e.g. a DER signature minted by an earlier
+      // version of this library — there is deliberately no DER
+      // fallback) is a plain SIGNATURE_MISMATCH, never a crypto error.
+      cryptoOk =
+        sigBytes.length === 64 &&
+        createVerify("sha256")
+          .update(base, "utf8")
+          .verify({ key, dsaEncoding: "ieee-p1363" }, sigBytes);
     } else if (effectiveAlg === "rsa-v1_5-sha256") {
       // RSASSA-PKCS1-v1_5-VERIFY per RFC 9421 §3.3.2: SHA-256 with
       // PKCS#1 v1.5 padding — the exact inverse of the sign side. A PSS

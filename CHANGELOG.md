@@ -29,6 +29,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Changed
 
+- **Breaking:** `ecdsa-p256-sha256` now uses the signature encoding
+  RFC 9421 §3.3.4 actually defines — the raw concatenation of r and s,
+  each padded to 32 octets (64 octets total, via node:crypto's
+  `dsaEncoding: "ieee-p1363"`) — instead of DER. Signatures this
+  library mints are now interoperable with spec-conformant peers, and
+  the official Appendix B.2.4 vector verifies end-to-end. DER-encoded
+  ECDSA signatures minted by earlier versions of this library are no
+  longer accepted, and there is deliberately no DER fallback: this is
+  a demo, and silently accepting two encodings would hide exactly the
+  interop bug this fix removes.
 - `JwksKeyStore` refreshes are now single-flight: concurrent
   `refresh()` / stale `refreshIfStale()` calls share one in-flight
   fetch and its atomic snapshot replacement instead of each fetching;
@@ -36,13 +46,10 @@ change type; no entry describes a feature that is not in the history.
 
 ### Tests
 
-- Independent RFC 9421 Appendix vectors added: B.2.6 (ed25519)
-  verifies end-to-end, and B.2.4 (ecdsa-p256-sha256) reproduces the
-  published signature base byte-for-byte. The B.2.4 check also pins a
-  known divergence: the published value verifies under the encoding
-  RFC 9421 §3.3.4 defines, but this library's ECDSA path expects
-  DER-encoded values, so the official vector does not yet verify
-  end-to-end (see the README Interoperability section).
+- Independent RFC 9421 Appendix vectors added: B.2.6 (ed25519) and
+  B.2.4 (ecdsa-p256-sha256) both verify end-to-end (B.2.4 after the
+  §3.3.4 encoding fix below; its signature base also reproduces
+  byte-for-byte).
 
 ## [0.1.0]
 

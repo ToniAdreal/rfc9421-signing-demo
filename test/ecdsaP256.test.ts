@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createVerify } from "node:crypto";
 import {
+  buildSignatureBase,
   exportPublicKeyPem,
   generateEd25519KeyPair,
   generateP256KeyPair,
@@ -47,6 +49,69 @@ test("ecdsa-p256-sha256 round-trip with body", () => {
   assert.equal(res.ok, true);
   assert.equal(res.keyId, "test-p256");
   assert.equal(res.alg, "ecdsa-p256-sha256");
+});
+
+/** Re-encode a raw 64-octet r||s value as DER, the pre-fix wire form. */
+function rawToDer(raw: Buffer): Buffer {
+  const encInt = (x: Buffer): Buffer => {
+    let b = x;
+    while (b.length > 1 && b[0] === 0x00 && (b[1] & 0x80) === 0) b = b.subarray(1);
+    if (b[0] & 0x80) b = Buffer.concat([Buffer.from([0x00]), b]);
+    return Buffer.concat([Buffer.from([0x02, b.length]), b]);
+  };
+  const body = Buffer.concat([encInt(raw.subarray(0, 32)), encInt(raw.subarray(32, 64))]);
+  return Buffer.concat([Buffer.from([0x30, body.length]), body]);
+}
+
+test("new ecdsa-p256-sha256 signatures are the 64-octet raw r||s form of RFC 9421 §3.3.4", () => {
+  const { publicKey, signed } = signP256(BODY);
+  const raw = Buffer.from(
+    signed.headers["signature"].slice("sig1=:".length, -1),
+    "base64",
+  );
+  // §3.3.4: r and s each padded to 32 octets — never a DER value, whose
+  // length varies with the integers (70–72 octets for P-256).
+  assert.equal(raw.length, 64);
+  // Independent check with node:crypto alone over the rebuilt signature
+  // base: the wire bytes verify as an ieee-p1363 (raw r||s) signature,
+  // and do NOT verify when read as DER — the encoding itself is pinned,
+  // not just this library's self-consistent round-trip.
+  const base = buildSignatureBase(
+    ["@method", "@authority", "@path", "content-digest"],
+    signed,
+    { created: CREATED, keyid: "test-p256", alg: "ecdsa-p256-sha256" },
+  );
+  const okP1363 = createVerify("sha256")
+    .update(base, "utf8")
+    .verify({ key: publicKey, dsaEncoding: "ieee-p1363" }, raw);
+  assert.equal(okP1363, true);
+  let okDer = false;
+  try {
+    okDer = createVerify("sha256").update(base, "utf8").verify(publicKey, raw);
+  } catch {
+    okDer = false;
+  }
+  assert.equal(okDer, false);
+});
+
+test("DER-encoded signatures (the pre-fix wire form) are rejected, with no fallback", () => {
+  const { publicKey, signed } = signP256(BODY);
+  const raw = Buffer.from(
+    signed.headers["signature"].slice("sig1=:".length, -1),
+    "base64",
+  );
+  const der = rawToDer(raw);
+  assert.notEqual(der.length, 64);
+  const tampered = {
+    ...signed,
+    headers: {
+      ...signed.headers,
+      signature: `sig1=:${der.toString("base64")}:`,
+    },
+  };
+  const res = verifyRequest(tampered, { key: publicKey, now: CREATED + 60 });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "SIGNATURE_MISMATCH");
 });
 
 test("signature-input serializes the alg parameter verbatim", () => {

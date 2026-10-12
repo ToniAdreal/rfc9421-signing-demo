@@ -67,8 +67,8 @@ function demoRequest(body?: string): RequestLike {
  * Sign like a foreign signer that never emits the optional `alg`
  * parameter: build the signature base with params that carry no `alg`,
  * then sign with node:crypto directly (mirroring src/sign.ts's crypto
- * choices: ed25519 raw, P-256 DER, RSA-PSS with saltLength 64 per
- * RFC 9421 §3.3.1, hmac-sha256).
+ * choices: ed25519 raw, P-256 raw r||s per RFC 9421 §3.3.4,
+ * RSA-PSS with saltLength 64 per RFC 9421 §3.3.1, hmac-sha256).
  */
 function signWithoutAlg(
   req: RequestLike,
@@ -116,7 +116,12 @@ function signWithoutAlg(
         saltLength: 64,
       });
   } else {
-    sig = createSign("sha256").update(base, "utf8").sign(key);
+    // A spec-conformant foreign P-256 signer emits the raw r||s value
+    // RFC 9421 §3.3.4 defines (node:crypto's ieee-p1363 encoding),
+    // never DER.
+    sig = createSign("sha256")
+      .update(base, "utf8")
+      .sign({ key, dsaEncoding: "ieee-p1363" });
   }
   headers["signature-input"] = signatureInputValue(label, covered, params);
   headers["signature"] = `${label}=:${sig.toString("base64")}:`;

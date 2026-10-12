@@ -304,11 +304,38 @@ test("RFC 9421 B.2.4: published signature is 64 octets and verifies under the RF
   assert.equal(tampered, false);
 });
 
-test("RFC 9421 B.2.4: KNOWN DIVERGENCE — verifyRequest currently rejects the published signature (library expects DER, RFC 9421 §3.3.4 defines raw r||s)", () => {
+test("RFC 9421 B.2.4: published signature verifies end-to-end via verifyRequest", () => {
   const signed = {
     ...B24_RESPONSE,
     headers: {
       ...B24_RESPONSE.headers,
+      "signature-input": B24_SIGNATURE_INPUT,
+      signature: `sig-b24=:${B24_SIGNATURE_B64}:`,
+    },
+  };
+  // B.2.4 carries no `alg`; `algFallback: "infer"` resolves the P-256
+  // key shape to ecdsa-p256-sha256. The published value is the raw
+  // r||s encoding RFC 9421 §3.3.4 defines (64 octets, checked above) —
+  // the same encoding this library now signs and verifies with, so the
+  // official vector passes end-to-end. (Earlier versions expected DER
+  // and rejected this vector; that divergence is fixed, not pinned.)
+  const res = verifyRequest(signed, {
+    key: importPublicKey(P256_PUB_PEM),
+    label: "sig-b24",
+    now: 1618884473 + 60,
+    algFallback: "infer",
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.keyId, "test-key-ecc-p256");
+  assert.equal(res.alg, "ecdsa-p256-sha256");
+});
+
+test("RFC 9421 B.2.4: tampering a covered component fails end-to-end verification", () => {
+  const signed = {
+    ...B24_RESPONSE,
+    headers: {
+      ...B24_RESPONSE.headers,
+      "content-length": "24",
       "signature-input": B24_SIGNATURE_INPUT,
       signature: `sig-b24=:${B24_SIGNATURE_B64}:`,
     },
@@ -319,12 +346,6 @@ test("RFC 9421 B.2.4: KNOWN DIVERGENCE — verifyRequest currently rejects the p
     now: 1618884473 + 60,
     algFallback: "infer",
   });
-  // This pins the divergence so a future §3.3.4 encoding fix flips this
-  // test instead of silently changing behavior: the published base is
-  // reproduced byte-for-byte (above) and the published signature is
-  // genuine under the RFC encoding (above), but this library's
-  // ecdsa-p256-sha256 path feeds the value to node:crypto as DER, so
-  // end-to-end verification of the official vector fails today.
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_MISMATCH");
   assert.equal(res.alg, "ecdsa-p256-sha256");

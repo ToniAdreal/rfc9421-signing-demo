@@ -38,8 +38,9 @@ export interface SignOptions {
   /**
    * ed25519: a private KeyObject (see keys.generateEd25519KeyPair).
    * ecdsa-p256-sha256: a P-256 private KeyObject (see
-   * keys.generateP256KeyPair); signatures are DER-encoded ECDSA values
-   * (RFC 9421 §3.3.4).
+   * keys.generateP256KeyPair); signatures are the raw r‖s concatenation
+   * (each integer padded to 32 octets, 64 octets total) that RFC 9421
+   * §3.3.4 defines.
    * rsa-pss-sha512: an RSA private KeyObject (see
    * keys.generateRsaPssKeyPair); signed with RSASSA-PSS (SHA-512, MGF1
    * with SHA-512, 64-byte salt) per RFC 9421 §3.3.1.
@@ -271,10 +272,16 @@ export function signRequest(
   if (opts.alg === "ed25519") {
     sig = edSign(null, Buffer.from(base, "utf8"), opts.key);
   } else if (opts.alg === "ecdsa-p256-sha256") {
-    // RFC 9421 §3.3.4: the signature value is the DER encoding of the
-    // ASN.1 ECDSA structure. node:crypto's createSign emits exactly that
-    // by default, and verifyRequest consumes it with createVerify below.
-    sig = createSign("sha256").update(base, "utf8").sign(opts.key);
+    // RFC 9421 §3.3.4: the signature value is the raw concatenation of
+    // the ECDSA integers r and s, each padded to 32 octets (64 octets
+    // total) — NOT the DER encoding node:crypto emits by default.
+    // `dsaEncoding: "ieee-p1363"` selects exactly that raw form, and
+    // verifyRequest consumes it with the same option. There is no DER
+    // fallback on either side: DER signatures minted by earlier
+    // versions of this library are rejected (see CHANGELOG).
+    sig = createSign("sha256")
+      .update(base, "utf8")
+      .sign({ key: opts.key, dsaEncoding: "ieee-p1363" });
   } else if (opts.alg === "rsa-v1_5-sha256") {
     // RFC 9421 §3.3.2: RSASSA-PKCS1-v1_5 with SHA-256. v1.5 padding is
     // deterministic — the same base and key always produce the same
