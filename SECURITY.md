@@ -13,9 +13,11 @@ Read this before using it anywhere that matters.
   `hmac-sha256`, and `hmac-sha512` (≥ 64-byte secrets, RFC 2104 §3); `verifyRequest` checks one
   signature label per call, while `verifyAllLabels` verifies every label
   in the request (a failing label never blocks the remaining labels);
-  and body binding signs via `Content-Digest: sha-512` only (the
-  verifier additionally accepts a `sha-256` fallback when no `sha-512`
-  entry is present). See
+  and body binding signs via `Content-Digest` with `sha-512` by
+  default, or `sha-256` when `SignOptions.contentDigestAlg` is set to
+  `"sha-256"` (the verifier prefers a `sha-512` entry when present and
+  accepts a `sha-256` entry as a fallback when no `sha-512` entry is
+  present). See
   `README.md` → "Limitations (honest)" for the full list of what is not
   supported.
 - **`rsa-v1_5-sha256` is for interoperability, not preference.**

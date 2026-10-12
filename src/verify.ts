@@ -705,8 +705,9 @@ export function verifyRequest(
           : req.body;
     // Prefer sha-512 when the header carries both algorithms; fall back to
     // sha-256 when no sha-512 entry is present (RFC 9530 allows either).
-    // Signing still emits sha-512 only (see src/digest.ts); the fallback
-    // exists for foreign signers that only send sha-256.
+    // Signing emits sha-512 by default, or sha-256 when the caller sets
+    // `contentDigestAlg: "sha-256"` (see src/digest.ts); the fallback
+    // here also covers foreign signers that only send sha-256.
     const dm512 = /(?:^|,)\s*sha-512\s*=:([A-Za-z0-9+/=]+):/.exec(digestHeader);
     const dm256 = /(?:^|,)\s*sha-256\s*=:([A-Za-z0-9+/=]+):/.exec(digestHeader);
     const dm = dm512 ?? dm256;
