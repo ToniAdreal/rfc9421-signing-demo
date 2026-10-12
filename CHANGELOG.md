@@ -27,6 +27,11 @@ change type; no entry describes a feature that is not in the history.
   network), and `memoizeKeyResolver` cache hits and misses (unknown
   keyids, which are never cached), with self-checks on the underlying
   resolver call counts.
+- The benchmark now also measures the malformed-input rejection path:
+  `verifyRequest` rotating over a 566-case corpus of malformed
+  `signature-input` / `signature` values, generated deterministically
+  with the parser fuzz test's fixed-seed approach and self-checked to
+  always return `{ ok: false, code }` and never throw.
 - `fromNodeRequest` now populates `RequestLike.trailers` from a Node
   `IncomingMessage` (`rawTrailers` when present, else `trailers`;
   names lowercased, multi-values joined like headers), so RFC 9421

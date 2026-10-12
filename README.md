@@ -760,29 +760,31 @@ see [SECURITY.md](SECURITY.md).
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
-algorithm plus the key-resolution and replay-check paths below (3000 timed
-iterations per op after 200 warmup, printing the Node version and CPU).
+algorithm plus the key-resolution, replay-check and malformed-input
+rejection paths below (3000 timed iterations per op after 200 warmup,
+printing the Node version and CPU).
 All rows below are from one real run on 2026-10-12:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519 | sign | ~9,300 ops/sec (~107 µs/op) |
-| ed25519 | verify | ~4,500 ops/sec (~222 µs/op) |
-| hmac-sha256 | sign | ~32,700 ops/sec (~31 µs/op) |
-| hmac-sha256 | verify | ~21,300 ops/sec (~47 µs/op) |
-| hmac-sha512 | sign | ~20,500 ops/sec (~49 µs/op) |
-| hmac-sha512 | verify | ~28,900 ops/sec (~35 µs/op) |
-| ecdsa-p256-sha256 | sign | ~4,500 ops/sec (~223 µs/op) |
-| ecdsa-p256-sha256 | verify | ~3,000 ops/sec (~338 µs/op) |
-| rsa-pss-sha512 | sign | ~1,000 ops/sec (~979 µs/op) |
-| rsa-pss-sha512 | verify | ~7,200 ops/sec (~138 µs/op) |
-| rsa-v1_5-sha256 | sign | ~1,200 ops/sec (~815 µs/op) |
-| rsa-v1_5-sha256 | verify | ~10,200 ops/sec (~98 µs/op) |
-| verifyAllLabels (2 labels) | verify | ~3,200 ops/sec (~316 µs/op) |
-| JwksKeyStore.resolve (hit) | resolve | ~4,090,000 ops/sec (~0.24 µs/op) |
-| memoizeKeyResolver (hit) | resolve | ~4,470,000 ops/sec (~0.22 µs/op) |
-| memoizeKeyResolver (miss) | resolve | ~5,280,000 ops/sec (~0.19 µs/op) |
-| ReplayCache.check (hit, 1k entries) | check | ~1,660,000 ops/sec (~0.60 µs/op) |
+| ed25519 | sign | ~8,100 ops/sec (~123 µs/op) |
+| ed25519 | verify | ~3,700 ops/sec (~272 µs/op) |
+| hmac-sha256 | sign | ~28,600 ops/sec (~35 µs/op) |
+| hmac-sha256 | verify | ~20,900 ops/sec (~48 µs/op) |
+| hmac-sha512 | sign | ~29,500 ops/sec (~34 µs/op) |
+| hmac-sha512 | verify | ~21,300 ops/sec (~47 µs/op) |
+| ecdsa-p256-sha256 | sign | ~4,900 ops/sec (~204 µs/op) |
+| ecdsa-p256-sha256 | verify | ~3,000 ops/sec (~335 µs/op) |
+| rsa-pss-sha512 | sign | ~713 ops/sec (~1,403 µs/op) |
+| rsa-pss-sha512 | verify | ~6,300 ops/sec (~159 µs/op) |
+| rsa-v1_5-sha256 | sign | ~742 ops/sec (~1,349 µs/op) |
+| rsa-v1_5-sha256 | verify | ~6,400 ops/sec (~156 µs/op) |
+| verifyAllLabels (2 labels) | verify | ~3,100 ops/sec (~321 µs/op) |
+| JwksKeyStore.resolve (hit) | resolve | ~6,330,000 ops/sec (~0.16 µs/op) |
+| memoizeKeyResolver (hit) | resolve | ~4,330,000 ops/sec (~0.23 µs/op) |
+| memoizeKeyResolver (miss) | resolve | ~5,710,000 ops/sec (~0.18 µs/op) |
+| ReplayCache.check (hit, 1k entries) | check | ~1,530,000 ops/sec (~0.65 µs/op) |
+| verifyRequest (malformed, 566 cases) | reject | ~13,200 ops/sec (~76 µs/op) |
 
 The `verifyAllLabels` row covers the multi-party scenario: the merchant signs
 with ed25519 and the payment gateway appends its own hmac-sha256 signature
@@ -806,7 +808,24 @@ replay. The bench self-checks that an unseen nonce reports false on its
 first check and true on its second, and that the final `stats()`
 counters match the exact number of check calls made.
 
-Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized; shared
+The `reject` row covers the malformed-input path a verification gateway
+faces from adversarial or broken senders: measured calls rotate over a
+fixed corpus of 566 malformed requests, generated deterministically
+with the same fixed-seed approach as the parser fuzz test (mulberry32,
+seed 20261005) — truncations, byte-level mutations, hand-built shapes
+and printable soup over the `signature-input` header of a valid signed
+request, malformed and mutated `signature` values, and missing
+headers. Pathological-size inputs are excluded (the fuzz test already
+pins their per-call latency). The bench self-checks, before and during
+timing, that every corpus case returns `{ ok: false, code }` and never
+throws, that the missing-header cases carry their exact codes, and
+that `MALFORMED_SIGNATURE_INPUT` is the largest error-code bucket, as
+the corpus construction implies. The bench performs zero network I/O
+and makes no wall-clock assertions; the number is this parser's own
+rejection throughput on this machine, not a comparison against any
+other implementation.
+
+Environment: Node v24.20.0, linux/x64, AMD EPYC 7D13 (virtualized; shared
 host, so numbers vary run to run). Request fixture: POST with a 31-byte JSON
 body, covered components `@method @authority @path content-digest`.
 Machine-local measurements for capacity planning, not guaranteed

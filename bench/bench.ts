@@ -12,8 +12,12 @@
  * hot path a verifier with `requireNonce` hits on every request:
  * `ReplayCache.check` hits against a cache prefilled with 1,000 nonces
  * under a deterministic fake clock (zero network, zero wall clock for
- * the cache itself). Numbers vary with hardware — do not treat them
- * as guaranteed throughput.
+ * the cache itself), plus the malformed-input rejection path:
+ * `verifyRequest` over a fixed-seed corpus of malformed
+ * signature-input / signature values (the parser rejection traffic a
+ * verification gateway faces), self-checked to always return
+ * `{ ok: false, code }` and never throw. Numbers vary with hardware —
+ * do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
  */
@@ -294,6 +298,259 @@ function benchmarkReplayCacheHit(): number {
   return ops;
 }
 
+/** Fixed seed for the malformed corpus (same seed as test/parserFuzz). */
+const MALFORMED_SEED = 20261005;
+/** `created` of the malformed corpus's base signature (fixed, no wall clock). */
+const MALFORMED_CREATED = 1_700_000_000;
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+interface MalformedCase {
+  kind: string;
+  sigInput: string;
+  sig: string;
+}
+
+/**
+ * Deterministic malformed-input corpus for the rejection path, built
+ * with the same generation approach as test/parserFuzz.test.ts (fixed
+ * mulberry32 seed, truncations / byte-level mutations / hand-built
+ * shapes / printable soup over a valid signed request, plus malformed
+ * `signature` values and missing headers). Pathological-size cases
+ * (multi-KB labels, thousands of members) are deliberately excluded:
+ * the fuzz test already pins their per-call latency, and they would
+ * dominate a steady-state throughput number.
+ */
+function buildMalformedCorpus(
+  validInput: string,
+  validSig: string,
+): MalformedCase[] {
+  const rand = mulberry32(MALFORMED_SEED);
+  const int = (n: number): number => Math.floor(rand() * n);
+  const pick = <T,>(arr: readonly T[]): T => arr[int(arr.length)];
+  const NASTY = '";=()\\,\' \t\n<>[]{}|~!#$%&*+^`'.split("");
+  const mutate = (s: string, edits: number): string => {
+    let out = s;
+    for (let i = 0; i < edits; i++) {
+      const op = int(3);
+      if (out.length === 0) {
+        out = pick(NASTY);
+        continue;
+      }
+      const pos = int(out.length);
+      if (op === 0) out = out.slice(0, pos) + pick(NASTY) + out.slice(pos);
+      else if (op === 1) out = out.slice(0, pos) + out.slice(pos + 1);
+      else out = out.slice(0, pos) + pick(NASTY) + out.slice(pos + 1);
+    }
+    return out;
+  };
+  // Hand-built malformed signature-input shapes (from parserFuzz).
+  const SYNTH: readonly string[] = [
+    "sig1=",
+    'sig1=("a"',
+    'sig1=("a" "b"',
+    "sig1=(\"a\");created=",
+    'sig1=("a");created=abc',
+    'sig1=("a");created="yesterday"',
+    'sig1="a";created=1',
+    'sig1=(("nested"))',
+    "sig1=((((",
+    'sig1=("unterminated);created=1',
+    'sig1=("esc\\',
+    'sig1=("bad-escape-\\q");created=1',
+    'sig1=("a");created=1\\',
+    "=",
+    ",",
+    "sig1",
+    "sig1=;",
+    "sig1=( );",
+    "sig1=();created=1",
+    "sig1=() garbage",
+    '"sig1"=("@method");created=1',
+    'sig1 = ("@method") ; created = 1',
+    'SIG1=("@method");CREATED=1',
+    'sig1=("@method");;created=1',
+    'sig1=("@method"),,sig2=("@path")',
+    'sig1=("@method");created=1,sig2',
+    'sig1=("@method");created=1,',
+    ',sig1=("@method");created=1',
+    'sig1=("@method");keyid=',
+    'sig1=("@method");keyid=""',
+    'sig1=("@method");keyid="k',
+    'sig1=("@method");alg=',
+    'sig1=("@method");alg="',
+    'sig1=("@method");nonce="\\',
+    'sig1=("@method");created=-5',
+    'sig1=("@method");created=99999999999999999999999',
+    'sig1=("@method");created=0x10',
+    'sig1=("@method");created=1.5',
+    'sig1=("@method");created=+1',
+    'sig1=("@method");created= 1',
+    'sig1=("@method");unknown-param',
+    'sig1=("@method");=1',
+    'sig1=("@method");1=2',
+    'sig1=("@CREATE\\d");created=1',
+    'sig1=("@method" "@path");created=1',
+    'sig1=("@method",);created=1',
+    'sig1=(,@method,);created=1',
+    'sig1=("@method");created=1;created=2',
+    'sig 1=("@method");created=1',
+    'sig1 =("@method");created=1',
+    'sig-1=("@method");created=1',
+    '1sig=("@method");created=1',
+    "sig1:=:aGk=:",
+    'sig1=("@method");created=1\x00',
+  ];
+  const SIG_SYNTH: readonly string[] = [
+    "sig1=",
+    "sig1=:",
+    "sig1=::",
+    "sig1=:!!!:",
+    "sig1=:aGk",
+    "sig1=aGk=:",
+    "sig1=:aGk=",
+    "sig1=:aGk=::extra",
+    "sig1=:====:",
+    "garbage",
+  ];
+
+  const cases: MalformedCase[] = [];
+  for (let i = 0; i < 100; i++)
+    cases.push({
+      kind: "truncation",
+      sigInput: validInput.slice(0, int(validInput.length)),
+      sig: validSig,
+    });
+  for (let i = 0; i < 200; i++)
+    cases.push({
+      kind: "mutation",
+      sigInput: mutate(validInput, 1 + int(4)),
+      sig: validSig,
+    });
+  for (const s of SYNTH) cases.push({ kind: "synthetic", sigInput: s, sig: validSig });
+  const PRINTABLE = Array.from({ length: 95 }, (_, i) =>
+    String.fromCharCode(32 + i),
+  );
+  const soup = (len: number): string => {
+    let s = "";
+    for (let i = 0; i < len; i++) s += pick(PRINTABLE);
+    return s;
+  };
+  for (let i = 0; i < 100; i++)
+    cases.push({ kind: "soup", sigInput: soup(int(401)), sig: validSig });
+  for (const s of SIG_SYNTH)
+    cases.push({ kind: "sig-synthetic", sigInput: validInput, sig: s });
+  for (let i = 0; i < 100; i++)
+    cases.push({
+      kind: "sig-mutation",
+      sigInput: validInput,
+      sig: mutate(validSig, 1 + int(3)),
+    });
+  cases.push({ kind: "missing-input", sigInput: "", sig: validSig });
+  cases.push({ kind: "missing-sig", sigInput: validInput, sig: "" });
+  return cases;
+}
+
+/**
+ * `verifyRequest` rejection-path steady state: measured calls rotate
+ * over the fixed malformed corpus, so the mix of parse failures,
+ * base-build failures, malformed signature fields and signature
+ * mismatches matches the corpus construction on every call.
+ *
+ * Self-checks (construction consistency, all untimed except the
+ * per-call rejection assertion inside the measured loop): the whole
+ * corpus is run once before timing — every case must return
+ * `{ ok: false, code }` (a throw escapes and fails the bench), the two
+ * missing-header cases must carry their exact codes, every
+ * sig-synthetic case must fail at the signature field
+ * (MALFORMED_SIGNATURE or SIGNATURE_MISMATCH), and
+ * MALFORMED_SIGNATURE_INPUT must be the single largest error-code
+ * bucket (the corpus is mostly input-side breakage by construction).
+ * The measured loop asserts every call rejects, and the rejection
+ * count afterwards must equal warmup + timed iterations exactly.
+ */
+function benchmarkMalformedReject(): { ops: number; corpusSize: number } {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const base: SignedHttpRequest = signRequest(fixture, {
+    keyId: "bench-key",
+    alg: "ed25519",
+    key: privateKey,
+    created: MALFORMED_CREATED,
+  });
+  const corpus = buildMalformedCorpus(
+    base.headers["signature-input"],
+    base.headers["signature"],
+  );
+  const requestFor = (c: MalformedCase): SignedHttpRequest => {
+    const headers = { ...base.headers };
+    if (c.sigInput !== "") headers["signature-input"] = c.sigInput;
+    else delete headers["signature-input"];
+    if (c.sig !== "") headers["signature"] = c.sig;
+    else delete headers["signature"];
+    return { ...fixture, headers };
+  };
+  const verifyOpts = { key: publicKey, now: MALFORMED_CREATED + 60 };
+
+  const histogram = new Map<string, number>();
+  for (const c of corpus) {
+    const res = verifyRequest(requestFor(c), verifyOpts);
+    if (res.ok || typeof res.code !== "string" || res.code.length === 0)
+      throw new Error(
+        `benchmark self-check failed: ${c.kind} case was not rejected with a code: ${JSON.stringify(res)}`,
+      );
+    histogram.set(res.code, (histogram.get(res.code) ?? 0) + 1);
+    if (c.kind === "missing-input" && res.code !== "MISSING_SIGNATURE_INPUT")
+      throw new Error(
+        `benchmark self-check failed: missing-input case gave ${res.code}`,
+      );
+    if (c.kind === "missing-sig" && res.code !== "MISSING_SIGNATURE")
+      throw new Error(
+        `benchmark self-check failed: missing-sig case gave ${res.code}`,
+      );
+    if (
+      c.kind === "sig-synthetic" &&
+      res.code !== "MALFORMED_SIGNATURE" &&
+      res.code !== "SIGNATURE_MISMATCH"
+    )
+      throw new Error(
+        `benchmark self-check failed: sig-synthetic case gave ${res.code}`,
+      );
+  }
+  const malformedInputCount = histogram.get("MALFORMED_SIGNATURE_INPUT") ?? 0;
+  for (const [code, count] of histogram) {
+    if (code !== "MALFORMED_SIGNATURE_INPUT" && count >= malformedInputCount)
+      throw new Error(
+        `benchmark self-check failed: code ${code} (${count}) is not below MALFORMED_SIGNATURE_INPUT (${malformedInputCount})`,
+      );
+  }
+
+  let idx = 0;
+  let rejected = 0;
+  const ops = measure(() => {
+    const res = verifyRequest(requestFor(corpus[idx % corpus.length]), verifyOpts);
+    idx++;
+    if (res.ok || typeof res.code !== "string" || res.code.length === 0)
+      throw new Error(
+        "benchmark self-check failed: malformed corpus case verified ok or without a code",
+      );
+    rejected++;
+  }, ITERATIONS);
+  if (rejected !== WARMUP + ITERATIONS)
+    throw new Error(
+      `benchmark self-check failed: ${rejected} rejections (expected ${WARMUP + ITERATIONS})`,
+    );
+  return { ops, corpusSize: corpus.length };
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -346,11 +603,17 @@ results.push({
   op: "check",
   ops: benchmarkReplayCacheHit(),
 });
+const malformed = benchmarkMalformedReject();
+results.push({
+  alg: `verifyRequest (malformed, ${malformed.corpusSize} cases)`,
+  op: "reject",
+  ops: malformed.ops,
+});
 
-console.log("alg                         op      throughput");
-console.log("-------------------------------------------------------------");
+console.log("alg                                    op      throughput");
+console.log("--------------------------------------------------------------------");
 for (const r of results) {
-  console.log(`${r.alg.padEnd(27)} ${r.op.padEnd(7)} ${fmt(r.ops)}`);
+  console.log(`${r.alg.padEnd(38)} ${r.op.padEnd(7)} ${fmt(r.ops)}`);
 }
 console.log("");
 console.log("Numbers are machine-local measurements, not guarantees.");
