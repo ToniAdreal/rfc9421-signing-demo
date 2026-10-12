@@ -8,8 +8,12 @@
  * hmac-sha256 dual labels via verifyAllLabels) and the key-resolution
  * hot path a gateway verifier hits on every request: `JwksKeyStore.resolve`
  * (Map hit on an offline-restored snapshot, zero network) and
- * `memoizeKeyResolver` cache hits / misses. Numbers vary with
- * hardware — do not treat them as guaranteed throughput.
+ * `memoizeKeyResolver` cache hits / misses, plus the replay-detection
+ * hot path a verifier with `requireNonce` hits on every request:
+ * `ReplayCache.check` hits against a cache prefilled with 1,000 nonces
+ * under a deterministic fake clock (zero network, zero wall clock for
+ * the cache itself). Numbers vary with hardware — do not treat them
+ * as guaranteed throughput.
  *
  * Run: `npm run bench`
  */
@@ -23,6 +27,7 @@ import {
   generateRsaV15KeyPair,
   JwksKeyStore,
   memoizeKeyResolver,
+  ReplayCache,
   secretKey,
   signRequest,
   verifyAllLabels,
@@ -224,6 +229,71 @@ function benchmarkMemoizeMiss(store: JwksKeyStore): number {
   return ops;
 }
 
+/** Number of nonces prefilled into the ReplayCache benchmark fixture. */
+const REPLAY_PREFILL = 1000;
+
+/**
+ * `ReplayCache.check` steady-state hit: the cache is prefilled with
+ * REPLAY_PREFILL nonces under a fixed fake clock (no wall clock, no
+ * randomness, no network), then every measured call checks a nonce
+ * that is already recorded — the replay path a verifier with
+ * `requireNonce` takes on a duplicate nonce. Calls rotate over the
+ * whole prefilled set so the LRU recency refresh is exercised across
+ * entries, not just on one hot key.
+ *
+ * Self-checks: every prefill call must report not-a-replay; an unseen
+ * nonce must report false on first check and true on the second; and
+ * after the measured run the stats counters must match the exact
+ * number of check calls made (prefill misses + one unseen miss, and
+ * the unseen re-check hit + warmup + timed hits).
+ */
+function benchmarkReplayCacheHit(): number {
+  const FIXED_NOW = 1_700_000_000;
+  const cache = new ReplayCache({
+    maxEntries: 10_000,
+    ttlSec: 3600,
+    now: () => FIXED_NOW,
+  });
+  for (let i = 0; i < REPLAY_PREFILL; i++) {
+    if (cache.check(`bench-nonce-${i}`) !== false)
+      throw new Error(
+        `benchmark self-check failed: prefill nonce ${i} reported as replay`,
+      );
+  }
+  if (cache.check("bench-unseen") !== false)
+    throw new Error(
+      "benchmark self-check failed: unseen nonce reported as replay",
+    );
+  if (cache.check("bench-unseen") !== true)
+    throw new Error(
+      "benchmark self-check failed: second check of unseen nonce not a replay",
+    );
+  let idx = 0;
+  const ops = measure(() => {
+    const nonce = `bench-nonce-${idx % REPLAY_PREFILL}`;
+    idx++;
+    if (cache.check(nonce) !== true)
+      throw new Error(
+        `benchmark self-check failed: prefilled nonce ${nonce} not a replay`,
+      );
+  }, ITERATIONS);
+  const stats = cache.stats();
+  const expectedHits = 1 + WARMUP + ITERATIONS;
+  const expectedMisses = REPLAY_PREFILL + 1;
+  if (
+    stats.hits !== expectedHits ||
+    stats.misses !== expectedMisses ||
+    stats.size !== REPLAY_PREFILL + 1 ||
+    stats.evictions !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: stats ${JSON.stringify(stats)} ` +
+        `(expected hits=${expectedHits}, misses=${expectedMisses}, ` +
+        `size=${REPLAY_PREFILL + 1}, evictions=0)`,
+    );
+  return ops;
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -270,6 +340,11 @@ results.push({
   alg: "memoizeKeyResolver (miss)",
   op: "resolve",
   ops: benchmarkMemoizeMiss(benchStore),
+});
+results.push({
+  alg: "ReplayCache.check (hit, 1k)",
+  op: "check",
+  ops: benchmarkReplayCacheHit(),
 });
 
 console.log("alg                         op      throughput");

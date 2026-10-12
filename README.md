@@ -733,29 +733,29 @@ see [SECURITY.md](SECURITY.md).
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
-algorithm plus the key-resolution paths below (3000 timed iterations per op
-after 200 warmup, printing the Node version and CPU). One real run on
-2026-10-10 (the three `resolve` rows were added from a real run on
-2026-10-11, same environment):
+algorithm plus the key-resolution and replay-check paths below (3000 timed
+iterations per op after 200 warmup, printing the Node version and CPU).
+All rows below are from one real run on 2026-10-12:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519 | sign | ~3,500 ops/sec (~284 µs/op) |
-| ed25519 | verify | ~4,100 ops/sec (~241 µs/op) |
-| hmac-sha256 | sign | ~45,300 ops/sec (~22 µs/op) |
-| hmac-sha256 | verify | ~33,400 ops/sec (~30 µs/op) |
-| hmac-sha512 | sign | ~45,900 ops/sec (~22 µs/op) |
-| hmac-sha512 | verify | ~37,600 ops/sec (~27 µs/op) |
-| ecdsa-p256-sha256 | sign | ~18,400 ops/sec (~54 µs/op) |
-| ecdsa-p256-sha256 | verify | ~7,500 ops/sec (~133 µs/op) |
-| rsa-pss-sha512 | sign | ~1,600 ops/sec (~618 µs/op) |
-| rsa-pss-sha512 | verify | ~11,700 ops/sec (~86 µs/op) |
-| rsa-v1_5-sha256 | sign | ~1,600 ops/sec (~607 µs/op) |
-| rsa-v1_5-sha256 | verify | ~9,000 ops/sec (~111 µs/op) |
-| verifyAllLabels (2 labels) | verify | ~5,100 ops/sec (~196 µs/op) |
-| JwksKeyStore.resolve (hit) | resolve | ~7,950,000 ops/sec (~0.13 µs/op) |
-| memoizeKeyResolver (hit) | resolve | ~4,750,000 ops/sec (~0.21 µs/op) |
-| memoizeKeyResolver (miss) | resolve | ~7,790,000 ops/sec (~0.13 µs/op) |
+| ed25519 | sign | ~9,300 ops/sec (~107 µs/op) |
+| ed25519 | verify | ~4,500 ops/sec (~222 µs/op) |
+| hmac-sha256 | sign | ~32,700 ops/sec (~31 µs/op) |
+| hmac-sha256 | verify | ~21,300 ops/sec (~47 µs/op) |
+| hmac-sha512 | sign | ~20,500 ops/sec (~49 µs/op) |
+| hmac-sha512 | verify | ~28,900 ops/sec (~35 µs/op) |
+| ecdsa-p256-sha256 | sign | ~4,500 ops/sec (~223 µs/op) |
+| ecdsa-p256-sha256 | verify | ~3,000 ops/sec (~338 µs/op) |
+| rsa-pss-sha512 | sign | ~1,000 ops/sec (~979 µs/op) |
+| rsa-pss-sha512 | verify | ~7,200 ops/sec (~138 µs/op) |
+| rsa-v1_5-sha256 | sign | ~1,200 ops/sec (~815 µs/op) |
+| rsa-v1_5-sha256 | verify | ~10,200 ops/sec (~98 µs/op) |
+| verifyAllLabels (2 labels) | verify | ~3,200 ops/sec (~316 µs/op) |
+| JwksKeyStore.resolve (hit) | resolve | ~4,090,000 ops/sec (~0.24 µs/op) |
+| memoizeKeyResolver (hit) | resolve | ~4,470,000 ops/sec (~0.22 µs/op) |
+| memoizeKeyResolver (miss) | resolve | ~5,280,000 ops/sec (~0.19 µs/op) |
+| ReplayCache.check (hit, 1k entries) | check | ~1,660,000 ops/sec (~0.60 µs/op) |
 
 The `verifyAllLabels` row covers the multi-party scenario: the merchant signs
 with ed25519 and the payment gateway appends its own hmac-sha256 signature
@@ -765,11 +765,19 @@ The `resolve` rows cover the keyid→key hot path: the `JwksKeyStore` is
 restored offline from a snapshot (the bench performs zero network I/O), a
 hit is a plain Map lookup, a `memoizeKeyResolver` hit is served from its
 TTL cache, and a miss uses an unknown keyid, which is never cached and so
-penetrates to the store on every call. On the 2026-10-11 run a memoized
-hit measured *slower* than a raw resolve: against an already in-memory
-store, the wrapper's TTL check and LRU recency refresh cost more than the
-Map lookup they save — memoizing pays off when the underlying resolver is
-slow or remote, which this offline fixture deliberately is not.
+penetrates to the store on every call. In this run a memoized hit measured
+about the same as a raw resolve — against an already in-memory store the
+wrapper's TTL check and LRU recency refresh roughly offset the Map lookup
+they save — memoizing pays off when the underlying resolver is slow or
+remote, which this offline fixture deliberately is not.
+
+The `ReplayCache.check` row covers the replay-detection hot path: the
+cache is prefilled with 1,000 nonces under a fixed fake clock
+(`ReplayCacheOptions.now`, so the cache itself sees no wall clock), and
+every measured call rotates over the prefilled set and must report a
+replay. The bench self-checks that an unseen nonce reports false on its
+first check and true on its second, and that the final `stats()`
+counters match the exact number of check calls made.
 
 Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized; shared
 host, so numbers vary run to run). Request fixture: POST with a 31-byte JSON
