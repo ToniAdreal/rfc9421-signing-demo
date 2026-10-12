@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHmac, createVerify, verify as edVerify } from "node:crypto";
+import {
+  constants,
+  createHmac,
+  createVerify,
+  verify as edVerify,
+} from "node:crypto";
 import {
   assertHmacSecretLength,
   buildSignatureBase,
@@ -99,13 +104,15 @@ test("RFC 9421 B.2.5: a tampered base does not verify against the published sign
 });
 
 // ---------------------------------------------------------------------------
-// Appendix B.2.6 (ed25519) and B.2.4 (ecdsa-p256-sha256) — added later.
+// Appendix B.2.6 (ed25519), B.2.4 (ecdsa-p256-sha256), and B.2.3
+// (rsa-pss-sha512) — added later.
 // Section-number note: in the published RFC, B.2.4 is the ecdsa-p256
-// response example and B.2.6 is the ed25519 request example (B.2.3 is an
-// rsa-pss-sha512 example). An earlier backlog entry mislabeled these two
-// vectors as "B.2.4 (ed25519) / B.2.3 (ecdsa)"; the values below are the
-// RFC's ed25519 and ecdsa-p256 vectors under their correct numbers,
-// fetched from https://www.rfc-editor.org/rfc/rfc9421.txt with RFC 8792
+// response example, B.2.6 is the ed25519 request example, and B.2.3 is
+// the rsa-pss-sha512 full-coverage request example. An earlier backlog
+// entry mislabeled the ed25519/ecdsa vectors as "B.2.4 (ed25519) /
+// B.2.3 (ecdsa)"; the values below are the RFC's vectors under their
+// correct numbers, fetched from
+// https://www.rfc-editor.org/rfc/rfc9421.txt with RFC 8792
 // line-continuation wraps unwrapped.
 // ---------------------------------------------------------------------------
 
@@ -349,4 +356,160 @@ test("RFC 9421 B.2.4: tampering a covered component fails end-to-end verificatio
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_MISMATCH");
   assert.equal(res.alg, "ecdsa-p256-sha256");
+});
+
+// ---------------------------------------------------------------------------
+// Appendix B.2.3 (rsa-pss-sha512, full coverage) — the last Appendix B
+// request vector not covered above. Values fetched verbatim from
+// https://www.rfc-editor.org/rfc/rfc9421.txt (§B.1.2 key, §B.2 test
+// request, §B.2.3 base and signature) with RFC 8792 line-continuation
+// wraps unwrapped. RSA-PSS is probabilistic: the published value can
+// be validated against the published key, but a fresh signature over
+// the same base is not expected to equal it (RFC §7.3.5).
+// ---------------------------------------------------------------------------
+
+/** RFC 9421 §B.1.2 test-key-rsa-pss public key, PEM (SPKI). */
+const RSA_PSS_PUB_PEM =
+  "-----BEGIN PUBLIC KEY-----\n" +
+  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr4tmm3r20Wd/PbqvP1s2\n" +
+  "+QEtvpuRaV8Yq40gjUR8y2Rjxa6dpG2GXHbPfvMs8ct+Lh1GH45x28Rw3Ry53mm+\n" +
+  "oAXjyQ86OnDkZ5N8lYbggD4O3w6M6pAvLkhk95AndTrifbIFPNU8PPMO7OyrFAHq\n" +
+  "gDsznjPFmTOtCEcN2Z1FpWgchwuYLPL+Wokqltd11nqqzi+bJ9cvSKADYdUAAN5W\n" +
+  "Utzdpiy6LbTgSxP7ociU4Tn0g5I6aDZJ7A8Lzo0KSyZYoA485mqcO0GVAdVw9lq4\n" +
+  "aOT9v6d+nb4bnNkQVklLQ3fVAvJm+xdDOp9LCNCN48V2pnDOkFV6+U9nV5oyc6XI\n" +
+  "2wIDAQAB\n" +
+  "-----END PUBLIC KEY-----\n";
+
+/** RFC 9421 §B.2 test-request Content-Digest value. */
+const B23_CONTENT_DIGEST =
+  "sha-512=:WZDPaVn/7XgHaAy8pmojAkGWoRx2UFChF41A2svX" +
+  "+TaPm+AbwAgBWnrIiYllu7BNNyealdVLvRwEmTHWXvJwew==:";
+
+/** RFC 9421 §B.2.3 signature base. */
+const B23_SIGNATURE_BASE =
+  `"date": Tue, 20 Apr 2021 02:07:55 GMT\n` +
+  `"@method": POST\n` +
+  `"@path": /foo\n` +
+  `"@query": ?param=Value&Pet=dog\n` +
+  `"@authority": example.com\n` +
+  `"content-type": application/json\n` +
+  `"content-digest": ${B23_CONTENT_DIGEST}\n` +
+  `"content-length": 18\n` +
+  `"@signature-params": ("date" "@method" "@path" "@query" "@authority" "content-type" "content-digest" "content-length");created=1618884473;keyid="test-key-rsa-pss"`;
+
+const B23_SIGNATURE_INPUT = `sig-b23=("date" "@method" "@path" "@query" "@authority" "content-type" "content-digest" "content-length");created=1618884473;keyid="test-key-rsa-pss"`;
+const B23_SIGNATURE_B64 =
+  "bbN8oArOxYoyylQQUU6QYwrTuaxLwjAC9fbY2F6SVWvh0yB" +
+  "iMIRGOnMYwZ/5MR6fb0Kh1rIRASVxFkeGt683+qRpRRU5p2voTp768ZrCUb38K0fU" +
+  "xN0O0iC59DzYx8DFll5GmydPxSmme9v6ULbMFkl+V5B1TP/yPViV7KsLNmvKiLJH1" +
+  "pFkh/aYA2HXXZzNBXmIkoQoLd7YfW91kE9o/CCoC1xMy7JA1ipwvKvfrs65ldmlu9" +
+  "bpG6A9BmzhuzF8Eim5f8ui9eH8LZH896+QIF61ka39VBrohr9iyMUJpvRX2Zbhl5Z" +
+  "JzSRxpJyoEZAFL2FUo5fTIztsDZKEgM4cUA==";
+
+const B23_COMPONENTS = [
+  "date",
+  "@method",
+  "@path",
+  "@query",
+  "@authority",
+  "content-type",
+  "content-digest",
+  "content-length",
+];
+
+/** The §B.2 test-request message, as this library sees it. */
+const B23_REQUEST = {
+  method: "POST",
+  url: "http://example.com/foo?param=Value&Pet=dog",
+  headers: {
+    date: "Tue, 20 Apr 2021 02:07:55 GMT",
+    "content-type": "application/json",
+    "content-digest": B23_CONTENT_DIGEST,
+    "content-length": "18",
+  },
+  body: '{"hello": "world"}',
+};
+
+test("RFC 9421 B.2.3: buildSignatureBase matches the published base byte-for-byte", () => {
+  const base = buildSignatureBase(B23_COMPONENTS, B23_REQUEST, {
+    created: 1618884473,
+    keyid: "test-key-rsa-pss",
+  });
+  assert.equal(base, B23_SIGNATURE_BASE);
+});
+
+test("RFC 9421 B.2.3: published Signature-Input parses to the exact components and parameters", () => {
+  const parsed = parseSignatureInput(B23_SIGNATURE_INPUT, "sig-b23");
+  assert.equal(parsed.label, "sig-b23");
+  assert.deepEqual(parsed.componentIds, B23_COMPONENTS);
+  assert.equal(parsed.params.created, 1618884473);
+  assert.equal(parsed.params.keyid, "test-key-rsa-pss");
+  assert.equal(parsed.params.alg, undefined);
+});
+
+test("RFC 9421 B.2.3: published signature is 256 octets and verifies under RSASSA-PSS (SHA-512, MGF1-SHA-512, 64-byte salt) with node:crypto alone", () => {
+  const sigBytes = parseSignatureField(
+    `sig-b23=:${B23_SIGNATURE_B64}:`,
+    "sig-b23",
+  );
+  // A 2048-bit RSA modulus yields a 256-octet signature value.
+  assert.equal(sigBytes.length, 256);
+  const pss = {
+    key: importPublicKey(RSA_PSS_PUB_PEM),
+    padding: constants.RSA_PKCS1_PSS_PADDING,
+    saltLength: 64,
+  };
+  const ok = createVerify("sha512")
+    .update(B23_SIGNATURE_BASE, "utf8")
+    .verify(pss, sigBytes);
+  assert.equal(ok, true);
+  // Tampering a covered component breaks even this independent check.
+  const tampered = createVerify("sha512")
+    .update(B23_SIGNATURE_BASE.replace('"@path": /foo', '"@path": /bar'), "utf8")
+    .verify(pss, sigBytes);
+  assert.equal(tampered, false);
+});
+
+test("RFC 9421 B.2.3: published signature verifies end-to-end via verifyRequest", () => {
+  const signed = {
+    ...B23_REQUEST,
+    headers: {
+      ...B23_REQUEST.headers,
+      "signature-input": B23_SIGNATURE_INPUT,
+      signature: `sig-b23=:${B23_SIGNATURE_B64}:`,
+    },
+  };
+  // B.2.3 carries no `alg`; `algFallback: "infer"` resolves the RSA
+  // key shape to rsa-pss-sha512 (RFC 9421 §3.3.1) — the only RSA
+  // padding key shape alone can imply.
+  const res = verifyRequest(signed, {
+    key: importPublicKey(RSA_PSS_PUB_PEM),
+    label: "sig-b23",
+    now: 1618884473 + 60,
+    algFallback: "infer",
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.keyId, "test-key-rsa-pss");
+  assert.equal(res.alg, "rsa-pss-sha512");
+});
+
+test("RFC 9421 B.2.3: tampering a covered component fails end-to-end verification", () => {
+  const signed = {
+    ...B23_REQUEST,
+    headers: {
+      ...B23_REQUEST.headers,
+      "content-length": "19",
+      "signature-input": B23_SIGNATURE_INPUT,
+      signature: `sig-b23=:${B23_SIGNATURE_B64}:`,
+    },
+  };
+  const res = verifyRequest(signed, {
+    key: importPublicKey(RSA_PSS_PUB_PEM),
+    label: "sig-b23",
+    now: 1618884473 + 60,
+    algFallback: "infer",
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "SIGNATURE_MISMATCH");
+  assert.equal(res.alg, "rsa-pss-sha512");
 });

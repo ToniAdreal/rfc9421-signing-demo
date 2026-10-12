@@ -11,6 +11,12 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- RFC 9421 Appendix B.2.3 official test vector (rsa-pss-sha512, full
+  coverage): the published signature base matches byte-for-byte, the
+  published 256-octet signature verifies with node:crypto alone under
+  RSASSA-PSS (SHA-512, MGF1-SHA-512, 64-byte salt), and it verifies
+  end-to-end through `verifyRequest` (via `algFallback: "infer"`,
+  since the vector carries no `alg` parameter).
 - `JwksKeyStore.stats()` observability: detached `{ refreshes,
   refreshFailures, hits, misses }` counters for the store's lifetime —
   refreshes counted once per actual fetch (single-flight merges count
