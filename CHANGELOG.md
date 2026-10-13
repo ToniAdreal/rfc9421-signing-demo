@@ -37,6 +37,22 @@ change type; no entry describes a feature that is not in the history.
   names lowercased, multi-values joined like headers), so RFC 9421
   `;tr` covered components verify on a real server. Messages without
   trailers produce no `trailers` field, as before.
+- The `@request-target` derived component (RFC 9421 §2.2.5): the
+  request target in origin form — the path plus, when present, `?`
+  and the query — reconstructed from `RequestLike.url` as
+  `pathname + search`, so it never contains the scheme or authority
+  and a URL fragment never participates. Because `RequestLike` only
+  carries an absolute URL, the absolute-form, authority-form, and
+  asterisk-form request targets of §2.2.5 cannot be represented and
+  are not produced.
+- A `package.json` `exports` map for the package root, pointing at
+  the built `dist/src` entry with `types`, `import`, and `default`
+  conditions (alongside the existing `main` field).
+- The benchmark now also measures the replay-detection hot path:
+  `ReplayCache.check` hits against a cache prefilled with 1,000
+  nonces under a deterministic fake clock (zero network), rotating
+  over the whole prefilled set so the LRU recency refresh is
+  exercised across entries, with self-checks on the stats counters.
 
 ### Changed
 
@@ -61,6 +77,31 @@ change type; no entry describes a feature that is not in the history.
   B.2.4 (ecdsa-p256-sha256) both verify end-to-end (B.2.4 after the
   §3.3.4 encoding fix below; its signature base also reproduces
   byte-for-byte).
+- The sha-256 `Content-Digest` path is cross-checked against values
+  produced outside this library: hardcoded vectors derived with
+  OpenSSL (`openssl dgst -sha256`) plus the published RFC 9530
+  Appendix D value for `{"hello": "world"}`. A live OpenSSL
+  re-check runs when an `openssl` binary is available and is
+  explicitly skipped — never silently passed — when it is not.
+- A test executes the README Quickstart's first TypeScript block
+  against the built entry point, so a renamed export, a changed
+  sign/verify signature, or a stale import path in the first code a
+  new reader runs fails the suite. The later Quickstart fragments
+  are illustrative snippets and are not executed.
+
+### Documentation
+
+- `CONTRIBUTING.md`: setup, the honesty hard rules contributions
+  are held to, and the pre-submit checks.
+- Corrected the `SECURITY.md` content-digest signing claim: body
+  binding signs with `sha-512` by default, or `sha-256` when
+  `SignOptions.contentDigestAlg` is set to `"sha-256"` (the earlier
+  text said signing emitted `sha-512` only).
+- Corrected the `package.json` description and keywords to match
+  the supported algorithms: the description now lists all six
+  (`ed25519`, `hmac-sha256`, `hmac-sha512`, `ecdsa-p256-sha256`,
+  `rsa-pss-sha512`, `rsa-v1_5-sha256`) instead of only the first
+  two.
 
 ## [0.1.0]
 
