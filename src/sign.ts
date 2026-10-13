@@ -22,6 +22,7 @@ export type SignAlg =
   | "hmac-sha256"
   | "hmac-sha512"
   | "ecdsa-p256-sha256"
+  | "ecdsa-p384-sha384"
   | "rsa-pss-sha512"
   | "rsa-v1_5-sha256";
 
@@ -41,6 +42,10 @@ export interface SignOptions {
    * keys.generateP256KeyPair); signatures are the raw r‖s concatenation
    * (each integer padded to 32 octets, 64 octets total) that RFC 9421
    * §3.3.4 defines.
+   * ecdsa-p384-sha384: a P-384 private KeyObject (see
+   * keys.generateP384KeyPair); signatures are the raw r‖s concatenation
+   * (each integer padded to 48 octets, 96 octets total) that RFC 9421
+   * §3.3.5 defines.
    * rsa-pss-sha512: an RSA private KeyObject (see
    * keys.generateRsaPssKeyPair); signed with RSASSA-PSS (SHA-512, MGF1
    * with SHA-512, 64-byte salt) per RFC 9421 §3.3.1.
@@ -280,6 +285,18 @@ export function signRequest(
     // fallback on either side: DER signatures minted by earlier
     // versions of this library are rejected (see CHANGELOG).
     sig = createSign("sha256")
+      .update(base, "utf8")
+      .sign({ key: opts.key, dsaEncoding: "ieee-p1363" });
+  } else if (opts.alg === "ecdsa-p384-sha384") {
+    // RFC 9421 §3.3.5: the signature value is the raw concatenation of
+    // the ECDSA integers r and s, each padded to 48 octets (96 octets
+    // total) — NOT the DER encoding node:crypto emits by default.
+    // `dsaEncoding: "ieee-p1363"` selects exactly that raw form, and
+    // verifyRequest consumes it with the same option. The limb width is
+    // the only difference from the P-256 branch above (32 octets), and
+    // the two widths are pinned separately on both sides so a P-256
+    // signature can never be re-read as P-384 or vice versa.
+    sig = createSign("sha384")
       .update(base, "utf8")
       .sign({ key: opts.key, dsaEncoding: "ieee-p1363" });
   } else if (opts.alg === "rsa-v1_5-sha256") {

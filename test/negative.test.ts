@@ -92,8 +92,9 @@ test("wrong hmac secret fails verification", () => {
 });
 
 test("unsupported alg in signature-input is rejected", () => {
-  // ecdsa-p384-sha384 is not implemented here; rsa-v1_5-sha256 and
-  // rsa-pss-sha512 are implemented, so they no longer exercise this path.
+  // ecdsa-p521-sha512 is not implemented here; ecdsa-p384-sha384,
+  // rsa-v1_5-sha256 and rsa-pss-sha512 are implemented, so they no
+  // longer exercise this path.
   const { signed, publicKey } = signedEd('{"amount":100}');
   const tampered: SignedHttpRequest = {
     ...signed,
@@ -101,13 +102,13 @@ test("unsupported alg in signature-input is rejected", () => {
       ...signed.headers,
       "signature-input": signed.headers["signature-input"].replace(
         'alg="ed25519"',
-        'alg="ecdsa-p384-sha384"',
+        'alg="ecdsa-p521-sha512"',
       ),
     },
   };
   const res = verifyRequest(tampered, { key: publicKey, now: CREATED + 60 });
   assert.equal(res.ok, false);
-  assert.equal(res.reason, 'unsupported alg "ecdsa-p384-sha384"');
+  assert.equal(res.reason, 'unsupported alg "ecdsa-p521-sha512"');
   assert.equal(res.code, "UNSUPPORTED_ALG");
 });
 

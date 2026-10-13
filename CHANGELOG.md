@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `ecdsa-p384-sha384` signature algorithm (RFC 9421 §3.3.5): NIST
+  P-384 with SHA-384, signatures in the raw r‖s form with each integer
+  padded to 48 octets (96 octets total) — the P-384 twin of the
+  existing `ecdsa-p256-sha256` support, with the two limb widths pinned
+  separately on both sides so a signature from one curve never verifies
+  as the other. Includes `generateP384KeyPair()`, the
+  `exportPublicKeyJwkP384` / `importPublicKeyJwkP384` JWK helpers
+  (`crv: "P-384"`, private material refused, P-256 JWKs refused), and a
+  `secp384r1` → `ecdsa-p384-sha384` mapping under
+  `algFallback: "infer"`.
 - `jwkThumbprint(jwk)`: the RFC 7638 JWK Thumbprint (SHA-256 over the
   lexicographic canonical JSON of the required members only, base64url)
   for the three public JWK shapes this library exports (OKP, EC, RSA),
