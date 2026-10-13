@@ -88,6 +88,12 @@ change type; no entry describes a feature that is not in the history.
   sign/verify signature, or a stale import path in the first code a
   new reader runs fails the suite. The later Quickstart fragments
   are illustrative snippets and are not executed.
+- The parser fuzz timing assertions are de-flaked: the per-call
+  50ms wall-clock budget (which failed once at 52.2ms under a
+  parallel full-suite run for sub-millisecond work) is now asserted
+  on the corpus median against the same 50ms budget, plus a 1000ms
+  catastrophic single-case bound, so a systematic slowdown still
+  fails while scheduler/GC pauses no longer do.
 
 ### Documentation
 
