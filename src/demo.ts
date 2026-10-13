@@ -1,7 +1,13 @@
 /**
  * Demo: sign one fixed request with a freshly generated ed25519 key,
  * print the wire headers, verify it, then tamper the body by one byte
- * and show the verifier rejecting it.
+ * and show the verifier rejecting it. After that single-signature
+ * script, the demo runs the canonical multi-party payments flow: the
+ * payment gateway appends a second signature with `addSignature`
+ * (label `gateway`, hmac-sha256), the merged wire headers are printed,
+ * and `verifyAllLabels` verifies each label independently. Finally the
+ * demo tampers `content-type` — a component only the gateway signature
+ * covers — to show one label failing while the other still verifies.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the library
@@ -12,13 +18,18 @@
  * the injected verify instant, no network. The ed25519 key pair itself
  * is generated fresh on every run (see `generateEd25519KeyPair`), so the
  * signature bytes differ between runs while every other printed line is
- * identical.
+ * identical. The gateway HMAC secret below is a fixed demo value (never
+ * use it anywhere else), so the gateway signature itself is
+ * deterministic; only the merchant's fresh-key signature varies.
  */
 
 import { fileURLToPath } from "node:url";
 import {
+  addSignature,
   generateEd25519KeyPair,
+  secretKey,
   signRequest,
+  verifyAllLabels,
   verifyRequest,
   type SignedHttpRequest,
   type VerifyResult,
@@ -33,13 +44,53 @@ export const DEMO_TAMPERED_BODY = JSON.stringify({
   amount: 101,
   currency: "USD",
 });
+/** Label of the gateway's appended second signature. */
+export const DEMO_GATEWAY_LABEL = "gateway";
+export const DEMO_GATEWAY_KEY_ID = "gateway-key-1";
+/**
+ * Demo-only gateway HMAC secret: 49 bytes (the hmac-sha256 floor is
+ * 32), fixed so the gateway signature is deterministic, and labelled
+ * as a demo value — it must never be used outside this demo.
+ */
+export const DEMO_GATEWAY_SECRET =
+  "demo-gateway-secret-do-not-use-in-prod-0123456789";
+/**
+ * Components the gateway signature covers. Unlike the merchant's
+ * `sig1` signature (the default set, including `content-digest`), the
+ * gateway additionally covers `content-type` — which is what makes
+ * the tamper-isolation step below possible: changing `content-type`
+ * breaks only the gateway label.
+ */
+export const DEMO_GATEWAY_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+  "content-type",
+];
+/** Value `content-type` is tampered to in the isolation step. */
+export const DEMO_TAMPERED_CONTENT_TYPE = "text/plain";
 
 export interface DemoResult {
   signed: SignedHttpRequest;
   tamperedBody: string;
   verification: VerifyResult;
   tamperedVerification: VerifyResult;
+  /** The request after the gateway appended its second signature. */
+  dualSigned: SignedHttpRequest;
+  /** Per-label results for the dual-signed request (both ok). */
+  dualVerification: VerifyResult[];
+  /**
+   * Per-label results after `content-type` was tampered: the merchant
+   * `sig1` label still verifies, the `gateway` label fails.
+   */
+  contentTypeTamperedVerification: VerifyResult[];
   lines: string[];
+}
+
+function formatLabelResult(prefix: string, result: VerifyResult): string {
+  return result.ok
+    ? `${prefix} ${result.label}: OK (label ${result.label}, keyid="${result.keyId}", alg="${result.alg}")`
+    : `${prefix} ${result.label}: FAILED (code ${result.code}: ${result.reason})`;
 }
 
 /**
@@ -80,6 +131,44 @@ export function runDemo(): DemoResult {
     { key: publicKey, now: DEMO_CREATED + 60 },
   );
 
+  // Multi-party step: the merchant's `sig1` signature above is the
+  // first signature; the payment gateway now appends its own second
+  // signature with `addSignature` (hmac-sha256 under a demo-only
+  // secret), without touching the merchant's entries. The gateway
+  // covers `content-type` in addition to the derived components —
+  // see DEMO_GATEWAY_COVERED_COMPONENTS.
+  const gatewaySecret = secretKey(DEMO_GATEWAY_SECRET);
+  const dualSigned = addSignature(signed, {
+    keyId: DEMO_GATEWAY_KEY_ID,
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    created: DEMO_CREATED,
+    label: DEMO_GATEWAY_LABEL,
+    coveredComponents: [...DEMO_GATEWAY_COVERED_COMPONENTS],
+  });
+  const dualVerifyOptions = {
+    key: publicKey,
+    keys: { [DEMO_GATEWAY_LABEL]: gatewaySecret },
+    now: DEMO_CREATED + 60,
+  };
+  const dualVerification = verifyAllLabels(dualSigned, dualVerifyOptions);
+
+  // Tamper isolation: `content-type` is covered only by the gateway
+  // signature, so changing it must fail the gateway label while the
+  // merchant `sig1` label (which does not cover `content-type`, and
+  // whose content-digest still matches the untouched body) still
+  // verifies — `verifyAllLabels` reports each label independently.
+  const contentTypeTamperedVerification = verifyAllLabels(
+    {
+      ...dualSigned,
+      headers: {
+        ...dualSigned.headers,
+        "content-type": DEMO_TAMPERED_CONTENT_TYPE,
+      },
+    },
+    dualVerifyOptions,
+  );
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -95,6 +184,16 @@ export function runDemo(): DemoResult {
     tamperedVerification.ok
       ? "Verification after tampering: OK (unexpected — tampering was not detected)"
       : `Verification after tampering: FAILED (code ${tamperedVerification.code}: ${tamperedVerification.reason})`,
+    "",
+    "Multi-party signing: gateway adds a second signature with addSignature (hmac-sha256)",
+    `Dual Signature-Input: ${dualSigned.headers["signature-input"]}`,
+    `Dual Signature: ${dualSigned.headers["signature"]}`,
+    ...dualVerification.map((r) => formatLabelResult("Dual verification", r)),
+    "",
+    `Tampered content-type: ${DEMO_TAMPERED_CONTENT_TYPE} (only the gateway signature covers "content-type")`,
+    ...contentTypeTamperedVerification.map((r) =>
+      formatLabelResult("After content-type tampering", r),
+    ),
   ];
 
   return {
@@ -102,6 +201,9 @@ export function runDemo(): DemoResult {
     tamperedBody: DEMO_TAMPERED_BODY,
     verification,
     tamperedVerification,
+    dualSigned,
+    dualVerification,
+    contentTypeTamperedVerification,
     lines,
   };
 }

@@ -11,6 +11,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now also shows the multi-party
+  payments flow: after the single-signature script, a payment gateway
+  appends a second signature with `addSignature` (label `gateway`,
+  hmac-sha256 under a labelled demo-only secret, additionally covering
+  `content-type`), the merged `Signature-Input` / `Signature` headers
+  are printed, and `verifyAllLabels` verifies both labels. Tampering
+  `content-type` then fails only the gateway label
+  (`SIGNATURE_MISMATCH`) while the merchant `sig1` label still
+  verifies.
 - `ecdsa-p384-sha384` signature algorithm (RFC 9421 §3.3.5): NIST
   P-384 with SHA-384, signatures in the raw r‖s form with each integer
   padded to 48 octets (96 octets total) — the P-384 twin of the
