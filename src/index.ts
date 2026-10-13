@@ -40,6 +40,7 @@ export {
   importPublicKeyJwk,
   importPublicKeyJwkP256,
   importPublicKeyJwkRsa,
+  jwkThumbprint,
   memoizeKeyResolver,
   MIN_HMAC_SECRET_BYTES,
   MIN_HMAC_SHA512_SECRET_BYTES,

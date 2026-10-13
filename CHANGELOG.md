@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `jwkThumbprint(jwk)`: the RFC 7638 JWK Thumbprint (SHA-256 over the
+  lexicographic canonical JSON of the required members only, base64url)
+  for the three public JWK shapes this library exports (OKP, EC, RSA),
+  so both sides of a JWKS distribution derive the same stable `keyid`
+  for the same key. Extra members (`kid`/`alg`/`use`) are ignored;
+  private JWKs (`"d"` present), missing/empty required members, and
+  unsupported `kty` values throw. Verified against the RFC 7638 §3.1
+  official example, whose published thumbprint is reproduced exactly.
 - RFC 9421 Appendix B.2.3 official test vector (rsa-pss-sha512, full
   coverage): the published signature base matches byte-for-byte, the
   published 256-octet signature verifies with node:crypto alone under

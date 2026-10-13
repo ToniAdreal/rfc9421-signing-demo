@@ -1,4 +1,5 @@
 import {
+  createHash,
   createPrivateKey,
   createPublicKey,
   createSecretKey,
@@ -529,6 +530,95 @@ export function importPublicKeyJwkRsa(jwk: unknown): KeyObject {
       }`,
     );
   }
+}
+
+/**
+ * Required JWK members per `kty` for the RFC 7638 thumbprint
+ * computation (RFC 7638 §3.2, with the member sets defined by
+ * RFC 7517/7518 and RFC 8037/8038). Only these members — plus `kty`
+ * itself — participate in the hash; every other member (`kid`, `alg`,
+ * `use`, …) is ignored, so two serializations of the same key that
+ * differ only in metadata produce the same thumbprint.
+ */
+const JWK_THUMBPRINT_REQUIRED_MEMBERS: Readonly<
+  Record<string, readonly string[]>
+> = {
+  OKP: ["crv", "x"],
+  EC: ["crv", "x", "y"],
+  RSA: ["e", "n"],
+};
+
+/**
+ * Compute the RFC 7638 JWK Thumbprint of a public-key JWK — a stable,
+ * content-derived identifier for the key, suitable for use as a
+ * `keyid` / JWKS `kid` that both sides of a key distribution derive
+ * identically instead of inventing local names.
+ *
+ * The computation follows RFC 7638 §3 exactly: take only the required
+ * members for the JWK's `kty` (OKP: `crv`/`x`; EC: `crv`/`x`/`y`;
+ * RSA: `e`/`n` — plus `kty` in every case), build the JSON object
+ * with those members in lexicographic order and no whitespace, hash
+ * its UTF-8 octets with SHA-256, and base64url-encode the digest.
+ * Member order in the input and extra members (`kid`, `alg`, `use`,
+ * …) do not affect the result. The `crv` value is not restricted to
+ * the curves this library imports — the thumbprint is defined for
+ * any curve name; curve support stays the import helpers' concern.
+ *
+ * Strictly validates before hashing, in the same fail-fast style as
+ * the `importPublicKeyJwk*` helpers: the input must be a plain
+ * object with a known `kty` and non-empty string values for every
+ * required member. JWKs carrying private material (`"d"`) are
+ * refused outright — this helper identifies *public* keys, and
+ * silently hashing a private JWK would encourage shipping secrets
+ * around. Anything else malformed throws a descriptive `Error` —
+ * never a verification failure, since this is key setup, not
+ * signature checking.
+ *
+ * Honest limit: a thumbprint is an identifier derived from public
+ * material. It is not a proof of key possession and not a signature —
+ * anyone who has the public key can compute it, so it must never be
+ * treated as an authentication credential by itself.
+ */
+export function jwkThumbprint(jwk: unknown): string {
+  const fail = (why: string): never => {
+    throw new Error(`jwkThumbprint: invalid JWK: ${why}`);
+  };
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk))
+    fail(
+      `expected a JWK object, got ${
+        Array.isArray(jwk) ? "an array" : jwk === null ? "null" : typeof jwk
+      }`,
+    );
+  const o = jwk as Record<string, unknown>;
+  if ("d" in o)
+    fail(
+      'private key material ("d") is not accepted; thumbprints here ' +
+        "identify public keys only (keep private keys in PEM on the signer side)",
+    );
+  if (!("kty" in o)) fail(`missing "kty" parameter`);
+  const kty = o["kty"];
+  if (typeof kty !== "string" || !(kty in JWK_THUMBPRINT_REQUIRED_MEMBERS))
+    throw new Error(
+      `jwkThumbprint: invalid JWK: unsupported kty ${JSON.stringify(kty)} ` +
+        `(supported: ${Object.keys(JWK_THUMBPRINT_REQUIRED_MEMBERS).join(", ")})`,
+    );
+  const required = JWK_THUMBPRINT_REQUIRED_MEMBERS[kty]!;
+  const members: Record<string, string> = { kty };
+  for (const name of required) {
+    const value = o[name];
+    if (typeof value !== "string" || value.length === 0)
+      throw new Error(
+        `jwkThumbprint: invalid JWK: missing or empty "${name}" ` +
+          `(a required member for kty "${kty}")`,
+      );
+    members[name] = value;
+  }
+  // RFC 7638 §3.3: members in lexicographic order, no whitespace.
+  const canonical = `{${Object.keys(members)
+    .sort()
+    .map((name) => `${JSON.stringify(name)}:${JSON.stringify(members[name])}`)
+    .join(",")}}`;
+  return createHash("sha256").update(canonical, "utf8").digest("base64url");
 }
 
 /**
