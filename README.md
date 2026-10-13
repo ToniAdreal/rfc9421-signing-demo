@@ -578,6 +578,96 @@ const dual = addSignature(merchantSigned, {
 });
 ```
 
+## FAQ (honest)
+
+- **Can I use this in production?**
+  No — not as-is. This is a demo / learning implementation of a subset
+  of RFC 9421, not a hardened, audited security library: no security
+  audit has been performed, cross-implementation compatibility is
+  untested (see the next answers), replay protection is opt-in only,
+  and there is no key lifecycle story beyond JWKS fetching. If you
+  need production message signatures, use a maintained, audited
+  implementation of the full RFC 9421 instead — see "Why not use this
+  directly in production" in [SECURITY.md](SECURITY.md).
+
+- **How much of RFC 9421 does this implement? What is missing?**
+  A self-consistent subset. Six signature algorithms are implemented
+  (`ed25519`, `ecdsa-p256-sha256`, `rsa-pss-sha512`,
+  `rsa-v1_5-sha256`, `hmac-sha256`, `hmac-sha512`), plus the
+  `;req`/`;bs`/`;sf`/`;key`/`;tr` component parameters for header
+  fields and `;name` for `@query-param`. Not implemented: component
+  parameters besides those, and generic keystores over HTTP (JWKS
+  fetching via `JwksKeyStore` *is* implemented — see below).
+  Narrower limits also apply inside what is implemented — `;sf`
+  covers the RFC 8941 core types only, `;tr` reads caller-supplied
+  `RequestLike.trailers` rather than parsing raw trailer sections
+  off the wire, and `@request-target` is reconstructed in origin
+  form only. The full list is in [Limitations](#limitations-honest).
+
+- **Has this been tested against other RFC 9421 implementations?**
+  No. No third-party RFC 9421 implementation has been exercised
+  against this library yet, so cross-implementation compatibility
+  is still untested — do not assume wire compatibility without
+  testing it yourself. What *has* been checked are the RFC's own
+  published example vectors: the Appendix B.2.3, B.2.4, B.2.5 and
+  B.2.6 vectors verify end-to-end through `verifyRequest` with
+  signature bases matching byte-for-byte, and the `Content-Digest`
+  values were cross-checked against `openssl` output. That is a
+  narrower claim than third-party interop; see
+  [Interoperability](#interoperability) for exactly what was verified.
+
+- **Which `Content-Digest` algorithms are accepted, and in what order?**
+  The verifier understands `sha-512` and `sha-256`, in that order:
+  when the header carries both, only the `sha-512` entry is honored;
+  a `sha-256` entry is accepted as a fallback only when no `sha-512`
+  entry is present. Any other digest algorithm is rejected with
+  `MISSING_CONTENT_DIGEST`. Signing mirrors this: it emits `sha-512`
+  by default, or `sha-256` when `SignOptions.contentDigestAlg` is
+  set to `"sha-256"` (for a peer that only accepts sha-256 digests).
+  Note the scope limit: body binding only applies when a
+  `content-digest` header is present at all — a request without one
+  verifies against headers alone.
+
+- **Does verifying a signature ever make network requests?**
+  `signRequest` / `verifyRequest` themselves do no network I/O — key
+  resolution is a synchronous, in-process lookup. The one network
+  path is opt-in: if you use `JwksKeyStore`, its `refresh()` fetches
+  the JWKS document from the URL you configured (via the global
+  `fetch`), and `resolve()` then answers from that fetched snapshot.
+  Nothing calls `refresh()` for you. Trusting that endpoint is your
+  responsibility: the store performs no TLS pinning and no
+  response-signature verification, so point it only at trusted
+  origins, over HTTPS (see [SECURITY.md](SECURITY.md)). The test
+  suite and benchmark stay offline — JWKS tests use a loopback-only
+  server and the benchmark resolves against a restored snapshot.
+
+- **Does a valid signature stop replay attacks?**
+  Not by itself. `created` / `expires` only bound the acceptance
+  window — a signature captured inside its window can be replayed
+  unless you opt into nonce checking: pass a `ReplayCache` via
+  `VerifyOptions.replayCache` to reject an already-seen `nonce`
+  with `NONCE_REPLAY`, and `requireNonce` to reject nonce-less
+  signatures with `MISSING_NONCE` instead of letting them bypass
+  the cache. The built-in cache is per-process and in-memory only
+  (TTL + LRU cap; a snapshot survives its *own* process's restart
+  but is never shared), so a multi-verifier deployment still needs
+  a shared nonce store (e.g. Redis) — see
+  [Limitations](#limitations-honest) and [SECURITY.md](SECURITY.md).
+
+- **Who manages keys and rotation?**
+  You do. Keys are passed in directly, resolved per call via a
+  caller-provided `keyResolver`, or fetched from a JWKS endpoint
+  via `JwksKeyStore`. There is no built-in persistent keystore and
+  no automatic rotation schedule: a `JwksKeyStore` snapshot can be
+  exported and restored across a single process's restart, but the
+  library never writes it anywhere itself, its persisted form is
+  unsigned (treat it as trusted configuration only), and deciding
+  *when* to re-fetch is your loop — `refreshIfStale()` performs the
+  staleness check and the re-fetch in one call, but nothing calls
+  it for you. Until a successful `refresh()` replaces the snapshot,
+  a revoked key keeps verifying; a failed refresh never replaces
+  the last good snapshot.
+
 ## Limitations (honest)
 
 - **Subset of RFC 9421.** Not implemented: component

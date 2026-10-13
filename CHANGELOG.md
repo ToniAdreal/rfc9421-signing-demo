@@ -102,6 +102,12 @@ change type; no entry describes a feature that is not in the history.
   (`ed25519`, `hmac-sha256`, `hmac-sha512`, `ecdsa-p256-sha256`,
   `rsa-pss-sha512`, `rsa-v1_5-sha256`) instead of only the first
   two.
+- A README "FAQ (honest)" section collecting the positioning
+  answers previously scattered across Limitations,
+  Interoperability, and SECURITY.md: production use, subset scope,
+  third-party interop status, Content-Digest algorithm preference,
+  JWKS network behavior, replay limits, and key management. It
+  restates existing documented facts only and adds no new claims.
 
 ## [0.1.0]
 
