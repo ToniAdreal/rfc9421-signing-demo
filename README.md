@@ -620,7 +620,7 @@ const dual = addSignature(merchantSigned, {
   against this library yet, so cross-implementation compatibility
   is still untested — do not assume wire compatibility without
   testing it yourself. What *has* been checked are the RFC's own
-  published example vectors: the Appendix B.2.1, B.2.3, B.2.4,
+  published example vectors: the Appendix B.2.1, B.2.2, B.2.3, B.2.4,
   B.2.5 and B.2.6 vectors verify end-to-end through `verifyRequest` with
   signature bases matching byte-for-byte, and the `Content-Digest`
   values were cross-checked against `openssl` output. That is a
@@ -761,7 +761,13 @@ What *has* been verified beyond the sign→verify round-trip tests:
   openssl-derived vectors run — the live cross-check itself was done
   locally.
 - RFC 9421 Appendix B.2.5 (hmac-sha256), B.2.6 (ed25519), B.2.4
-  (ecdsa-p256-sha256), B.2.3 (rsa-pss-sha512, full coverage), and
+  (ecdsa-p256-sha256), B.2.3 (rsa-pss-sha512, full coverage),
+  B.2.2 (rsa-pss-sha512, selective coverage — `@authority`,
+  `content-digest`, and a single named query parameter via
+  `@query-param;name="Pet"`, with a `tag` parameter; the test pins
+  the selective boundary: changing a covered component fails, while
+  changing uncovered components — method, date, content-type, an
+  unrelated query parameter — still verifies), and
   B.2.1 (rsa-pss-sha512, minimal coverage — empty covered-components
   list, authenticated by its created/keyid/nonce parameters alone) vectors in
   `test/rfc9421AppendixB.test.ts`: the
@@ -985,7 +991,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 618 tests including the RFC 9421 Appendix B.2.1, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all five verify end-to-end;
+`npm test` runs 624 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

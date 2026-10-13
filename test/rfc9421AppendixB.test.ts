@@ -644,3 +644,176 @@ test("RFC 9421 B.2.1: tampering the nonce fails end-to-end verification", () => 
   assert.equal(res.code, "SIGNATURE_MISMATCH");
   assert.equal(res.alg, "rsa-pss-sha512");
 });
+
+// ---------------------------------------------------------------------------
+// Appendix B.2.2 (rsa-pss-sha512, selective coverage) — covers only
+// @authority, content-digest, and one named query parameter, plus a
+// tag parameter. Values taken from the RFC text (key in B.1.2, test
+// request in B.2, base and signature in B.2.2) with RFC 8792 wraps
+// unwrapped. RSA-PSS is probabilistic: validate the published value
+// against the published key, do not re-sign and compare.
+// ---------------------------------------------------------------------------
+
+/** RFC 9421 B.2.2 signature base. */
+const B22_SIGNATURE_BASE =
+  `"@authority": example.com\n` +
+  `"content-digest": ${B23_CONTENT_DIGEST}\n` +
+  `"@query-param";name="Pet": dog\n` +
+  `"@signature-params": ("@authority" "content-digest" "@query-param";name="Pet");created=1618884473;keyid="test-key-rsa-pss";tag="header-example"`;
+
+const B22_SIGNATURE_INPUT = `sig-b22=("@authority" "content-digest" "@query-param";name="Pet");created=1618884473;keyid="test-key-rsa-pss";tag="header-example"`;
+const B22_SIGNATURE_B64 =
+  "LjbtqUbfmvjj5C5kr1Ugj4PmLYvx9wVjZvD9GsTT4F7GrcQ" +
+  "EdJzgI9qHxICagShLRiLMlAJjtq6N4CDfKtjvuJyE5qH7KT8UCMkSowOB4+ECxCmT" +
+  "8rtAmj/0PIXxi0A0nxKyB09RNrCQibbUjsLS/2YyFYXEu4TRJQzRw1rLEuEfY17SA" +
+  "RYhpTlaqwZVtR8NV7+4UKkjqpcAoFqWFQh62s7Cl+H2fjBSpqfZUJcsIk4N6wiKYd" +
+  "4je2U/lankenQ99PZfB4jY3I5rSV2DSBVkSFsURIjYErOs0tFTQosMTAoxk//0RoK" +
+  "UqiYY8Bh0aaUEb0rQl3/XaVe4bXTugEjHSw==";
+
+const B22_COMPONENTS = [
+  "@authority",
+  "content-digest",
+  '@query-param;name="Pet"',
+];
+
+/** The B.2 test-request message, as this library sees it. */
+const B22_REQUEST = {
+  method: "POST",
+  url: "http://example.com/foo?param=Value&Pet=dog",
+  headers: {
+    date: "Tue, 20 Apr 2021 02:07:55 GMT",
+    "content-type": "application/json",
+    "content-digest": B23_CONTENT_DIGEST,
+    "content-length": "18",
+  },
+  body: '{"hello": "world"}',
+};
+
+function b22Signed(overrides: Record<string, unknown> = {}) {
+  return {
+    ...B22_REQUEST,
+    ...overrides,
+    headers: {
+      ...B22_REQUEST.headers,
+      ...((overrides.headers as Record<string, string> | undefined) ?? {}),
+      "signature-input": B22_SIGNATURE_INPUT,
+      signature: `sig-b22=:${B22_SIGNATURE_B64}:`,
+    },
+  };
+}
+
+test("RFC 9421 B.2.2: buildSignatureBase matches the published base byte-for-byte", () => {
+  const base = buildSignatureBase(B22_COMPONENTS, B22_REQUEST, {
+    created: 1618884473,
+    keyid: "test-key-rsa-pss",
+    tag: "header-example",
+  });
+  assert.equal(base, B22_SIGNATURE_BASE);
+});
+
+test("RFC 9421 B.2.2: published Signature-Input parses to the exact components and parameters", () => {
+  const parsed = parseSignatureInput(B22_SIGNATURE_INPUT, "sig-b22");
+  assert.equal(parsed.label, "sig-b22");
+  assert.deepEqual(parsed.componentIds, B22_COMPONENTS);
+  assert.equal(parsed.params.created, 1618884473);
+  assert.equal(parsed.params.keyid, "test-key-rsa-pss");
+  assert.equal(parsed.params.tag, "header-example");
+  assert.equal(parsed.params.alg, undefined);
+});
+
+test("RFC 9421 B.2.2: published signature is 256 octets and verifies under RSASSA-PSS (SHA-512, MGF1-SHA-512, 64-byte salt) with node:crypto alone", () => {
+  const sigBytes = parseSignatureField(
+    `sig-b22=:${B22_SIGNATURE_B64}:`,
+    "sig-b22",
+  );
+  assert.equal(sigBytes.length, 256);
+  const pss = {
+    key: importPublicKey(RSA_PSS_PUB_PEM),
+    padding: constants.RSA_PKCS1_PSS_PADDING,
+    saltLength: 64,
+  };
+  const ok = createVerify("sha512")
+    .update(B22_SIGNATURE_BASE, "utf8")
+    .verify(pss, sigBytes);
+  assert.equal(ok, true);
+  // Flipping one signature octet breaks even this independent check.
+  const mutated = Buffer.from(sigBytes);
+  mutated[10] ^= 0x01;
+  const bad = createVerify("sha512")
+    .update(B22_SIGNATURE_BASE, "utf8")
+    .verify(pss, mutated);
+  assert.equal(bad, false);
+  // Tampering a covered component in the base also breaks it.
+  const tampered = createVerify("sha512")
+    .update(B22_SIGNATURE_BASE.replace('"Pet": dog', '"Pet": cat'), "utf8")
+    .verify(pss, sigBytes);
+  assert.equal(tampered, false);
+});
+
+test("RFC 9421 B.2.2: published signature verifies end-to-end via verifyRequest", () => {
+  const res = verifyRequest(b22Signed(), {
+    key: importPublicKey(RSA_PSS_PUB_PEM),
+    label: "sig-b22",
+    now: 1618884473 + 60,
+    algFallback: "infer",
+    expectedTag: "header-example",
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.keyId, "test-key-rsa-pss");
+  assert.equal(res.alg, "rsa-pss-sha512");
+  assert.equal(res.tag, "header-example");
+});
+
+test("RFC 9421 B.2.2: tampering a covered component fails end-to-end verification", () => {
+  // The covered query parameter: Pet=dog is signed, Pet=cat is not the
+  // signed value.
+  const byQueryParam = verifyRequest(
+    b22Signed({ url: "http://example.com/foo?param=Value&Pet=cat" }),
+    {
+      key: importPublicKey(RSA_PSS_PUB_PEM),
+      label: "sig-b22",
+      now: 1618884473 + 60,
+      algFallback: "infer",
+    },
+  );
+  assert.equal(byQueryParam.ok, false);
+  assert.equal(byQueryParam.code, "SIGNATURE_MISMATCH");
+  // The covered authority, reached via the request URL host.
+  const byAuthority = verifyRequest(
+    b22Signed({ url: "http://attacker.com/foo?param=Value&Pet=dog" }),
+    {
+      key: importPublicKey(RSA_PSS_PUB_PEM),
+      label: "sig-b22",
+      now: 1618884473 + 60,
+      algFallback: "infer",
+    },
+  );
+  assert.equal(byAuthority.ok, false);
+  assert.equal(byAuthority.code, "SIGNATURE_MISMATCH");
+});
+
+test("RFC 9421 B.2.2: changing uncovered components does not affect verification (selective coverage)", () => {
+  // None of date, content-type, the method, or the unrelated `param`
+  // query parameter is covered by this vector, so changing all of them
+  // must leave the signature valid. This is the semantic boundary that
+  // distinguishes selective coverage from B.2.1 (nothing covered) and
+  // B.2.3 (everything covered) — asserted as-is, not as a virtue.
+  const res = verifyRequest(
+    b22Signed({
+      method: "GET",
+      url: "http://example.com/foo?param=Changed&Pet=dog",
+      headers: {
+        date: "Wed, 21 Apr 2021 02:07:55 GMT",
+        "content-type": "text/plain",
+      },
+    }),
+    {
+      key: importPublicKey(RSA_PSS_PUB_PEM),
+      label: "sig-b22",
+      now: 1618884473 + 60,
+      algFallback: "infer",
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.alg, "rsa-pss-sha512");
+});
