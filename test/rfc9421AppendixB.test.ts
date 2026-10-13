@@ -513,3 +513,134 @@ test("RFC 9421 B.2.3: tampering a covered component fails end-to-end verificatio
   assert.equal(res.code, "SIGNATURE_MISMATCH");
   assert.equal(res.alg, "rsa-pss-sha512");
 });
+
+// ---------------------------------------------------------------------------
+// Appendix B.2.1 (rsa-pss-sha512, minimal coverage) — the empty covered-
+// components baseline. Values taken from the RFC text (§B.1.2 key,
+// §B.2 test request, §B.2.1 base and signature) with RFC 8792 wraps
+// unwrapped. This vector covers no message components at all: its base
+// is a single @signature-params line carrying created, keyid and a
+// nonce. RSA-PSS is probabilistic (RFC §7.3.5): the published value is
+// validated against the published key, not reproduced by re-signing.
+// ---------------------------------------------------------------------------
+
+/** RFC 9421 §B.2.1 signature base. */
+const B21_SIGNATURE_BASE = `"@signature-params": ();created=1618884473;keyid="test-key-rsa-pss";nonce="b3k2pp5k7z-50gnwp.yemd"`;
+
+const B21_SIGNATURE_INPUT = `sig-b21=();created=1618884473;keyid="test-key-rsa-pss";nonce="b3k2pp5k7z-50gnwp.yemd"`;
+const B21_NONCE = "b3k2pp5k7z-50gnwp.yemd";
+const B21_SIGNATURE_B64 =
+  "d2pmTvmbncD3xQm8E9ZV2828BjQWGgiwAaw5bAkgibUopem" +
+  "LJcWDy/lkbbHAve4cRAtx31Iq786U7it++wgGxbtRxf8Udx7zFZsckzXaJMkA7ChG" +
+  "52eSkFxykJeNqsrWH5S+oxNFlD4dzVuwe8DhTSja8xxbR/Z2cOGdCbzR72rgFWhzx" +
+  "2VjBqJzsPLMIQKhO4DGezXehhWwE56YCE+O6c0mKZsfxVrogUvA4HELjVKWmAvtl6" +
+  "UnCh8jYzuVG5WSb/QEVPnP5TmcAnLH1g+s++v6d4s8m0gCw1fV5/SITLq9mhho8K3" +
+  "+7EPYTU8IU1bLhdxO5Nyt8C8ssinQ98Xw9Q==";
+
+/** The §B.2 test-request message, as this library sees it. */
+const B21_REQUEST = {
+  method: "POST",
+  url: "http://example.com/foo?param=Value&Pet=dog",
+  headers: {
+    date: "Tue, 20 Apr 2021 02:07:55 GMT",
+    "content-type": "application/json",
+    "content-digest": B23_CONTENT_DIGEST,
+    "content-length": "18",
+  },
+  body: '{"hello": "world"}',
+};
+
+test("RFC 9421 B.2.1: buildSignatureBase matches the published base byte-for-byte", () => {
+  const base = buildSignatureBase([], B21_REQUEST, {
+    created: 1618884473,
+    keyid: "test-key-rsa-pss",
+    nonce: B21_NONCE,
+  });
+  assert.equal(base, B21_SIGNATURE_BASE);
+});
+
+test("RFC 9421 B.2.1: published Signature-Input parses to the exact components and parameters", () => {
+  const parsed = parseSignatureInput(B21_SIGNATURE_INPUT, "sig-b21");
+  assert.equal(parsed.label, "sig-b21");
+  assert.deepEqual(parsed.componentIds, []);
+  assert.equal(parsed.params.created, 1618884473);
+  assert.equal(parsed.params.keyid, "test-key-rsa-pss");
+  assert.equal(parsed.params.nonce, B21_NONCE);
+  assert.equal(parsed.params.alg, undefined);
+});
+
+test("RFC 9421 B.2.1: published signature is 256 octets and verifies under RSASSA-PSS (SHA-512, MGF1-SHA-512, 64-byte salt) with node:crypto alone", () => {
+  const sigBytes = parseSignatureField(
+    `sig-b21=:${B21_SIGNATURE_B64}:`,
+    "sig-b21",
+  );
+  assert.equal(sigBytes.length, 256);
+  const pss = {
+    key: importPublicKey(RSA_PSS_PUB_PEM),
+    padding: constants.RSA_PKCS1_PSS_PADDING,
+    saltLength: 64,
+  };
+  const ok = createVerify("sha512")
+    .update(B21_SIGNATURE_BASE, "utf8")
+    .verify(pss, sigBytes);
+  assert.equal(ok, true);
+  // Flipping one signature octet breaks even this independent check.
+  const mutated = Buffer.from(sigBytes);
+  mutated[0] ^= 0x01;
+  const bad = createVerify("sha512")
+    .update(B21_SIGNATURE_BASE, "utf8")
+    .verify(pss, mutated);
+  assert.equal(bad, false);
+  // The nonce is part of @signature-params, so tampering it also
+  // breaks the independent check.
+  const tampered = createVerify("sha512")
+    .update(B21_SIGNATURE_BASE.replace(B21_NONCE, "attacker-nonce"), "utf8")
+    .verify(pss, sigBytes);
+  assert.equal(tampered, false);
+});
+
+test("RFC 9421 B.2.1: published signature verifies end-to-end via verifyRequest", () => {
+  const signed = {
+    ...B21_REQUEST,
+    headers: {
+      ...B21_REQUEST.headers,
+      "signature-input": B21_SIGNATURE_INPUT,
+      signature: `sig-b21=:${B21_SIGNATURE_B64}:`,
+    },
+  };
+  // B.2.1 carries no `alg`; `algFallback: "infer"` resolves the RSA
+  // key shape to rsa-pss-sha512, as with B.2.3.
+  const res = verifyRequest(signed, {
+    key: importPublicKey(RSA_PSS_PUB_PEM),
+    label: "sig-b21",
+    now: 1618884473 + 60,
+    algFallback: "infer",
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.keyId, "test-key-rsa-pss");
+  assert.equal(res.alg, "rsa-pss-sha512");
+  assert.equal(res.nonce, B21_NONCE);
+});
+
+test("RFC 9421 B.2.1: tampering the nonce fails end-to-end verification", () => {
+  // No message component is covered, so there is no covered component
+  // to tamper; the nonce is the vector's authenticated parameter, and
+  // changing it on the wire rebuilds a different signature base.
+  const signed = {
+    ...B21_REQUEST,
+    headers: {
+      ...B21_REQUEST.headers,
+      "signature-input": B21_SIGNATURE_INPUT.replace(B21_NONCE, "attacker-nonce"),
+      signature: `sig-b21=:${B21_SIGNATURE_B64}:`,
+    },
+  };
+  const res = verifyRequest(signed, {
+    key: importPublicKey(RSA_PSS_PUB_PEM),
+    label: "sig-b21",
+    now: 1618884473 + 60,
+    algFallback: "infer",
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "SIGNATURE_MISMATCH");
+  assert.equal(res.alg, "rsa-pss-sha512");
+});

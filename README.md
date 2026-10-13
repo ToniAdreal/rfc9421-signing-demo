@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 613 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 618 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -620,8 +620,8 @@ const dual = addSignature(merchantSigned, {
   against this library yet, so cross-implementation compatibility
   is still untested — do not assume wire compatibility without
   testing it yourself. What *has* been checked are the RFC's own
-  published example vectors: the Appendix B.2.3, B.2.4, B.2.5 and
-  B.2.6 vectors verify end-to-end through `verifyRequest` with
+  published example vectors: the Appendix B.2.1, B.2.3, B.2.4,
+  B.2.5 and B.2.6 vectors verify end-to-end through `verifyRequest` with
   signature bases matching byte-for-byte, and the `Content-Digest`
   values were cross-checked against `openssl` output. That is a
   narrower claim than third-party interop; see
@@ -761,7 +761,9 @@ What *has* been verified beyond the sign→verify round-trip tests:
   openssl-derived vectors run — the live cross-check itself was done
   locally.
 - RFC 9421 Appendix B.2.5 (hmac-sha256), B.2.6 (ed25519), B.2.4
-  (ecdsa-p256-sha256), and B.2.3 (rsa-pss-sha512) vectors in
+  (ecdsa-p256-sha256), B.2.3 (rsa-pss-sha512, full coverage), and
+  B.2.1 (rsa-pss-sha512, minimal coverage — empty covered-components
+  list, authenticated by its created/keyid/nonce parameters alone) vectors in
   `test/rfc9421AppendixB.test.ts`: the
   signature base matches the published bytes exactly and the published
   signature value verifies end-to-end through `verifyRequest`. For
@@ -983,7 +985,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 613 tests including the RFC 9421 Appendix B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all four verify end-to-end;
+`npm test` runs 618 tests including the RFC 9421 Appendix B.2.1, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all five verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

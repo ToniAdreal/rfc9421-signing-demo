@@ -19,6 +19,14 @@ change type; no entry describes a feature that is not in the history.
   private JWKs (`"d"` present), missing/empty required members, and
   unsupported `kty` values throw. Verified against the RFC 7638 §3.1
   official example, whose published thumbprint is reproduced exactly.
+- RFC 9421 Appendix B.2.1 official test vector (rsa-pss-sha512,
+  minimal coverage): the published signature base — a single
+  `@signature-params` line over an empty covered-components list with
+  `created`/`keyid`/`nonce` — matches byte-for-byte, the published
+  256-octet signature verifies with node:crypto alone under
+  RSASSA-PSS (SHA-512, MGF1-SHA-512, 64-byte salt), and it verifies
+  end-to-end through `verifyRequest` (via `algFallback: "infer"`,
+  since the vector carries no `alg` parameter), returning the nonce.
 - RFC 9421 Appendix B.2.3 official test vector (rsa-pss-sha512, full
   coverage): the published signature base matches byte-for-byte, the
   published 256-octet signature verifies with node:crypto alone under
