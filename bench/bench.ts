@@ -8,7 +8,13 @@
  * hmac-sha256 dual labels via verifyAllLabels) and the key-resolution
  * hot path a gateway verifier hits on every request: `JwksKeyStore.resolve`
  * (Map hit on an offline-restored snapshot, zero network) and
- * `memoizeKeyResolver` cache hits / misses, plus the replay-detection
+ * `memoizeKeyResolver` cache hits / misses, plus the key-management
+ * derivation a JWKS publisher runs for every key at publish/rotation
+ * time: `jwkThumbprint` (RFC 7638) over a fixed three-shape fixture
+ * (ed25519 / P-256 / RSA public JWKs, one derivation per shape per
+ * measured call, self-checked outside timing against independently
+ * pinned thumbprints — the RSA one is the RFC 7638 §3.1 published
+ * value), plus the replay-detection
  * hot path a verifier with `requireNonce` hits on every request:
  * `ReplayCache.check` hits against a cache prefilled with 1,000 nonces
  * under a deterministic fake clock (zero network, zero wall clock for
@@ -30,6 +36,7 @@ import {
   generateRsaPssKeyPair,
   generateRsaV15KeyPair,
   JwksKeyStore,
+  jwkThumbprint,
   memoizeKeyResolver,
   ReplayCache,
   secretKey,
@@ -231,6 +238,74 @@ function benchmarkMemoizeMiss(store: JwksKeyStore): number {
       `benchmark self-check failed: miss path made ${underlying} underlying calls (expected ${WARMUP + ITERATIONS})`,
     );
   return ops;
+}
+
+/**
+ * Fixed public-JWK fixture for the `jwkThumbprint` path — the three
+ * shapes this library exports, with sources that exist independently
+ * of this implementation:
+ * - ed25519: the RFC 8032 §7.1 Test 1 public key.
+ * - P-256: the curve generator point G (SEC 2), as a public JWK.
+ * - RSA: the RFC 7638 §3.1 example JWK, verbatim (including its
+ *   non-required `alg`/`kid` members, which must not participate).
+ */
+const THUMBPRINT_FIXTURE = {
+  ed25519: {
+    kty: "OKP",
+    crv: "Ed25519",
+    x: "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+  },
+  p256: {
+    kty: "EC",
+    crv: "P-256",
+    x: "axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY",
+    y: "T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+  },
+  rsa: {
+    kty: "RSA",
+    n: "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
+    e: "AQAB",
+    alg: "RS256",
+    kid: "2011-04-29",
+  },
+} as const;
+
+/**
+ * Expected thumbprints for the fixture above. The RSA value is the
+ * thumbprint published in RFC 7638 §3.1 itself (the same value
+ * test/jwkThumbprint.test.ts pins). The ed25519 / P-256 values were
+ * computed independently of this implementation (canonical required-
+ * member JSON + SHA-256, cross-checked in Python's hashlib, whose
+ * RSA output reproduces the RFC value exactly) and are pinned here
+ * as literals — never derived from `jwkThumbprint` at bench time.
+ */
+const THUMBPRINT_EXPECTED = {
+  ed25519: "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k",
+  p256: "xx0BcA-wMohw8atYDJOe6peGModklG2wRHBlXHMvl0M",
+  rsa: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs",
+} as const;
+
+/**
+ * `jwkThumbprint` steady state: one measured call derives the
+ * thumbprint of each of the three fixture shapes (3 derivations per
+ * call) — the per-key cost a JWKS publisher/rotator pays to assign
+ * stable keyids. Self-checks run outside timing: every shape must
+ * reproduce its pinned expected thumbprint above.
+ */
+function benchmarkJwkThumbprint(): number {
+  for (const shape of ["ed25519", "p256", "rsa"] as const) {
+    const tp = jwkThumbprint(THUMBPRINT_FIXTURE[shape]);
+    if (tp !== THUMBPRINT_EXPECTED[shape])
+      throw new Error(
+        `benchmark self-check failed: ${shape} thumbprint ${tp} ` +
+          `(expected ${THUMBPRINT_EXPECTED[shape]})`,
+      );
+  }
+  return measure(() => {
+    jwkThumbprint(THUMBPRINT_FIXTURE.ed25519);
+    jwkThumbprint(THUMBPRINT_FIXTURE.p256);
+    jwkThumbprint(THUMBPRINT_FIXTURE.rsa);
+  }, ITERATIONS);
 }
 
 /** Number of nonces prefilled into the ReplayCache benchmark fixture. */
@@ -597,6 +672,11 @@ results.push({
   alg: "memoizeKeyResolver (miss)",
   op: "resolve",
   ops: benchmarkMemoizeMiss(benchStore),
+});
+results.push({
+  alg: "jwkThumbprint (3 JWK shapes)",
+  op: "derive",
+  ops: benchmarkJwkThumbprint(),
 });
 results.push({
   alg: "ReplayCache.check (hit, 1k)",

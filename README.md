@@ -886,31 +886,32 @@ see [SECURITY.md](SECURITY.md).
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
-algorithm plus the key-resolution, replay-check and malformed-input
-rejection paths below (3000 timed iterations per op after 200 warmup,
-printing the Node version and CPU).
-All rows below are from one real run on 2026-10-12:
+algorithm plus the key-resolution, thumbprint-derivation, replay-check
+and malformed-input rejection paths below (3000 timed iterations per
+op after 200 warmup, printing the Node version and CPU).
+All rows below are from one real run on 2026-10-13:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519 | sign | ~8,100 ops/sec (~123 µs/op) |
-| ed25519 | verify | ~3,700 ops/sec (~272 µs/op) |
-| hmac-sha256 | sign | ~28,600 ops/sec (~35 µs/op) |
-| hmac-sha256 | verify | ~20,900 ops/sec (~48 µs/op) |
-| hmac-sha512 | sign | ~29,500 ops/sec (~34 µs/op) |
-| hmac-sha512 | verify | ~21,300 ops/sec (~47 µs/op) |
-| ecdsa-p256-sha256 | sign | ~4,900 ops/sec (~204 µs/op) |
-| ecdsa-p256-sha256 | verify | ~3,000 ops/sec (~335 µs/op) |
-| rsa-pss-sha512 | sign | ~713 ops/sec (~1,403 µs/op) |
-| rsa-pss-sha512 | verify | ~6,300 ops/sec (~159 µs/op) |
-| rsa-v1_5-sha256 | sign | ~742 ops/sec (~1,349 µs/op) |
-| rsa-v1_5-sha256 | verify | ~6,400 ops/sec (~156 µs/op) |
-| verifyAllLabels (2 labels) | verify | ~3,100 ops/sec (~321 µs/op) |
-| JwksKeyStore.resolve (hit) | resolve | ~6,330,000 ops/sec (~0.16 µs/op) |
-| memoizeKeyResolver (hit) | resolve | ~4,330,000 ops/sec (~0.23 µs/op) |
-| memoizeKeyResolver (miss) | resolve | ~5,710,000 ops/sec (~0.18 µs/op) |
-| ReplayCache.check (hit, 1k entries) | check | ~1,530,000 ops/sec (~0.65 µs/op) |
-| verifyRequest (malformed, 566 cases) | reject | ~13,200 ops/sec (~76 µs/op) |
+| ed25519 | sign | ~13,000 ops/sec (~77 µs/op) |
+| ed25519 | verify | ~6,200 ops/sec (~160 µs/op) |
+| hmac-sha256 | sign | ~48,800 ops/sec (~20 µs/op) |
+| hmac-sha256 | verify | ~40,500 ops/sec (~25 µs/op) |
+| hmac-sha512 | sign | ~48,600 ops/sec (~21 µs/op) |
+| hmac-sha512 | verify | ~37,400 ops/sec (~27 µs/op) |
+| ecdsa-p256-sha256 | sign | ~10,300 ops/sec (~97 µs/op) |
+| ecdsa-p256-sha256 | verify | ~5,700 ops/sec (~174 µs/op) |
+| rsa-pss-sha512 | sign | ~1,890 ops/sec (~529 µs/op) |
+| rsa-pss-sha512 | verify | ~12,000 ops/sec (~84 µs/op) |
+| rsa-v1_5-sha256 | sign | ~1,340 ops/sec (~744 µs/op) |
+| rsa-v1_5-sha256 | verify | ~12,700 ops/sec (~79 µs/op) |
+| verifyAllLabels (2 labels) | verify | ~5,400 ops/sec (~184 µs/op) |
+| JwksKeyStore.resolve (hit) | resolve | ~7,670,000 ops/sec (~0.13 µs/op) |
+| memoizeKeyResolver (hit) | resolve | ~5,240,000 ops/sec (~0.19 µs/op) |
+| memoizeKeyResolver (miss) | resolve | ~7,270,000 ops/sec (~0.14 µs/op) |
+| jwkThumbprint (3 JWK shapes) | derive | ~84,700 ops/sec (~11.8 µs/op) |
+| ReplayCache.check (hit, 1k entries) | check | ~1,780,000 ops/sec (~0.56 µs/op) |
+| verifyRequest (malformed, 566 cases) | reject | ~21,600 ops/sec (~46 µs/op) |
 
 The `verifyAllLabels` row covers the multi-party scenario: the merchant signs
 with ed25519 and the payment gateway appends its own hmac-sha256 signature
@@ -921,10 +922,21 @@ restored offline from a snapshot (the bench performs zero network I/O), a
 hit is a plain Map lookup, a `memoizeKeyResolver` hit is served from its
 TTL cache, and a miss uses an unknown keyid, which is never cached and so
 penetrates to the store on every call. In this run a memoized hit measured
-about the same as a raw resolve — against an already in-memory store the
-wrapper's TTL check and LRU recency refresh roughly offset the Map lookup
+somewhat slower than a raw resolve — against an already in-memory store the
+wrapper's TTL check and LRU recency refresh cost more than the Map lookup
 they save — memoizing pays off when the underlying resolver is slow or
 remote, which this offline fixture deliberately is not.
+
+The `jwkThumbprint` row covers the key-management derivation a JWKS
+publisher runs for every key at publish/rotation time: one measured
+call derives the RFC 7638 thumbprint of each of the three public JWK
+shapes this library exports (ed25519, P-256, RSA — so the per-op cost
+covers 3 derivations). The fixture keys have sources independent of
+this implementation (the RFC 8032 §7.1 ed25519 test key, the P-256
+generator point, and the RFC 7638 §3.1 example RSA key), and the bench
+self-checks outside timing that every shape reproduces its pinned
+expected thumbprint — the RSA expectation is the value published in
+RFC 7638 §3.1 itself.
 
 The `ReplayCache.check` row covers the replay-detection hot path: the
 cache is prefilled with 1,000 nonces under a fixed fake clock
@@ -951,7 +963,7 @@ and makes no wall-clock assertions; the number is this parser's own
 rejection throughput on this machine, not a comparison against any
 other implementation.
 
-Environment: Node v24.20.0, linux/x64, AMD EPYC 7D13 (virtualized; shared
+Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized; shared
 host, so numbers vary run to run). Request fixture: POST with a 31-byte JSON
 body, covered components `@method @authority @path content-digest`.
 Machine-local measurements for capacity planning, not guaranteed

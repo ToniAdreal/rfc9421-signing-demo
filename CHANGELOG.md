@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures the
+  `jwkThumbprint` key-derivation path: one measured call derives the
+  RFC 7638 thumbprint of each of the three exported public JWK shapes
+  (ed25519 / P-256 / RSA) over a fixed fixture whose keys come from
+  RFC 8032 §7.1, the P-256 generator point, and the RFC 7638 §3.1
+  example. Self-checks outside timing pin every shape to an
+  independently computed expected thumbprint — the RSA one is the
+  value published in RFC 7638 §3.1.
 - The CLI demo (`npm run demo`) now also shows the multi-party
   payments flow: after the single-signature script, a payment gateway
   appends a second signature with `addSignature` (label `gateway`,
