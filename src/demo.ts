@@ -11,8 +11,13 @@
  * The next segment demonstrates nonce replay protection: the demo
  * signs in with an opt-in `ReplayCache`, so the *same* signed request
  * verifies once and is then rejected with `NONCE_REPLAY`, while a
- * request carrying a different nonce still verifies. The closing
- * segment demonstrates JWKS key resolution: a `JwksKeyStore` is
+ * request carrying a different nonce still verifies. The next segment
+ * re-signs the same request with `contentDigestAlg: "sha-256"` for a
+ * peer that only accepts sha-256 digests: its `content-digest` header
+ * and verification are printed alongside the main line's sha-512
+ * header, and a one-byte body tamper is rejected with
+ * `BODY_DIGEST_MISMATCH`. The closing segment demonstrates JWKS key
+ * resolution: a `JwksKeyStore` is
  * restored offline from a snapshot of the demo public key, the demo
  * request verifies through its key resolver, and a request signed
  * under an unknown `keyid` is rejected with `KEY_RESOLUTION_FAILED`.
@@ -144,6 +149,19 @@ export interface DemoResult {
    * the same cache (ok — a fresh nonce is not a replay).
    */
   replayOtherNonceVerification: VerifyResult;
+  /**
+   * The same demo request re-signed with
+   * `contentDigestAlg: "sha-256"` (its `content-digest` header carries
+   * a `sha-256=:` entry instead of the main line's `sha-512=:`).
+   */
+  sha256Signed: SignedHttpRequest;
+  /** Verification of `sha256Signed` (ok). */
+  sha256Verification: VerifyResult;
+  /**
+   * Verification of `sha256Signed` with the body tampered by one
+   * byte: rejected with `BODY_DIGEST_MISMATCH`.
+   */
+  sha256TamperedVerification: VerifyResult;
   /** The v1 snapshot the JWKS segment restores its store from. */
   jwksSnapshot: JwksKeyStoreSnapshot;
   /** Number of keys in the restored JWKS store (1: the demo key). */
@@ -284,6 +302,39 @@ export function runDemo(): DemoResult {
     replayVerifyOptions,
   );
 
+  // sha-256 Content-Digest segment: some peers (e.g. a payment
+  // gateway webhook endpoint) only accept sha-256 digests. Re-sign
+  // the *same* demo request — same key, keyid, created and nonce —
+  // with `contentDigestAlg: "sha-256"`, so the only wire difference
+  // from the main line is the digest algorithm (and the signature
+  // over it). The verifier accepts sha-256, so it verifies; changing
+  // the body by the same one byte as the main tamper step
+  // (100 -> 101) is rejected with BODY_DIGEST_MISMATCH.
+  const sha256Signed = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_NONCE,
+      contentDigestAlg: "sha-256",
+    },
+  );
+  const sha256Verification = verifyRequest(sha256Signed, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  const sha256TamperedVerification = verifyRequest(
+    { ...sha256Signed, body: DEMO_TAMPERED_BODY },
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+
   // JWKS segment: production gateways do not hand the verifier a raw
   // key — they publish a JWKS and the verifier resolves the claimed
   // keyid against it. The demo rebuilds that path offline: a v:1
@@ -370,6 +421,15 @@ export function runDemo(): DemoResult {
       ? `Replay check, new request with nonce "${DEMO_OTHER_NONCE}": OK (a fresh nonce is not a replay)`
       : `Replay check, new request with nonce "${DEMO_OTHER_NONCE}": FAILED (code ${replayOtherNonceVerification.code}: ${replayOtherNonceVerification.reason})`,
     "",
+    `Content-Digest algorithms on the same body: main line ${signed.headers["content-digest"]} vs sha-256 peer line ${sha256Signed.headers["content-digest"]}`,
+    `sha-256 Content-Digest: ${sha256Signed.headers["content-digest"]}`,
+    sha256Verification.ok
+      ? `sha-256 verification: OK (label ${sha256Verification.label}, keyid="${sha256Verification.keyId}", alg="${sha256Verification.alg}")`
+      : `sha-256 verification: FAILED (code ${sha256Verification.code}: ${sha256Verification.reason})`,
+    sha256TamperedVerification.ok
+      ? "sha-256 verification after tampering: OK (unexpected — tampering was not detected)"
+      : `sha-256 verification after tampering: FAILED (code ${sha256TamperedVerification.code}: ${sha256TamperedVerification.reason})`,
+    "",
     `JWKS key resolution: JwksKeyStore restored offline from a v1 snapshot (endpoint ${DEMO_JWKS_URL}, fetchedAtSec=${DEMO_JWKS_FETCHED_AT_SEC}, ${jwksStore.size} key)`,
     jwksVerification.ok
       ? `JWKS verification for keyid "${DEMO_KEY_ID}": OK (label ${jwksVerification.label}, keyid="${jwksVerification.keyId}", alg="${jwksVerification.alg}")`
@@ -390,6 +450,9 @@ export function runDemo(): DemoResult {
     replayFirstVerification,
     replaySecondVerification,
     replayOtherNonceVerification,
+    sha256Signed,
+    sha256Verification,
+    sha256TamperedVerification,
     jwksSnapshot,
     jwksStoreSize: jwksStore.size,
     jwksVerification,

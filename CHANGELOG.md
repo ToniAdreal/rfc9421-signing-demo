@@ -11,6 +11,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now also shows a sha-256
+  Content-Digest segment: the same fixed demo request is re-signed
+  with `contentDigestAlg: "sha-256"` for a peer that only accepts
+  sha-256 digests, the main line's sha-512 and the peer line's
+  sha-256 `Content-Digest` headers are printed side by side on the
+  same body, the sha-256 signature verifies, and the same one-byte
+  body tamper as the main line is rejected with
+  `BODY_DIGEST_MISMATCH`. The segment performs zero network I/O and
+  uses the demo's fixed key id, `created` and nonce.
 - The benchmark (`npm run bench`) now also measures the per-curve
   JWK export/import round trip: for each of P-256, P-384, P-521 and
   RSA (2048-bit, the library default; its JWK is shared by both RSA

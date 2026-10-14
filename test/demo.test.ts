@@ -215,6 +215,52 @@ test("demo request data is deterministic across runs (fresh key aside)", () => {
   );
 });
 
+test("demo sha-256 segment re-signs the same request for a sha-256-only peer", () => {
+  const { signed, sha256Signed, sha256Verification, sha256TamperedVerification } =
+    runDemo();
+
+  // Same body, different digest algorithm: the sha-256 header has the
+  // 44-char base64 wire shape and differs from the main line's sha-512.
+  assert.match(
+    sha256Signed.headers["content-digest"],
+    /^sha-256=:[A-Za-z0-9+/]{43}=:$/,
+  );
+  assert.ok(signed.headers["content-digest"].startsWith("sha-512=:"));
+  assert.notEqual(
+    sha256Signed.headers["content-digest"],
+    signed.headers["content-digest"],
+  );
+  assert.equal(sha256Signed.body, DEMO_BODY);
+  // Everything else about the signing inputs matches the main line.
+  assert.equal(
+    sha256Signed.headers["signature-input"],
+    signed.headers["signature-input"],
+  );
+
+  assert.equal(sha256Verification.ok, true);
+  assert.equal(sha256Verification.keyId, DEMO_KEY_ID);
+  assert.equal(sha256Verification.alg, "ed25519");
+  // The same one-byte body tamper as the main line is a digest mismatch.
+  assert.equal(sha256TamperedVerification.ok, false);
+  assert.equal(sha256TamperedVerification.code, "BODY_DIGEST_MISMATCH");
+});
+
+test("demo lines contain the sha-256 segment (comparison, verification, tamper rejection)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /Content-Digest algorithms on the same body: main line sha-512=:.* vs sha-256 peer line sha-256=:/,
+  );
+  assert.match(out, /sha-256 Content-Digest: sha-256=:/);
+  assert.match(out, /sha-256 verification: OK /);
+  assert.match(
+    out,
+    /sha-256 verification after tampering: FAILED \(code BODY_DIGEST_MISMATCH:/,
+  );
+});
+
 test("demo JWKS segment verifies via a restored store and rejects an unknown keyid", () => {
   const {
     jwksSnapshot,
@@ -290,6 +336,12 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(
     out,
     /Replay check, second presentation of the same request: FAILED \(code NONCE_REPLAY:/,
+  );
+  assert.match(out, /sha-256 Content-Digest: sha-256=:/);
+  assert.match(out, /sha-256 verification: OK /);
+  assert.match(
+    out,
+    /sha-256 verification after tampering: FAILED \(code BODY_DIGEST_MISMATCH:/,
   );
   assert.match(out, /JWKS key resolution: JwksKeyStore restored offline/);
   assert.match(
