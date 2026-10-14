@@ -11,6 +11,9 @@ import {
   DEMO_GATEWAY_SECRET,
   DEMO_KEY_ID,
   DEMO_NONCE,
+  DEMO_OTHER_NONCE,
+  DEMO_REPLAY_CACHE_MAX_ENTRIES,
+  DEMO_REPLAY_CACHE_TTL_SEC,
   DEMO_TAMPERED_BODY,
   DEMO_TAMPERED_CONTENT_TYPE,
   runDemo,
@@ -140,6 +143,49 @@ test("demo lines contain the dual headers, dual verification, and tamper isolati
   );
 });
 
+test("demo replay segment rejects the same request twice via ReplayCache", () => {
+  const {
+    replayFirstVerification,
+    replaySecondVerification,
+    replayOtherNonceVerification,
+  } = runDemo();
+
+  assert.ok(DEMO_REPLAY_CACHE_MAX_ENTRIES >= 1);
+  assert.ok(DEMO_REPLAY_CACHE_TTL_SEC > 0);
+  assert.notEqual(DEMO_OTHER_NONCE, DEMO_NONCE);
+
+  // First presentation of the nonce spends it and verifies.
+  assert.equal(replayFirstVerification.ok, true);
+  assert.equal(replayFirstVerification.nonce, DEMO_NONCE);
+  // The identical request presented again is a replay: the signature
+  // is still valid, but the nonce has already been seen.
+  assert.equal(replaySecondVerification.ok, false);
+  assert.equal(replaySecondVerification.code, "NONCE_REPLAY");
+  assert.equal(replaySecondVerification.nonce, DEMO_NONCE);
+  // A fresh nonce against the same cache is not a replay.
+  assert.equal(replayOtherNonceVerification.ok, true);
+  assert.equal(replayOtherNonceVerification.nonce, DEMO_OTHER_NONCE);
+});
+
+test("demo lines contain the replay segment (first ok, replay rejected, fresh nonce ok)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Replay protection: same request verified twice against a ReplayCache/);
+  assert.match(
+    out,
+    new RegExp(`Replay check, first presentation of nonce "${DEMO_NONCE}": OK`),
+  );
+  assert.match(
+    out,
+    /Replay check, second presentation of the same request: FAILED \(code NONCE_REPLAY:/,
+  );
+  assert.match(
+    out,
+    new RegExp(`Replay check, new request with nonce "${DEMO_OTHER_NONCE}": OK`),
+  );
+});
+
 test("demo request data is deterministic across runs (fresh key aside)", () => {
   const a = runDemo();
   const b = runDemo();
@@ -184,5 +230,9 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(
     out,
     /After content-type tampering gateway: FAILED \(code SIGNATURE_MISMATCH:/,
+  );
+  assert.match(
+    out,
+    /Replay check, second presentation of the same request: FAILED \(code NONCE_REPLAY:/,
   );
 });

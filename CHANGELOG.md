@@ -11,6 +11,13 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a replay-protection
+  segment: the demo's signed request is verified twice against an
+  opt-in `ReplayCache` (fixed injected clock, capacity 100, TTL
+  3600s) — the first presentation passes, the identical second
+  presentation is rejected with `NONCE_REPLAY` — and a request
+  signed with a different nonce still verifies, showing that the
+  cache rejects repeats, not new nonces.
 - The benchmark (`npm run bench`) now also measures the
   `ecdsa-p521-sha512` sign/verify path: the algorithm loop gains the
   P-521 member with the same fixture caliber as the existing

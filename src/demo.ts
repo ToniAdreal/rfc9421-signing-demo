@@ -8,6 +8,10 @@
  * and `verifyAllLabels` verifies each label independently. Finally the
  * demo tampers `content-type` — a component only the gateway signature
  * covers — to show one label failing while the other still verifies.
+ * The closing segment demonstrates nonce replay protection: the demo
+ * signs in with an opt-in `ReplayCache`, so the *same* signed request
+ * verifies once and is then rejected with `NONCE_REPLAY`, while a
+ * request carrying a different nonce still verifies.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the library
@@ -27,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import {
   addSignature,
   generateEd25519KeyPair,
+  ReplayCache,
   secretKey,
   signRequest,
   verifyAllLabels,
@@ -69,6 +74,20 @@ export const DEMO_GATEWAY_COVERED_COMPONENTS: string[] = [
 ];
 /** Value `content-type` is tampered to in the isolation step. */
 export const DEMO_TAMPERED_CONTENT_TYPE = "text/plain";
+/**
+ * Nonce of the second request in the replay segment: distinct from
+ * `DEMO_NONCE`, so the replay cache must let it through — the cache
+ * rejects *repeats*, not new nonces.
+ */
+export const DEMO_OTHER_NONCE = "demo-nonce-002";
+/**
+ * Replay-cache configuration for the closing segment: capacity 100
+ * entries, a nonce stays tracked for 3600 seconds, and the clock is
+ * pinned to the demo's fixed verify instant (`DEMO_CREATED + 60`), so
+ * the segment is fully deterministic — no wall clock.
+ */
+export const DEMO_REPLAY_CACHE_MAX_ENTRIES = 100;
+export const DEMO_REPLAY_CACHE_TTL_SEC = 3600;
 
 export interface DemoResult {
   signed: SignedHttpRequest;
@@ -84,6 +103,18 @@ export interface DemoResult {
    * `sig1` label still verifies, the `gateway` label fails.
    */
   contentTypeTamperedVerification: VerifyResult[];
+  /** First verification of `signed` against the demo replay cache (ok). */
+  replayFirstVerification: VerifyResult;
+  /**
+   * Second verification of the *same* `signed` request against the same
+   * cache: rejected with `NONCE_REPLAY`.
+   */
+  replaySecondVerification: VerifyResult;
+  /**
+   * Verification of a request signed with `DEMO_OTHER_NONCE` against
+   * the same cache (ok — a fresh nonce is not a replay).
+   */
+  replayOtherNonceVerification: VerifyResult;
   lines: string[];
 }
 
@@ -169,6 +200,47 @@ export function runDemo(): DemoResult {
     dualVerifyOptions,
   );
 
+  // Replay segment: a nonce alone does not stop replays — the verifier
+  // needs a cache of seen nonces. With an opt-in ReplayCache (fixed
+  // clock pinned to the demo's verify instant, capacity/TTL constants
+  // above), the *same* signed request verifies the first time and is
+  // rejected with NONCE_REPLAY the second time: the signature is still
+  // cryptographically valid, but its nonce has already been spent.
+  const replayCache = new ReplayCache({
+    maxEntries: DEMO_REPLAY_CACHE_MAX_ENTRIES,
+    ttlSec: DEMO_REPLAY_CACHE_TTL_SEC,
+    now: () => DEMO_CREATED + 60,
+  });
+  const replayVerifyOptions = {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    replayCache,
+  };
+  const replayFirstVerification = verifyRequest(signed, replayVerifyOptions);
+  const replaySecondVerification = verifyRequest(signed, replayVerifyOptions);
+
+  // A different nonce is not a replay: a second request signed with
+  // DEMO_OTHER_NONCE verifies against the same cache.
+  const otherNonceSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_OTHER_NONCE,
+    },
+  );
+  const replayOtherNonceVerification = verifyRequest(
+    otherNonceSigned,
+    replayVerifyOptions,
+  );
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -194,6 +266,17 @@ export function runDemo(): DemoResult {
     ...contentTypeTamperedVerification.map((r) =>
       formatLabelResult("After content-type tampering", r),
     ),
+    "",
+    `Replay protection: same request verified twice against a ReplayCache (capacity ${DEMO_REPLAY_CACHE_MAX_ENTRIES}, TTL ${DEMO_REPLAY_CACHE_TTL_SEC}s)`,
+    replayFirstVerification.ok
+      ? `Replay check, first presentation of nonce "${DEMO_NONCE}": OK`
+      : `Replay check, first presentation of nonce "${DEMO_NONCE}": FAILED (code ${replayFirstVerification.code}: ${replayFirstVerification.reason})`,
+    replaySecondVerification.ok
+      ? "Replay check, second presentation of the same request: OK (unexpected — replay was not detected)"
+      : `Replay check, second presentation of the same request: FAILED (code ${replaySecondVerification.code}: ${replaySecondVerification.reason})`,
+    replayOtherNonceVerification.ok
+      ? `Replay check, new request with nonce "${DEMO_OTHER_NONCE}": OK (a fresh nonce is not a replay)`
+      : `Replay check, new request with nonce "${DEMO_OTHER_NONCE}": FAILED (code ${replayOtherNonceVerification.code}: ${replayOtherNonceVerification.reason})`,
   ];
 
   return {
@@ -204,6 +287,9 @@ export function runDemo(): DemoResult {
     dualSigned,
     dualVerification,
     contentTypeTamperedVerification,
+    replayFirstVerification,
+    replaySecondVerification,
+    replayOtherNonceVerification,
     lines,
   };
 }
