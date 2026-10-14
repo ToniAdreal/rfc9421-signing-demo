@@ -35,16 +35,30 @@
  * starts: `fromNodeRequest` over a fixed mock `IncomingRequestLike`
  * (no real server, zero network), self-checked outside timing
  * against a hand-pinned expected `RequestLike` (see NODE_FIXTURE
- * below). Numbers vary with hardware —
+ * below), plus the key-distribution round trip a JWKS publisher /
+ * verifier pays for every non-ed25519 key: `exportPublicKeyJwk*` →
+ * JSON stringify/parse → `importPublicKeyJwk*` for each of P-256,
+ * P-384, P-521 and RSA (one freshly generated key pair per shape,
+ * generated outside timing; the RSA pair is the library's 2048-bit
+ * default and its JWK is shared by both RSA algorithms),
+ * self-checked outside timing by comparing the re-imported public
+ * key's SPKI DER byte-for-byte against the original's — an
+ * independent node:crypto encoding, not the JWK helpers' own
+ * output. Numbers vary with hardware —
  * do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
  */
+import { type KeyObject } from "node:crypto";
 import { cpus } from "node:os";
 import {
   addSignature,
   contentDigest,
   exportPublicKeyJwk,
+  exportPublicKeyJwkP256,
+  exportPublicKeyJwkP384,
+  exportPublicKeyJwkP521,
+  exportPublicKeyJwkRsa,
   fromNodeRequest,
   generateEd25519KeyPair,
   generateP256KeyPair,
@@ -52,6 +66,10 @@ import {
   generateP521KeyPair,
   generateRsaPssKeyPair,
   generateRsaV15KeyPair,
+  importPublicKeyJwkP256,
+  importPublicKeyJwkP384,
+  importPublicKeyJwkP521,
+  importPublicKeyJwkRsa,
   JwksKeyStore,
   jwkThumbprint,
   memoizeKeyResolver,
@@ -865,6 +883,51 @@ function benchmarkFromNodeRequest(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Per-curve JWK round-trip steady state: for one key shape, a measured
+ * call runs `exportPublicKeyJwk*` on a fixed public key, pushes the
+ * JWK through a JSON stringify/parse round trip (the wire form a JWKS
+ * document actually travels in), and re-imports it with
+ * `importPublicKeyJwk*` — the key-distribution work a publisher pays
+ * when serializing a key set and a verifier pays when loading one,
+ * for the shapes the generic ed25519-only `exportPublicKeyJwk` does
+ * not cover.
+ *
+ * Fixture caliber (fixed, stated here as the backlog requires): one
+ * fresh key pair per shape, generated ONCE before timing with the
+ * library's own generators — P-256 / P-384 / P-521 via
+ * generateP256KeyPair / generateP384KeyPair / generateP521KeyPair,
+ * RSA via generateRsaPssKeyPair (2048-bit modulus, the library
+ * default; the RSA JWK carries no `alg`, so this one round trip
+ * serves both `rsa-pss-sha512` and `rsa-v1_5-sha256`). The keys are
+ * random per bench run, but nothing measured depends on their values
+ * and the only assertion is the round-trip property below — no wall
+ * clock, no network.
+ *
+ * Self-check (outside timing): the re-imported key's SPKI DER
+ * encoding — produced by node:crypto directly, independently of the
+ * JWK helpers — must equal the original public key's DER
+ * byte-for-byte, for every shape.
+ */
+function benchmarkJwkRoundTrip(
+  shape: string,
+  publicKey: KeyObject,
+  exportJwk: (key: KeyObject) => unknown,
+  importJwk: (jwk: unknown) => KeyObject,
+): number {
+  const originalDer = publicKey.export({ format: "der", type: "spki" });
+  const revived = importJwk(JSON.parse(JSON.stringify(exportJwk(publicKey))));
+  const revivedDer = revived.export({ format: "der", type: "spki" });
+  if (!originalDer.equals(revivedDer))
+    throw new Error(
+      `benchmark self-check failed: ${shape} JWK round trip changed the key ` +
+        `(re-imported DER ${revivedDer.length} bytes, original ${originalDer.length} bytes)`,
+    );
+  return measure(() => {
+    importJwk(JSON.parse(JSON.stringify(exportJwk(publicKey))));
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -944,6 +1007,46 @@ results.push({
   alg: "fromNodeRequest (inbound, trailers)",
   op: "normalize",
   ops: benchmarkFromNodeRequest(),
+});
+results.push({
+  alg: "JWK round-trip P-256",
+  op: "roundtrip",
+  ops: benchmarkJwkRoundTrip(
+    "P-256",
+    generateP256KeyPair().publicKey,
+    exportPublicKeyJwkP256,
+    importPublicKeyJwkP256,
+  ),
+});
+results.push({
+  alg: "JWK round-trip P-384",
+  op: "roundtrip",
+  ops: benchmarkJwkRoundTrip(
+    "P-384",
+    generateP384KeyPair().publicKey,
+    exportPublicKeyJwkP384,
+    importPublicKeyJwkP384,
+  ),
+});
+results.push({
+  alg: "JWK round-trip P-521",
+  op: "roundtrip",
+  ops: benchmarkJwkRoundTrip(
+    "P-521",
+    generateP521KeyPair().publicKey,
+    exportPublicKeyJwkP521,
+    importPublicKeyJwkP521,
+  ),
+});
+results.push({
+  alg: "JWK round-trip RSA-2048",
+  op: "roundtrip",
+  ops: benchmarkJwkRoundTrip(
+    "RSA",
+    generateRsaPssKeyPair().publicKey,
+    exportPublicKeyJwkRsa,
+    importPublicKeyJwkRsa,
+  ),
 });
 
 console.log("alg                                    op      throughput");

@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures the per-curve
+  JWK export/import round trip: for each of P-256, P-384, P-521 and
+  RSA (2048-bit, the library default; its JWK is shared by both RSA
+  algorithms), one freshly generated public key (generated outside
+  timing) is exported with `exportPublicKeyJwk*`, pushed through a
+  JSON stringify/parse round trip, and re-imported with
+  `importPublicKeyJwk*` on every measured call. Self-checks outside
+  timing require the re-imported key's SPKI DER — produced by
+  node:crypto directly, independently of the JWK helpers — to equal
+  the original's byte-for-byte. The bench performs zero network I/O.
+  The README Benchmarks table was refreshed wholesale from one real
+  run and now carries the four `roundtrip` rows.
 - The CLI demo (`npm run demo`) now closes with a JWKS key-resolution
   segment: a `JwksKeyStore` is restored offline from a v1 snapshot
   carrying only the demo key's public JWK (`fetchedAtSec` and the
