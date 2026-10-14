@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `ecdsa-p521-sha512` signature algorithm (RFC 9421 §3.3.6): NIST
+  P-521 with SHA-512, signatures in the raw r‖s form with each integer
+  padded to 66 octets (132 octets total) — the highest-strength tier of
+  the existing ECDSA support, with the three EC limb widths (32 / 48 /
+  66 octets) pinned separately on both sides so a signature from one
+  curve never verifies as another's. Includes `generateP521KeyPair()`,
+  the `exportPublicKeyJwkP521` / `importPublicKeyJwkP521` JWK helpers
+  (`crv: "P-521"`, private material refused, P-256 / P-384 JWKs
+  refused), and a `secp521r1` → `ecdsa-p521-sha512` mapping under
+  `algFallback: "infer"`. With this, every signature algorithm RFC 9421
+  registers is implemented; the unsupported-algorithm tests now pin
+  `ed448` (not registered in RFC 9421) instead.
 - The benchmark (`npm run bench`) now also measures the
   `jwkThumbprint` key-derivation path: one measured call derives the
   RFC 7638 thumbprint of each of the three exported public JWK shapes

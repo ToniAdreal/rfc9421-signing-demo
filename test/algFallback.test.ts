@@ -256,9 +256,9 @@ test("infer: wire alg=\"ed25519\" with an RSA key throws a configuration error",
   );
 });
 
-test("infer: an unmappable key shape (non-P-256/P-384 EC) throws a configuration error", () => {
-  const { publicKey: p521Public } = generateKeyPairSync("ec", {
-    namedCurve: "secp521r1",
+test("infer: an unmappable key shape (non-NIST EC) throws a configuration error", () => {
+  const { publicKey: k1Public } = generateKeyPairSync("ec", {
+    namedCurve: "secp256k1",
   });
   const { privateKey } = generateEd25519KeyPair();
   const wire = signWithoutAlg(demoRequest(JSON.stringify({ amount: 1 })), {
@@ -266,9 +266,9 @@ test("infer: an unmappable key shape (non-P-256/P-384 EC) throws a configuration
     key: privateKey,
   });
   assert.throws(
-    () => verifyRequest(wire, { key: p521Public, algFallback: "infer" }),
+    () => verifyRequest(wire, { key: k1Public, algFallback: "infer" }),
     /cannot infer an algorithm/,
-    "secp521r1 key has no supported mapping under infer",
+    "secp256k1 key has no supported mapping under infer",
   );
 });
 

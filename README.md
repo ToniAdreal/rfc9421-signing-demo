@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 642 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 658 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -154,7 +154,11 @@ with the same refusal of private (`"d"`) material. P-384 gateways
 likewise: `exportPublicKeyJwkP384` / `importPublicKeyJwkP384` handle
 `{ kty: "EC", crv: "P-384", x, y }` for `ecdsa-p384-sha384` verifiers —
 the two curves' helpers are deliberately separate, so a P-256 JWK is
-refused by the P-384 importer and vice versa.
+refused by the P-384 importer and vice versa. P-521 gateways
+likewise: `exportPublicKeyJwkP521` / `importPublicKeyJwkP521` handle
+`{ kty: "EC", crv: "P-521", x, y }` for `ecdsa-p521-sha512` verifiers —
+the three curves' helpers are deliberately separate, so a JWK from one
+curve is refused by the other curves' importers.
 
 RSA gateways too: `exportPublicKeyJwkRsa` / `importPublicKeyJwkRsa` handle
 the RFC 7518 RSA shape (`{ kty: "RSA", n, e }`) for RSA verifiers, with
@@ -443,6 +447,8 @@ with no trailers produces no `trailers` field at all.
   §3.3.4 defines; see [Interoperability](#interoperability)),
   `ecdsa-p384-sha384` (NIST P-384; the same raw r‖s form with each
   integer padded to 48 octets — 96 octets total — per RFC 9421 §3.3.5),
+  `ecdsa-p521-sha512` (NIST P-521; the same raw r‖s form with each
+  integer padded to 66 octets — 132 octets total — per RFC 9421 §3.3.6),
   `rsa-pss-sha512` (RSASSA-PSS with
   SHA-512, MGF1 with SHA-512, 64-byte salt per RFC 9421 §3.3.1),
   `rsa-v1_5-sha256` (RSASSA-PKCS1-v1_5 with SHA-256 per RFC 9421 §3.3.2 —
@@ -614,8 +620,9 @@ const dual = addSignature(merchantSigned, {
   directly in production" in [SECURITY.md](SECURITY.md).
 
 - **How much of RFC 9421 does this implement? What is missing?**
-  A self-consistent subset. Seven signature algorithms are implemented
-  (`ed25519`, `ecdsa-p256-sha256`, `ecdsa-p384-sha384`, `rsa-pss-sha512`,
+  A self-consistent subset. Eight signature algorithms are implemented
+  (`ed25519`, `ecdsa-p256-sha256`, `ecdsa-p384-sha384`,
+  `ecdsa-p521-sha512`, `rsa-pss-sha512`,
   `rsa-v1_5-sha256`, `hmac-sha256`, `hmac-sha512`), plus the
   `;req`/`;bs`/`;sf`/`;key`/`;tr` component parameters for header
   fields and `;name` for `@query-param`. Not implemented: component
@@ -820,6 +827,9 @@ most also appear in [Limitations](#limitations)):
   (raw r‖s encoding per RFC 9421 §3.3.5, each integer padded to
   48 octets; the P-256 and P-384 widths are pinned separately, so a
   signature from one curve never verifies as the other),
+  `ecdsa-p521-sha512` (raw r‖s encoding per RFC 9421 §3.3.6, each integer
+  padded to 66 octets; its width is pinned separately from the P-256 and
+  P-384 widths for the same reason),
   `rsa-pss-sha512` (RSASSA-PSS with
   SHA-512, MGF1 with SHA-512, and a 64-byte salt per RFC 9421 §3.3.1 —
   signatures are probabilistic, so verifiers re-verify rather than
@@ -836,7 +846,7 @@ most also appear in [Limitations](#limitations)):
   fallback: `VerifyOptions.algFallback: "infer"` infers the algorithm
   from the resolved key's shape (`secret` → `hmac-sha256`, ed25519 key
   → `ed25519`, P-256 EC key → `ecdsa-p256-sha256`, P-384 EC key →
-  `ecdsa-p384-sha384`, RSA key →
+  `ecdsa-p384-sha384`, P-521 EC key → `ecdsa-p521-sha512`, RSA key →
   `rsa-pss-sha512` — never `rsa-v1_5-sha256`, since key shape cannot
   distinguish the two RSA paddings) and throws a caller
   configuration `Error` when a wire-carried `alg` contradicts the key's
@@ -1020,7 +1030,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 642 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 658 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

@@ -24,6 +24,7 @@ export interface VerifyOptions {
    * ed25519: the signer's public KeyObject.
    * ecdsa-p256-sha256: the signer's P-256 public KeyObject.
    * ecdsa-p384-sha384: the signer's P-384 public KeyObject.
+   * ecdsa-p521-sha512: the signer's P-521 public KeyObject.
    * rsa-pss-sha512: the signer's RSA public KeyObject (verified with
    * RSASSA-PSS, SHA-512, MGF1 with SHA-512, 64-byte salt — RFC 9421
    * §3.3.1).
@@ -155,7 +156,8 @@ export interface VerifyOptions {
    *   infers the algorithm from the *resolved* key's shape — a `secret`
    *   key implies `hmac-sha256`, an ed25519 key implies `ed25519`, a
    *   P-256 (`prime256v1`) EC key implies `ecdsa-p256-sha256`, a
-   *   P-384 (`secp384r1`) EC key implies `ecdsa-p384-sha384`, and an
+   *   P-384 (`secp384r1`) EC key implies `ecdsa-p384-sha384`, a
+   *   P-521 (`secp521r1`) EC key implies `ecdsa-p521-sha512`, and an
    *   RSA key implies `rsa-pss-sha512`; an unmappable key shape throws
    *   a caller configuration `Error`. (An RSA key is never inferred as
    *   `rsa-v1_5-sha256`: the key shape cannot distinguish the two RSA
@@ -275,6 +277,7 @@ type SupportedAlg =
   | "hmac-sha512"
   | "ecdsa-p256-sha256"
   | "ecdsa-p384-sha384"
+  | "ecdsa-p521-sha512"
   | "rsa-pss-sha512"
   | "rsa-v1_5-sha256";
 
@@ -309,9 +312,14 @@ function inferAlgFromKeyShape(key: KeyObject): SupportedAlg {
     key.asymmetricKeyDetails?.namedCurve === "secp384r1"
   )
     return "ecdsa-p384-sha384";
+  if (
+    key.asymmetricKeyType === "ec" &&
+    key.asymmetricKeyDetails?.namedCurve === "secp521r1"
+  )
+    return "ecdsa-p521-sha512";
   if (key.asymmetricKeyType === "rsa") return "rsa-pss-sha512";
   throw new Error(
-    `verifyRequest: algFallback "infer" cannot infer an algorithm for ${describeKey(key)} — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, P-384 (secp384r1) EC keys, and RSA keys (rsa-pss-sha512)`,
+    `verifyRequest: algFallback "infer" cannot infer an algorithm for ${describeKey(key)} — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, P-384 (secp384r1) EC keys, P-521 (secp521r1) EC keys, and RSA keys (rsa-pss-sha512)`,
   );
 }
 
@@ -334,6 +342,9 @@ function assertAlgMatchesKeyShape(alg: SupportedAlg, key: KeyObject): void {
     (alg === "ecdsa-p384-sha384" &&
       key.asymmetricKeyType === "ec" &&
       key.asymmetricKeyDetails?.namedCurve === "secp384r1") ||
+    (alg === "ecdsa-p521-sha512" &&
+      key.asymmetricKeyType === "ec" &&
+      key.asymmetricKeyDetails?.namedCurve === "secp521r1") ||
     (alg === "rsa-pss-sha512" && key.asymmetricKeyType === "rsa") ||
     (alg === "rsa-v1_5-sha256" && key.asymmetricKeyType === "rsa");
   if (ok) return;
@@ -548,6 +559,7 @@ export function verifyRequest(
       effectiveAlg === "hmac-sha512" ||
       effectiveAlg === "ecdsa-p256-sha256" ||
       effectiveAlg === "ecdsa-p384-sha384" ||
+      effectiveAlg === "ecdsa-p521-sha512" ||
       effectiveAlg === "rsa-pss-sha512" ||
       effectiveAlg === "rsa-v1_5-sha256") &&
     alg !== undefined
@@ -601,6 +613,18 @@ export function verifyRequest(
       cryptoOk =
         sigBytes.length === 96 &&
         createVerify("sha384")
+          .update(base, "utf8")
+          .verify({ key, dsaEncoding: "ieee-p1363" }, sigBytes);
+    } else if (effectiveAlg === "ecdsa-p521-sha512") {
+      // Expects the raw r‖s ECDSA value RFC 9421 §3.3.6 defines (each
+      // integer padded to 66 octets, 132 octets total), consumed via
+      // `dsaEncoding: "ieee-p1363"` — the same encoding the sign side
+      // emits. The length guard comes first and is pinned to the P-521
+      // width: a 96-octet P-384 value (or a DER value) is a plain
+      // SIGNATURE_MISMATCH here, never silently re-interpreted.
+      cryptoOk =
+        sigBytes.length === 132 &&
+        createVerify("sha512")
           .update(base, "utf8")
           .verify({ key, dsaEncoding: "ieee-p1363" }, sigBytes);
     } else if (effectiveAlg === "rsa-v1_5-sha256") {

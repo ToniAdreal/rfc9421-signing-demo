@@ -50,6 +50,24 @@ export function generateP384KeyPair(): {
 }
 
 /**
+ * Generate a fresh NIST P-521 (secp521r1) key pair for the
+ * `ecdsa-p521-sha512` algorithm (RFC 9421 §3.3.6). The signatures
+ * produced from this pair are the raw concatenation of the two ECDSA
+ * integers r and s, each padded to 66 octets (132 octets in total), as
+ * §3.3.6 defines — `signRequest` / `verifyRequest` both pass
+ * `dsaEncoding: "ieee-p1363"` to node:crypto, so the wire format stays
+ * spec-conformant. P-521 is the highest-strength tier in the RFC's
+ * registry, common in enterprise / government PKI deployments; with it,
+ * every ECDSA algorithm RFC 9421 registers is implemented here.
+ */
+export function generateP521KeyPair(): {
+  publicKey: KeyObject;
+  privateKey: KeyObject;
+} {
+  return generateKeyPairSync("ec", { namedCurve: "P-521" });
+}
+
+/**
  * Minimum RSA modulus size in bits accepted by this library's RSA
  * signature algorithms (`rsa-pss-sha512`, `rsa-v1_5-sha256`). The key
  * generators below mint exactly this size; production deployments
@@ -545,6 +563,125 @@ export function importPublicKeyJwkP384(jwk: unknown): KeyObject {
   } catch (err) {
     throw new Error(
       `importPublicKeyJwkP384: node:crypto rejected the JWK: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
+ * Public-key-only JWK view of a NIST P-521 key, exactly as produced by
+ * {@link exportPublicKeyJwkP521}. RFC 7518 §6.2: EC public keys carry
+ * `kty: "EC"`, `crv: "P-521"`, and base64url `x` / `y` coordinates.
+ * Private JWKs (`"d"` present) are never produced or accepted here —
+ * same public-key-distribution-only policy as {@link P384PublicJwk}.
+ */
+export interface P521PublicJwk {
+  kty: "EC";
+  crv: "P-521";
+  /** Base64url-encoded 66-byte x coordinate. */
+  x: string;
+  /** Base64url-encoded 66-byte y coordinate. */
+  y: string;
+}
+
+/**
+ * Export a NIST P-521 public key as a plain-object JWK (RFC 7518 §6.2),
+ * ready to `JSON.stringify` and ship to a verifier. Uses node:crypto's
+ * native JWK support — no third-party dependencies.
+ *
+ * Throws a caller-configuration `Error` for anything that is not a P-521
+ * public KeyObject (private keys, symmetric secrets, other curves or
+ * algorithms); this helper is the public-key-distribution case only.
+ */
+export function exportPublicKeyJwkP521(key: KeyObject): P521PublicJwk {
+  const namedCurve = key.asymmetricKeyDetails?.namedCurve;
+  if (
+    key.type !== "public" ||
+    key.asymmetricKeyType !== "ec" ||
+    namedCurve !== "secp521r1"
+  )
+    throw new Error(
+      `exportPublicKeyJwkP521: expected a P-521 public KeyObject, got ` +
+        `type=${String(key.type)} ` +
+        `asymmetricKeyType=${String(key.asymmetricKeyType)} ` +
+        `namedCurve=${String(namedCurve)} ` +
+        `(JWK support here is P-521 public keys only — the public-key-distribution case)`,
+    );
+  const raw = key.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  // Node emits exactly { kty: "EC", crv: "P-521", x: "<base64url>", y: "<base64url>" }.
+  if (
+    raw["kty"] !== "EC" ||
+    raw["crv"] !== "P-521" ||
+    typeof raw["x"] !== "string" ||
+    typeof raw["y"] !== "string"
+  )
+    throw new Error(
+      "exportPublicKeyJwkP521: node:crypto returned an unexpected JWK shape " +
+        `for a P-521 public key: ${JSON.stringify(Object.keys(raw))}`,
+    );
+  return { kty: "EC", crv: "P-521", x: raw["x"], y: raw["y"] };
+}
+
+/**
+ * Import a NIST P-521 public key from a JWK object (RFC 7518 §6.2), as
+ * produced by {@link exportPublicKeyJwkP521} and typically received over
+ * the wire as JSON.
+ *
+ * Strictly validates before touching node:crypto: the input must be a
+ * plain object with `kty: "EC"`, `crv: "P-521"`, and non-empty string
+ * `x` / `y`. Anything else throws a descriptive `Error` — never a
+ * verification failure, since this is key setup, not signature checking.
+ * JWKs carrying private material (`"d"`) are refused outright: this
+ * helper is public-key distribution only, and silently accepting a
+ * private JWK would encourage shipping secrets around. P-256 / P-384
+ * JWKs are refused here too — the curves' helpers are deliberately
+ * separate so a key can never be silently re-interpreted on the wrong
+ * curve.
+ */
+export function importPublicKeyJwkP521(jwk: unknown): KeyObject {
+  const fail = (why: string): never => {
+    throw new Error(`importPublicKeyJwkP521: invalid JWK: ${why}`);
+  };
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk))
+    fail(
+      `expected a JWK object, got ${
+        Array.isArray(jwk) ? "an array" : jwk === null ? "null" : typeof jwk
+      }`,
+    );
+  const o = jwk as Record<string, unknown>;
+  if ("d" in o)
+    fail(
+      'private key material ("d") is not accepted; this helper imports ' +
+        "public keys only (keep private keys in PEM on the signer side)",
+    );
+  if (!("kty" in o)) fail(`missing "kty" parameter`);
+  if (o["kty"] !== "EC")
+    fail(`expected kty "EC", got ${JSON.stringify(o["kty"])}`);
+  if (!("crv" in o)) fail(`missing "crv" parameter`);
+  if (o["crv"] !== "P-521")
+    fail(`expected crv "P-521", got ${JSON.stringify(o["crv"])}`);
+  const x = o["x"];
+  if (typeof x !== "string" || x.length === 0)
+    throw new Error(
+      `importPublicKeyJwkP521: invalid JWK: missing or empty "x" (the base64url x-coordinate)`,
+    );
+  const y = o["y"];
+  if (typeof y !== "string" || y.length === 0)
+    throw new Error(
+      `importPublicKeyJwkP521: invalid JWK: missing or empty "y" (the base64url y-coordinate)`,
+    );
+  try {
+    return createPublicKey({
+      key: { kty: "EC", crv: "P-521", x, y },
+      format: "jwk",
+    });
+  } catch (err) {
+    throw new Error(
+      `importPublicKeyJwkP521: node:crypto rejected the JWK: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
