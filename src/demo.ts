@@ -8,10 +8,14 @@
  * and `verifyAllLabels` verifies each label independently. Finally the
  * demo tampers `content-type` — a component only the gateway signature
  * covers — to show one label failing while the other still verifies.
- * The closing segment demonstrates nonce replay protection: the demo
+ * The next segment demonstrates nonce replay protection: the demo
  * signs in with an opt-in `ReplayCache`, so the *same* signed request
  * verifies once and is then rejected with `NONCE_REPLAY`, while a
- * request carrying a different nonce still verifies.
+ * request carrying a different nonce still verifies. The closing
+ * segment demonstrates JWKS key resolution: a `JwksKeyStore` is
+ * restored offline from a snapshot of the demo public key, the demo
+ * request verifies through its key resolver, and a request signed
+ * under an unknown `keyid` is rejected with `KEY_RESOLUTION_FAILED`.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the library
@@ -30,12 +34,15 @@
 import { fileURLToPath } from "node:url";
 import {
   addSignature,
+  exportPublicKeyJwk,
   generateEd25519KeyPair,
+  JwksKeyStore,
   ReplayCache,
   secretKey,
   signRequest,
   verifyAllLabels,
   verifyRequest,
+  type JwksKeyStoreSnapshot,
   type SignedHttpRequest,
   type VerifyResult,
 } from "./index.js";
@@ -88,6 +95,28 @@ export const DEMO_OTHER_NONCE = "demo-nonce-002";
  */
 export const DEMO_REPLAY_CACHE_MAX_ENTRIES = 100;
 export const DEMO_REPLAY_CACHE_TTL_SEC = 3600;
+/**
+ * JWKS endpoint the closing segment's store is configured with. The
+ * store is restored from a snapshot, so this URL is never fetched in
+ * the demo — it is the endpoint a production verifier would refresh
+ * from, and it matches the signed request's host.
+ */
+export const DEMO_JWKS_URL = "https://api.example.com/.well-known/jwks.json";
+/**
+ * `fetchedAtSec` of the closing segment's JWKS snapshot: pinned to
+ * `DEMO_CREATED`, and the store's injected clock is pinned to the
+ * demo's fixed verify instant (`DEMO_CREATED + 60`), so the restored
+ * snapshot is fresh (well inside the default 300s TTL) and the
+ * segment is fully deterministic — no wall clock.
+ */
+export const DEMO_JWKS_FETCHED_AT_SEC = DEMO_CREATED;
+/**
+ * Key id of the second request in the JWKS segment: it is absent from
+ * the restored snapshot, so key resolution must fail closed with
+ * `KEY_RESOLUTION_FAILED` even though the request is signed with the
+ * demo's own private key.
+ */
+export const DEMO_UNKNOWN_KEY_ID = "demo-unknown-key-1";
 
 export interface DemoResult {
   signed: SignedHttpRequest;
@@ -115,6 +144,20 @@ export interface DemoResult {
    * the same cache (ok — a fresh nonce is not a replay).
    */
   replayOtherNonceVerification: VerifyResult;
+  /** The v1 snapshot the JWKS segment restores its store from. */
+  jwksSnapshot: JwksKeyStoreSnapshot;
+  /** Number of keys in the restored JWKS store (1: the demo key). */
+  jwksStoreSize: number;
+  /**
+   * Verification of `signed` through the restored store's key
+   * resolver (ok — the snapshot carries `DEMO_KEY_ID`).
+   */
+  jwksVerification: VerifyResult;
+  /**
+   * Verification of a request signed under `DEMO_UNKNOWN_KEY_ID`
+   * through the same resolver: rejected with `KEY_RESOLUTION_FAILED`.
+   */
+  jwksUnknownKeyVerification: VerifyResult;
   lines: string[];
 }
 
@@ -241,6 +284,55 @@ export function runDemo(): DemoResult {
     replayVerifyOptions,
   );
 
+  // JWKS segment: production gateways do not hand the verifier a raw
+  // key — they publish a JWKS and the verifier resolves the claimed
+  // keyid against it. The demo rebuilds that path offline: a v:1
+  // snapshot carrying only the demo key's *public* JWK (fetchedAtSec
+  // pinned to DEMO_JWKS_FETCHED_AT_SEC above) is restored into a
+  // JwksKeyStore whose fetchImpl throws if it is ever called, so the
+  // segment performs zero network I/O, and whose clock is pinned to
+  // the fixed verify instant.
+  const jwksSnapshot: JwksKeyStoreSnapshot = {
+    v: 1,
+    fetchedAtSec: DEMO_JWKS_FETCHED_AT_SEC,
+    keys: [{ ...exportPublicKeyJwk(publicKey), kid: DEMO_KEY_ID }],
+  };
+  const jwksStore = JwksKeyStore.restore(jwksSnapshot, DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      throw new Error("demo must not fetch (offline JWKS restore)");
+    },
+    now: () => DEMO_CREATED + 60,
+  });
+  const jwksVerification = verifyRequest(signed, {
+    keyResolver: (kid) => jwksStore.resolve(kid),
+    now: DEMO_CREATED + 60,
+  });
+
+  // An unknown keyid fails closed: this request is signed with the
+  // demo's own private key, so its signature would verify — but its
+  // claimed keyid is not in the restored snapshot, so the resolver
+  // returns undefined and verification is rejected before any
+  // signature check.
+  const unknownKeySigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_UNKNOWN_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_NONCE,
+    },
+  );
+  const jwksUnknownKeyVerification = verifyRequest(unknownKeySigned, {
+    keyResolver: (kid) => jwksStore.resolve(kid),
+    now: DEMO_CREATED + 60,
+  });
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -277,6 +369,14 @@ export function runDemo(): DemoResult {
     replayOtherNonceVerification.ok
       ? `Replay check, new request with nonce "${DEMO_OTHER_NONCE}": OK (a fresh nonce is not a replay)`
       : `Replay check, new request with nonce "${DEMO_OTHER_NONCE}": FAILED (code ${replayOtherNonceVerification.code}: ${replayOtherNonceVerification.reason})`,
+    "",
+    `JWKS key resolution: JwksKeyStore restored offline from a v1 snapshot (endpoint ${DEMO_JWKS_URL}, fetchedAtSec=${DEMO_JWKS_FETCHED_AT_SEC}, ${jwksStore.size} key)`,
+    jwksVerification.ok
+      ? `JWKS verification for keyid "${DEMO_KEY_ID}": OK (label ${jwksVerification.label}, keyid="${jwksVerification.keyId}", alg="${jwksVerification.alg}")`
+      : `JWKS verification for keyid "${DEMO_KEY_ID}": FAILED (code ${jwksVerification.code}: ${jwksVerification.reason})`,
+    jwksUnknownKeyVerification.ok
+      ? `JWKS verification for unknown keyid "${DEMO_UNKNOWN_KEY_ID}": OK (unexpected — unknown keyid was not rejected)`
+      : `JWKS verification for unknown keyid "${DEMO_UNKNOWN_KEY_ID}": FAILED (code ${jwksUnknownKeyVerification.code}: ${jwksUnknownKeyVerification.reason})`,
   ];
 
   return {
@@ -290,6 +390,10 @@ export function runDemo(): DemoResult {
     replayFirstVerification,
     replaySecondVerification,
     replayOtherNonceVerification,
+    jwksSnapshot,
+    jwksStoreSize: jwksStore.size,
+    jwksVerification,
+    jwksUnknownKeyVerification,
     lines,
   };
 }

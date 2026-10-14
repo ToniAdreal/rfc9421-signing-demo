@@ -9,6 +9,8 @@ import {
   DEMO_GATEWAY_KEY_ID,
   DEMO_GATEWAY_LABEL,
   DEMO_GATEWAY_SECRET,
+  DEMO_JWKS_FETCHED_AT_SEC,
+  DEMO_JWKS_URL,
   DEMO_KEY_ID,
   DEMO_NONCE,
   DEMO_OTHER_NONCE,
@@ -16,6 +18,7 @@ import {
   DEMO_REPLAY_CACHE_TTL_SEC,
   DEMO_TAMPERED_BODY,
   DEMO_TAMPERED_CONTENT_TYPE,
+  DEMO_UNKNOWN_KEY_ID,
   runDemo,
 } from "../src/demo.js";
 
@@ -212,6 +215,59 @@ test("demo request data is deterministic across runs (fresh key aside)", () => {
   );
 });
 
+test("demo JWKS segment verifies via a restored store and rejects an unknown keyid", () => {
+  const {
+    jwksSnapshot,
+    jwksStoreSize,
+    jwksVerification,
+    jwksUnknownKeyVerification,
+  } = runDemo();
+
+  // The snapshot is the hand-pinned v1 shape: the demo key's public
+  // JWK under DEMO_KEY_ID, fetched at the pinned instant, and it
+  // carries no private material.
+  assert.equal(DEMO_JWKS_FETCHED_AT_SEC, DEMO_CREATED);
+  assert.equal(jwksSnapshot.v, 1);
+  assert.equal(jwksSnapshot.fetchedAtSec, DEMO_JWKS_FETCHED_AT_SEC);
+  assert.equal(jwksSnapshot.keys.length, 1);
+  assert.equal(jwksSnapshot.keys[0].kid, DEMO_KEY_ID);
+  assert.equal(jwksSnapshot.keys[0].kty, "OKP");
+  assert.ok(!("d" in jwksSnapshot.keys[0]));
+  assert.equal(jwksStoreSize, 1);
+  assert.notEqual(DEMO_UNKNOWN_KEY_ID, DEMO_KEY_ID);
+
+  // The demo request verifies through the store's key resolver.
+  assert.equal(jwksVerification.ok, true);
+  assert.equal(jwksVerification.keyId, DEMO_KEY_ID);
+  assert.equal(jwksVerification.alg, "ed25519");
+  // A request signed under a keyid absent from the snapshot fails
+  // closed at key resolution, before any signature check.
+  assert.equal(jwksUnknownKeyVerification.ok, false);
+  assert.equal(jwksUnknownKeyVerification.code, "KEY_RESOLUTION_FAILED");
+});
+
+test("demo lines contain the JWKS segment (hit verifies, unknown keyid rejected)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    new RegExp(
+      `JWKS key resolution: JwksKeyStore restored offline from a v1 snapshot \\(endpoint ${DEMO_JWKS_URL.replace(/\./g, "\\.")}, fetchedAtSec=${DEMO_JWKS_FETCHED_AT_SEC}, 1 key\\)`,
+    ),
+  );
+  assert.match(
+    out,
+    new RegExp(`JWKS verification for keyid "${DEMO_KEY_ID}": OK `),
+  );
+  assert.match(
+    out,
+    new RegExp(
+      `JWKS verification for unknown keyid "${DEMO_UNKNOWN_KEY_ID}": FAILED \\(code KEY_RESOLUTION_FAILED:`,
+    ),
+  );
+});
+
 test("compiled demo script exits 0 and prints success plus tamper rejection", () => {
   const out = execFileSync("node", [path.join(repoRoot, "dist", "src", "demo.js")], {
     encoding: "utf8",
@@ -234,5 +290,10 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(
     out,
     /Replay check, second presentation of the same request: FAILED \(code NONCE_REPLAY:/,
+  );
+  assert.match(out, /JWKS key resolution: JwksKeyStore restored offline/);
+  assert.match(
+    out,
+    /JWKS verification for unknown keyid "demo-unknown-key-1": FAILED \(code KEY_RESOLUTION_FAILED:/,
   );
 });

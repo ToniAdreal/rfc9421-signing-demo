@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a JWKS key-resolution
+  segment: a `JwksKeyStore` is restored offline from a v1 snapshot
+  carrying only the demo key's public JWK (`fetchedAtSec` and the
+  store clock are pinned to the demo's fixed instants, and the
+  configured `fetchImpl` throws if it is ever called, so the segment
+  performs zero network I/O), the demo's signed request verifies
+  through `keyResolver: (kid) => store.resolve(kid)`, and a request
+  signed under an unknown `keyid` is rejected with
+  `KEY_RESOLUTION_FAILED`, showing the production gateway
+  key-discovery path the earlier segments bypassed by passing a key
+  directly.
+
 - The benchmark (`npm run bench`) now also measures the
   `fromNodeRequest` inbound-normalization path: a fixed mock
   `IncomingRequestLike` (seven header entries including a multi-value
