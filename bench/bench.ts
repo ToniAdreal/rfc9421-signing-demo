@@ -23,7 +23,13 @@
  * `verifyRequest` over a fixed-seed corpus of malformed
  * signature-input / signature values (the parser rejection traffic a
  * verification gateway faces), self-checked to always return
- * `{ ok: false, code }` and never throw. Numbers vary with hardware —
+ * `{ ok: false, code }` and never throw, plus the standalone body-hash
+ * primitive every signed/verified request pays for: `contentDigest`
+ * over the shared 31-byte fixture body, measured separately for
+ * sha-512 and sha-256 and self-checked outside timing against
+ * independently pinned digest values (see DIGEST_EXPECTED below), so
+ * the cost of hashing a body is visible apart from the asymmetric
+ * signing it is normally bundled into. Numbers vary with hardware —
  * do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
@@ -31,6 +37,7 @@
 import { cpus } from "node:os";
 import {
   addSignature,
+  contentDigest,
   exportPublicKeyJwk,
   generateEd25519KeyPair,
   generateP256KeyPair,
@@ -45,6 +52,7 @@ import {
   signRequest,
   verifyAllLabels,
   verifyRequest,
+  type ContentDigestAlg,
   type SignAlg,
   type SignedHttpRequest,
 } from "../src/index.js";
@@ -635,6 +643,53 @@ function benchmarkMalformedReject(): { ops: number; corpusSize: number } {
   return { ops, corpusSize: corpus.length };
 }
 
+/**
+ * Expected Content-Digest wire values for the shared fixture body
+ * (`JSON.stringify({ amount: 100, currency: "USD" })`, 31 bytes),
+ * pinned as literals — never derived from `contentDigest` at bench
+ * time:
+ * - sha-256: the OpenSSL-derived vector for these exact bytes in
+ *   test/contentDigestSha256Openssl.test.ts (openssl dgst -sha256).
+ * - sha-512: computed outside this library with
+ *   `openssl dgst -sha512` and cross-checked with Python hashlib
+ *   (both agreed byte-for-byte) on 2026-10-14.
+ * The sha-512 self-check additionally pins the pre-existing golden
+ * vector from test/golden.test.ts: contentDigest("hello").
+ */
+const DIGEST_EXPECTED: Record<ContentDigestAlg, string> = {
+  "sha-512":
+    "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+  "sha-256": "sha-256=:nRIVtM4I5bjHe8zXwvZzr4LRU7HqvqIqHjxSQnK3jbE=:",
+};
+const DIGEST_HELLO_SHA512 =
+  "sha-512=:m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRlnPKcjI8PZm6XBHXx6zG4UuMXaDEZjR1wuXDre9G9zvN7AQw==:";
+
+/**
+ * `contentDigest` steady state over the shared fixture body (31
+ * bytes, printed in the bench header): the standalone RFC 9530 body
+ * hash, isolated from the sign/verify paths that normally bundle it
+ * with an asymmetric signature, so a reader can see what hashing a
+ * body costs on its own and how sha-512 compares with sha-256 at
+ * this size. Self-checks run outside timing: the fixture body must
+ * reproduce the pinned wire value for the algorithm, and the
+ * sha-512 path must also reproduce the golden "hello" vector.
+ */
+function benchmarkContentDigest(alg: ContentDigestAlg): number {
+  const actual = contentDigest(fixture.body, alg);
+  if (actual !== DIGEST_EXPECTED[alg])
+    throw new Error(
+      `benchmark self-check failed: contentDigest(fixture, ${alg}) gave ${actual} ` +
+        `(expected ${DIGEST_EXPECTED[alg]})`,
+    );
+  if (alg === "sha-512" && contentDigest("hello") !== DIGEST_HELLO_SHA512)
+    throw new Error(
+      "benchmark self-check failed: contentDigest(\"hello\") sha-512 golden mismatch",
+    );
+  return measure(() => {
+    contentDigest(fixture.body, alg);
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -698,6 +753,16 @@ results.push({
   alg: `verifyRequest (malformed, ${malformed.corpusSize} cases)`,
   op: "reject",
   ops: malformed.ops,
+});
+results.push({
+  alg: "contentDigest sha-512 (31-byte body)",
+  op: "digest",
+  ops: benchmarkContentDigest("sha-512"),
+});
+results.push({
+  alg: "contentDigest sha-256 (31-byte body)",
+  op: "digest",
+  ops: benchmarkContentDigest("sha-256"),
 });
 
 console.log("alg                                    op      throughput");
