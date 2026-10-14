@@ -3,7 +3,8 @@
  *
  * Measures real, locally-observed sign/verify throughput for each
  * algorithm in the benchmark loop below (ed25519, hmac-sha256,
- * hmac-sha512, ecdsa-p256-sha256, ecdsa-p384-sha384, rsa-pss-sha512,
+ * hmac-sha512, ecdsa-p256-sha256, ecdsa-p384-sha384,
+ * ecdsa-p521-sha512, rsa-pss-sha512,
  * rsa-v1_5-sha256) on the machine that
  * runs it, plus a multi-party scenario (merchant ed25519 + gateway
  * hmac-sha256 dual labels via verifyAllLabels) and the key-resolution
@@ -42,6 +43,7 @@ import {
   generateEd25519KeyPair,
   generateP256KeyPair,
   generateP384KeyPair,
+  generateP521KeyPair,
   generateRsaPssKeyPair,
   generateRsaV15KeyPair,
   JwksKeyStore,
@@ -92,6 +94,15 @@ function benchmarkScenario(alg: SignAlg): { signOps: number; verifyOps: number }
     // (generateP384KeyPair) generated once per scenario, outside the
     // timed loops; only sign/verify calls are measured.
     const { publicKey, privateKey } = generateP384KeyPair();
+    signKey = privateKey;
+    verifyKey = publicKey;
+  } else if (alg === "ecdsa-p521-sha512") {
+    // Same fixture caliber as the P-256 / P-384 paths above: one fresh
+    // key pair (generateP521KeyPair) generated once per scenario,
+    // outside the timed loops; only sign/verify calls are measured.
+    // P-521 signatures are raw r||s with each limb padded to 66 bytes
+    // (132 bytes total, RFC 9421 §3.3.6).
+    const { publicKey, privateKey } = generateP521KeyPair();
     signKey = privateKey;
     verifyKey = publicKey;
   } else if (alg === "rsa-pss-sha512") {
@@ -710,6 +721,7 @@ for (const alg of [
   "hmac-sha512",
   "ecdsa-p256-sha256",
   "ecdsa-p384-sha384",
+  "ecdsa-p521-sha512",
   "rsa-pss-sha512",
   "rsa-v1_5-sha256",
 ] as const) {

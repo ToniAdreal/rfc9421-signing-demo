@@ -12,6 +12,14 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures the
+  `ecdsa-p521-sha512` sign/verify path: the algorithm loop gains the
+  P-521 member with the same fixture caliber as the existing
+  P-256 / P-384 paths (one fresh `generateP521KeyPair()` pair per
+  scenario, outside the timed loops; signatures are the raw r‖s
+  form, 132 bytes total), closing the drift left when the algorithm
+  itself landed. The README Benchmarks table was refreshed
+  wholesale from one real run and now carries the two P-521 rows.
+- The benchmark (`npm run bench`) now also measures the
   `ecdsa-p384-sha384` sign/verify path: the algorithm loop gains the
   P-384 member with the same fixture caliber as the existing P-256
   path (one fresh `generateP384KeyPair()` pair per scenario, outside

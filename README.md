@@ -904,43 +904,53 @@ All rows below are from one real run on 2026-10-14:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519 | sign | ~1,920 ops/sec (~520 µs/op) |
-| ed25519 | verify | ~727 ops/sec (~1,376 µs/op) |
-| hmac-sha256 | sign | ~4,960 ops/sec (~201 µs/op) |
-| hmac-sha256 | verify | ~3,800 ops/sec (~263 µs/op) |
-| hmac-sha512 | sign | ~3,280 ops/sec (~305 µs/op) |
-| hmac-sha512 | verify | ~3,260 ops/sec (~307 µs/op) |
-| ecdsa-p256-sha256 | sign | ~1,210 ops/sec (~827 µs/op) |
-| ecdsa-p256-sha256 | verify | ~684 ops/sec (~1,462 µs/op) |
-| ecdsa-p384-sha384 | sign | ~110 ops/sec (~9,064 µs/op) |
-| ecdsa-p384-sha384 | verify | ~118 ops/sec (~8,481 µs/op) |
-| rsa-pss-sha512 | sign | ~211 ops/sec (~4,740 µs/op) |
-| rsa-pss-sha512 | verify | ~2,570 ops/sec (~390 µs/op) |
-| rsa-v1_5-sha256 | sign | ~259 ops/sec (~3,864 µs/op) |
-| rsa-v1_5-sha256 | verify | ~1,565 ops/sec (~639 µs/op) |
-| verifyAllLabels (2 labels) | verify | ~471 ops/sec (~2,121 µs/op) |
-| JwksKeyStore.resolve (hit) | resolve | ~524,000 ops/sec (~1.91 µs/op) |
-| memoizeKeyResolver (hit) | resolve | ~4,410,000 ops/sec (~0.23 µs/op) |
-| memoizeKeyResolver (miss) | resolve | ~307,000 ops/sec (~3.26 µs/op) |
-| jwkThumbprint (3 JWK shapes) | derive | ~10,300 ops/sec (~97.4 µs/op) |
-| ReplayCache.check (hit, 1k entries) | check | ~222,000 ops/sec (~4.50 µs/op) |
-| verifyRequest (malformed, 566 cases) | reject | ~2,270 ops/sec (~440 µs/op) |
-| contentDigest sha-512 (31-byte body) | digest | ~38,600 ops/sec (~25.9 µs/op) |
-| contentDigest sha-256 (31-byte body) | digest | ~81,800 ops/sec (~12.2 µs/op) |
+| ed25519 | sign | ~5,850 ops/sec (~171 µs/op) |
+| ed25519 | verify | ~2,220 ops/sec (~451 µs/op) |
+| hmac-sha256 | sign | ~42,000 ops/sec (~23.8 µs/op) |
+| hmac-sha256 | verify | ~14,600 ops/sec (~68.7 µs/op) |
+| hmac-sha512 | sign | ~12,600 ops/sec (~79.5 µs/op) |
+| hmac-sha512 | verify | ~8,490 ops/sec (~118 µs/op) |
+| ecdsa-p256-sha256 | sign | ~3,810 ops/sec (~262 µs/op) |
+| ecdsa-p256-sha256 | verify | ~2,650 ops/sec (~377 µs/op) |
+| ecdsa-p384-sha384 | sign | ~364 ops/sec (~2,748 µs/op) |
+| ecdsa-p384-sha384 | verify | ~488 ops/sec (~2,049 µs/op) |
+| ecdsa-p521-sha512 | sign | ~152 ops/sec (~6,571 µs/op) |
+| ecdsa-p521-sha512 | verify | ~214 ops/sec (~4,671 µs/op) |
+| rsa-pss-sha512 | sign | ~947 ops/sec (~1,056 µs/op) |
+| rsa-pss-sha512 | verify | ~3,750 ops/sec (~266 µs/op) |
+| rsa-v1_5-sha256 | sign | ~1,050 ops/sec (~951 µs/op) |
+| rsa-v1_5-sha256 | verify | ~6,050 ops/sec (~165 µs/op) |
+| verifyAllLabels (2 labels) | verify | ~3,310 ops/sec (~302 µs/op) |
+| JwksKeyStore.resolve (hit) | resolve | ~3,550,000 ops/sec (~0.28 µs/op) |
+| memoizeKeyResolver (hit) | resolve | ~3,780,000 ops/sec (~0.26 µs/op) |
+| memoizeKeyResolver (miss) | resolve | ~4,140,000 ops/sec (~0.24 µs/op) |
+| jwkThumbprint (3 JWK shapes) | derive | ~45,900 ops/sec (~21.8 µs/op) |
+| ReplayCache.check (hit, 1k entries) | check | ~1,140,000 ops/sec (~0.87 µs/op) |
+| verifyRequest (malformed, 566 cases) | reject | ~7,730 ops/sec (~129 µs/op) |
+| contentDigest sha-512 (31-byte body) | digest | ~222,500 ops/sec (~4.49 µs/op) |
+| contentDigest sha-256 (31-byte body) | digest | ~132,900 ops/sec (~7.53 µs/op) |
 
-Load note for this run: it was taken while the shared host was under
-heavy unrelated parallel load (load average ~13–16 on a 2-core host),
-so the absolute throughputs above are depressed across the board
-relative to quieter runs of the same bench, and individual rows were
-not all hit equally. Two further runs the same day were also taken
-under that load and were not used. Treat the table as one real,
-heavily-contended run — most useful for same-run relative comparison
-— and re-run the bench on a quiet machine for capacity numbers.
+Load note for this run: it was taken while the shared host carried
+unrelated parallel load (load average ~4–6 on a 2-core host), so the
+absolute throughputs above are depressed relative to quieter runs of
+the same bench, and individual rows were not all hit equally. A
+second run the same day was also taken under that load and was not
+used for the table. Treat the table as one real, contended run —
+most useful for same-run relative comparison — and re-run the bench
+on a quiet machine for capacity numbers.
 
 The `ecdsa-p384-sha384` rows: the P-384 path uses the same fixture
 caliber as P-256 (one fresh key pair per scenario, outside the timed
 loops), and in this run it measured markedly more expensive than
-P-256 — about 11× the per-op sign cost and about 6× the verify cost.
+P-256 — about 10× the per-op sign cost and about 5× the verify cost.
+
+The `ecdsa-p521-sha512` rows are new: the P-521 path uses the same
+fixture caliber as P-256 / P-384 (one fresh key pair per scenario,
+outside the timed loops; signatures are the raw r‖s form, 132 bytes
+total), and it is the most expensive EC tier in this run — about
+2.4× the per-op sign cost and about 2.3× the verify cost of P-384.
+A second run the same day reproduced the same magnitude (sign
+~157 ops/sec, verify ~161 ops/sec).
 
 The `verifyAllLabels` row covers the multi-party scenario: the merchant signs
 with ed25519 and the payment gateway appends its own hmac-sha256 signature
@@ -950,13 +960,12 @@ The `resolve` rows cover the keyid→key hot path: the `JwksKeyStore` is
 restored offline from a snapshot (the bench performs zero network I/O), a
 hit is a plain Map lookup, a `memoizeKeyResolver` hit is served from its
 TTL cache, and a miss uses an unknown keyid, which is never cached and so
-penetrates to the store on every call. In this run the raw-resolve row
-landed in a heavier contention window than the memoized rows (see the
-load note above), so the three resolve rows should not be compared at
-face value this time; on a quiet host a memoized hit costs about the
-same as the raw Map lookup it wraps — memoizing pays off when the
-underlying resolver is slow or remote, which this offline fixture
-deliberately is not.
+penetrates to the store on every call. In this run the three rows
+landed within noise of each other (~0.24–0.28 µs/op), as expected on
+this offline fixture: a memoized hit costs about the same as the raw
+Map lookup it wraps — memoizing pays off when the underlying
+resolver is slow or remote, which this offline fixture deliberately
+is not.
 
 The `jwkThumbprint` row covers the key-management derivation a JWKS
 publisher runs for every key at publish/rotation time: one measured
@@ -999,9 +1008,11 @@ hash, `contentDigest(body, alg)`, over the shared fixture body (the
 31-byte JSON body named in the bench header), isolated from the
 sign/verify paths that normally bundle hashing with an asymmetric
 signature — so a reader can see what hashing a body costs on its own
-and how the two algorithms compare at this size. In this run sha-256
-measured about 2.1× the sha-512 throughput on the 31-byte body (at
-this size the call is mostly fixed overhead, not bulk hashing). The
+and how the two algorithms compare at this size. In this run sha-512
+measured about 1.7× the sha-256 throughput on the 31-byte body, but
+a second run the same day flipped the ordering (both ≈1–2 µs/op
+there) — at this size the call is mostly fixed overhead, so the
+ordering is shared-host noise, not bulk-hashing performance. The
 bench self-checks outside timing that the fixture body reproduces
 pinned wire values for both algorithms — the sha-256 value is the
 OpenSSL-derived vector in the test suite, the sha-512 value was
