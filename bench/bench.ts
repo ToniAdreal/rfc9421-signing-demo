@@ -3,7 +3,8 @@
  *
  * Measures real, locally-observed sign/verify throughput for each
  * algorithm in the benchmark loop below (ed25519, hmac-sha256,
- * hmac-sha512, ecdsa-p256-sha256, rsa-pss-sha512, rsa-v1_5-sha256) on the machine that
+ * hmac-sha512, ecdsa-p256-sha256, ecdsa-p384-sha384, rsa-pss-sha512,
+ * rsa-v1_5-sha256) on the machine that
  * runs it, plus a multi-party scenario (merchant ed25519 + gateway
  * hmac-sha256 dual labels via verifyAllLabels) and the key-resolution
  * hot path a gateway verifier hits on every request: `JwksKeyStore.resolve`
@@ -33,6 +34,7 @@ import {
   exportPublicKeyJwk,
   generateEd25519KeyPair,
   generateP256KeyPair,
+  generateP384KeyPair,
   generateRsaPssKeyPair,
   generateRsaV15KeyPair,
   JwksKeyStore,
@@ -75,6 +77,13 @@ function benchmarkScenario(alg: SignAlg): { signOps: number; verifyOps: number }
     verifyKey = publicKey;
   } else if (alg === "ecdsa-p256-sha256") {
     const { publicKey, privateKey } = generateP256KeyPair();
+    signKey = privateKey;
+    verifyKey = publicKey;
+  } else if (alg === "ecdsa-p384-sha384") {
+    // Same fixture caliber as the P-256 path above: one fresh key pair
+    // (generateP384KeyPair) generated once per scenario, outside the
+    // timed loops; only sign/verify calls are measured.
+    const { publicKey, privateKey } = generateP384KeyPair();
     signKey = privateKey;
     verifyKey = publicKey;
   } else if (alg === "rsa-pss-sha512") {
@@ -645,6 +654,7 @@ for (const alg of [
   "hmac-sha256",
   "hmac-sha512",
   "ecdsa-p256-sha256",
+  "ecdsa-p384-sha384",
   "rsa-pss-sha512",
   "rsa-v1_5-sha256",
 ] as const) {

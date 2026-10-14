@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures the
+  `ecdsa-p384-sha384` sign/verify path: the algorithm loop gains the
+  P-384 member with the same fixture caliber as the existing P-256
+  path (one fresh `generateP384KeyPair()` pair per scenario, outside
+  the timed loops), closing the drift between the implemented
+  algorithm list and the benchmark loop. The README Benchmarks table
+  was refreshed wholesale from one real run and now carries the two
+  P-384 rows.
 - `ecdsa-p521-sha512` signature algorithm (RFC 9421 §3.3.6): NIST
   P-521 with SHA-512, signatures in the raw r‖s form with each integer
   padded to 66 octets (132 octets total) — the highest-strength tier of

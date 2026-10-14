@@ -899,29 +899,37 @@ see [SECURITY.md](SECURITY.md).
 algorithm plus the key-resolution, thumbprint-derivation, replay-check
 and malformed-input rejection paths below (3000 timed iterations per
 op after 200 warmup, printing the Node version and CPU).
-All rows below are from one real run on 2026-10-13:
+All rows below are from one real run on 2026-10-14:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519 | sign | ~13,000 ops/sec (~77 µs/op) |
-| ed25519 | verify | ~6,200 ops/sec (~160 µs/op) |
-| hmac-sha256 | sign | ~48,800 ops/sec (~20 µs/op) |
-| hmac-sha256 | verify | ~40,500 ops/sec (~25 µs/op) |
-| hmac-sha512 | sign | ~48,600 ops/sec (~21 µs/op) |
-| hmac-sha512 | verify | ~37,400 ops/sec (~27 µs/op) |
-| ecdsa-p256-sha256 | sign | ~10,300 ops/sec (~97 µs/op) |
-| ecdsa-p256-sha256 | verify | ~5,700 ops/sec (~174 µs/op) |
-| rsa-pss-sha512 | sign | ~1,890 ops/sec (~529 µs/op) |
-| rsa-pss-sha512 | verify | ~12,000 ops/sec (~84 µs/op) |
-| rsa-v1_5-sha256 | sign | ~1,340 ops/sec (~744 µs/op) |
-| rsa-v1_5-sha256 | verify | ~12,700 ops/sec (~79 µs/op) |
-| verifyAllLabels (2 labels) | verify | ~5,400 ops/sec (~184 µs/op) |
-| JwksKeyStore.resolve (hit) | resolve | ~7,670,000 ops/sec (~0.13 µs/op) |
-| memoizeKeyResolver (hit) | resolve | ~5,240,000 ops/sec (~0.19 µs/op) |
-| memoizeKeyResolver (miss) | resolve | ~7,270,000 ops/sec (~0.14 µs/op) |
-| jwkThumbprint (3 JWK shapes) | derive | ~84,700 ops/sec (~11.8 µs/op) |
-| ReplayCache.check (hit, 1k entries) | check | ~1,780,000 ops/sec (~0.56 µs/op) |
-| verifyRequest (malformed, 566 cases) | reject | ~21,600 ops/sec (~46 µs/op) |
+| ed25519 | sign | ~9,940 ops/sec (~101 µs/op) |
+| ed25519 | verify | ~6,060 ops/sec (~165 µs/op) |
+| hmac-sha256 | sign | ~51,200 ops/sec (~20 µs/op) |
+| hmac-sha256 | verify | ~40,700 ops/sec (~25 µs/op) |
+| hmac-sha512 | sign | ~49,100 ops/sec (~20 µs/op) |
+| hmac-sha512 | verify | ~39,000 ops/sec (~26 µs/op) |
+| ecdsa-p256-sha256 | sign | ~10,100 ops/sec (~99 µs/op) |
+| ecdsa-p256-sha256 | verify | ~4,310 ops/sec (~232 µs/op) |
+| ecdsa-p384-sha384 | sign | ~734 ops/sec (~1,362 µs/op) |
+| ecdsa-p384-sha384 | verify | ~889 ops/sec (~1,125 µs/op) |
+| rsa-pss-sha512 | sign | ~1,670 ops/sec (~599 µs/op) |
+| rsa-pss-sha512 | verify | ~10,800 ops/sec (~93 µs/op) |
+| rsa-v1_5-sha256 | sign | ~1,800 ops/sec (~554 µs/op) |
+| rsa-v1_5-sha256 | verify | ~13,100 ops/sec (~76 µs/op) |
+| verifyAllLabels (2 labels) | verify | ~5,320 ops/sec (~188 µs/op) |
+| JwksKeyStore.resolve (hit) | resolve | ~8,910,000 ops/sec (~0.11 µs/op) |
+| memoizeKeyResolver (hit) | resolve | ~4,650,000 ops/sec (~0.22 µs/op) |
+| memoizeKeyResolver (miss) | resolve | ~7,630,000 ops/sec (~0.13 µs/op) |
+| jwkThumbprint (3 JWK shapes) | derive | ~83,300 ops/sec (~12.0 µs/op) |
+| ReplayCache.check (hit, 1k entries) | check | ~2,230,000 ops/sec (~0.45 µs/op) |
+| verifyRequest (malformed, 566 cases) | reject | ~20,800 ops/sec (~48 µs/op) |
+
+The `ecdsa-p384-sha384` rows are new: the P-384 path uses the same
+fixture caliber as P-256 (one fresh key pair per scenario, outside the
+timed loops), and in this run it measured markedly more expensive than
+P-256 — about 14× the per-op sign cost and about 5× the verify cost on
+this machine (a second run reproduced the same magnitude).
 
 The `verifyAllLabels` row covers the multi-party scenario: the merchant signs
 with ed25519 and the payment gateway appends its own hmac-sha256 signature
