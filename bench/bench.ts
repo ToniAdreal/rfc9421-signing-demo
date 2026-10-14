@@ -30,7 +30,12 @@
  * sha-512 and sha-256 and self-checked outside timing against
  * independently pinned digest values (see DIGEST_EXPECTED below), so
  * the cost of hashing a body is visible apart from the asymmetric
- * signing it is normally bundled into. Numbers vary with hardware —
+ * signing it is normally bundled into, plus the inbound
+ * normalization every gateway request pays before verification even
+ * starts: `fromNodeRequest` over a fixed mock `IncomingRequestLike`
+ * (no real server, zero network), self-checked outside timing
+ * against a hand-pinned expected `RequestLike` (see NODE_FIXTURE
+ * below). Numbers vary with hardware —
  * do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
@@ -40,6 +45,7 @@ import {
   addSignature,
   contentDigest,
   exportPublicKeyJwk,
+  fromNodeRequest,
   generateEd25519KeyPair,
   generateP256KeyPair,
   generateP384KeyPair,
@@ -55,6 +61,7 @@ import {
   verifyAllLabels,
   verifyRequest,
   type ContentDigestAlg,
+  type IncomingRequestLike,
   type SignAlg,
   type SignedHttpRequest,
 } from "../src/index.js";
@@ -701,6 +708,163 @@ function benchmarkContentDigest(alg: ContentDigestAlg): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed mock inbound request for the `fromNodeRequest` path — a plain
+ * `IncomingRequestLike` test double, NOT a real server (the bench
+ * performs zero network I/O and never opens a socket). Composition,
+ * item by item:
+ * - method POST, origin-form url "/v1/payments?event=charge.succeeded";
+ * - `socket.encrypted` true, so the rebuilt absolute URL is https;
+ * - seven header entries: Host with a port (mixed-case name),
+ *   Content-Type, Content-Digest (the pinned sha-512 wire value of
+ *   the shared fixture body — the adapter passes header values
+ *   through unvalidated; it never recomputes digests),
+ *   Signature-Input / Signature (pass-through strings in the shapes
+ *   `verifyRequest` would later parse), one multi-value
+ *   X-Forwarded-For whose first element carries padding whitespace
+ *   (exercising the per-element trim + ", " join), and one
+ *   `undefined` X-Debug-Skip entry (must be dropped);
+ * - trailers in BOTH Node forms, mutually consistent: `rawTrailers`
+ *   in wire order with a duplicated X-Dup name (must merge to
+ *   "a, b"), and the parsed `trailers` object saying the same thing;
+ * - body: the shared 31-byte fixture body, passed as the buffered
+ *   second argument exactly as a real handler would after `end`.
+ */
+const NODE_FIXTURE_REQ: IncomingRequestLike = {
+  method: "POST",
+  url: "/v1/payments?event=charge.succeeded",
+  socket: { encrypted: true },
+  headers: {
+    Host: "gateway.example.com:8443",
+    "Content-Type": "application/json",
+    "Content-Digest":
+      "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+    "Signature-Input":
+      'sig1=("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="bench-key";alg="ed25519"',
+    Signature: "sig1=:dGVzdA==:",
+    "X-Forwarded-For": [" 203.0.113.10 ", "10.0.0.8"],
+    "X-Debug-Skip": undefined,
+  },
+  trailers: { "x-checksum": "trailer-value", "x-dup": ["a", "b"] },
+  rawTrailers: [
+    "X-Checksum", "trailer-value",
+    "X-Dup", "a",
+    "x-dup", "b",
+  ],
+};
+
+/**
+ * Hand-pinned expected normalization of NODE_FIXTURE_REQ — written
+ * out literally from the adapter's documented rules (absolute-URL
+ * rebuild from scheme + verbatim host + origin-form path, header
+ * names lowercased, multi-value values trimmed and joined with
+ * ", ", `undefined` entries dropped, raw trailers merged by
+ * lowercased name), never derived from `fromNodeRequest` at bench
+ * time.
+ */
+const NODE_EXPECTED_URL =
+  "https://gateway.example.com:8443/v1/payments?event=charge.succeeded";
+const NODE_EXPECTED_HEADERS: Record<string, string> = {
+  host: "gateway.example.com:8443",
+  "content-type": "application/json",
+  "content-digest":
+    "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+  "signature-input":
+    'sig1=("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="bench-key";alg="ed25519"',
+  signature: "sig1=:dGVzdA==:",
+  "x-forwarded-for": "203.0.113.10, 10.0.0.8",
+};
+const NODE_EXPECTED_TRAILERS: Record<string, string> = {
+  "x-checksum": "trailer-value",
+  "x-dup": "a, b",
+};
+
+/** Field-by-field equality of a normalized request against the pins above. */
+function assertNodeShape(
+  actual: ReturnType<typeof fromNodeRequest>,
+  label: string,
+): void {
+  const fail = (what: string): never => {
+    throw new Error(`benchmark self-check failed (${label}): ${what}`);
+  };
+  if (actual.method !== "POST") fail(`method ${actual.method}`);
+  if (actual.url !== NODE_EXPECTED_URL) fail(`url ${actual.url}`);
+  if (actual.body !== fixture.body) fail("body did not pass through");
+  const headerKeys = Object.keys(actual.headers);
+  if (headerKeys.length !== Object.keys(NODE_EXPECTED_HEADERS).length)
+    fail(`headers ${JSON.stringify(actual.headers)}`);
+  for (const [name, value] of Object.entries(NODE_EXPECTED_HEADERS)) {
+    if (actual.headers[name] !== value)
+      fail(`header ${name} is ${actual.headers[name]} (expected ${value})`);
+  }
+  if ("x-debug-skip" in actual.headers) fail("undefined header not dropped");
+  if ("Host" in actual.headers) fail("header name not lowercased");
+  const trailers = actual.trailers;
+  if (trailers === undefined)
+    throw new Error(
+      `benchmark self-check failed (${label}): trailers missing`,
+    );
+  const trailerKeys = Object.keys(trailers);
+  if (trailerKeys.length !== Object.keys(NODE_EXPECTED_TRAILERS).length)
+    fail(`trailers ${JSON.stringify(trailers)}`);
+  for (const [name, value] of Object.entries(NODE_EXPECTED_TRAILERS)) {
+    if (trailers[name] !== value)
+      fail(`trailer ${name} is ${trailers[name]} (expected ${value})`);
+  }
+}
+
+/**
+ * `fromNodeRequest` steady state: the inbound normalization a
+ * gateway runs on every received request before `verifyRequest` —
+ * header folding, absolute-URL rebuild and trailer carry-over over
+ * the fixed mock above. Self-checks run outside timing: the fixture
+ * must normalize to the hand-pinned expectation field by field; the
+ * parsed-trailers-object form (no `rawTrailers`) must produce the
+ * identical result; a disagreeing parsed object must lose to
+ * `rawTrailers`; and a trailer-less message must gain no `trailers`
+ * field at all. The measured loop additionally pins the rebuilt URL
+ * on every call.
+ */
+function benchmarkFromNodeRequest(): number {
+  assertNodeShape(
+    fromNodeRequest(NODE_FIXTURE_REQ, fixture.body),
+    "raw-trailers fixture",
+  );
+  assertNodeShape(
+    fromNodeRequest(
+      { ...NODE_FIXTURE_REQ, rawTrailers: undefined },
+      fixture.body,
+    ),
+    "trailers-object fixture",
+  );
+  const precedence = fromNodeRequest(
+    {
+      ...NODE_FIXTURE_REQ,
+      trailers: { "x-checksum": "stale-object-value" },
+    },
+    fixture.body,
+  );
+  if (precedence.trailers?.["x-checksum"] !== "trailer-value")
+    throw new Error(
+      "benchmark self-check failed: rawTrailers did not take precedence",
+    );
+  const bare = fromNodeRequest(
+    { ...NODE_FIXTURE_REQ, rawTrailers: undefined, trailers: undefined },
+    fixture.body,
+  );
+  if ("trailers" in bare)
+    throw new Error(
+      "benchmark self-check failed: trailer-less request gained trailers",
+    );
+  return measure(() => {
+    const r = fromNodeRequest(NODE_FIXTURE_REQ, fixture.body);
+    if (r.url !== NODE_EXPECTED_URL)
+      throw new Error(
+        "benchmark self-check failed: fromNodeRequest rebuilt an unexpected URL",
+      );
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -775,6 +939,11 @@ results.push({
   alg: "contentDigest sha-256 (31-byte body)",
   op: "digest",
   ops: benchmarkContentDigest("sha-256"),
+});
+results.push({
+  alg: "fromNodeRequest (inbound, trailers)",
+  op: "normalize",
+  ops: benchmarkFromNodeRequest(),
 });
 
 console.log("alg                                    op      throughput");

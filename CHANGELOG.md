@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures the
+  `fromNodeRequest` inbound-normalization path: a fixed mock
+  `IncomingRequestLike` (seven header entries including a multi-value
+  header and an `undefined` entry, trailers in both Node forms, the
+  shared 31-byte body) is normalized on every measured call, with
+  self-checks outside timing pinning the result field by field
+  against a hand-written expected `RequestLike`, the
+  parsed-trailers-object form, `rawTrailers` precedence, and the
+  no-trailers shape. No real server is started; the bench performs
+  zero network I/O. The README Benchmarks table was refreshed
+  wholesale from one real run and now carries the `normalize` row.
 - The CLI demo (`npm run demo`) now closes with a replay-protection
   segment: the demo's signed request is verified twice against an
   opt-in `ReplayCache` (fixed injected clock, capacity 100, TTL
