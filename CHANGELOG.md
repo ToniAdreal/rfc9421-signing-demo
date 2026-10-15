@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `canonicalizeStructuredFieldValue` — the parse-then-strictly-
+  reserialize step every `;sf` covered component pays on the
+  signer and the verifier — as one pass over a fixed six-value
+  corpus (Dictionary / List / Item shapes, a Decimal member, a
+  leading-zero Integer, and a Byte Sequence member) per measured
+  call. Every expected serialization is hand-pinned in the bench
+  from the RFC 8941 §4 rules and re-pinned on every measured
+  pass. The README Benchmarks table was refreshed wholesale from
+  one real run and now carries the `canon` row. The bench
+  performs zero network I/O and makes no wall-clock assertions.
 - The benchmark (`npm run bench`) now also measures the three
   standalone signature parsers a gateway pre-screen calls
   directly — `listSignatureLabels`, `parseSignatureInput` and
