@@ -44,8 +44,15 @@
  * self-checked outside timing by comparing the re-imported public
  * key's SPKI DER byte-for-byte against the original's — an
  * independent node:crypto encoding, not the JWK helpers' own
- * output. Numbers vary with hardware —
- * do not treat them as guaranteed throughput.
+ * output, plus the pure string-building step every sign/verify pays
+ * before any cryptography runs: `buildSignatureBase` over the
+ * shared fixture request with the fixed covered set
+ * `@method @authority @path content-digest`, self-checked outside
+ * timing against a hand-written expected base text (see
+ * BASE_EXPECTED below), so the cost of resolving covered
+ * components and serializing the signature base is visible apart
+ * from the algorithm costs it is normally bundled into. Numbers
+ * vary with hardware — do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
  */
@@ -53,6 +60,7 @@ import { type KeyObject } from "node:crypto";
 import { cpus } from "node:os";
 import {
   addSignature,
+  buildSignatureBase,
   contentDigest,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -80,6 +88,8 @@ import {
   verifyRequest,
   type ContentDigestAlg,
   type IncomingRequestLike,
+  type RequestLike,
+  type SignatureParams,
   type SignAlg,
   type SignedHttpRequest,
 } from "../src/index.js";
@@ -928,6 +938,96 @@ function benchmarkJwkRoundTrip(
   }, ITERATIONS);
 }
 
+/**
+ * Fixed covered set for the `buildSignatureBase` path — the same
+ * set the bench header names for the sign/verify scenarios
+ * (`@method @authority @path content-digest`).
+ */
+const BASE_COMPONENTS = [
+  "@method",
+  "@authority",
+  "@path",
+  "content-digest",
+] as const;
+
+/** Fixed signature parameters for the base path (no wall clock). */
+const BASE_PARAMS: SignatureParams = {
+  created: 1_700_000_000,
+  keyid: "bench-key",
+  alg: "ed25519",
+};
+
+/**
+ * Fixed request for the base path: the shared bench fixture (same
+ * method / URL / body shape as every other path), with the
+ * `content-digest` header the covered set resolves — its value is
+ * the pinned sha-512 wire value of the fixture body from
+ * DIGEST_EXPECTED above, written out literally here.
+ */
+const BASE_REQUEST: RequestLike = {
+  method: fixture.method,
+  url: fixture.url,
+  headers: {
+    "content-type": "application/json",
+    "content-digest":
+      "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+  },
+  body: fixture.body,
+};
+
+/**
+ * Hand-written expected signature base for BASE_REQUEST /
+ * BASE_COMPONENTS / BASE_PARAMS — written out literally from the
+ * RFC 9421 §2.5 rules (one `"id": value` line per covered component:
+ * method uppercased, authority lowercased host, path alone, the
+ * digest header value verbatim; then the `@signature-params` line
+ * with parameters in created / keyid / alg order), in the same
+ * hand-pinned style as the golden vector in test/golden.test.ts.
+ * Never derived from `buildSignatureBase` at bench time.
+ */
+const BASE_EXPECTED =
+  `"@method": POST\n` +
+  `"@authority": api.example.com\n` +
+  `"@path": /v1/payments\n` +
+  `"content-digest": sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:\n` +
+  `"@signature-params": ("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="bench-key";alg="ed25519"`;
+
+/**
+ * `buildSignatureBase` steady state: the pure string-building step
+ * every sign and verify pays before any cryptography — resolving
+ * each covered component against the fixture request and
+ * serializing the `"@signature-params"` line. Isolated here so a
+ * reader can see what base construction costs on its own and how
+ * much of a sign/verify number is cryptography versus base
+ * building. Self-check outside timing: the built base must equal
+ * BASE_EXPECTED byte-for-byte; the measured loop re-pins the full
+ * text on every call. Zero network, zero randomness, no wall-clock
+ * assertions.
+ */
+function benchmarkBuildSignatureBase(): number {
+  const actual = buildSignatureBase(
+    [...BASE_COMPONENTS],
+    BASE_REQUEST,
+    BASE_PARAMS,
+  );
+  if (actual !== BASE_EXPECTED)
+    throw new Error(
+      `benchmark self-check failed: buildSignatureBase gave ${JSON.stringify(actual)} ` +
+        `(expected ${JSON.stringify(BASE_EXPECTED)})`,
+    );
+  return measure(() => {
+    const base = buildSignatureBase(
+      [...BASE_COMPONENTS],
+      BASE_REQUEST,
+      BASE_PARAMS,
+    );
+    if (base !== BASE_EXPECTED)
+      throw new Error(
+        "benchmark self-check failed: buildSignatureBase diverged from the pinned base text",
+      );
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -1047,6 +1147,11 @@ results.push({
     exportPublicKeyJwkRsa,
     importPublicKeyJwkRsa,
   ),
+});
+results.push({
+  alg: "buildSignatureBase (4 components)",
+  op: "build",
+  ops: benchmarkBuildSignatureBase(),
 });
 
 console.log("alg                                    op      throughput");
