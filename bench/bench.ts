@@ -59,7 +59,15 @@
  * against hand-pinned parse shapes and a hand-pinned malformed
  * set that must all throw, so the pure parsing cost before any
  * cryptography is visible apart from the end-to-end verify paths
- * that bundle it. Numbers
+ * that bundle it, plus the strict Structured Field canonicalization
+ * every `;sf` covered component pays on both sides:
+ * `canonicalizeStructuredFieldValue` over a fixed six-value corpus
+ * (Dictionary / List / Item shapes, decimal and leading-zero integer
+ * boundaries, and a Byte Sequence member — see SF_FIXTURE below),
+ * self-checked on every measured pass against hand-pinned expected
+ * serializations, so the parse-then-reserialize cost of the `;sf`
+ * path is visible apart from the end-to-end `;sf` verify total that
+ * bundles it. Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
@@ -69,6 +77,7 @@ import { cpus } from "node:os";
 import {
   addSignature,
   buildSignatureBase,
+  canonicalizeStructuredFieldValue,
   contentDigest,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -1276,6 +1285,101 @@ function benchmarkParseSignatureField(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed corpus for the `canonicalizeStructuredFieldValue` path —
+ * six values written out literally here, covering the three shapes
+ * the function tries (Dictionary, then List, then Item) and the
+ * normalization boundaries a gateway's `;sf` values actually hit.
+ * Every expected serialization is hand-pinned below from the
+ * RFC 8941 §4 strict-serialization rules (and matches the values
+ * pinned independently in test/sfComponent.test.ts) — never
+ * derived from `canonicalizeStructuredFieldValue` at bench time:
+ * - dict-decimal: a Dictionary whose second member is a Decimal —
+ *   decimals serialize with exactly three fractional digits
+ *   (`1.5` → `1.500`); the Integer member is already canonical.
+ * - dict-params-inner-list: a Dictionary with sloppy spacing,
+ *   member parameters, and an Inner List — separators collapse
+ *   to `, ` between members and `;` with no space before each
+ *   parameter, inner-list items join with a single space.
+ * - list-strings: a List of two Strings — the member separator
+ *   collapses to `, ` regardless of the wire spacing.
+ * - item-decimal: a lone Decimal Item — same three-digit rule.
+ * - item-leading-zero-int: a lone Integer Item with leading
+ *   zeros — integers serialize as the bare number (`007` → `7`).
+ * - dict-byte-sequence: a Dictionary member holding a Byte
+ *   Sequence with a Boolean parameter — the base64 is re-encoded
+ *   canonically (this value is already canonical, so input and
+ *   expectation coincide) and `?0` stays `?0`.
+ */
+const SF_FIXTURE: ReadonlyArray<{
+  name: string;
+  input: string;
+  expected: string;
+}> = [
+  {
+    name: "dict-decimal",
+    input: "limit=1500, remaining=1.5",
+    expected: "limit=1500, remaining=1.500",
+  },
+  {
+    name: "dict-params-inner-list",
+    input: "a=1,  b=2;x=1;  y=2, c=(a   b  c)",
+    expected: "a=1, b=2;x=1;y=2, c=(a b c)",
+  },
+  {
+    name: "list-strings",
+    input: '"a" ,  "b"',
+    expected: '"a", "b"',
+  },
+  {
+    name: "item-decimal",
+    input: "1.5",
+    expected: "1.500",
+  },
+  {
+    name: "item-leading-zero-int",
+    input: "007",
+    expected: "7",
+  },
+  {
+    name: "dict-byte-sequence",
+    input: "sig=:aGVsbG8=:;x=?0",
+    expected: "sig=:aGVsbG8=:;x=?0",
+  },
+];
+
+/**
+ * `canonicalizeStructuredFieldValue` steady state: one measured
+ * call is one pass over the whole six-value SF_FIXTURE corpus
+ * (6 canonicalizations per op) — the parse-as-Dictionary/List/Item
+ * plus strict-reserialize work every `;sf` covered component pays
+ * on the signer and the verifier, isolated from the end-to-end
+ * `;sf` verify path that bundles it with base building and
+ * cryptography. Self-checks: every corpus entry is verified
+ * against its hand-pinned expectation outside timing first, and
+ * the measured loop re-pins every entry's result on every pass.
+ * Zero network, zero randomness, no wall-clock assertions.
+ */
+function benchmarkCanonicalizeStructuredFieldValue(): number {
+  for (const entry of SF_FIXTURE) {
+    const actual = canonicalizeStructuredFieldValue(entry.input);
+    if (actual !== entry.expected)
+      throw new Error(
+        `benchmark self-check failed: ${entry.name} canonicalized to ${JSON.stringify(actual)} ` +
+          `(expected ${JSON.stringify(entry.expected)})`,
+      );
+  }
+  return measure(() => {
+    for (const entry of SF_FIXTURE) {
+      const actual = canonicalizeStructuredFieldValue(entry.input);
+      if (actual !== entry.expected)
+        throw new Error(
+          `benchmark self-check failed: ${entry.name} canonicalization diverged from the pinned serialization`,
+        );
+    }
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -1415,6 +1519,11 @@ results.push({
   alg: "parseSignatureField (merchant)",
   op: "parse",
   ops: benchmarkParseSignatureField(),
+});
+results.push({
+  alg: "canonicalizeStructuredFieldValue (6 values)",
+  op: "canon",
+  ops: benchmarkCanonicalizeStructuredFieldValue(),
 });
 
 console.log("alg                                    op      throughput");
