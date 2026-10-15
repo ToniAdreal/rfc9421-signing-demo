@@ -67,7 +67,16 @@
  * self-checked on every measured pass against hand-pinned expected
  * serializations, so the parse-then-reserialize cost of the `;sf`
  * path is visible apart from the end-to-end `;sf` verify total that
- * bundles it. Numbers
+ * bundles it, plus the throwing verify wrapper a middleware-style
+ * caller actually uses: `verifyRequestOrThrow`, measured as two
+ * separate rows — the success path (result unwrapping) over one
+ * fixed valid ed25519 request and the failure path (VerifyError
+ * construction carrying the pinned `SIGNATURE_MISMATCH` code) over
+ * the same request with one signature byte flipped, each
+ * self-checked on every measured call (see ORTHROW_* below), so the
+ * cost difference between the result-object and throwing APIs —
+ * including exception construction on failure — is visible.
+ * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
@@ -95,6 +104,7 @@ import {
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
+  isVerifyError,
   JwksKeyStore,
   jwkThumbprint,
   listSignatureLabels,
@@ -106,6 +116,7 @@ import {
   signRequest,
   verifyAllLabels,
   verifyRequest,
+  verifyRequestOrThrow,
   type ContentDigestAlg,
   type IncomingRequestLike,
   type RequestLike,
@@ -1380,6 +1391,118 @@ function benchmarkCanonicalizeStructuredFieldValue(): number {
   }, ITERATIONS);
 }
 
+/** Fixed `created` for the OrThrow fixture (no wall clock). */
+const ORTHROW_CREATED = 1_700_000_000;
+/** Pinned failure code for the tampered OrThrow fixture — written
+ * here as a literal, from the verify contract: flipping a signature
+ * byte leaves the base rebuildable but fails the cryptography, so
+ * the code is SIGNATURE_MISMATCH (same pin as test/verifyErrors). */
+const ORTHROW_TAMPERED_CODE = "SIGNATURE_MISMATCH";
+
+/**
+ * Fixed corpus for the `verifyRequestOrThrow` paths: one valid
+ * ed25519-signed request over the shared fixture (created pinned at
+ * ORTHROW_CREATED, verified at created+60 — no wall clock) and the
+ * same request with the first signature byte flipped (`buf[0] ^= 0xff`,
+ * the tamper construction from test/verifyErrors.test.ts).
+ * Reported as TWO separate rows (success / tampered), not merged:
+ * the success row is the unwrapping cost over `verifyRequest`, the
+ * tampered row additionally pays for VerifyError construction.
+ */
+function buildOrThrowFixture(): {
+  valid: SignedHttpRequest;
+  tampered: SignedHttpRequest;
+  verifyOpts: { key: ReturnType<typeof generateEd25519KeyPair>["publicKey"]; now: number };
+} {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const valid: SignedHttpRequest = signRequest(fixture, {
+    keyId: "bench-key",
+    alg: "ed25519",
+    key: privateKey,
+    created: ORTHROW_CREATED,
+  });
+  const sigHeader = valid.headers["signature"];
+  const tamperedSig = sigHeader.replace(
+    /:([A-Za-z0-9+/=]+):/,
+    (_m, b64: string) => {
+      const buf = Buffer.from(b64, "base64");
+      buf[0] ^= 0xff;
+      return `:${buf.toString("base64")}:`;
+    },
+  );
+  if (tamperedSig === sigHeader)
+    throw new Error("benchmark self-check failed: tamper did not change the signature");
+  const tampered: SignedHttpRequest = {
+    ...valid,
+    headers: { ...valid.headers, signature: tamperedSig },
+  };
+  return { valid, tampered, verifyOpts: { key: publicKey, now: ORTHROW_CREATED + 60 } };
+}
+
+function assertOrThrowFixture(
+  fx: ReturnType<typeof buildOrThrowFixture>,
+): void {
+  const ok = verifyRequestOrThrow(fx.valid, fx.verifyOpts);
+  if (ok.label !== "sig1" || ok.keyId !== "bench-key" || ok.alg !== "ed25519")
+    throw new Error(
+      `benchmark self-check failed: verifyRequestOrThrow(valid) gave ${JSON.stringify(ok)}`,
+    );
+  let thrown: unknown;
+  try {
+    verifyRequestOrThrow(fx.tampered, fx.verifyOpts);
+  } catch (e) {
+    thrown = e;
+  }
+  if (!isVerifyError(thrown) || thrown.code !== ORTHROW_TAMPERED_CODE)
+    throw new Error(
+      `benchmark self-check failed: verifyRequestOrThrow(tampered) gave ` +
+        `${thrown instanceof Error ? `${thrown.name}: ${thrown.message}` : "no throw"} ` +
+        `(expected VerifyError ${ORTHROW_TAMPERED_CODE})`,
+    );
+}
+
+/** `verifyRequestOrThrow` success path: result unwrapping, no throw. */
+function benchmarkVerifyRequestOrThrowOk(): number {
+  const fx = buildOrThrowFixture();
+  assertOrThrowFixture(fx);
+  return measure(() => {
+    const r = verifyRequestOrThrow(fx.valid, fx.verifyOpts);
+    if (r.label !== "sig1" || r.keyId !== "bench-key" || r.alg !== "ed25519")
+      throw new Error(
+        "benchmark self-check failed: verifyRequestOrThrow(valid) diverged in the measured loop",
+      );
+  }, ITERATIONS);
+}
+
+/**
+ * `verifyRequestOrThrow` failure path: every call must throw a
+ * VerifyError carrying the pinned code; the throw count afterwards
+ * must equal warmup + timed iterations exactly.
+ */
+function benchmarkVerifyRequestOrThrowTampered(): number {
+  const fx = buildOrThrowFixture();
+  assertOrThrowFixture(fx);
+  let thrownCount = 0;
+  const ops = measure(() => {
+    let thrown: unknown;
+    try {
+      verifyRequestOrThrow(fx.tampered, fx.verifyOpts);
+    } catch (e) {
+      thrown = e;
+    }
+    if (!isVerifyError(thrown) || thrown.code !== ORTHROW_TAMPERED_CODE)
+      throw new Error(
+        "benchmark self-check failed: verifyRequestOrThrow(tampered) did not throw the pinned VerifyError in the measured loop",
+      );
+    thrownCount++;
+  }, ITERATIONS);
+  if (thrownCount !== WARMUP + ITERATIONS)
+    throw new Error(
+      `benchmark self-check failed: ${thrownCount} tampered throws (expected ${WARMUP + ITERATIONS})`,
+    );
+  return ops;
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -1524,6 +1647,16 @@ results.push({
   alg: "canonicalizeStructuredFieldValue (6 values)",
   op: "canon",
   ops: benchmarkCanonicalizeStructuredFieldValue(),
+});
+results.push({
+  alg: "verifyRequestOrThrow (valid)",
+  op: "verify",
+  ops: benchmarkVerifyRequestOrThrowOk(),
+});
+results.push({
+  alg: "verifyRequestOrThrow (tampered)",
+  op: "throw",
+  ops: benchmarkVerifyRequestOrThrowTampered(),
 });
 
 console.log("alg                                    op      throughput");

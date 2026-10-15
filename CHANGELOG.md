@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `verifyRequestOrThrow` — the throwing verify wrapper a
+  middleware-style caller uses — as two separate rows over a
+  fixed ed25519 fixture: the success path (result unwrapping
+  over one valid request) and the failure path over the same
+  request with one signature byte flipped, where every measured
+  call catches a `VerifyError` asserted via `isVerifyError` to
+  carry the pinned `SIGNATURE_MISMATCH` code, so the exception-
+  construction cost is priced separately. Self-checks run
+  outside timing and on every measured call. The README
+  Benchmarks table was refreshed wholesale from one real run
+  and now carries the `verify` / `throw` rows. The bench
+  performs zero network I/O and makes no wall-clock assertions.
 - The CLI demo (`npm run demo`) now also closes with a JWK
   thumbprint segment: the demo public key is exported as a JWK, its
   RFC 7638 `jwkThumbprint` is printed, and a request signed with
