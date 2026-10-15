@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a structured-field
+  canonicalization segment: three fixed field values (a Dictionary
+  with a Decimal member, an Integer Item with leading zeros, a
+  Dictionary Byte Sequence member) are run through
+  `canonicalizeStructuredFieldValue` and printed as raw ->
+  canonical pairs, showing the form a verifier actually compares
+  for a `;sf` covered component (Decimals gain three fractional
+  digits, leading-zero Integers collapse, Byte Sequences are
+  re-encoded). Every expectation is hand-pinned from the RFC 8941
+  §4 rules, matching the values pinned in the `;sf` component
+  tests and the bench corpus; the segment performs zero network
+  I/O and is byte-identical between runs.
 - The benchmark (`npm run bench`) now also measures
   `serializeDictionaryMemberValue` — the single-member extraction
   every `;key` covered component pays on the signer and the

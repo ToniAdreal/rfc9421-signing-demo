@@ -30,6 +30,16 @@
  * demo public key is exported as a JWK, its `jwkThumbprint` is
  * printed, and a request signed with that thumbprint as its `keyid`
  * verifies under `expectedKeyId` pinned to the same thumbprint.
+ * The demo closes with a structured-field canonicalization segment:
+ * three fixed field values (a Dictionary with a Decimal member, an
+ * Integer Item with leading zeros, a Dictionary Byte Sequence
+ * member) are run through `canonicalizeStructuredFieldValue` and
+ * printed as raw -> canonical pairs — the canonical form is what a
+ * verifier actually compares for a `;sf` covered component, because
+ * it re-serializes the parsed value strictly (Decimals gain three
+ * fractional digits, leading-zero Integers collapse, Byte Sequences
+ * are re-encoded). Every input and expectation is a fixed constant,
+ * so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -57,6 +67,7 @@ import { fileURLToPath } from "node:url";
 import {
   addSignature,
   buildSignatureBase,
+  canonicalizeStructuredFieldValue,
   exportPublicKeyJwk,
   fromNodeRequest,
   generateEd25519KeyPair,
@@ -156,6 +167,36 @@ export const DEMO_JWKS_FETCHED_AT_SEC = DEMO_CREATED;
  * demo's own private key.
  */
 export const DEMO_UNKNOWN_KEY_ID = "demo-unknown-key-1";
+/**
+ * Fixed structured-field values of the closing canonicalization
+ * segment, with the canonical form of each hand-pinned from the
+ * RFC 8941 §4 strict-serialization rules (the same values pinned
+ * independently in `test/sfComponent.test.ts` and the bench corpus)
+ * — the demo never derives an expectation from the function it
+ * demonstrates.
+ */
+export const DEMO_SF_CANONICALIZATION: ReadonlyArray<{
+  name: string;
+  input: string;
+  expected: string;
+}> = [
+  {
+    name: "dictionary-decimal",
+    input: "limit=1500, remaining=1.5",
+    expected: "limit=1500, remaining=1.500",
+  },
+  {
+    name: "item-leading-zero-integer",
+    input: "007",
+    expected: "7",
+  },
+  {
+    name: "dictionary-byte-sequence",
+    input: "sig=:aGVsbG8=:;x=?0",
+    expected: "sig=:aGVsbG8=:;x=?0",
+  },
+];
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -268,6 +309,15 @@ export interface DemoResult {
    * to the thumbprint (ok — thumbprint-as-keyid binding holds).
    */
   thumbprintVerification: VerifyResult;
+  /**
+   * The closing canonicalization segment's results: each fixed input
+   * paired with its `canonicalizeStructuredFieldValue` output.
+   */
+  sfCanonicalization: ReadonlyArray<{
+    name: string;
+    input: string;
+    canonical: string;
+  }>;
   lines: string[];
 }
 
@@ -583,6 +633,18 @@ export function runDemo(): DemoResult {
     expectedKeyId: thumbprint,
   });
 
+  // Canonicalization segment: a `;sf` covered component is not
+  // compared as wire bytes — the verifier parses the field value and
+  // re-serializes it strictly, so the canonical form below is the
+  // value that actually enters the signature base. All three inputs
+  // are fixed constants (expectations hand-pinned in
+  // DEMO_SF_CANONICALIZATION), so this segment is deterministic.
+  const sfCanonicalization = DEMO_SF_CANONICALIZATION.map((c) => ({
+    name: c.name,
+    input: c.input,
+    canonical: canonicalizeStructuredFieldValue(c.input),
+  }));
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -654,6 +716,11 @@ export function runDemo(): DemoResult {
     thumbprintVerification.ok
       ? `Thumbprint-as-keyid verification: OK (label ${thumbprintVerification.label}, keyid="${thumbprintVerification.keyId}", alg="${thumbprintVerification.alg}")`
       : `Thumbprint-as-keyid verification: FAILED (code ${thumbprintVerification.code}: ${thumbprintVerification.reason})`,
+    "",
+    "Structured-field canonicalization (;sf): a verifier compares the parsed value re-serialized strictly, not the wire bytes",
+    ...sfCanonicalization.map(
+      (c) => `Canonicalize ${c.name}: ${c.input} -> ${c.canonical}`,
+    ),
   ];
 
   return {
@@ -682,6 +749,7 @@ export function runDemo(): DemoResult {
     thumbprint,
     thumbprintSigned,
     thumbprintVerification,
+    sfCanonicalization,
     lines,
   };
 }

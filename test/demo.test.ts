@@ -16,6 +16,7 @@ import {
   DEMO_INBOUND_WRONG_SCHEME,
   DEMO_GATEWAY_LABEL,
   DEMO_GATEWAY_SECRET,
+  DEMO_SF_CANONICALIZATION,
   DEMO_JWKS_FETCHED_AT_SEC,
   DEMO_JWKS_URL,
   DEMO_KEY_ID,
@@ -519,6 +520,51 @@ test("demo lines contain the thumbprint segment (thumbprint printed, thumbprint-
   );
 });
 
+test("demo canonicalization segment canonicalizes the fixed corpus to the hand-pinned forms", () => {
+  const { sfCanonicalization } = runDemo();
+
+  // Expectations are the literal values pinned in
+  // DEMO_SF_CANONICALIZATION (hand-derived from RFC 8941 §4, matching
+  // test/sfComponent.test.ts and the bench corpus) — the test pins
+  // them again here so a drift in either place fails loudly.
+  assert.deepEqual(sfCanonicalization, [
+    {
+      name: "dictionary-decimal",
+      input: "limit=1500, remaining=1.5",
+      canonical: "limit=1500, remaining=1.500",
+    },
+    {
+      name: "item-leading-zero-integer",
+      input: "007",
+      canonical: "7",
+    },
+    {
+      name: "dictionary-byte-sequence",
+      input: "sig=:aGVsbG8=:;x=?0",
+      canonical: "sig=:aGVsbG8=:;x=?0",
+    },
+  ]);
+  assert.deepEqual(
+    DEMO_SF_CANONICALIZATION.map((c) => c.expected),
+    sfCanonicalization.map((c) => c.canonical),
+  );
+});
+
+test("demo lines contain the canonicalization segment (raw -> canonical pairs)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Structured-field canonicalization \(;sf\): a verifier compares the parsed value re-serialized strictly, not the wire bytes/);
+  assert.ok(out.includes("Canonicalize dictionary-decimal: limit=1500, remaining=1.5 -> limit=1500, remaining=1.500"));
+  assert.ok(out.includes("Canonicalize item-leading-zero-integer: 007 -> 7"));
+  assert.ok(out.includes("Canonicalize dictionary-byte-sequence: sig=:aGVsbG8=:;x=?0 -> sig=:aGVsbG8=:;x=?0"));
+  // The segment closes the demo: its last pair is the final line.
+  assert.equal(
+    lines[lines.length - 1],
+    "Canonicalize dictionary-byte-sequence: sig=:aGVsbG8=:;x=?0 -> sig=:aGVsbG8=:;x=?0",
+  );
+});
+
 test("compiled demo script exits 0 and prints success plus tamper rejection", () => {
   const out = execFileSync("node", [path.join(repoRoot, "dist", "src", "demo.js")], {
     encoding: "utf8",
@@ -564,4 +610,7 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   );
   assert.match(out, /JWK thumbprint: RFC 7638 thumbprint of the demo ed25519 public JWK is "[A-Za-z0-9_-]{43}"/);
   assert.match(out, /Thumbprint-as-keyid verification: OK /);
+  assert.match(out, /Structured-field canonicalization \(;sf\):/);
+  assert.match(out, /Canonicalize dictionary-decimal: limit=1500, remaining=1\.5 -> limit=1500, remaining=1\.500/);
+  assert.match(out, /Canonicalize item-leading-zero-integer: 007 -> 7/);
 });
