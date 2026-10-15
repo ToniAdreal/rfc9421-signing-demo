@@ -30,6 +30,14 @@
  * demo public key is exported as a JWK, its `jwkThumbprint` is
  * printed, and a request signed with that thumbprint as its `keyid`
  * verifies under `expectedKeyId` pinned to the same thumbprint.
+ * Right after the main line's verification, the demo also prints a
+ * signature-base segment: the RFC 9421 §2.5 signature base of the
+ * main signed request — the exact string that was signed — rebuilt
+ * with `buildSignatureBase` over the request's actual covered
+ * components, so readers can compare it line by line with the RFC
+ * text. The base carries no key or signature bytes and every input
+ * is a fixed demo constant, so the printed base is identical
+ * between runs.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the library
@@ -48,6 +56,7 @@
 import { fileURLToPath } from "node:url";
 import {
   addSignature,
+  buildSignatureBase,
   exportPublicKeyJwk,
   fromNodeRequest,
   generateEd25519KeyPair,
@@ -74,6 +83,18 @@ export const DEMO_TAMPERED_BODY = JSON.stringify({
   amount: 101,
   currency: "USD",
 });
+/**
+ * Components the main `sig1` signature covers: `signRequest`'s
+ * default set for a request with a body. It is repeated here
+ * explicitly so the signature-base segment below can rebuild the
+ * base over exactly the set the signer used.
+ */
+export const DEMO_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+  "content-digest",
+];
 /** Label of the gateway's appended second signature. */
 export const DEMO_GATEWAY_LABEL = "gateway";
 export const DEMO_GATEWAY_KEY_ID = "gateway-key-1";
@@ -176,6 +197,8 @@ export interface DemoResult {
   signed: SignedHttpRequest;
   tamperedBody: string;
   verification: VerifyResult;
+  /** RFC 9421 §2.5 signature base of the main `sig1` signed request. */
+  signatureBase: string;
   tamperedVerification: VerifyResult;
   /** The request after the gateway appended its second signature. */
   dualSigned: SignedHttpRequest;
@@ -283,6 +306,24 @@ export function runDemo(): DemoResult {
     key: publicKey,
     now: DEMO_CREATED + 60,
   });
+
+  // Signature-base segment: rebuild the RFC 9421 §2.5 signature base
+  // of the main signed request over exactly the components and
+  // parameters the signer used (the signed request itself carries
+  // the resolved `content-digest` header value the base binds). The
+  // base is the exact string that was signed; it contains no key or
+  // signature bytes and every input is a fixed demo constant, so it
+  // is identical between runs even though the key pair is fresh.
+  const signatureBase = buildSignatureBase(
+    [...DEMO_COVERED_COMPONENTS],
+    signed,
+    {
+      created: DEMO_CREATED,
+      keyid: DEMO_KEY_ID,
+      alg: "ed25519",
+      nonce: DEMO_NONCE,
+    },
+  );
 
   // One byte of the body changed (100 -> 101); the headers — including
   // the signed content-digest — are left untouched, exactly as a
@@ -553,6 +594,10 @@ export function runDemo(): DemoResult {
       ? `Verification: OK (label ${verification.label}, keyid="${verification.keyId}", alg="${verification.alg}", nonce="${verification.nonce}")`
       : `Verification: FAILED (code ${verification.code}: ${verification.reason})`,
     "",
+    "Signature base (RFC 9421 §2.5): the exact string signed for the main sig1 signature, rebuilt with buildSignatureBase",
+    ...signatureBase.split("\n"),
+    `Each base line above is one covered component in order (${DEMO_COVERED_COMPONENTS.map((c) => `"${c}"`).join(", ")}); the final "@signature-params" line binds that covered set to the signature parameters (created, keyid, alg, nonce)`,
+    "",
     `Tampered body: ${DEMO_TAMPERED_BODY} (one byte changed: amount 100 -> 101)`,
     tamperedVerification.ok
       ? "Verification after tampering: OK (unexpected — tampering was not detected)"
@@ -615,6 +660,7 @@ export function runDemo(): DemoResult {
     signed,
     tamperedBody: DEMO_TAMPERED_BODY,
     verification,
+    signatureBase,
     tamperedVerification,
     dualSigned,
     dualVerification,

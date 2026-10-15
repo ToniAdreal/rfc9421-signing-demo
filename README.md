@@ -15,14 +15,18 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 668 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 670 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
 pair, signs a fixed payment request (with `Content-Digest` and a
 `nonce`), prints the `Signature-Input` / `Signature` headers, and
-verifies it; then it tampers the body by one byte and shows the
-verifier rejecting it with `BODY_DIGEST_MISMATCH`. The demo then
+verifies it. It then prints the signature-base segment: the
+RFC 9421 §2.5 signature base of the main signature — the exact
+string that was signed — rebuilt with `buildSignatureBase` over
+its covered components, followed by a line mapping each base line
+to its covered component. It then tampers the body by one byte and
+shows the verifier rejecting it with `BODY_DIGEST_MISMATCH`. The demo then
 continues with the multi-party flow: a payment gateway appends a
 second signature with `addSignature` (hmac-sha256, label `gateway`),
 the merged headers are printed, `verifyAllLabels` verifies both
@@ -1264,7 +1268,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 668 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 670 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

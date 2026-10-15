@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now also prints a signature-base
+  segment right after the main line's verification: the RFC 9421
+  §2.5 signature base of the main `sig1` signature — the exact
+  string that was signed — rebuilt with `buildSignatureBase` over
+  the request's actual covered components (`@method`, `@authority`,
+  `@path`, `content-digest`), followed by a line mapping each base
+  line to its covered component. The base carries no key or
+  signature bytes and every input is a fixed demo constant, so the
+  segment is byte-identical between runs; it performs zero
+  network I/O.
 - The benchmark (`npm run bench`) now also measures
   `verifyRequestOrThrow` — the throwing verify wrapper a
   middleware-style caller uses — as two separate rows over a

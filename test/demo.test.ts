@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   DEMO_BODY,
+  DEMO_COVERED_COMPONENTS,
   DEMO_CREATED,
   DEMO_GATEWAY_KEY_ID,
   DEMO_INBOUND_COVERED_COMPONENTS,
@@ -85,6 +86,83 @@ test("demo lines contain the headers, the success, and the tamper rejection", ()
     out,
     /Verification after tampering: FAILED \(code BODY_DIGEST_MISMATCH:/,
   );
+});
+
+// Hand-written expectation for the main line's RFC 9421 §2.5
+// signature base. Every line was derived by hand from the demo's
+// fixed inputs, NOT from the implementation's output: the component
+// values are the request's method / authority / path, the
+// content-digest is the sha-512 of DEMO_BODY (cross-checked with
+// `openssl dgst -sha512`), and the @signature-params line lists the
+// covered set in order with the signer's parameters in wire order
+// (created, keyid, alg, nonce).
+const EXPECTED_SIGNATURE_BASE = [
+  '"@method": POST',
+  '"@authority": api.example.com',
+  '"@path": /v1/payments',
+  '"content-digest": sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:',
+  '"@signature-params": ("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001"',
+].join("\n");
+
+const EXPECTED_SIGNATURE_BASE_EXPLANATION =
+  'Each base line above is one covered component in order ("@method", "@authority", "@path", "content-digest"); the final "@signature-params" line binds that covered set to the signature parameters (created, keyid, alg, nonce)';
+
+test("demo signature base segment rebuilds the main line's base byte-for-byte", () => {
+  const { signed, signatureBase } = runDemo();
+
+  // The demo's stated covered set is the signer's default set for a
+  // request with a body, in order.
+  assert.deepEqual(DEMO_COVERED_COMPONENTS, [
+    "@method",
+    "@authority",
+    "@path",
+    "content-digest",
+  ]);
+
+  // The rebuilt base equals the hand-written expectation exactly.
+  assert.equal(signatureBase, EXPECTED_SIGNATURE_BASE);
+
+  // Cross-check (not the expectation source): the base's final line
+  // is the wire Signature-Input value for sig1, prefixed as a base
+  // line — the string that was signed binds the same wire params.
+  const paramsLine = signatureBase.split("\n").at(-1);
+  assert.equal(
+    paramsLine,
+    `"@signature-params": ${signed.headers["signature-input"].slice("sig1=".length)}`,
+  );
+
+  // The base carries no key or signature bytes and every input is a
+  // fixed constant, so it is identical across runs even though each
+  // run generates a fresh key pair.
+  assert.equal(runDemo().signatureBase, signatureBase);
+});
+
+test("demo lines print the signature base block verbatim, followed by its explanation", () => {
+  const { lines } = runDemo();
+
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Signature base (RFC 9421 §2.5):"),
+  );
+  assert.notEqual(headerIdx, -1);
+  // The segment sits after the main verification line and before
+  // the tampered-body segment.
+  const verificationIdx = lines.findIndex((l) =>
+    l.startsWith("Verification: OK"),
+  );
+  const tamperedIdx = lines.findIndex((l) =>
+    l.startsWith("Tampered body:"),
+  );
+  assert.ok(verificationIdx !== -1 && verificationIdx < headerIdx);
+  assert.ok(tamperedIdx !== -1 && headerIdx < tamperedIdx);
+
+  // The printed block is the hand-written base, verbatim and in
+  // order, and the very next line is the explanation of how the
+  // base lines map to the covered components.
+  assert.deepEqual(
+    lines.slice(headerIdx + 1, headerIdx + 6),
+    EXPECTED_SIGNATURE_BASE.split("\n"),
+  );
+  assert.equal(lines[headerIdx + 6], EXPECTED_SIGNATURE_BASE_EXPLANATION);
 });
 
 test("demo gateway addSignature second label verifies alongside sig1", () => {
@@ -454,6 +532,9 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
     out,
     /Verification after tampering: FAILED \(code BODY_DIGEST_MISMATCH:/,
   );
+  assert.match(out, /Signature base \(RFC 9421 §2\.5\): the exact string signed/);
+  assert.match(out, /"@method": POST\n"@authority": api\.example\.com\n"@path": \/v1\/payments/);
+  assert.match(out, /Each base line above is one covered component in order/);
   assert.match(out, /Dual Signature-Input: sig1=.*gateway=/);
   assert.match(out, /Dual verification gateway: OK /);
   assert.match(
