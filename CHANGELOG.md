@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now also closes with a JWK
+  thumbprint segment: the demo public key is exported as a JWK, its
+  RFC 7638 `jwkThumbprint` is printed, and a request signed with
+  that thumbprint as its `keyid` verifies with `expectedKeyId`
+  pinned to the same thumbprint, showing the fingerprint-as-keyid
+  binding. The segment performs zero network I/O; the thumbprint
+  is derived from the demo's fresh key, so it differs between runs
+  like the signature itself.
 - The benchmark (`npm run bench`) now also measures
   `canonicalizeStructuredFieldValue` — the parse-then-strictly-
   reserialize step every `;sf` covered component pays on the

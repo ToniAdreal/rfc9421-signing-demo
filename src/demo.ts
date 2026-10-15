@@ -26,6 +26,10 @@
  * restored offline from a snapshot of the demo public key, the demo
  * request verifies through its key resolver, and a request signed
  * under an unknown `keyid` is rejected with `KEY_RESOLUTION_FAILED`.
+ * The closing segment demonstrates RFC 7638 thumbprint keyids: the
+ * demo public key is exported as a JWK, its `jwkThumbprint` is
+ * printed, and a request signed with that thumbprint as its `keyid`
+ * verifies under `expectedKeyId` pinned to the same thumbprint.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the library
@@ -47,6 +51,7 @@ import {
   exportPublicKeyJwk,
   fromNodeRequest,
   generateEd25519KeyPair,
+  jwkThumbprint,
   JwksKeyStore,
   ReplayCache,
   secretKey,
@@ -130,6 +135,8 @@ export const DEMO_JWKS_FETCHED_AT_SEC = DEMO_CREATED;
  * demo's own private key.
  */
 export const DEMO_UNKNOWN_KEY_ID = "demo-unknown-key-1";
+/** Nonce of the thumbprint segment's signed request. */
+export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
  * Host (with port) of the inbound segment's mock `IncomingMessage`:
  * `fromNodeRequest` preserves the port verbatim in the rebuilt URL's
@@ -229,6 +236,15 @@ export interface DemoResult {
    * through the same resolver: rejected with `KEY_RESOLUTION_FAILED`.
    */
   jwksUnknownKeyVerification: VerifyResult;
+  /** RFC 7638 thumbprint of the demo public key's exported JWK. */
+  thumbprint: string;
+  /** The request signed with `thumbprint` as its `keyid`. */
+  thumbprintSigned: SignedHttpRequest;
+  /**
+   * Verification of `thumbprintSigned` with `expectedKeyId` pinned
+   * to the thumbprint (ok — thumbprint-as-keyid binding holds).
+   */
+  thumbprintVerification: VerifyResult;
   lines: string[];
 }
 
@@ -496,6 +512,36 @@ export function runDemo(): DemoResult {
     now: DEMO_CREATED + 60,
   });
 
+  // Thumbprint segment: a gateway that receives the demo public key
+  // as a JWK needs a stable keyid for it. RFC 7638 defines that
+  // identifier: hash the JWK's required members in canonical form.
+  // The thumbprint is derived from the demo's (fresh) public key, so
+  // like the signature itself it differs between runs; signing a
+  // request with the thumbprint as `keyid` and verifying with
+  // `expectedKeyId` pinned to it shows the fingerprint-as-keyid
+  // binding a verifier would enforce.
+  const thumbprint = jwkThumbprint(exportPublicKeyJwk(publicKey));
+  const thumbprintSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: thumbprint,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_THUMBPRINT_NONCE,
+    },
+  );
+  const thumbprintVerification = verifyRequest(thumbprintSigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    expectedKeyId: thumbprint,
+  });
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -558,6 +604,11 @@ export function runDemo(): DemoResult {
     jwksUnknownKeyVerification.ok
       ? `JWKS verification for unknown keyid "${DEMO_UNKNOWN_KEY_ID}": OK (unexpected — unknown keyid was not rejected)`
       : `JWKS verification for unknown keyid "${DEMO_UNKNOWN_KEY_ID}": FAILED (code ${jwksUnknownKeyVerification.code}: ${jwksUnknownKeyVerification.reason})`,
+    "",
+    `JWK thumbprint: RFC 7638 thumbprint of the demo ed25519 public JWK is "${thumbprint}"`,
+    thumbprintVerification.ok
+      ? `Thumbprint-as-keyid verification: OK (label ${thumbprintVerification.label}, keyid="${thumbprintVerification.keyId}", alg="${thumbprintVerification.alg}")`
+      : `Thumbprint-as-keyid verification: FAILED (code ${thumbprintVerification.code}: ${thumbprintVerification.reason})`,
   ];
 
   return {
@@ -582,6 +633,9 @@ export function runDemo(): DemoResult {
     jwksStoreSize: jwksStore.size,
     jwksVerification,
     jwksUnknownKeyVerification,
+    thumbprint,
+    thumbprintSigned,
+    thumbprintVerification,
     lines,
   };
 }

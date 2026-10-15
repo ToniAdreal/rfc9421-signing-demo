@@ -24,6 +24,7 @@ import {
   DEMO_REPLAY_CACHE_TTL_SEC,
   DEMO_TAMPERED_BODY,
   DEMO_TAMPERED_CONTENT_TYPE,
+  DEMO_THUMBPRINT_NONCE,
   DEMO_UNKNOWN_KEY_ID,
   runDemo,
 } from "../src/demo.js";
@@ -205,7 +206,13 @@ test("demo request data is deterministic across runs (fresh key aside)", () => {
   // is filtered too (the gateway HMAC signature in it is deterministic).
   const withoutSignature = (lines: string[]) =>
     lines.filter(
-      (l) => !l.startsWith("Signature: ") && !l.startsWith("Dual Signature: "),
+      (l) =>
+        !l.startsWith("Signature: ") &&
+        !l.startsWith("Dual Signature: ") &&
+        // The thumbprint is derived from the fresh key, so it (and the
+        // verification line quoting it as keyid) varies like a signature.
+        !l.startsWith("JWK thumbprint: ") &&
+        !l.startsWith("Thumbprint-as-keyid verification: "),
     );
   assert.deepEqual(withoutSignature(a.lines), withoutSignature(b.lines));
   assert.equal(a.signed.headers["signature-input"], b.signed.headers["signature-input"]);
@@ -390,6 +397,50 @@ test("demo lines contain the JWKS segment (hit verifies, unknown keyid rejected)
   );
 });
 
+test("demo thumbprint segment derives the RFC 7638 thumbprint and binds it as keyid", () => {
+  const { thumbprint, thumbprintSigned, thumbprintVerification } = runDemo();
+
+  // A SHA-256 thumbprint is a 43-char base64url digest (RFC 7638).
+  assert.match(thumbprint, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(thumbprint, DEMO_KEY_ID);
+
+  // The segment's request is signed under the thumbprint itself.
+  assert.ok(
+    thumbprintSigned.headers["signature-input"].includes(
+      `keyid="${thumbprint}"`,
+    ),
+  );
+  assert.ok(
+    thumbprintSigned.headers["signature-input"].includes(
+      `nonce="${DEMO_THUMBPRINT_NONCE}"`,
+    ),
+  );
+  assert.equal(thumbprintSigned.body, DEMO_BODY);
+
+  // Verification with expectedKeyId pinned to the thumbprint passes.
+  assert.equal(thumbprintVerification.ok, true);
+  assert.equal(thumbprintVerification.keyId, thumbprint);
+  assert.equal(thumbprintVerification.alg, "ed25519");
+});
+
+test("demo lines contain the thumbprint segment (thumbprint printed, thumbprint-as-keyid verifies)", () => {
+  const { lines, thumbprint } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    new RegExp(
+      `JWK thumbprint: RFC 7638 thumbprint of the demo ed25519 public JWK is "${thumbprint}"`,
+    ),
+  );
+  assert.match(
+    out,
+    new RegExp(
+      `Thumbprint-as-keyid verification: OK \\(label sig1, keyid="${thumbprint}", alg="ed25519"\\)`,
+    ),
+  );
+});
+
 test("compiled demo script exits 0 and prints success plus tamper rejection", () => {
   const out = execFileSync("node", [path.join(repoRoot, "dist", "src", "demo.js")], {
     encoding: "utf8",
@@ -430,4 +481,6 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
     out,
     /JWKS verification for unknown keyid "demo-unknown-key-1": FAILED \(code KEY_RESOLUTION_FAILED:/,
   );
+  assert.match(out, /JWK thumbprint: RFC 7638 thumbprint of the demo ed25519 public JWK is "[A-Za-z0-9_-]{43}"/);
+  assert.match(out, /Thumbprint-as-keyid verification: OK /);
 });
