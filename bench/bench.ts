@@ -75,7 +75,15 @@
  * the same request with one signature byte flipped, each
  * self-checked on every measured call (see ORTHROW_* below), so the
  * cost difference between the result-object and throwing APIs —
- * including exception construction on failure — is visible.
+ * including exception construction on failure — is visible, plus
+ * the single-member extraction every `;key` covered component
+ * pays: `serializeDictionaryMemberValue` over one fixed
+ * multi-member Dictionary value and a fixed six-key set (see
+ * DICT_MEMBER_* below), self-checked on every measured pass
+ * against hand-pinned expected serializations with the
+ * missing-key throw asserted outside timing, so the
+ * parse-whole-dictionary-then-extract-one-member cost is visible
+ * apart from the whole-value canonicalization above.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -113,6 +121,7 @@ import {
   parseSignatureInput,
   ReplayCache,
   secretKey,
+  serializeDictionaryMemberValue,
   signRequest,
   verifyAllLabels,
   verifyRequest,
@@ -1391,6 +1400,100 @@ function benchmarkCanonicalizeStructuredFieldValue(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed corpus for the `serializeDictionaryMemberValue` path —
+ * one multi-member Dictionary value written out literally here,
+ * plus a fixed six-key extraction set covering the member shapes
+ * a gateway's `;key` components actually select. Every expected
+ * serialization is hand-pinned below from the RFC 8941 §4.1.2
+ * member-serialization rules — the member value WITHOUT its
+ * Dictionary key, parameters still attached — and matches the
+ * values pinned independently in test/keyComponent.test.ts (the
+ * `a` / `b` / `c` / `d` members of its DICT fixture and the
+ * `n=1.5` decimal case) and test/sfComponent.test.ts (the Byte
+ * Sequence member's canonical form) — never derived from
+ * `serializeDictionaryMemberValue` at bench time:
+ * - a: an Integer member, already canonical → `1`.
+ * - b: a member carrying parameters → `2;x=1;y=2` (the
+ *   parameters stay attached to the extracted member value).
+ * - n: a Decimal member → `1.500` (exactly three fractional
+ *   digits, the same rule the `;sf` corpus pins).
+ * - sig: a Byte Sequence member with a Boolean parameter →
+ *   `:aGVsbG8=:;x=?0` (base64 re-encoded canonically).
+ * - c: an Inner List member → `(a b c)`.
+ * - d: a bare key — a Boolean-true member serializes as `?1`,
+ *   the key itself is not included.
+ */
+const DICT_MEMBER_VALUE =
+  "a=1, b=2;x=1;y=2, n=1.5, sig=:aGVsbG8=:;x=?0, c=(a b c), d";
+const DICT_MEMBER_FIXTURE: ReadonlyArray<{
+  key: string;
+  expected: string;
+}> = [
+  { key: "a", expected: "1" },
+  { key: "b", expected: "2;x=1;y=2" },
+  { key: "n", expected: "1.500" },
+  { key: "sig", expected: ":aGVsbG8=:;x=?0" },
+  { key: "c", expected: "(a b c)" },
+  { key: "d", expected: "?1" },
+];
+
+/**
+ * `serializeDictionaryMemberValue` steady state: one measured
+ * call is one pass over the whole fixed key set (6 extractions
+ * per op, each re-parsing the whole Dictionary value — that is
+ * the function's actual contract, there is no incremental API)
+ * — the single-member extraction every `;key` covered component
+ * pays on the signer and the verifier, isolated from the
+ * end-to-end `;key` verify path and from the whole-value
+ * `canonicalizeStructuredFieldValue` path above, whose cost
+ * covers reserializing every member rather than one. Self-checks:
+ * every fixture entry is verified against its hand-pinned
+ * expectation outside timing first, a missing key (`zzz`) must
+ * throw "not present" outside timing, and the measured loop
+ * re-pins every entry's result on every pass. Zero network, zero
+ * randomness, no wall-clock assertions.
+ */
+function benchmarkSerializeDictionaryMemberValue(): number {
+  for (const entry of DICT_MEMBER_FIXTURE) {
+    const actual = serializeDictionaryMemberValue(
+      DICT_MEMBER_VALUE,
+      entry.key,
+    );
+    if (actual !== entry.expected)
+      throw new Error(
+        `benchmark self-check failed: member ${entry.key} serialized to ${JSON.stringify(actual)} ` +
+          `(expected ${JSON.stringify(entry.expected)})`,
+      );
+  }
+  let missingThrown: unknown;
+  try {
+    serializeDictionaryMemberValue(DICT_MEMBER_VALUE, "zzz");
+  } catch (e) {
+    missingThrown = e;
+  }
+  if (
+    !(missingThrown instanceof Error) ||
+    !missingThrown.message.includes("not present")
+  )
+    throw new Error(
+      `benchmark self-check failed: missing key did not throw "not present" ` +
+        `(got ${missingThrown instanceof Error ? JSON.stringify(missingThrown.message) : "no throw"})`,
+    );
+  return measure(() => {
+    for (const entry of DICT_MEMBER_FIXTURE) {
+      const actual = serializeDictionaryMemberValue(
+        DICT_MEMBER_VALUE,
+        entry.key,
+      );
+      if (actual !== entry.expected)
+        throw new Error(
+          `benchmark self-check failed: member ${entry.key} extraction diverged from the pinned serialization`,
+        );
+    }
+  }, ITERATIONS);
+}
+
 /** Fixed `created` for the OrThrow fixture (no wall clock). */
 const ORTHROW_CREATED = 1_700_000_000;
 /** Pinned failure code for the tampered OrThrow fixture — written
@@ -1647,6 +1750,11 @@ results.push({
   alg: "canonicalizeStructuredFieldValue (6 values)",
   op: "canon",
   ops: benchmarkCanonicalizeStructuredFieldValue(),
+});
+results.push({
+  alg: "serializeDictionaryMemberValue (6 keys)",
+  op: "extract",
+  ops: benchmarkSerializeDictionaryMemberValue(),
 });
 results.push({
   alg: "verifyRequestOrThrow (valid)",

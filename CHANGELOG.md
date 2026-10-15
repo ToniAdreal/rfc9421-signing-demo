@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `serializeDictionaryMemberValue` — the single-member extraction
+  every `;key` covered component pays on the signer and the
+  verifier — as one pass over a fixed six-key set against one
+  fixed multi-member Dictionary value (an Integer member, a
+  member with parameters, a Decimal member, a Byte Sequence
+  member, an Inner List member and a bare key) per measured
+  call. Every expected serialization is hand-pinned in the bench
+  from the RFC 8941 §4.1.2 rules, a missing key's throw is
+  asserted outside timing, and every measured pass re-pins
+  every entry's result. The README Benchmarks table was
+  refreshed wholesale from one real run and now carries the
+  `extract` row. The bench performs zero network I/O and makes
+  no wall-clock assertions.
 - The CLI demo (`npm run demo`) now also prints a signature-base
   segment right after the main line's verification: the RFC 9421
   §2.5 signature base of the main `sig1` signature — the exact
