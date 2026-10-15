@@ -51,7 +51,15 @@
  * timing against a hand-written expected base text (see
  * BASE_EXPECTED below), so the cost of resolving covered
  * components and serializing the signature base is visible apart
- * from the algorithm costs it is normally bundled into. Numbers
+ * from the algorithm costs it is normally bundled into, plus the
+ * three standalone parsers a gateway pre-screen calls directly —
+ * `listSignatureLabels`, `parseSignatureInput` and
+ * `parseSignatureField` — over a fixed hand-written dual-label
+ * fixture (see PARSER_* below), self-checked outside timing
+ * against hand-pinned parse shapes and a hand-pinned malformed
+ * set that must all throw, so the pure parsing cost before any
+ * cryptography is visible apart from the end-to-end verify paths
+ * that bundle it. Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
@@ -80,7 +88,10 @@ import {
   importPublicKeyJwkRsa,
   JwksKeyStore,
   jwkThumbprint,
+  listSignatureLabels,
   memoizeKeyResolver,
+  parseSignatureField,
+  parseSignatureInput,
   ReplayCache,
   secretKey,
   signRequest,
@@ -1028,6 +1039,243 @@ function benchmarkBuildSignatureBase(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed dual-label wire fixture for the standalone-parser paths —
+ * written out literally here, NOT produced by `signRequest` at
+ * bench time, so the expected parse shapes pinned below are
+ * checked against the wire text itself:
+ * - `signature-input`: two members. `merchant` covers
+ *   `@method @authority @path content-digest` with parameters
+ *   created=1700000000, keyid="merchant-key", alg="ed25519",
+ *   nonce="bench-nonce" (no expires). `gateway` covers
+ *   `@method @authority content-type` with parameters
+ *   created=1700000060, expires=1700003600, keyid="gateway-key",
+ *   alg="hmac-sha256" (no nonce).
+ * - `signature`: the `merchant` member is the base64 of the 16
+ *   bytes 0,1,…,15; the `gateway` member is the base64 of the
+ *   11 ASCII bytes `hello-world`. Neither value is a real
+ *   signature — the parsers never verify, they only decode.
+ */
+const PARSER_INPUT =
+  'merchant=("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="merchant-key";alg="ed25519";nonce="bench-nonce", ' +
+  'gateway=("@method" "@authority" "content-type");created=1700000060;expires=1700003600;keyid="gateway-key";alg="hmac-sha256"';
+const PARSER_SIG =
+  "merchant=:AAECAwQFBgcICQoLDA0ODw==:, gateway=:aGVsbG8td29ybGQ=:";
+
+/** Hand-pinned parse shapes for the fixture above. */
+const PARSER_EXPECTED_LABELS = ["merchant", "gateway"] as const;
+const PARSER_EXPECTED_MERCHANT_COMPONENTS = [
+  "@method",
+  "@authority",
+  "@path",
+  "content-digest",
+] as const;
+const PARSER_EXPECTED_GATEWAY_COMPONENTS = [
+  "@method",
+  "@authority",
+  "content-type",
+] as const;
+const PARSER_EXPECTED_MERCHANT_BYTES = Buffer.from([
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+]);
+const PARSER_EXPECTED_GATEWAY_BYTES = Buffer.from("hello-world", "utf8");
+
+/**
+ * Hand-pinned malformed set for the standalone parsers: every entry
+ * must throw, with a message containing the pinned substring.
+ * (The two `parseSignatureField` shape cases report "not present"
+ * because that parser's only failure mode is finding no
+ * `:base64:` member for the label — pinned as its actual contract.)
+ */
+const PARSER_MALFORMED: ReadonlyArray<{
+  name: string;
+  run: () => unknown;
+  message: string;
+}> = [
+  {
+    name: "listSignatureLabels empty value",
+    run: () => listSignatureLabels(""),
+    message: "malformed Signature-Input member",
+  },
+  {
+    name: "listSignatureLabels trailing empty member",
+    run: () => listSignatureLabels('sig1=("@method");created=1, ,'),
+    message: "malformed Signature-Input member",
+  },
+  {
+    name: "parseSignatureInput unknown label",
+    run: () => parseSignatureInput(PARSER_INPUT, "missing"),
+    message: "not present in Signature-Input",
+  },
+  {
+    name: "parseSignatureInput unterminated inner list",
+    run: () => parseSignatureInput('sig1=("a"', "sig1"),
+    message: "unterminated inner list",
+  },
+  {
+    name: "parseSignatureInput missing inner list",
+    run: () => parseSignatureInput('sig1="a";created=1', "sig1"),
+    message: "expected inner list",
+  },
+  {
+    name: "parseSignatureField unknown label",
+    run: () => parseSignatureField(PARSER_SIG, "missing"),
+    message: "not present in Signature field",
+  },
+  {
+    name: "parseSignatureField non-base64 member value",
+    run: () => parseSignatureField("merchant=:!!!:", "merchant"),
+    message: "not present in Signature field",
+  },
+  {
+    name: "parseSignatureField member without colons",
+    run: () => parseSignatureField("merchant=aGk=", "merchant"),
+    message: "not present in Signature field",
+  },
+];
+
+function assertParserComponents(
+  actual: readonly string[],
+  expected: readonly string[],
+  what: string,
+): void {
+  if (
+    actual.length !== expected.length ||
+    actual.some((v, i) => v !== expected[i])
+  )
+    throw new Error(
+      `benchmark self-check failed: ${what} parsed to ${JSON.stringify(actual)} ` +
+        `(expected ${JSON.stringify(expected)})`,
+    );
+}
+
+/**
+ * Outside-timing self-checks for the standalone-parser fixture:
+ * the label list, both members' component lists and every pinned
+ * parameter, both members' decoded bytes, and the whole malformed
+ * set (each entry must throw with its pinned message substring).
+ */
+function assertParserFixture(): void {
+  const labels = listSignatureLabels(PARSER_INPUT);
+  assertParserComponents(labels, PARSER_EXPECTED_LABELS, "label list");
+
+  const merchant = parseSignatureInput(PARSER_INPUT, "merchant");
+  if (merchant.label !== "merchant")
+    throw new Error("benchmark self-check failed: merchant label mismatch");
+  assertParserComponents(
+    merchant.componentIds,
+    PARSER_EXPECTED_MERCHANT_COMPONENTS,
+    "merchant components",
+  );
+  if (
+    merchant.params.created !== 1700000000 ||
+    merchant.params.keyid !== "merchant-key" ||
+    merchant.params.alg !== "ed25519" ||
+    merchant.params.nonce !== "bench-nonce" ||
+    merchant.params.expires !== undefined
+  )
+    throw new Error(
+      `benchmark self-check failed: merchant params ${JSON.stringify(merchant.params)}`,
+    );
+
+  const gateway = parseSignatureInput(PARSER_INPUT, "gateway");
+  if (gateway.label !== "gateway")
+    throw new Error("benchmark self-check failed: gateway label mismatch");
+  assertParserComponents(
+    gateway.componentIds,
+    PARSER_EXPECTED_GATEWAY_COMPONENTS,
+    "gateway components",
+  );
+  if (
+    gateway.params.created !== 1700000060 ||
+    gateway.params.expires !== 1700003600 ||
+    gateway.params.keyid !== "gateway-key" ||
+    gateway.params.alg !== "hmac-sha256" ||
+    gateway.params.nonce !== undefined
+  )
+    throw new Error(
+      `benchmark self-check failed: gateway params ${JSON.stringify(gateway.params)}`,
+    );
+
+  if (!parseSignatureField(PARSER_SIG, "merchant").equals(PARSER_EXPECTED_MERCHANT_BYTES))
+    throw new Error(
+      "benchmark self-check failed: merchant signature bytes mismatch",
+    );
+  if (!parseSignatureField(PARSER_SIG, "gateway").equals(PARSER_EXPECTED_GATEWAY_BYTES))
+    throw new Error(
+      "benchmark self-check failed: gateway signature bytes mismatch",
+    );
+
+  for (const bad of PARSER_MALFORMED) {
+    let thrown: unknown;
+    try {
+      bad.run();
+    } catch (e) {
+      thrown = e;
+    }
+    if (!(thrown instanceof Error) || !thrown.message.includes(bad.message))
+      throw new Error(
+        `benchmark self-check failed: ${bad.name} did not throw "${bad.message}" ` +
+          `(got ${thrown instanceof Error ? JSON.stringify(thrown.message) : "no throw"})`,
+      );
+  }
+}
+
+/**
+ * Standalone-parser steady states: each measured call runs ONE of
+ * the three parsers over the valid dual-label fixture above (the
+ * three are reported as separate rows, matching the table) and
+ * re-pins the core of its expected result on every call. This is
+ * the pre-screening work a gateway does before any cryptography —
+ * splitting labels, parsing one member's covered components and
+ * parameters, decoding one member's signature bytes — isolated
+ * from the end-to-end `verifyRequest` paths that bundle it with
+ * base building and crypto. Zero network, zero randomness, no
+ * wall-clock assertions.
+ */
+function benchmarkListSignatureLabels(): number {
+  assertParserFixture();
+  return measure(() => {
+    const labels = listSignatureLabels(PARSER_INPUT);
+    if (
+      labels.length !== 2 ||
+      labels[0] !== "merchant" ||
+      labels[1] !== "gateway"
+    )
+      throw new Error(
+        "benchmark self-check failed: listSignatureLabels diverged from the pinned labels",
+      );
+  }, ITERATIONS);
+}
+
+function benchmarkParseSignatureInput(): number {
+  assertParserFixture();
+  return measure(() => {
+    const parsed = parseSignatureInput(PARSER_INPUT, "merchant");
+    if (
+      parsed.componentIds.length !== 4 ||
+      parsed.componentIds[3] !== "content-digest" ||
+      parsed.params.created !== 1700000000 ||
+      parsed.params.keyid !== "merchant-key" ||
+      parsed.params.nonce !== "bench-nonce"
+    )
+      throw new Error(
+        "benchmark self-check failed: parseSignatureInput diverged from the pinned shape",
+      );
+  }, ITERATIONS);
+}
+
+function benchmarkParseSignatureField(): number {
+  assertParserFixture();
+  return measure(() => {
+    const bytes = parseSignatureField(PARSER_SIG, "merchant");
+    if (!bytes.equals(PARSER_EXPECTED_MERCHANT_BYTES))
+      throw new Error(
+        "benchmark self-check failed: parseSignatureField diverged from the pinned bytes",
+      );
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -1152,6 +1400,21 @@ results.push({
   alg: "buildSignatureBase (4 components)",
   op: "build",
   ops: benchmarkBuildSignatureBase(),
+});
+results.push({
+  alg: "listSignatureLabels (2 labels)",
+  op: "parse",
+  ops: benchmarkListSignatureLabels(),
+});
+results.push({
+  alg: "parseSignatureInput (merchant)",
+  op: "parse",
+  ops: benchmarkParseSignatureInput(),
+});
+results.push({
+  alg: "parseSignatureField (merchant)",
+  op: "parse",
+  ops: benchmarkParseSignatureField(),
 });
 
 console.log("alg                                    op      throughput");

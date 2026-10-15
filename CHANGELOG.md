@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures the three
+  standalone signature parsers a gateway pre-screen calls
+  directly — `listSignatureLabels`, `parseSignatureInput` and
+  `parseSignatureField` — each as its own row over a fixed
+  hand-written dual-label fixture (`merchant` / `gateway`
+  members, written out literally in the bench, not produced by
+  `signRequest`). Self-checks outside timing pin both members'
+  label list, component lists, every parameter and both decoded
+  byte strings, plus a hand-pinned malformed set that must all
+  throw; every measured call re-pins the core of its result.
+  The README Benchmarks table was refreshed wholesale from one
+  real run and now carries the three `parse` rows. The bench
+  performs zero network I/O and makes no wall-clock assertions.
 - The CLI demo (`npm run demo`) now also shows an inbound
   normalization segment: a request signed against a host-with-port
   URL (with `@scheme` and a multi-value `x-trace-hops` header
