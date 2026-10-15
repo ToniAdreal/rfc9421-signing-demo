@@ -7,6 +7,12 @@ import {
   DEMO_BODY,
   DEMO_CREATED,
   DEMO_GATEWAY_KEY_ID,
+  DEMO_INBOUND_COVERED_COMPONENTS,
+  DEMO_INBOUND_HOST,
+  DEMO_INBOUND_NONCE,
+  DEMO_INBOUND_TRACE_HOPS,
+  DEMO_INBOUND_URL,
+  DEMO_INBOUND_WRONG_SCHEME,
   DEMO_GATEWAY_LABEL,
   DEMO_GATEWAY_SECRET,
   DEMO_JWKS_FETCHED_AT_SEC,
@@ -261,6 +267,76 @@ test("demo lines contain the sha-256 segment (comparison, verification, tamper r
   );
 });
 
+test("demo inbound segment normalizes a mock IncomingMessage and verifies it", () => {
+  const {
+    inboundSigned,
+    inboundNormalized,
+    inboundVerification,
+    inboundWrongSchemeVerification,
+  } = runDemo();
+
+  // The signer-side request is the port-carrying https URL, with
+  // @scheme and the multi-value trace header covered.
+  assert.equal(DEMO_INBOUND_URL, `https://${DEMO_INBOUND_HOST}/v1/payments`);
+  assert.ok(DEMO_INBOUND_COVERED_COMPONENTS.includes("@scheme"));
+  assert.ok(DEMO_INBOUND_COVERED_COMPONENTS.includes("x-trace-hops"));
+  assert.match(
+    inboundSigned.headers["signature-input"],
+    /\("@method" "@scheme" "@authority" "@path" "content-digest" "x-trace-hops"\)/,
+  );
+  assert.ok(
+    inboundSigned.headers["signature-input"].includes(
+      `nonce="${DEMO_INBOUND_NONCE}"`,
+    ),
+  );
+
+  // Normalization: method/url rebuilt from origin form + host with
+  // port, mixed-case names lowercased, multi-value header joined.
+  assert.equal(inboundNormalized.method, "POST");
+  assert.equal(inboundNormalized.url, DEMO_INBOUND_URL);
+  assert.equal(inboundNormalized.headers["host"], DEMO_INBOUND_HOST);
+  assert.equal(
+    inboundNormalized.headers["x-trace-hops"],
+    DEMO_INBOUND_TRACE_HOPS.join(", "),
+  );
+  assert.equal(inboundNormalized.headers["content-type"], "application/json");
+  assert.ok(!("Host" in inboundNormalized.headers));
+  assert.ok(!("X-Trace-Hops" in inboundNormalized.headers));
+  assert.equal(inboundNormalized.body, DEMO_BODY);
+
+  assert.equal(inboundVerification.ok, true);
+  assert.equal(inboundVerification.keyId, DEMO_KEY_ID);
+  assert.equal(inboundVerification.alg, "ed25519");
+  // Rebuilding with the wrong scheme changes the covered @scheme
+  // component, so the same wire request is rejected.
+  assert.equal(DEMO_INBOUND_WRONG_SCHEME, "http");
+  assert.equal(inboundWrongSchemeVerification.ok, false);
+  assert.equal(inboundWrongSchemeVerification.code, "SIGNATURE_MISMATCH");
+});
+
+test("demo lines contain the inbound segment (normalized shape, verified, wrong scheme rejected)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /Inbound normalization: mock Node IncomingMessage normalized with fromNodeRequest \(mixed-case headers, multi-value x-trace-hops, host with port\)/,
+  );
+  assert.match(
+    out,
+    new RegExp(
+      `Inbound normalized: POST ${DEMO_INBOUND_URL.replace(/\./g, "\\.")} \\(host "${DEMO_INBOUND_HOST}", x-trace-hops "${DEMO_INBOUND_TRACE_HOPS.join(", ")}", content-type "application/json"\\)`,
+    ),
+  );
+  assert.match(out, /Inbound verification: OK /);
+  assert.match(
+    out,
+    new RegExp(
+      `Inbound verification with wrong scheme "${DEMO_INBOUND_WRONG_SCHEME}": FAILED \\(code SIGNATURE_MISMATCH:`,
+    ),
+  );
+});
+
 test("demo JWKS segment verifies via a restored store and rejects an unknown keyid", () => {
   const {
     jwksSnapshot,
@@ -342,6 +418,12 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(
     out,
     /sha-256 verification after tampering: FAILED \(code BODY_DIGEST_MISMATCH:/,
+  );
+  assert.match(out, /Inbound normalization: mock Node IncomingMessage normalized with fromNodeRequest/);
+  assert.match(out, /Inbound verification: OK /);
+  assert.match(
+    out,
+    /Inbound verification with wrong scheme "http": FAILED \(code SIGNATURE_MISMATCH:/,
   );
   assert.match(out, /JWKS key resolution: JwksKeyStore restored offline/);
   assert.match(

@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now also shows an inbound
+  normalization segment: a request signed against a host-with-port
+  URL (with `@scheme` and a multi-value `x-trace-hops` header
+  covered) is rebuilt from a mock Node `IncomingMessage`-shaped
+  object — mixed-case header names, the multi-value header still an
+  array, an encrypted socket — through `fromNodeRequest`, the
+  normalized method/URL/headers are printed, and the result
+  verifies; rebuilding the same wire request with the wrong scheme
+  (`http`) is rejected with `SIGNATURE_MISMATCH`. The segment starts
+  no server and performs zero network I/O.
 - The CLI demo (`npm run demo`) now also shows a sha-256
   Content-Digest segment: the same fixed demo request is re-signed
   with `contentDigestAlg: "sha-256"` for a peer that only accepts

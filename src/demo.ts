@@ -16,8 +16,13 @@
  * peer that only accepts sha-256 digests: its `content-digest` header
  * and verification are printed alongside the main line's sha-512
  * header, and a one-byte body tamper is rejected with
- * `BODY_DIGEST_MISMATCH`. The closing segment demonstrates JWKS key
- * resolution: a `JwksKeyStore` is
+ * `BODY_DIGEST_MISMATCH`. The next segment demonstrates inbound
+ * normalization: a mock Node `IncomingMessage`-shaped object
+ * (mixed-case headers, a multi-value header, a host with a port) is
+ * normalized with `fromNodeRequest` and verifies, while rebuilding
+ * it with the wrong scheme is rejected with `SIGNATURE_MISMATCH`
+ * because the inbound signature covers `@scheme`. The closing
+ * segment demonstrates JWKS key resolution: a `JwksKeyStore` is
  * restored offline from a snapshot of the demo public key, the demo
  * request verifies through its key resolver, and a request signed
  * under an unknown `keyid` is rejected with `KEY_RESOLUTION_FAILED`.
@@ -40,6 +45,7 @@ import { fileURLToPath } from "node:url";
 import {
   addSignature,
   exportPublicKeyJwk,
+  fromNodeRequest,
   generateEd25519KeyPair,
   JwksKeyStore,
   ReplayCache,
@@ -47,7 +53,9 @@ import {
   signRequest,
   verifyAllLabels,
   verifyRequest,
+  type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
+  type RequestLike,
   type SignedHttpRequest,
   type VerifyResult,
 } from "./index.js";
@@ -122,6 +130,40 @@ export const DEMO_JWKS_FETCHED_AT_SEC = DEMO_CREATED;
  * demo's own private key.
  */
 export const DEMO_UNKNOWN_KEY_ID = "demo-unknown-key-1";
+/**
+ * Host (with port) of the inbound segment's mock `IncomingMessage`:
+ * `fromNodeRequest` preserves the port verbatim in the rebuilt URL's
+ * `@authority`, so the equivalent signer-side request below is
+ * signed against the same host-and-port URL.
+ */
+export const DEMO_INBOUND_HOST = "api.example.com:8443";
+/** Absolute URL the inbound segment signs and then rebuilds. */
+export const DEMO_INBOUND_URL = `https://${DEMO_INBOUND_HOST}/v1/payments`;
+/** Nonce of the inbound segment's signed request. */
+export const DEMO_INBOUND_NONCE = "demo-nonce-inbound-001";
+/**
+ * Multi-value header of the inbound segment, as a mock Node server
+ * would expose repeated fields (an array). It is a covered component,
+ * so verification only passes if `fromNodeRequest` joins the values
+ * exactly as the signer canonicalized them (`"edge-1, gateway-2"`).
+ */
+export const DEMO_INBOUND_TRACE_HOPS: string[] = ["edge-1", "gateway-2"];
+/**
+ * Covered components of the inbound segment's signature. `@scheme` is
+ * covered deliberately: rebuilding the same wire request with the
+ * wrong scheme (the TLS-terminating-proxy mistake) must fail
+ * verification instead of silently verifying against another URL.
+ */
+export const DEMO_INBOUND_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@scheme",
+  "@authority",
+  "@path",
+  "content-digest",
+  "x-trace-hops",
+];
+/** Wrong scheme the inbound segment rebuilds with (must be rejected). */
+export const DEMO_INBOUND_WRONG_SCHEME = "http";
 
 export interface DemoResult {
   signed: SignedHttpRequest;
@@ -162,6 +204,17 @@ export interface DemoResult {
    * byte: rejected with `BODY_DIGEST_MISMATCH`.
    */
   sha256TamperedVerification: VerifyResult;
+  /** The request signed for the inbound segment (host with port). */
+  inboundSigned: SignedHttpRequest;
+  /** `inboundSigned`'s wire form normalized by `fromNodeRequest`. */
+  inboundNormalized: RequestLike;
+  /** Verification of the normalized inbound request (ok). */
+  inboundVerification: VerifyResult;
+  /**
+   * Verification of the same wire request rebuilt with the wrong
+   * scheme: rejected with `SIGNATURE_MISMATCH` (`@scheme` is covered).
+   */
+  inboundWrongSchemeVerification: VerifyResult;
   /** The v1 snapshot the JWKS segment restores its store from. */
   jwksSnapshot: JwksKeyStoreSnapshot;
   /** Number of keys in the restored JWKS store (1: the demo key). */
@@ -335,6 +388,65 @@ export function runDemo(): DemoResult {
     { key: publicKey, now: DEMO_CREATED + 60 },
   );
 
+  // Inbound segment: a real webhook gateway never sees a hand-built
+  // RequestLike — it receives a Node IncomingMessage. The demo signs
+  // the equivalent RequestLike first (host with port, `@scheme`
+  // covered, the multi-value `x-trace-hops` header covered), then
+  // rebuilds it from a mock IncomingMessage-shaped object — mixed-case
+  // header names, the multi-value header still an array, the socket
+  // flagged encrypted so the scheme is inferred as https — through
+  // `fromNodeRequest`, with no server and no network. Normalization
+  // lowercases the names and joins the multi-value header exactly as
+  // the signer canonicalized it, so verification passes.
+  const inboundSigned = signRequest(
+    {
+      method: "POST",
+      url: DEMO_INBOUND_URL,
+      headers: {
+        "content-type": "application/json",
+        "x-trace-hops": [...DEMO_INBOUND_TRACE_HOPS],
+      },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_INBOUND_NONCE,
+      coveredComponents: [...DEMO_INBOUND_COVERED_COMPONENTS],
+    },
+  );
+  const inboundWire: IncomingRequestLike = {
+    method: "POST",
+    url: "/v1/payments",
+    headers: {
+      Host: DEMO_INBOUND_HOST,
+      "Content-Type": "application/json",
+      "X-Trace-Hops": [...DEMO_INBOUND_TRACE_HOPS],
+      "Content-Digest": inboundSigned.headers["content-digest"],
+      "Signature-Input": inboundSigned.headers["signature-input"],
+      Signature: inboundSigned.headers["signature"],
+    },
+    socket: { encrypted: true },
+  };
+  const inboundNormalized = fromNodeRequest(inboundWire, DEMO_BODY);
+  const inboundVerification = verifyRequest(inboundNormalized, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+
+  // Scheme mismatch: rebuilding the identical wire request with the
+  // wrong scheme changes the covered `@scheme` component, so the
+  // verifier rejects it with SIGNATURE_MISMATCH — the two sides
+  // disagree on the exact URL that was signed.
+  const inboundWrongSchemeVerification = verifyRequest(
+    fromNodeRequest(inboundWire, DEMO_BODY, {
+      scheme: DEMO_INBOUND_WRONG_SCHEME,
+    }),
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+
   // JWKS segment: production gateways do not hand the verifier a raw
   // key — they publish a JWKS and the verifier resolves the claimed
   // keyid against it. The demo rebuilds that path offline: a v:1
@@ -430,6 +542,15 @@ export function runDemo(): DemoResult {
       ? "sha-256 verification after tampering: OK (unexpected — tampering was not detected)"
       : `sha-256 verification after tampering: FAILED (code ${sha256TamperedVerification.code}: ${sha256TamperedVerification.reason})`,
     "",
+    "Inbound normalization: mock Node IncomingMessage normalized with fromNodeRequest (mixed-case headers, multi-value x-trace-hops, host with port)",
+    `Inbound normalized: ${inboundNormalized.method} ${inboundNormalized.url} (host "${inboundNormalized.headers["host"]}", x-trace-hops "${inboundNormalized.headers["x-trace-hops"]}", content-type "${inboundNormalized.headers["content-type"]}")`,
+    inboundVerification.ok
+      ? `Inbound verification: OK (label ${inboundVerification.label}, keyid="${inboundVerification.keyId}", alg="${inboundVerification.alg}")`
+      : `Inbound verification: FAILED (code ${inboundVerification.code}: ${inboundVerification.reason})`,
+    inboundWrongSchemeVerification.ok
+      ? `Inbound verification with wrong scheme "${DEMO_INBOUND_WRONG_SCHEME}": OK (unexpected — scheme mismatch was not detected)`
+      : `Inbound verification with wrong scheme "${DEMO_INBOUND_WRONG_SCHEME}": FAILED (code ${inboundWrongSchemeVerification.code}: ${inboundWrongSchemeVerification.reason})`,
+    "",
     `JWKS key resolution: JwksKeyStore restored offline from a v1 snapshot (endpoint ${DEMO_JWKS_URL}, fetchedAtSec=${DEMO_JWKS_FETCHED_AT_SEC}, ${jwksStore.size} key)`,
     jwksVerification.ok
       ? `JWKS verification for keyid "${DEMO_KEY_ID}": OK (label ${jwksVerification.label}, keyid="${jwksVerification.keyId}", alg="${jwksVerification.alg}")`
@@ -453,6 +574,10 @@ export function runDemo(): DemoResult {
     sha256Signed,
     sha256Verification,
     sha256TamperedVerification,
+    inboundSigned,
+    inboundNormalized,
+    inboundVerification,
+    inboundWrongSchemeVerification,
     jwksSnapshot,
     jwksStoreSize: jwksStore.size,
     jwksVerification,
