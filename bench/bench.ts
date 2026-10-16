@@ -92,7 +92,16 @@
  * on every measured pass against hand-pinned expected strings, so
  * the inner-list-plus-parameters cost is visible apart from the
  * `buildSignatureBase` row that bundles it with component
- * resolution.
+ * resolution, plus the nonce generation an anti-replay signer
+ * pays on every request: `generateNonce` at the two fixed byte
+ * tiers (the default 16 bytes and 32 bytes, one generation per
+ * tier per measured call, see NONCE_* below), self-checked on
+ * every measured call only for the shape the generateNonce test
+ * pins — exact length (22 / 43 base64url characters) and
+ * base64url-only characters, never a specific value — so the
+ * CSPRNG-plus-encoding cost is visible as the fixed per-request
+ * overhead it is (the random source is the system CSPRNG via
+ * node:crypto, so the numbers include entropy-source cost).
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -112,6 +121,7 @@ import {
   exportPublicKeyJwkRsa,
   fromNodeRequest,
   generateEd25519KeyPair,
+  generateNonce,
   generateP256KeyPair,
   generateP384KeyPair,
   generateP521KeyPair,
@@ -1635,6 +1645,67 @@ function benchmarkSerializeSignatureParams(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed byte tiers for the `generateNonce` path — the two sizes
+ * the backlog names: the default 16 bytes (128 bits, the standard
+ * nonce strength) and 32 bytes (256 bits). The expected lengths
+ * are hand-pinned from the shape test/generateNonce.test.ts pins —
+ * 16 bytes -> ceil(128 / 6) = 22 base64url characters, 32 bytes ->
+ * ceil(256 / 6) = 43, with no padding — never derived from
+ * `generateNonce` at bench time.
+ */
+const NONCE_TIERS = [
+  { bytes: 16, expectedLength: 22 },
+  { bytes: 32, expectedLength: 43 },
+] as const;
+const NONCE_SHAPE = /^[A-Za-z0-9_-]+$/;
+
+function assertNonceShape(
+  nonce: string,
+  bytes: number,
+  expectedLength: number,
+): void {
+  if (
+    nonce.length !== expectedLength ||
+    !NONCE_SHAPE.test(nonce) ||
+    /[+/=]/.test(nonce)
+  )
+    throw new Error(
+      `benchmark self-check failed: generateNonce(${bytes}) gave ` +
+        `${JSON.stringify(nonce)} (expected ${expectedLength} base64url chars)`,
+    );
+}
+
+/**
+ * `generateNonce` steady state: one measured call generates one
+ * nonce per fixed tier (2 generations per op) — the default tier
+ * is exercised through the no-argument default, the 32-byte tier
+ * through the explicit argument. This is the fixed per-request
+ * cost an anti-replay signer pays before signing: drawing bytes
+ * from the system CSPRNG (`node:crypto` `randomBytes`, so the
+ * numbers include entropy-source cost) plus base64url encoding.
+ * Self-checks assert morphology only — exact length and the
+ * base64url-only character set the generateNonce test pins — on
+ * every measured call, and never a specific value: the output is
+ * random by design, and that randomness comes only from the
+ * function under test itself. Zero network, no wall-clock
+ * assertions.
+ */
+function benchmarkGenerateNonce(): number {
+  for (const tier of NONCE_TIERS) {
+    const nonce =
+      tier.bytes === 16 ? generateNonce() : generateNonce(tier.bytes);
+    assertNonceShape(nonce, tier.bytes, tier.expectedLength);
+  }
+  return measure(() => {
+    for (const tier of NONCE_TIERS) {
+      const nonce =
+        tier.bytes === 16 ? generateNonce() : generateNonce(tier.bytes);
+      assertNonceShape(nonce, tier.bytes, tier.expectedLength);
+    }
+  }, ITERATIONS);
+}
+
 /** Fixed `created` for the OrThrow fixture (no wall clock). */
 const ORTHROW_CREATED = 1_700_000_000;
 /** Pinned failure code for the tampered OrThrow fixture — written
@@ -1901,6 +1972,11 @@ results.push({
   alg: "serializeSignatureParams (5 cases)",
   op: "serialize",
   ops: benchmarkSerializeSignatureParams(),
+});
+results.push({
+  alg: "generateNonce (16 + 32 bytes)",
+  op: "generate",
+  ops: benchmarkGenerateNonce(),
 });
 results.push({
   alg: "verifyRequestOrThrow (valid)",

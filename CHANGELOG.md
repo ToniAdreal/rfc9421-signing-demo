@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `generateNonce` — the nonce generation an anti-replay
+  signer pays on every request — as one pass over the two
+  fixed byte tiers per measured call: the default 16 bytes
+  (128 bits, exercised through the no-argument default) and
+  32 bytes (256 bits). The random source is the system
+  CSPRNG (`node:crypto` `randomBytes`), so the numbers
+  include entropy-source cost. Self-checks assert morphology
+  only, on every measured call — exact length (22 base64url
+  characters for 16 bytes, 43 for 32, the lengths pinned in
+  the generateNonce test suite) and the base64url-only
+  character set — and never a specific value. The README
+  Benchmarks table was refreshed wholesale from one real
+  run and now carries the `generate` row. The bench
+  performs zero network I/O and makes no wall-clock
+  assertions; the only randomness is the function under
+  test itself.
 - The CLI demo (`npm run demo`) now closes with a
   dictionary-member extraction segment: one fixed multi-member
   Dictionary value is run through
