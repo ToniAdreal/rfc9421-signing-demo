@@ -156,7 +156,22 @@
  * timed region — self-checked on every measured pass
  * against hand-pinned pass/throw outcomes, so the
  * fail-closed modulus check is visible apart from the RSA
- * sign/verify rows that bundle it.
+ * sign/verify rows that bundle it, plus the full
+ * `Signature-Input` field-value building every signer pays
+ * once per label: `signatureInputValue` over a fixed
+ * four-case corpus (see SIG_INPUT_* below) spanning a bare
+ * single-component value with no parameters, the golden
+ * four-component value, a second label carrying all six
+ * parameters, and parameterized component ids with an
+ * escaped nonce — self-checked on every measured pass
+ * against hand-pinned expected strings, with the
+ * dual-label header join (the two single-label values
+ * joined with ", ", the merge the multi-label tests pin)
+ * asserted outside timing. Note the function builds the
+ * field value (`label=` plus the serialized parameters);
+ * it does not look a label up in a request, so there is
+ * no missing-label / undefined outcome to pin — an empty
+ * parameter set renders as the bare inner list.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -208,6 +223,7 @@ import {
   serializeDictionaryMemberValue,
   serializeSignatureParams,
   signRequest,
+  signatureInputValue,
   verifyAllLabels,
   verifyRequest,
   verifyRequestOrThrow,
@@ -2519,6 +2535,150 @@ function benchmarkAssertRsaModulusLength(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed corpus for the `signatureInputValue` path — four
+ * (label, componentIds, params) cases. Every expected value
+ * is hand-pinned below from the function's contract — the
+ * result is exactly `label + "=" + serializeSignatureParams(
+ * componentIds, params)` rendered as one string, with the
+ * inner list and parameter order the SIG_PARAMS_* fixture
+ * above pins — and matches values pinned independently
+ * elsewhere in the suite — never derived from
+ * `signatureInputValue` at bench time:
+ * - minimal: one covered component and an empty parameter
+ *   set — the value renders as the bare inner list with no
+ *   `;param` suffix at all (there is no undefined outcome:
+ *   this function builds a value, it does not look one up).
+ * - golden: the shared four components with created + keyid
+ *   + alg under the label `sig1` — the `@signature-params`
+ *   line pinned in test/golden.test.ts, with its `sig1=`
+ *   prefix.
+ * - merchant-full: a second label, `merchant`, over the
+ *   same four components with all six parameters set — the
+ *   second member a multi-label header is built from.
+ * - gateway-parameterized: the label `gateway`, two
+ *   parameterized component ids (`;req`, `;key="b"`) and a
+ *   nonce carrying a quote and a backslash, serialized
+ *   escaped exactly as the SIG_PARAMS_* escaped case pins.
+ * Outside timing, the golden and merchant-full values are
+ * also joined with ", " and pinned against the full
+ * dual-label header literal below — the merge shape
+ * test/multiLabel.test.ts and the multi-label cases in
+ * test/invalidTimeWindow.test.ts build from two
+ * `signatureInputValue` outputs.
+ */
+const SIG_INPUT_FIXTURE: ReadonlyArray<{
+  name: string;
+  label: string;
+  componentIds: string[];
+  params: SignatureParams;
+  expected: string;
+}> = [
+  {
+    name: "minimal",
+    label: "sig1",
+    componentIds: ["@method"],
+    params: {},
+    expected: 'sig1=("@method")',
+  },
+  {
+    name: "golden",
+    label: "sig1",
+    componentIds: ["@method", "@authority", "@path", "content-digest"],
+    params: { created: 1700000000, keyid: "k1", alg: "hmac-sha256" },
+    expected:
+      'sig1=("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="k1";alg="hmac-sha256"',
+  },
+  {
+    name: "merchant-full",
+    label: "merchant",
+    componentIds: ["@method", "@authority", "@path", "content-digest"],
+    params: {
+      created: 1700000000,
+      expires: 1700000300,
+      keyid: "demo-key-1",
+      alg: "ed25519",
+      nonce: "demo-nonce-001",
+      tag: "payment-webhook-v1",
+    },
+    expected:
+      'merchant=("@method" "@authority" "@path" "content-digest");created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"',
+  },
+  {
+    name: "gateway-parameterized",
+    label: "gateway",
+    componentIds: ["@method;req", 'x-dict;key="b"'],
+    params: {
+      created: 1700000000,
+      keyid: "k",
+      alg: "ed25519",
+      nonce: 'a"b\\c d',
+    },
+    expected:
+      'gateway=("@method";req "x-dict";key="b");created=1700000000;keyid="k";alg="ed25519";nonce="a\\"b\\\\c d"',
+  },
+];
+
+/** Full dual-label `Signature-Input` header built by joining the
+ *  golden and merchant-full corpus values with ", " — hand-pinned
+ *  as one literal, asserted outside timing only. */
+const SIG_INPUT_JOINED_EXPECTED =
+  'sig1=("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="k1";alg="hmac-sha256", ' +
+  'merchant=("@method" "@authority" "@path" "content-digest");created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"';
+
+function assertSigInputCorpus(label: string): void {
+  for (const entry of SIG_INPUT_FIXTURE) {
+    const actual = signatureInputValue(
+      entry.label,
+      entry.componentIds,
+      entry.params,
+    );
+    if (actual !== entry.expected)
+      throw new Error(
+        `benchmark self-check failed (${label}): signatureInputValue(${entry.name}) gave ${JSON.stringify(actual)} ` +
+          `(expected ${JSON.stringify(entry.expected)})`,
+      );
+  }
+}
+
+/**
+ * `signatureInputValue` steady state: one measured call is
+ * one pass over the whole fixed corpus (4 value builds per
+ * op) — the `label=` prefix plus inner-list-and-parameters
+ * serialization a signer pays once per label before the
+ * signature base is built, isolated from the
+ * `serializeSignatureParams` row above (which measures the
+ * same serialization without the label prefix) and from
+ * the sign rows that bundle it with base building and
+ * cryptography. Self-checks: the whole corpus is asserted
+ * exhaustively outside timing first — including the
+ * dual-label ", " join pinned against
+ * SIG_INPUT_JOINED_EXPECTED — and the measured loop
+ * re-pins every case's built value on every pass. Zero
+ * network, zero randomness, no wall-clock assertions.
+ */
+function benchmarkSignatureInputValue(): number {
+  assertSigInputCorpus("outside timing");
+  const golden = SIG_INPUT_FIXTURE[1];
+  const merchant = SIG_INPUT_FIXTURE[2];
+  const joined =
+    signatureInputValue(golden.label, golden.componentIds, golden.params) +
+    ", " +
+    signatureInputValue(
+      merchant.label,
+      merchant.componentIds,
+      merchant.params,
+    );
+  if (joined !== SIG_INPUT_JOINED_EXPECTED)
+    throw new Error(
+      `benchmark self-check failed (outside timing): dual-label join gave ${JSON.stringify(joined)} ` +
+        `(expected ${JSON.stringify(SIG_INPUT_JOINED_EXPECTED)})`,
+    );
+  return measure(() => {
+    assertSigInputCorpus("measured pass");
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -2713,6 +2873,11 @@ results.push({
   alg: "assertRsaModulusLength (7 cases)",
   op: "guard",
   ops: benchmarkAssertRsaModulusLength(),
+});
+results.push({
+  alg: "signatureInputValue (4 cases)",
+  op: "serialize",
+  ops: benchmarkSignatureInputValue(),
 });
 
 console.log("alg                                    op      throughput");

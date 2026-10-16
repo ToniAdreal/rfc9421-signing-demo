@@ -12,6 +12,32 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `signatureInputValue` — the full `Signature-Input` field
+  value a signer builds once per label (`label=` plus the
+  serialized inner list and parameters) — as one pass over
+  a fixed four-case corpus per measured call: a bare
+  single-component value with an empty parameter set (the
+  value renders as the bare inner list — the function
+  builds a value, it does not look one up, so there is no
+  missing-label / undefined outcome), the shared four
+  components under the label `sig1` with created + keyid +
+  alg, a second label, `merchant`, over the same four
+  components with all six parameters set, and a `gateway`
+  value with parameterized component ids and an escaped
+  nonce. Every expected string is hand-pinned in the bench
+  from the function's contract (matching values pinned
+  independently in the golden, multi-label and nonce test
+  suites), never derived from the implementation at bench
+  time, self-checked exhaustively outside timing —
+  including the dual-label join of the golden and merchant
+  values (joined with ", ", the merge the multi-label
+  tests build) against a hand-pinned full header literal —
+  and re-pinned on every measured pass. The README
+  Benchmarks table was refreshed wholesale from one real
+  run and now carries the second `serialize` row. The
+  bench performs zero network I/O, zero randomness, and
+  no wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `assertRsaModulusLength` — the RSA modulus-length guard
   every `rsa-v1_5-sha256` sign/verify pays before any RSA
   operation runs (the modulus must be at least
