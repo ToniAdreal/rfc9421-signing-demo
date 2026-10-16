@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `joinHeaderValues` — the multi-value header combination
+  every canonical lookup, signer-side fold and Node-adapter
+  fold pays for a repeated header field (RFC 9421 §2.5:
+  trim each element, join with ", ") — as one pass over a
+  fixed nine-case corpus per measured call: an empty array,
+  a single padded value, plain and whitespace-padded
+  multi-value arrays (spaces and tabs), and empty-element
+  cases (a lone empty string, two whitespace-only elements,
+  an empty element in the middle of real values, and an
+  empty first element). Empty elements are not dropped —
+  they still contribute their separator — and every
+  expected combination is hand-pinned in the bench from
+  the helper's documented contract (the non-empty pins
+  match the multi-value-header test suite), never derived
+  from the implementation at bench time, and re-pinned on
+  every measured pass. The README Benchmarks table was
+  refreshed wholesale from one real run and now carries
+  the `join` row. The bench performs zero network I/O,
+  zero randomness and no wall-clock assertions.
 - The CLI demo (`npm run demo`) now closes with a
   signature-params serialization segment: five fixed (covered
   components, parameters) cases — an empty component list

@@ -112,7 +112,16 @@
  * both forms, with missing and undefined-valued headers
  * asserted outside timing, so the per-component scan-and-fold
  * cost is visible apart from the end-to-end sign/verify paths
- * that bundle it.
+ * that bundle it, plus the multi-value header combination every
+ * canonical lookup and signer-side fold pays: `joinHeaderValues`
+ * over a fixed multi-value corpus (see JOIN_* below) spanning
+ * empty, single-value, multi-value, whitespace-padded and
+ * empty-element cases, self-checked on every measured pass
+ * against hand-pinned expected combinations — the trim-each-
+ * element-then-join-with-", " step (RFC 9421 §2.5) that turns a
+ * repeated header on a proxy chain into the one canonical
+ * string both sides sign, visible apart from the lookup rows
+ * above that bundle it with the case-insensitive scan.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -146,6 +155,7 @@ import {
   importPublicKeyJwkRsa,
   isVerifyError,
   JwksKeyStore,
+  joinHeaderValues,
   jwkThumbprint,
   listSignatureLabels,
   memoizeKeyResolver,
@@ -2010,6 +2020,84 @@ function benchmarkGetHeader(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed multi-value corpus for the `joinHeaderValues` path —
+ * nine value arrays written out literally here, spanning the
+ * shapes a repeated header takes on a proxy chain:
+ * - the empty array (no values at all);
+ * - a single padded value and a plain two-value array;
+ * - padded multi-value arrays (spaces and tabs around elements);
+ * - empty-string elements: one lone empty string, two
+ *   whitespace-only elements, an empty element in the middle of
+ *   real values, and an empty first element before real values.
+ * Empty elements are NOT dropped: each element is trimmed and
+ * the results are joined with ", ", so an empty element still
+ * contributes its separator — the pins below state that
+ * explicitly, because dropping empties would canonicalize two
+ * different wire shapes onto one signature base.
+ */
+const JOIN_CORPUS: ReadonlyArray<{
+  values: string[];
+  expected: string;
+}> = [
+  // [] — no elements, nothing to join: "".
+  { values: [], expected: "" },
+  // ["  solo  "] — one element, trimmed: "solo".
+  { values: ["  solo  "], expected: "solo" },
+  // ["a", "b"] — plain pair: "a, b".
+  { values: ["a", "b"], expected: "a, b" },
+  // ["  a  ", "b "] — padded pair (pin from the component tests): "a, b".
+  { values: ["  a  ", "b "], expected: "a, b" },
+  // ["\ta\t", "  b", "c  "] — tab/space padding, three values: "a, b, c".
+  { values: ["\ta\t", "  b", "c  "], expected: "a, b, c" },
+  // [""] — one empty element, trimmed to "": "".
+  { values: [""], expected: "" },
+  // ["   ", "\t"] — two whitespace-only elements trim to "" and "":
+  // joined with the separator they still produce ", ".
+  { values: ["   ", "\t"], expected: ", " },
+  // ["a", "", "b"] — empty middle element keeps its separators: "a, , b".
+  { values: ["a", "", "b"], expected: "a, , b" },
+  // ["", " 203.0.113.10 ", "10.0.0.8"] — empty first element, then
+  // a padded address and a plain one: ", 203.0.113.10, 10.0.0.8".
+  {
+    values: ["", " 203.0.113.10 ", "10.0.0.8"],
+    expected: ", 203.0.113.10, 10.0.0.8",
+  },
+];
+
+/**
+ * `joinHeaderValues` steady state: one measured call is one pass
+ * over the whole fixed corpus (9 combinations per op) — the
+ * trim-and-join step every canonical header lookup, signer-side
+ * fold and Node-adapter fold pays for a multi-value field, on the
+ * signer and the verifier alike. Self-checks: every corpus entry
+ * is verified against its hand-pinned expectation outside timing
+ * first — the non-empty pins match the values pinned
+ * independently in test/multiValueHeaderWhitespace.test.ts, and
+ * no expected value is derived from `joinHeaderValues` at bench
+ * time — and the measured loop re-pins every entry's result on
+ * every pass. Zero network, zero randomness, no wall-clock
+ * assertions.
+ */
+function benchmarkJoinHeaderValues(): number {
+  for (const entry of JOIN_CORPUS) {
+    const actual = joinHeaderValues(entry.values);
+    if (actual !== entry.expected)
+      throw new Error(
+        `benchmark self-check failed: joinHeaderValues(${JSON.stringify(entry.values)}) gave ${JSON.stringify(actual)} ` +
+          `(expected ${JSON.stringify(entry.expected)})`,
+      );
+  }
+  return measure(() => {
+    for (const entry of JOIN_CORPUS) {
+      if (joinHeaderValues(entry.values) !== entry.expected)
+        throw new Error(
+          `benchmark self-check failed: joinHeaderValues(${JSON.stringify(entry.values)}) diverged from the pinned value`,
+        );
+    }
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -2184,6 +2272,11 @@ results.push({
   alg: "getHeader/getHeaderRaw (9 names ×2)",
   op: "lookup",
   ops: benchmarkGetHeader(),
+});
+results.push({
+  alg: "joinHeaderValues (9 cases)",
+  op: "join",
+  ops: benchmarkJoinHeaderValues(),
 });
 
 console.log("alg                                    op      throughput");
