@@ -12,6 +12,35 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `assertRsaModulusLength` — the RSA modulus-length guard
+  every `rsa-v1_5-sha256` sign/verify pays before any RSA
+  operation runs (the modulus must be at least
+  `MIN_RSA_MODULUS_BITS` = 2048 bits, and the key must be
+  an RSA key at all) — as one pass over a fixed seven-case
+  corpus per measured call: a 2048-bit RSA public and
+  private key at exactly the floor (both pass), a 1024-bit
+  RSA public and private key below the floor (both throw
+  the pinned modulus message the rsaV15 suite pins for the
+  same weak pair on both sides), and three wrong-shape
+  keys (an ed25519 public key, a P-256 public key and a
+  symmetric secret, each throwing the pinned
+  expected-an-RSA-key message for its shape). Five of the
+  seven cases throw and are caught inside the measured
+  pass — the fail-closed rejection is part of the steady
+  state a caller pays. Every expected pass/throw
+  outcome, including the exact full throw message under
+  the bench's fixed caller context, is hand-pinned in
+  the bench from the guard's documented contract, never
+  derived from the implementation at bench time,
+  self-checked exhaustively outside timing, and
+  re-pinned on every measured pass. All keys are
+  generated once at bench start; the timed region
+  generates no keys. The README Benchmarks table was
+  refreshed wholesale from one real run and now carries
+  the second `guard` row. The bench performs zero
+  network I/O, zero key generation inside timing, and
+  no wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `assertHmacSecretLength` — the per-algorithm HMAC
   secret-length guard every HMAC sign/verify pays before any
   MAC runs (RFC 2104: the key SHOULD be at least as long as

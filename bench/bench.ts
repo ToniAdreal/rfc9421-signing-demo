@@ -142,17 +142,36 @@
  * every measured pass against hand-pinned pass/throw outcomes
  * (including the exact floor and byte count in each throw
  * message), so the fail-closed key-length check is visible
- * apart from the HMAC sign/verify rows that bundle it.
+ * apart from the HMAC sign/verify rows that bundle it, plus
+ * the RSA modulus-length guard every rsa-v1_5-sha256
+ * sign/verify pays before any RSA operation runs:
+ * `assertRsaModulusLength` over a fixed seven-case corpus
+ * (see RSA_GUARD_* below) spanning a 2048-bit RSA pair at
+ * exactly the floor (public and private, both pass), a
+ * 1024-bit RSA pair below the floor (public and private,
+ * both throw the pinned modulus message), and three
+ * wrong-shape keys (ed25519, P-256 and a symmetric secret,
+ * each throwing the pinned expected-an-RSA-key message) —
+ * all keys generated once at bench start, never inside the
+ * timed region — self-checked on every measured pass
+ * against hand-pinned pass/throw outcomes, so the
+ * fail-closed modulus check is visible apart from the RSA
+ * sign/verify rows that bundle it.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
  */
-import { createSecretKey, type KeyObject } from "node:crypto";
+import {
+  createSecretKey,
+  generateKeyPairSync,
+  type KeyObject,
+} from "node:crypto";
 import { cpus } from "node:os";
 import {
   addSignature,
   assertHmacSecretLength,
+  assertRsaModulusLength,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
   contentDigest,
@@ -2383,6 +2402,123 @@ function benchmarkAssertHmacSecretLength(): number {
   }, ITERATIONS);
 }
 
+/** Fixed caller context the bench passes to the RSA guard — the
+ *  guard prefixes every throw with the caller-supplied context,
+ *  exactly as the sign/verify paths pass theirs (see src/keys.ts). */
+const RSA_GUARD_CONTEXT = "assertRsaModulusLength bench";
+
+/**
+ * Fixed key corpus for the `assertRsaModulusLength` path —
+ * seven cases, with every key generated ONCE here at bench
+ * start (the 2048-bit pair via the library generator, the
+ * 1024-bit pair and the wrong-shape keys via node:crypto
+ * directly); the timed region generates no keys at all.
+ * Composition, with the hand-pinned outcome for each:
+ * - RSA 2048 public and private — exactly at the
+ *   MIN_RSA_MODULUS_BITS floor (2048) -> both pass;
+ * - RSA 1024 public and private — below the floor -> both
+ *   throw "RSA modulus must be at least 2048 bits, got 1024
+ *   bits" (the message the rsaV15 suite pins for the same
+ *   weak pair on both the sign and verify sides);
+ * - ed25519 public -> throws "expected an RSA key, got an
+ *   asymmetric ed25519 key"; P-256 public -> throws
+ *   "expected an RSA key, got an asymmetric ec key" (the
+ *   shape the rsaV15 suite pins for a P-256 key on the
+ *   verify side); a symmetric secret KeyObject -> throws
+ *   "expected an RSA key, got a secret (symmetric) key".
+ * Every pinned message is the guard's documented contract
+ * with RSA_GUARD_CONTEXT as the prefix. No expected outcome
+ * is derived from `assertRsaModulusLength` at bench time.
+ */
+const RSA_GUARD_STRONG = generateRsaPssKeyPair();
+const RSA_GUARD_WEAK = generateKeyPairSync("rsa", {
+  modulusLength: 1024,
+});
+const RSA_GUARD_CORPUS: ReadonlyArray<{
+  label: string;
+  key: KeyObject;
+  /** Pinned full throw message, or null when the call passes. */
+  expectedError: string | null;
+}> = [
+  { label: "rsa-2048 public", key: RSA_GUARD_STRONG.publicKey, expectedError: null },
+  { label: "rsa-2048 private", key: RSA_GUARD_STRONG.privateKey, expectedError: null },
+  {
+    label: "rsa-1024 public",
+    key: RSA_GUARD_WEAK.publicKey,
+    expectedError:
+      `${RSA_GUARD_CONTEXT}: RSA modulus must be at least 2048 bits, got 1024 bits`,
+  },
+  {
+    label: "rsa-1024 private",
+    key: RSA_GUARD_WEAK.privateKey,
+    expectedError:
+      `${RSA_GUARD_CONTEXT}: RSA modulus must be at least 2048 bits, got 1024 bits`,
+  },
+  {
+    label: "ed25519 public",
+    key: generateEd25519KeyPair().publicKey,
+    expectedError:
+      `${RSA_GUARD_CONTEXT}: expected an RSA key, got an asymmetric ed25519 key`,
+  },
+  {
+    label: "p-256 public",
+    key: generateP256KeyPair().publicKey,
+    expectedError:
+      `${RSA_GUARD_CONTEXT}: expected an RSA key, got an asymmetric ec key`,
+  },
+  {
+    label: "secret key",
+    key: createSecretKey(Buffer.alloc(32, 0xab)),
+    expectedError:
+      `${RSA_GUARD_CONTEXT}: expected an RSA key, got a secret (symmetric) key`,
+  },
+];
+
+/** Run one corpus case and return its outcome: null on pass, the thrown message otherwise. */
+function rsaGuardOutcome(
+  entry: (typeof RSA_GUARD_CORPUS)[number],
+): string | null {
+  try {
+    assertRsaModulusLength(entry.key, RSA_GUARD_CONTEXT);
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+function assertRsaGuardCorpus(label: string): void {
+  for (const entry of RSA_GUARD_CORPUS) {
+    const outcome = rsaGuardOutcome(entry);
+    if (outcome !== entry.expectedError)
+      throw new Error(
+        `benchmark self-check failed (${label}): assertRsaModulusLength(${entry.label}) gave ${JSON.stringify(outcome)} ` +
+          `(expected ${JSON.stringify(entry.expectedError)})`,
+      );
+  }
+}
+
+/**
+ * `assertRsaModulusLength` steady state: one measured call is
+ * one pass over the whole fixed corpus (7 guard checks per
+ * op, five of which throw and are caught inside the outcome
+ * helper — the fail-closed rejection is part of the steady
+ * state, exactly as a caller importing an RSA key pays it) —
+ * the RSA modulus floor (at least MIN_RSA_MODULUS_BITS =
+ * 2048 bits, plus the RSA key-shape check) the rsa-v1_5-sha256
+ * sign and verify paths enforce before any RSA operation
+ * runs. Self-checks: the whole corpus is asserted
+ * exhaustively outside timing first, and the measured loop
+ * re-pins every case's pass/throw outcome on every pass.
+ * Zero network, zero key generation inside timing, no
+ * wall-clock assertions.
+ */
+function benchmarkAssertRsaModulusLength(): number {
+  assertRsaGuardCorpus("outside timing");
+  return measure(() => {
+    assertRsaGuardCorpus("measured pass");
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -2572,6 +2708,11 @@ results.push({
   alg: "assertHmacSecretLength (10 cases)",
   op: "guard",
   ops: benchmarkAssertHmacSecretLength(),
+});
+results.push({
+  alg: "assertRsaModulusLength (7 cases)",
+  op: "guard",
+  ops: benchmarkAssertRsaModulusLength(),
 });
 
 console.log("alg                                    op      throughput");
