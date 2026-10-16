@@ -932,51 +932,52 @@ algorithm plus the key-resolution, thumbprint-derivation, replay-check,
 malformed-input rejection, standalone content-digest,
 inbound-normalization, per-curve JWK round-trip,
 signature-base-building, standalone signature-parser,
-structured-field canonicalization, dictionary-member extraction and throwing-verify-wrapper paths below
+structured-field canonicalization, dictionary-member extraction, signature-parameter serialization and throwing-verify-wrapper paths below
 (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU).
-All rows below are from one real run on 2026-10-15:
+All rows below are from one real run on 2026-10-16:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519 | sign | ~5,250 ops/sec (~190 µs/op) |
-| ed25519 | verify | ~2,440 ops/sec (~410 µs/op) |
-| hmac-sha256 | sign | ~17,000 ops/sec (~58.8 µs/op) |
-| hmac-sha256 | verify | ~18,900 ops/sec (~52.8 µs/op) |
-| hmac-sha512 | sign | ~17,700 ops/sec (~56.6 µs/op) |
-| hmac-sha512 | verify | ~13,600 ops/sec (~73.3 µs/op) |
-| ecdsa-p256-sha256 | sign | ~3,990 ops/sec (~251 µs/op) |
-| ecdsa-p256-sha256 | verify | ~4,340 ops/sec (~230 µs/op) |
-| ecdsa-p384-sha384 | sign | ~342 ops/sec (~2,923 µs/op) |
-| ecdsa-p384-sha384 | verify | ~477 ops/sec (~2,097 µs/op) |
-| ecdsa-p521-sha512 | sign | ~177 ops/sec (~5,640 µs/op) |
-| ecdsa-p521-sha512 | verify | ~189 ops/sec (~5,301 µs/op) |
-| rsa-pss-sha512 | sign | ~888 ops/sec (~1,126 µs/op) |
-| rsa-pss-sha512 | verify | ~7,040 ops/sec (~142 µs/op) |
-| rsa-v1_5-sha256 | sign | ~1,180 ops/sec (~848 µs/op) |
-| rsa-v1_5-sha256 | verify | ~9,010 ops/sec (~111 µs/op) |
-| verifyAllLabels (2 labels) | verify | ~1,680 ops/sec (~595 µs/op) |
-| JwksKeyStore.resolve (hit) | resolve | ~896,000 ops/sec (~1.12 µs/op) |
-| memoizeKeyResolver (hit) | resolve | ~2,560,000 ops/sec (~0.39 µs/op) |
-| memoizeKeyResolver (miss) | resolve | ~1,230,000 ops/sec (~0.81 µs/op) |
-| jwkThumbprint (3 JWK shapes) | derive | ~29,400 ops/sec (~34.1 µs/op) |
-| ReplayCache.check (hit, 1k entries) | check | ~1,490,000 ops/sec (~0.67 µs/op) |
-| verifyRequest (malformed, 566 cases) | reject | ~8,900 ops/sec (~112 µs/op) |
-| contentDigest sha-512 (31-byte body) | digest | ~623,000 ops/sec (~1.61 µs/op) |
-| contentDigest sha-256 (31-byte body) | digest | ~118,000 ops/sec (~8.50 µs/op) |
-| fromNodeRequest (inbound, trailers) | normalize | ~60,600 ops/sec (~16.5 µs/op) |
-| JWK round-trip P-256 | roundtrip | ~5,040 ops/sec (~199 µs/op) |
-| JWK round-trip P-384 | roundtrip | ~9,500 ops/sec (~105 µs/op) |
-| JWK round-trip P-521 | roundtrip | ~8,170 ops/sec (~122 µs/op) |
-| JWK round-trip RSA-2048 | roundtrip | ~4,320 ops/sec (~232 µs/op) |
-| buildSignatureBase (4 components) | build | ~54,200 ops/sec (~18.5 µs/op) |
-| listSignatureLabels (2 labels) | parse | ~460,000 ops/sec (~2.18 µs/op) |
-| parseSignatureInput (merchant) | parse | ~42,200 ops/sec (~23.7 µs/op) |
-| parseSignatureField (merchant) | parse | ~207,000 ops/sec (~4.84 µs/op) |
-| canonicalizeStructuredFieldValue (6 values) | canon | ~4,780 ops/sec (~209 µs/op) |
-| serializeDictionaryMemberValue (6 keys) | extract | ~10,000 ops/sec (~100 µs/op) |
-| verifyRequestOrThrow (valid) | verify | ~2,930 ops/sec (~341 µs/op) |
-| verifyRequestOrThrow (tampered) | throw | ~2,330 ops/sec (~430 µs/op) |
+| ed25519 | sign | ~7,700 ops/sec (~130 µs/op) |
+| ed25519 | verify | ~2,020 ops/sec (~496 µs/op) |
+| hmac-sha256 | sign | ~20,200 ops/sec (~49.4 µs/op) |
+| hmac-sha256 | verify | ~20,400 ops/sec (~49.0 µs/op) |
+| hmac-sha512 | sign | ~16,300 ops/sec (~61.3 µs/op) |
+| hmac-sha512 | verify | ~14,000 ops/sec (~71.4 µs/op) |
+| ecdsa-p256-sha256 | sign | ~3,680 ops/sec (~272 µs/op) |
+| ecdsa-p256-sha256 | verify | ~1,560 ops/sec (~641 µs/op) |
+| ecdsa-p384-sha384 | sign | ~347 ops/sec (~2,885 µs/op) |
+| ecdsa-p384-sha384 | verify | ~582 ops/sec (~1,718 µs/op) |
+| ecdsa-p521-sha512 | sign | ~146 ops/sec (~6,862 µs/op) |
+| ecdsa-p521-sha512 | verify | ~164 ops/sec (~6,094 µs/op) |
+| rsa-pss-sha512 | sign | ~833 ops/sec (~1,200 µs/op) |
+| rsa-pss-sha512 | verify | ~4,720 ops/sec (~212 µs/op) |
+| rsa-v1_5-sha256 | sign | ~576 ops/sec (~1,737 µs/op) |
+| rsa-v1_5-sha256 | verify | ~1,670 ops/sec (~600 µs/op) |
+| verifyAllLabels (2 labels) | verify | ~1,660 ops/sec (~602 µs/op) |
+| JwksKeyStore.resolve (hit) | resolve | ~774,000 ops/sec (~1.29 µs/op) |
+| memoizeKeyResolver (hit) | resolve | ~2,420,000 ops/sec (~0.41 µs/op) |
+| memoizeKeyResolver (miss) | resolve | ~5,360,000 ops/sec (~0.19 µs/op) |
+| jwkThumbprint (3 JWK shapes) | derive | ~13,800 ops/sec (~72.5 µs/op) |
+| ReplayCache.check (hit, 1k entries) | check | ~2,060,000 ops/sec (~0.49 µs/op) |
+| verifyRequest (malformed, 566 cases) | reject | ~8,670 ops/sec (~115 µs/op) |
+| contentDigest sha-512 (31-byte body) | digest | ~153,000 ops/sec (~6.52 µs/op) |
+| contentDigest sha-256 (31-byte body) | digest | ~188,000 ops/sec (~5.31 µs/op) |
+| fromNodeRequest (inbound, trailers) | normalize | ~58,200 ops/sec (~17.2 µs/op) |
+| JWK round-trip P-256 | roundtrip | ~4,620 ops/sec (~217 µs/op) |
+| JWK round-trip P-384 | roundtrip | ~4,240 ops/sec (~236 µs/op) |
+| JWK round-trip P-521 | roundtrip | ~2,480 ops/sec (~403 µs/op) |
+| JWK round-trip RSA-2048 | roundtrip | ~3,860 ops/sec (~259 µs/op) |
+| buildSignatureBase (4 components) | build | ~54,700 ops/sec (~18.3 µs/op) |
+| listSignatureLabels (2 labels) | parse | ~187,000 ops/sec (~5.35 µs/op) |
+| parseSignatureInput (merchant) | parse | ~86,700 ops/sec (~11.5 µs/op) |
+| parseSignatureField (merchant) | parse | ~301,000 ops/sec (~3.32 µs/op) |
+| canonicalizeStructuredFieldValue (6 values) | canon | ~6,960 ops/sec (~144 µs/op) |
+| serializeDictionaryMemberValue (6 keys) | extract | ~11,000 ops/sec (~90.7 µs/op) |
+| serializeSignatureParams (5 cases) | serialize | ~14,200 ops/sec (~70.6 µs/op) |
+| verifyRequestOrThrow (valid) | verify | ~2,490 ops/sec (~402 µs/op) |
+| verifyRequestOrThrow (tampered) | throw | ~2,490 ops/sec (~401 µs/op) |
 
 Load note for this run: it was taken on a shared host, so the
 absolute throughputs above vary from quieter runs of the same
@@ -988,14 +989,14 @@ the bench on a quiet machine for capacity numbers.
 The `ecdsa-p384-sha384` rows: the P-384 path uses the same fixture
 caliber as P-256 (one fresh key pair per scenario, outside the timed
 loops), and in this run it measured markedly more expensive than
-P-256 — about 2,923 µs/op to sign versus about 251 µs/op, and about
-2,097 µs/op to verify versus about 230 µs/op.
+P-256 — about 2,885 µs/op to sign versus about 272 µs/op, and about
+1,718 µs/op to verify versus about 641 µs/op.
 
 The `ecdsa-p521-sha512` rows: the P-521 path uses the same fixture
 caliber as P-256 / P-384 (one fresh key pair per scenario, outside
 the timed loops; signatures are the raw r‖s form, 132 bytes total),
-and it is the most expensive EC tier in this run — about 1.9× the
-per-op sign cost and about 2.5× the verify cost of P-384.
+and it is the most expensive EC tier in this run — about 2.4× the
+per-op sign cost and about 3.5× the verify cost of P-384.
 
 The `verifyAllLabels` row covers the multi-party scenario: the merchant signs
 with ed25519 and the payment gateway appends its own hmac-sha256 signature
@@ -1006,11 +1007,11 @@ restored offline from a snapshot (the bench performs zero network I/O), a
 hit is a plain Map lookup, a `memoizeKeyResolver` hit is served from its
 TTL cache, and a miss uses an unknown keyid, which is never cached and so
 penetrates to the store on every call. In this run the raw
-store hit landed at ~1.12 µs/op, the memoized hit at ~0.39 µs/op
-and the miss at ~0.81 µs/op — all three are around-a-µs Map/cache
+store hit landed at ~1.29 µs/op, the memoized hit at ~0.41 µs/op
+and the miss at ~0.19 µs/op — all three are around-a-µs Map/cache
 operations whose relative ordering is contention noise on this
-offline fixture (a memoized hit cannot really be cheaper than
-the raw Map lookup it wraps; that inversion is the shared host,
+offline fixture (a miss cannot really be cheaper than the raw
+Map lookup it penetrates to; that inversion is the shared host,
 not the code): memoizing pays off when the underlying
 resolver is slow or remote, which this offline fixture
 deliberately is not.
@@ -1057,7 +1058,7 @@ hash, `contentDigest(body, alg)`, over the shared fixture body (the
 sign/verify paths that normally bundle hashing with an asymmetric
 signature — so a reader can see what hashing a body costs on its own
 and how the two algorithms compare at this size. In this run
-sha-512 landed ahead (~623,000 versus ~118,000 ops/sec) — at this
+sha-256 landed ahead (~188,000 versus ~153,000 ops/sec) — at this
 size the call is mostly fixed overhead, so the ordering (and the
 size of the gap, which flipped versus the previous run) is
 shared-host noise, not bulk-hashing performance. The
@@ -1085,7 +1086,7 @@ normalized result field by field against a hand-written expected
 `RequestLike`, check that the parsed-trailers-object form produces
 the identical result, that `rawTrailers` wins over a disagreeing
 parsed object, and that a trailer-less message gains no `trailers`
-field. In this run it measured ~60,600 ops/sec (~16.5 µs/op) —
+field. In this run it measured ~58,200 ops/sec (~17.2 µs/op) —
 the work is a handful of object allocations and string folds, so
 run-to-run swings here are host contention (see the load note),
 not code changes.
@@ -1106,8 +1107,8 @@ serves both `rsa-pss-sha512` and `rsa-v1_5-sha256`). Self-checks
 outside timing require the re-imported key's SPKI DER — produced by
 node:crypto directly, independently of the JWK helpers — to equal
 the original's byte-for-byte, for every shape. In this run the EC
-rows landed at ~5,040 (P-256), ~9,500 (P-384) and ~8,170 (P-521)
-ops/sec and RSA at ~4,320 ops/sec. No ordering across curves is
+rows landed at ~4,620 (P-256), ~4,240 (P-384) and ~2,480 (P-521)
+ops/sec and RSA at ~3,860 ops/sec. No ordering across curves is
 claimed from this one contended run — the per-call cost is
 dominated by node:crypto's JWK import validation, whose relative
 cost per curve should be re-measured on a quiet machine before
@@ -1130,10 +1131,10 @@ hand-written expected base text byte-for-byte, written out
 literally from the RFC 9421 §2.5 rules in the same hand-pinned
 style as the test suite's golden vector — never derived from
 `buildSignatureBase` at bench time — and re-pins the full text on
-every measured call. In this run it measured ~54,200 ops/sec
-(~18.5 µs/op) — about 31% of the same run's hmac-sha256 sign
-per-op time (~58.8 µs/op) and about 10% of an ed25519 sign
-(~190 µs/op), which is the expected shape: base building is a
+every measured call. In this run it measured ~54,700 ops/sec
+(~18.3 µs/op) — about 37% of the same run's hmac-sha256 sign
+per-op time (~49.4 µs/op) and about 14% of an ed25519 sign
+(~130 µs/op), which is the expected shape: base building is a
 real but minority share of a sign, and the cryptography
 dominates. The bench performs zero network I/O and makes no
 wall-clock assertions.
@@ -1161,11 +1162,11 @@ label, an unterminated or missing inner list, and signature
 members with no `:base64:` shape) all throw; every measured call
 re-pins the core of its result. In this run
 `parseSignatureInput` was the most expensive of the three
-(~42,200 ops/sec, ~23.7 µs/op), `listSignatureLabels` landed at
-~460,000 ops/sec (~2.18 µs/op) and `parseSignatureField` at
-~207,000 ops/sec (~4.84 µs/op) — together the whole
-pre-screen parse of one member costs roughly 31 µs, about 7.5% of
-an ed25519 verify in the same run (~410 µs/op), so for a gateway
+(~86,700 ops/sec, ~11.5 µs/op), `listSignatureLabels` landed at
+~187,000 ops/sec (~5.35 µs/op) and `parseSignatureField` at
+~301,000 ops/sec (~3.32 µs/op) — together the whole
+pre-screen parse of one member costs roughly 20 µs, about 4% of
+an ed25519 verify in the same run (~496 µs/op), so for a gateway
 the parsing itself is not the bottleneck; the cryptography is.
 The bench performs zero network I/O and makes no wall-clock
 assertions.
@@ -1187,8 +1188,8 @@ canonically). Every expected serialization is hand-pinned in the
 bench from the RFC 8941 §4 rules (matching the values pinned
 independently in the `;sf` test suite) — never derived from the
 implementation at bench time — and every measured pass re-pins
-every entry's result. In this run it measured ~4,780 ops/sec
-(~209 µs/op for the six-value pass, roughly 35 µs per value): the
+every entry's result. In this run it measured ~6,960 ops/sec
+(~144 µs/op for the six-value pass, roughly 24 µs per value): the
 most expensive pure-string path in this table, which is the honest
 cost of parsing a value as up to three Structured Field types and
 reserializing it strictly. The bench performs zero network I/O
@@ -1215,12 +1216,39 @@ hand-pinned in the bench from the RFC 8941 §4.1.2 rules
 `;sf` test suites) — never derived from the implementation at
 bench time — every measured pass re-pins every entry's result,
 and a missing key must throw "not present", asserted outside
-timing. In this run it measured ~10,000 ops/sec (~100 µs/op
-for the six-key pass, roughly 17 µs per extraction): cheaper
+timing. In this run it measured ~11,000 ops/sec (~90.7 µs/op
+for the six-key pass, roughly 15 µs per extraction): cheaper
 per pass than whole-value canonicalization in the same run
-(~209 µs/op), which is the expected shape — it reserializes
+(~144 µs/op), which is the expected shape — it reserializes
 only one member, though it still parses them all. The bench
 performs zero network I/O and makes no wall-clock assertions.
+
+The `serialize` row is new: it measures
+`serializeSignatureParams` — the inner-list-plus-parameters
+serialization every sign and verify pays before any
+cryptography runs — isolated from the `buildSignatureBase`
+row above, whose cost bundles it with resolving every covered
+component's value. One measured op is one pass over a fixed
+five-case corpus (5 serializations per op) spanning zero to
+four covered components: an empty component list carrying
+exactly the RFC 9421 §B.2.1 parameters, the shared four
+components with created + keyid + alg, the same four with all
+six parameters set (created, expires, keyid, alg, nonce, tag),
+four parameterized component ids (`;req`, `;tr`, `;name=`,
+`;key=`), and a nonce whose quote and backslash characters
+must serialize escaped. Every expected string is hand-pinned
+in the bench from the serializer's contract (matching values
+pinned independently in the Appendix B, golden, parameterized-
+component and nonce test suites) — never derived from the
+implementation at bench time — and every measured pass
+re-pins every case's result. In this run it measured
+~14,200 ops/sec (~70.6 µs/op for the five-case pass, roughly
+14 µs per case): the same order as one `buildSignatureBase`
+call in the same run (~18.3 µs/op), which is the expected
+shape — for a single signature the parameter serialization
+is most of the base's string-building cost, and resolving
+the component values adds the rest. The bench performs zero
+network I/O and makes no wall-clock assertions.
 
 The `verify` / `throw` rows for `verifyRequestOrThrow` are new:
 they measure the throwing wrapper a middleware-style caller
@@ -1239,13 +1267,12 @@ literal in the bench, and the throw count afterwards must equal
 warmup + timed iterations exactly, so the row prices exception
 construction and carrying the machine-readable code, not just
 the failed cryptography. In this run the valid row measured
-~2,930 ops/sec (~341 µs/op) and the tampered row ~2,330 ops/sec
-(~430 µs/op): the failure path landed modestly more expensive
-per op than the success path in this run, and both rows landed
-where shared-host contention put them relative to the
-result-style ed25519 verify row (~410 µs/op) — the wrapper adds
-no cryptography, so no cross-row ordering beyond that is
-claimed. The bench performs zero network I/O and makes no
+~2,490 ops/sec (~402 µs/op) and the tampered row ~2,490 ops/sec
+(~401 µs/op): the two paths landed essentially tied in this
+run, and both landed where shared-host contention put them
+relative to the result-style ed25519 verify row (~496 µs/op) —
+the wrapper adds no cryptography, so no cross-row ordering
+beyond that is claimed. The bench performs zero network I/O and makes no
 wall-clock assertions.
 
 Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized; shared

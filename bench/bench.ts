@@ -83,7 +83,16 @@
  * against hand-pinned expected serializations with the
  * missing-key throw asserted outside timing, so the
  * parse-whole-dictionary-then-extract-one-member cost is visible
- * apart from the whole-value canonicalization above.
+ * apart from the whole-value canonicalization above, plus the
+ * signature-parameter serialization every sign/verify pays before
+ * any cryptography runs: `serializeSignatureParams` over a fixed
+ * five-case corpus (see SIG_PARAMS_* below) spanning zero to four
+ * covered components, plain and parameterized component ids, and
+ * parameter sets from three members up to all six, self-checked
+ * on every measured pass against hand-pinned expected strings, so
+ * the inner-list-plus-parameters cost is visible apart from the
+ * `buildSignatureBase` row that bundles it with component
+ * resolution.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -122,6 +131,7 @@ import {
   ReplayCache,
   secretKey,
   serializeDictionaryMemberValue,
+  serializeSignatureParams,
   signRequest,
   verifyAllLabels,
   verifyRequest,
@@ -1494,6 +1504,137 @@ function benchmarkSerializeDictionaryMemberValue(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed corpus for the `serializeSignatureParams` path — five
+ * (componentIds, params) cases spanning zero to four covered
+ * components and parameter sets from three members up to all
+ * six. Every expected serialization is hand-pinned below from
+ * the serializer's contract — the inner list is the covered
+ * component ids in canonical wire form (quoted base, then
+ * `;req` / `;tr` / `;name=` / `;key=` parameters), followed by
+ * the signature parameters in the fixed order created, expires,
+ * keyid, alg, nonce, tag, with string values quoted and
+ * backslash / quote characters escaped — and matches values
+ * pinned independently elsewhere in the suite — never derived
+ * from `serializeSignatureParams` at bench time:
+ * - empty: no covered components, created + keyid + nonce —
+ *   exactly the RFC 9421 §B.2.1 `@signature-params` value pinned
+ *   in test/rfc9421AppendixB.test.ts.
+ * - golden: the shared four components with created + keyid +
+ *   alg — the `@signature-params` line pinned in
+ *   test/golden.test.ts.
+ * - full: the same four components with all six parameters set
+ *   (expires sits between created and keyid, tag last).
+ * - parameterized: four component ids carrying `;req`, `;tr`,
+ *   `;name="amount"` and `;key="b"` — each member's canonical
+ *   form matches the pins in the `;req` / `;tr` /
+ *   `@query-param` / `;key` component tests.
+ * - escaped: a nonce carrying a quote and a backslash
+ *   (`a"b\c d`) serializes with both escaped, matching the
+ *   wire form pinned in test/nonce.test.ts.
+ */
+const SIG_PARAMS_FIXTURE: ReadonlyArray<{
+  name: string;
+  componentIds: string[];
+  params: SignatureParams;
+  expected: string;
+}> = [
+  {
+    name: "empty",
+    componentIds: [],
+    params: {
+      created: 1618884473,
+      keyid: "test-key-rsa-pss",
+      nonce: "b3k2pp5k7z-50gnwp.yemd",
+    },
+    expected:
+      '();created=1618884473;keyid="test-key-rsa-pss";nonce="b3k2pp5k7z-50gnwp.yemd"',
+  },
+  {
+    name: "golden",
+    componentIds: ["@method", "@authority", "@path", "content-digest"],
+    params: { created: 1700000000, keyid: "k1", alg: "hmac-sha256" },
+    expected:
+      '("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="k1";alg="hmac-sha256"',
+  },
+  {
+    name: "full",
+    componentIds: ["@method", "@authority", "@path", "content-digest"],
+    params: {
+      created: 1700000000,
+      expires: 1700000300,
+      keyid: "demo-key-1",
+      alg: "ed25519",
+      nonce: "demo-nonce-001",
+      tag: "payment-webhook-v1",
+    },
+    expected:
+      '("@method" "@authority" "@path" "content-digest");created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"',
+  },
+  {
+    name: "parameterized",
+    componentIds: [
+      "@method;req",
+      "x-checksum;tr",
+      '@query-param;name="amount"',
+      'x-dict;key="b"',
+    ],
+    params: { created: 1700000000, keyid: "k1", alg: "ed25519" },
+    expected:
+      '("@method";req "x-checksum";tr "@query-param";name="amount" "x-dict";key="b");created=1700000000;keyid="k1";alg="ed25519"',
+  },
+  {
+    name: "escaped",
+    componentIds: ["@method"],
+    params: {
+      created: 1700000000,
+      keyid: "k",
+      alg: "ed25519",
+      nonce: 'a"b\\c d',
+    },
+    expected:
+      '("@method");created=1700000000;keyid="k";alg="ed25519";nonce="a\\"b\\\\c d"',
+  },
+];
+
+/**
+ * `serializeSignatureParams` steady state: one measured call is
+ * one pass over the whole fixed corpus (5 serializations per
+ * op) — the inner-list-plus-parameters string building every
+ * sign/verify pays before any cryptography runs, isolated from
+ * the `buildSignatureBase` path above, whose cost additionally
+ * covers resolving every covered component's value. Self-checks:
+ * every fixture entry is verified against its hand-pinned
+ * expectation outside timing first, and the measured loop
+ * re-pins every entry's result on every pass. Zero network,
+ * zero randomness, no wall-clock assertions.
+ */
+function benchmarkSerializeSignatureParams(): number {
+  for (const entry of SIG_PARAMS_FIXTURE) {
+    const actual = serializeSignatureParams(
+      entry.componentIds,
+      entry.params,
+    );
+    if (actual !== entry.expected)
+      throw new Error(
+        `benchmark self-check failed: case ${entry.name} serialized to ${JSON.stringify(actual)} ` +
+          `(expected ${JSON.stringify(entry.expected)})`,
+      );
+  }
+  return measure(() => {
+    for (const entry of SIG_PARAMS_FIXTURE) {
+      const actual = serializeSignatureParams(
+        entry.componentIds,
+        entry.params,
+      );
+      if (actual !== entry.expected)
+        throw new Error(
+          `benchmark self-check failed: case ${entry.name} serialization diverged from the pinned string`,
+        );
+    }
+  }, ITERATIONS);
+}
+
 /** Fixed `created` for the OrThrow fixture (no wall clock). */
 const ORTHROW_CREATED = 1_700_000_000;
 /** Pinned failure code for the tampered OrThrow fixture — written
@@ -1755,6 +1896,11 @@ results.push({
   alg: "serializeDictionaryMemberValue (6 keys)",
   op: "extract",
   ops: benchmarkSerializeDictionaryMemberValue(),
+});
+results.push({
+  alg: "serializeSignatureParams (5 cases)",
+  op: "serialize",
+  ops: benchmarkSerializeSignatureParams(),
 });
 results.push({
   alg: "verifyRequestOrThrow (valid)",

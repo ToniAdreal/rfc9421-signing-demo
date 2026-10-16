@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `serializeSignatureParams` — the inner-list-plus-parameters
+  serialization every sign and verify pays before any
+  cryptography runs — as one pass over a fixed five-case corpus
+  per measured call: an empty component list carrying the
+  RFC 9421 §B.2.1 parameters, the shared four covered
+  components with created + keyid + alg, the same four with all
+  six parameters set, four parameterized component ids
+  (`;req` / `;tr` / `;name=` / `;key=`), and a nonce whose quote
+  and backslash characters must serialize escaped. Every
+  expected string is hand-pinned in the bench from the
+  serializer's contract, matching values pinned independently
+  in the Appendix B, golden, parameterized-component and nonce
+  test suites, and every measured pass re-pins every case's
+  result. `serializeSignatureParams` is also now re-exported
+  from the package entry point alongside `signatureInputValue`
+  (it was previously only reachable through the components
+  module). The README Benchmarks table was refreshed wholesale
+  from one real run and now carries the `serialize` row. The
+  bench performs zero network I/O and makes no wall-clock
+  assertions.
 - The CLI demo (`npm run demo`) now closes with a structured-field
   canonicalization segment: three fixed field values (a Dictionary
   with a Decimal member, an Integer Item with leading zeros, a
