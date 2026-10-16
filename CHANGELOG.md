@@ -12,6 +12,25 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `getHeader` / `getHeaderRaw` — the case-insensitive header
+  lookup every covered-component resolution pays on the
+  signer and the verifier — as one pass over a fixed
+  nine-name lookup set against one fixed multi-header
+  fixture per measured call (9 names × both helpers = 18
+  lookups): mixed-case single strings, a duplicated header
+  name under two casings (the first match in insertion order
+  must win), and multi-value fields with padded elements, on
+  which the canonical form (trimmed, joined with ", ") and
+  the raw form (joined untrimmed, the form a `;bs` component
+  binds) must differ. Every expected value is hand-pinned in
+  the bench from the two helpers' documented contracts and
+  re-pinned on every measured pass; missing and
+  undefined-valued headers returning `undefined` from both
+  helpers are asserted outside timing. The README Benchmarks
+  table was refreshed wholesale from one real run and now
+  carries the `lookup` row. The bench performs zero network
+  I/O, zero randomness and no wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `generateNonce` — the nonce generation an anti-replay
   signer pays on every request — as one pass over the two
   fixed byte tiers per measured call: the default 16 bytes

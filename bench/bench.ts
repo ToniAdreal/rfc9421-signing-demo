@@ -101,7 +101,18 @@
  * base64url-only characters, never a specific value — so the
  * CSPRNG-plus-encoding cost is visible as the fixed per-request
  * overhead it is (the random source is the system CSPRNG via
- * node:crypto, so the numbers include entropy-source cost).
+ * node:crypto, so the numbers include entropy-source cost), plus
+ * the case-insensitive header lookup every covered-component
+ * resolution pays on the signer and the verifier: `getHeader`
+ * (canonical form — multi-value elements trimmed and joined
+ * with ", ") and `getHeaderRaw` (raw form — elements joined
+ * untrimmed, the form a `;bs` component binds) over a fixed
+ * multi-header fixture (see HEADER_* below), self-checked on
+ * every measured pass against hand-pinned expected values for
+ * both forms, with missing and undefined-valued headers
+ * asserted outside timing, so the per-component scan-and-fold
+ * cost is visible apart from the end-to-end sign/verify paths
+ * that bundle it.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -127,6 +138,8 @@ import {
   generateP521KeyPair,
   generateRsaPssKeyPair,
   generateRsaV15KeyPair,
+  getHeader,
+  getHeaderRaw,
   importPublicKeyJwkP256,
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
@@ -1818,6 +1831,185 @@ function benchmarkVerifyRequestOrThrowTampered(): number {
   return ops;
 }
 
+/**
+ * Fixed multi-header fixture for the `getHeader` / `getHeaderRaw`
+ * paths — one headers object written out literally here, holding
+ * eight entries in insertion order:
+ * - `Host` (mixed case, with a port) AND a later lowercase `host`
+ *   entry holding a different value: the two keys coexist in one
+ *   object, and a case-insensitive lookup must return the FIRST
+ *   matching key in insertion order, never the shadowed second
+ *   one — the duplicate-casing case a gateway hits when a proxy
+ *   re-adds a header under a different casing;
+ * - `Content-Type` and `Content-Digest` single strings (the
+ *   digest value is the pinned sha-512 wire value of the shared
+ *   fixture body, carried here as an opaque header value — the
+ *   lookup helpers never recompute digests);
+ * - two multi-value fields whose elements carry padding
+ *   whitespace (`X-Forwarded-For`, `X-Trace`): the canonical
+ *   `getHeader` form trims each element and joins with ", ",
+ *   while `getHeaderRaw` joins the raw elements with ", " and
+ *   keeps every space — the two forms MUST differ on these
+ *   entries, which is exactly what the pins below assert;
+ * - `x-custom`, a single string with padding: a single (non-array)
+ *   value is returned verbatim by BOTH helpers (neither trims a
+ *   lone string), so its two pins coincide;
+ * - `Authorization`, a plain single string;
+ * - `X-Debug-Skip`, present with an `undefined` value: both
+ *   helpers return `undefined` for it, asserted outside timing
+ *   together with the genuinely missing names below.
+ */
+const HEADER_FIXTURE: Record<string, string | string[] | undefined> = {
+  Host: "gateway.example.com:8443",
+  host: "shadowed.example.com",
+  "Content-Type": "application/json",
+  "Content-Digest":
+    "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+  "X-Forwarded-For": [" 203.0.113.10 ", "10.0.0.8"],
+  "X-Trace": ["  alpha  ", " beta "],
+  "x-custom": "  padded value  ",
+  Authorization: "Bearer bench-token",
+  "X-Debug-Skip": undefined,
+};
+
+/**
+ * Hand-pinned expected lookups over HEADER_FIXTURE — every
+ * expected value is written out literally from the two helpers'
+ * documented contracts (case-insensitive first-match scan;
+ * canonical form trims and joins multi-value elements with
+ * ", "; raw form joins them untrimmed; a single string passes
+ * through verbatim in both forms) — never derived from
+ * `getHeader` / `getHeaderRaw` at bench time:
+ * - host / HOST: both casings resolve to the FIRST `Host` entry
+ *   (`gateway.example.com:8443`), not the shadowed lowercase one;
+ * - content-type / content-digest: the single strings verbatim;
+ * - x-forwarded-for: canonical `203.0.113.10, 10.0.0.8`, raw
+ *   ` 203.0.113.10 , 10.0.0.8` (the first element's trailing
+ *   space survives, then the ", " separator);
+ * - X-TRACE: canonical `alpha, beta`, raw `  alpha  ,  beta `;
+ * - x-custom / X-Custom: `  padded value  ` in both forms;
+ * - authorization: `Bearer bench-token` in both forms.
+ */
+const HEADER_LOOKUPS: ReadonlyArray<{
+  name: string;
+  canonical: string;
+  raw: string;
+}> = [
+  {
+    name: "host",
+    canonical: "gateway.example.com:8443",
+    raw: "gateway.example.com:8443",
+  },
+  {
+    name: "HOST",
+    canonical: "gateway.example.com:8443",
+    raw: "gateway.example.com:8443",
+  },
+  {
+    name: "content-type",
+    canonical: "application/json",
+    raw: "application/json",
+  },
+  {
+    name: "content-digest",
+    canonical:
+      "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+    raw: "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+  },
+  {
+    name: "x-forwarded-for",
+    canonical: "203.0.113.10, 10.0.0.8",
+    raw: " 203.0.113.10 , 10.0.0.8",
+  },
+  {
+    name: "X-TRACE",
+    canonical: "alpha, beta",
+    raw: "  alpha  ,  beta ",
+  },
+  {
+    name: "x-custom",
+    canonical: "  padded value  ",
+    raw: "  padded value  ",
+  },
+  {
+    name: "authorization",
+    canonical: "Bearer bench-token",
+    raw: "Bearer bench-token",
+  },
+  {
+    name: "X-Custom",
+    canonical: "  padded value  ",
+    raw: "  padded value  ",
+  },
+];
+
+/**
+ * Names whose lookup result must be `undefined` from BOTH
+ * helpers, asserted outside timing only (the missing-header
+ * return form is a contract check, not part of the measured
+ * pass): three names absent from the fixture entirely, plus
+ * `x-debug-skip`, which is present but carries an `undefined`
+ * value.
+ */
+const HEADER_MISSING = ["x-missing", "signature", "cookie", "x-debug-skip"] as const;
+
+function assertHeaderFixture(): void {
+  for (const entry of HEADER_LOOKUPS) {
+    const canonical = getHeader(HEADER_FIXTURE, entry.name);
+    if (canonical !== entry.canonical)
+      throw new Error(
+        `benchmark self-check failed: getHeader(${entry.name}) gave ${JSON.stringify(canonical)} ` +
+          `(expected ${JSON.stringify(entry.canonical)})`,
+      );
+    const raw = getHeaderRaw(HEADER_FIXTURE, entry.name);
+    if (raw !== entry.raw)
+      throw new Error(
+        `benchmark self-check failed: getHeaderRaw(${entry.name}) gave ${JSON.stringify(raw)} ` +
+          `(expected ${JSON.stringify(entry.raw)})`,
+      );
+  }
+  for (const name of HEADER_MISSING) {
+    if (getHeader(HEADER_FIXTURE, name) !== undefined)
+      throw new Error(
+        `benchmark self-check failed: getHeader(${name}) did not return undefined`,
+      );
+    if (getHeaderRaw(HEADER_FIXTURE, name) !== undefined)
+      throw new Error(
+        `benchmark self-check failed: getHeaderRaw(${name}) did not return undefined`,
+      );
+  }
+}
+
+/**
+ * `getHeader` / `getHeaderRaw` steady state: one measured call
+ * is one pass over the whole fixed lookup set (9 names × both
+ * helpers = 18 lookups per op) — the case-insensitive scan and
+ * multi-value fold every covered component pays when
+ * `resolveComponent` reads a field from the request, on the
+ * signer and the verifier alike. Self-checks: every fixture
+ * entry is verified against its hand-pinned expectation for
+ * both helpers outside timing first (with the missing /
+ * undefined-valued names asserted there too), and the measured
+ * loop re-pins every lookup's result for both helpers on every
+ * pass. Zero network, zero randomness, no wall-clock
+ * assertions.
+ */
+function benchmarkGetHeader(): number {
+  assertHeaderFixture();
+  return measure(() => {
+    for (const entry of HEADER_LOOKUPS) {
+      if (getHeader(HEADER_FIXTURE, entry.name) !== entry.canonical)
+        throw new Error(
+          `benchmark self-check failed: getHeader(${entry.name}) diverged from the pinned value`,
+        );
+      if (getHeaderRaw(HEADER_FIXTURE, entry.name) !== entry.raw)
+        throw new Error(
+          `benchmark self-check failed: getHeaderRaw(${entry.name}) diverged from the pinned value`,
+        );
+    }
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -1987,6 +2179,11 @@ results.push({
   alg: "verifyRequestOrThrow (tampered)",
   op: "throw",
   ops: benchmarkVerifyRequestOrThrowTampered(),
+});
+results.push({
+  alg: "getHeader/getHeaderRaw (9 names ×2)",
+  op: "lookup",
+  ops: benchmarkGetHeader(),
 });
 
 console.log("alg                                    op      throughput");
