@@ -12,6 +12,32 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `assertHmacSecretLength` — the per-algorithm HMAC
+  secret-length guard every HMAC sign/verify pays before any
+  MAC runs (RFC 2104: the key SHOULD be at least as long as
+  the hash output, so hmac-sha256 requires at least 32 bytes
+  and hmac-sha512 at least 64) — as one pass over a fixed
+  ten-case corpus per measured call: for each algorithm an
+  empty secret, one byte below its floor, exactly at its
+  floor, and far above it, plus the cross-algorithm pair a
+  63-byte secret that passes for hmac-sha256 and a 32-byte
+  secret that passes for hmac-sha256 but is rejected for
+  hmac-sha512. Six of the ten cases throw and are caught
+  inside the measured pass — the fail-closed rejection is
+  part of the steady state a caller pays. Every expected
+  pass/throw outcome, including the exact floor and byte
+  count in each throw message, is hand-pinned in the bench
+  from the guard's documented contract (matching the
+  messages the keyLength and hmacSha512 suites pin
+  independently), never derived from the implementation at
+  bench time, self-checked exhaustively outside timing, and
+  re-pinned on every measured pass. The secrets are built
+  once at bench start from a fixed fill — only their lengths
+  matter. The README Benchmarks table was refreshed
+  wholesale from one real run and now carries the `guard`
+  row. The bench performs zero network I/O, zero randomness
+  and no wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `contentDigestAlgOf` — the digest-algorithm identification
   a signer appending a second signature pays to pin itself
   to the existing wire Content-Digest value — as one pass

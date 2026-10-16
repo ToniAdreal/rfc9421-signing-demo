@@ -132,16 +132,27 @@
  * `undefined` fail-closed outcome for every value whose first
  * `=`-prefix is not exactly `sha-512` or `sha-256` — so the
  * prefix-scan cost is visible apart from the digest hashing
- * and the end-to-end paths that bundle it.
+ * and the end-to-end paths that bundle it, plus the HMAC
+ * secret-length guard every HMAC sign/verify pays before any
+ * MAC runs: `assertHmacSecretLength` over a fixed ten-case
+ * corpus (see HMAC_GUARD_* below) spanning, for each algorithm,
+ * an empty secret, one byte below the floor, exactly at the
+ * floor, and far above it — plus the 32-byte secret that passes
+ * for hmac-sha256 but fails for hmac-sha512 — self-checked on
+ * every measured pass against hand-pinned pass/throw outcomes
+ * (including the exact floor and byte count in each throw
+ * message), so the fail-closed key-length check is visible
+ * apart from the HMAC sign/verify rows that bundle it.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
  * Run: `npm run bench`
  */
-import { type KeyObject } from "node:crypto";
+import { createSecretKey, type KeyObject } from "node:crypto";
 import { cpus } from "node:os";
 import {
   addSignature,
+  assertHmacSecretLength,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
   contentDigest,
@@ -2218,6 +2229,160 @@ function benchmarkContentDigestAlgOf(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed secret-length corpus for the `assertHmacSecretLength`
+ * path — ten cases written out here, with every secret a
+ * `createSecretKey` KeyObject built ONCE at bench start from a
+ * fixed 0xab fill (deterministic, zero randomness; only the byte
+ * length matters to the guard, never the content). Composition,
+ * with the hand-pinned outcome for each:
+ * - hmac-sha256 via the DEFAULT (one-argument) call — the
+ *   backwards-compatible form the keyLength suite pins:
+ *   0 bytes -> throws "at least 32 bytes … got 0 bytes";
+ *   31 bytes (one below the floor) -> throws "… got 31 bytes";
+ *   32 bytes (exactly the RFC 2104 floor) -> passes;
+ *   128 bytes (far above) -> passes.
+ * - hmac-sha256 explicit: 63 bytes -> passes (the same secret
+ *   fails for hmac-sha512 below — the floor is paired with the
+ *   algorithm, never shared).
+ * - hmac-sha512: 0 bytes -> throws "at least 64 bytes … got 0
+ *   bytes"; 32 bytes (adequate for sha256, half the sha512
+ *   floor) -> throws "… got 32 bytes"; 63 bytes (one below) ->
+ *   throws "… got 63 bytes"; 64 bytes (exactly the floor) ->
+ *   passes; 128 bytes (far above) -> passes.
+ * Every pinned floor and byte count matches the messages the
+ * keyLength and hmacSha512 suites pin independently. No
+ * expected outcome is derived from `assertHmacSecretLength`
+ * at bench time.
+ */
+const HMAC_GUARD_CORPUS: ReadonlyArray<{
+  bytes: number;
+  alg: "hmac-sha256" | "hmac-sha512" | undefined;
+  key: KeyObject;
+  /** Pinned throw-message fragment, or null when the call passes. */
+  expectedError: string | null;
+}> = [
+  {
+    bytes: 0,
+    alg: undefined,
+    key: createSecretKey(Buffer.alloc(0, 0xab)),
+    expectedError:
+      "assertHmacSecretLength: hmac-sha256 secret must be at least 32 bytes",
+  },
+  {
+    bytes: 31,
+    alg: undefined,
+    key: createSecretKey(Buffer.alloc(31, 0xab)),
+    expectedError:
+      "assertHmacSecretLength: hmac-sha256 secret must be at least 32 bytes",
+  },
+  {
+    bytes: 32,
+    alg: undefined,
+    key: createSecretKey(Buffer.alloc(32, 0xab)),
+    expectedError: null,
+  },
+  {
+    bytes: 128,
+    alg: undefined,
+    key: createSecretKey(Buffer.alloc(128, 0xab)),
+    expectedError: null,
+  },
+  {
+    bytes: 63,
+    alg: "hmac-sha256",
+    key: createSecretKey(Buffer.alloc(63, 0xab)),
+    expectedError: null,
+  },
+  {
+    bytes: 0,
+    alg: "hmac-sha512",
+    key: createSecretKey(Buffer.alloc(0, 0xab)),
+    expectedError:
+      "assertHmacSecretLength: hmac-sha512 secret must be at least 64 bytes",
+  },
+  {
+    bytes: 32,
+    alg: "hmac-sha512",
+    key: createSecretKey(Buffer.alloc(32, 0xab)),
+    expectedError:
+      "assertHmacSecretLength: hmac-sha512 secret must be at least 64 bytes",
+  },
+  {
+    bytes: 63,
+    alg: "hmac-sha512",
+    key: createSecretKey(Buffer.alloc(63, 0xab)),
+    expectedError:
+      "assertHmacSecretLength: hmac-sha512 secret must be at least 64 bytes",
+  },
+  {
+    bytes: 64,
+    alg: "hmac-sha512",
+    key: createSecretKey(Buffer.alloc(64, 0xab)),
+    expectedError: null,
+  },
+  {
+    bytes: 128,
+    alg: "hmac-sha512",
+    key: createSecretKey(Buffer.alloc(128, 0xab)),
+    expectedError: null,
+  },
+];
+
+/** Run one corpus case and return its outcome: null on pass, the thrown message otherwise. */
+function hmacGuardOutcome(
+  entry: (typeof HMAC_GUARD_CORPUS)[number],
+): string | null {
+  try {
+    if (entry.alg === undefined) assertHmacSecretLength(entry.key);
+    else assertHmacSecretLength(entry.key, entry.alg);
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+function assertHmacGuardCorpus(label: string): void {
+  for (const entry of HMAC_GUARD_CORPUS) {
+    const outcome = hmacGuardOutcome(entry);
+    if (entry.expectedError === null) {
+      if (outcome !== null)
+        throw new Error(
+          `benchmark self-check failed (${label}): assertHmacSecretLength(${entry.bytes} bytes, ${entry.alg ?? "default"}) threw ${JSON.stringify(outcome)} (expected pass)`,
+        );
+    } else if (
+      outcome === null ||
+      !outcome.includes(entry.expectedError) ||
+      !outcome.includes(`got ${entry.bytes} bytes`)
+    )
+      throw new Error(
+        `benchmark self-check failed (${label}): assertHmacSecretLength(${entry.bytes} bytes, ${entry.alg ?? "default"}) gave ${JSON.stringify(outcome)} ` +
+          `(expected a throw containing ${JSON.stringify(entry.expectedError)} and "got ${entry.bytes} bytes")`,
+      );
+  }
+}
+
+/**
+ * `assertHmacSecretLength` steady state: one measured call is
+ * one pass over the whole fixed corpus (10 guard checks per
+ * op, six of which throw and are caught inside the outcome
+ * helper — the fail-closed rejection is part of the steady
+ * state, exactly as a caller constructing a secretKey-guarded
+ * sign/verify pays it) — the per-algorithm HMAC key-length
+ * floor (RFC 2104: sha256 >= 32 bytes, sha512 >= 64 bytes)
+ * the sign and verify paths enforce before any MAC runs.
+ * Self-checks: the whole corpus is asserted exhaustively
+ * outside timing first, and the measured loop re-pins every
+ * case's pass/throw outcome on every pass. Zero network, zero
+ * randomness, no wall-clock assertions.
+ */
+function benchmarkAssertHmacSecretLength(): number {
+  assertHmacGuardCorpus("outside timing");
+  return measure(() => {
+    assertHmacGuardCorpus("measured pass");
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -2402,6 +2567,11 @@ results.push({
   alg: "contentDigestAlgOf (10 cases)",
   op: "identify",
   ops: benchmarkContentDigestAlgOf(),
+});
+results.push({
+  alg: "assertHmacSecretLength (10 cases)",
+  op: "guard",
+  ops: benchmarkAssertHmacSecretLength(),
 });
 
 console.log("alg                                    op      throughput");
