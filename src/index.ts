@@ -20,7 +20,7 @@ export type {
   JwksKeyStoreStats,
   JwksSnapshotKey,
 } from "./jwks.js";
-export { assertContentDigestAlg, contentDigest } from "./digest.js";
+export { assertContentDigestAlg, contentDigest, contentDigestAlgOf } from "./digest.js";
 export type { ContentDigestAlg } from "./digest.js";
 export {
   assertHmacSecretLength,

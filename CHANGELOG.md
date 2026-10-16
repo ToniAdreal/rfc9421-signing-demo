@@ -12,6 +12,31 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `contentDigestAlgOf` — the digest-algorithm identification
+  a signer appending a second signature pays to pin itself
+  to the existing wire Content-Digest value — as one pass
+  over a fixed ten-case corpus per measured call: both
+  emittable algorithms alone (the pinned wire values of the
+  shared fixture body), mixed two-algorithm values in both
+  orders (the helper reads only the prefix before the first
+  `=`, so a mixed value resolves to its first entry — the
+  signer-side pinning contract, not the verifier's
+  whole-value sha-512-preferring body check), unknown
+  algorithms (sha-1, sha-384), and malformed shapes (an
+  uppercase prefix, a leading space, a bare algorithm name
+  with no `=`, and the empty string), whose expected result
+  is `undefined` — the fail-closed shape a caller turns
+  into an explicit rejection. Every expected result is
+  hand-pinned in the bench from the helper's documented
+  contract, never derived from the implementation at bench
+  time, self-checked outside timing, and re-pinned on every
+  measured pass. `contentDigestAlgOf` is now also exported
+  from the package entry point (it was previously internal
+  to the signing path). The README Benchmarks table was
+  refreshed wholesale from one real run and now carries
+  the `identify` row. The bench performs zero network I/O,
+  zero randomness and no wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `joinHeaderValues` — the multi-value header combination
   every canonical lookup, signer-side fold and Node-adapter
   fold pays for a repeated header field (RFC 9421 §2.5:

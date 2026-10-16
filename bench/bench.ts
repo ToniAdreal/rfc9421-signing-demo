@@ -121,7 +121,18 @@
  * element-then-join-with-", " step (RFC 9421 §2.5) that turns a
  * repeated header on a proxy chain into the one canonical
  * string both sides sign, visible apart from the lookup rows
- * above that bundle it with the case-insensitive scan.
+ * above that bundle it with the case-insensitive scan, plus the
+ * digest-algorithm identification a signer appending a second
+ * signature pays before it can pin itself to the wire value:
+ * `contentDigestAlgOf` over a fixed ten-case corpus (see
+ * DIGEST_ALG_* below) spanning both emittable algorithms, both
+ * orders of a mixed two-algorithm value, unknown algorithms,
+ * and malformed shapes, self-checked on every measured pass
+ * against hand-pinned expected results — including the
+ * `undefined` fail-closed outcome for every value whose first
+ * `=`-prefix is not exactly `sha-512` or `sha-256` — so the
+ * prefix-scan cost is visible apart from the digest hashing
+ * and the end-to-end paths that bundle it.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -134,6 +145,7 @@ import {
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
   contentDigest,
+  contentDigestAlgOf,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
   exportPublicKeyJwkP384,
@@ -2098,6 +2110,114 @@ function benchmarkJoinHeaderValues(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed Content-Digest header-value corpus for the
+ * `contentDigestAlgOf` path — ten values written out literally
+ * here. The two single-algorithm values are the pinned
+ * DIGEST_EXPECTED wire values of the shared fixture body above.
+ * Composition, with the hand-pinned expectation for each:
+ * - sha-512 alone -> "sha-512"; sha-256 alone -> "sha-256"
+ *   (the only two algorithms this library can emit);
+ * - mixed values in both orders: the helper reads only the
+ *   prefix before the FIRST "=", so sha-512-first ->
+ *   "sha-512" and sha-256-first -> "sha-256". This is the
+ *   signer-side pinning contract `addSignature` relies on (the
+ *   wire header written by the first signer carries a single
+ *   algorithm); it is NOT the verifier's body check, which
+ *   scans the whole value and prefers sha-512 when both are
+ *   present (see src/verify.ts);
+ * - unknown algorithms sha-1 and sha-384 -> undefined
+ *   (fail-closed: a caller such as `addSignature` must reject
+ *   a header it cannot emit, and the sha-1 shape is the one the
+ *   contentDigestAlg tests pin for that rejection);
+ * - malformed shapes -> undefined: an uppercase "SHA-512"
+ *   prefix (the comparison is case-sensitive), a leading
+ *   space before the algorithm, a bare "sha-512" with no "="
+ *   at all, and the empty string.
+ * No expected value is derived from `contentDigestAlgOf` at
+ * bench time.
+ */
+const DIGEST_ALG_CORPUS: ReadonlyArray<{
+  value: string;
+  expected: ContentDigestAlg | undefined;
+}> = [
+  // sha-512 alone — the DIGEST_EXPECTED sha-512 wire value: "sha-512".
+  {
+    value:
+      "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+    expected: "sha-512",
+  },
+  // sha-256 alone — the DIGEST_EXPECTED sha-256 wire value: "sha-256".
+  {
+    value: "sha-256=:nRIVtM4I5bjHe8zXwvZzr4LRU7HqvqIqHjxSQnK3jbE=:",
+    expected: "sha-256",
+  },
+  // Mixed, sha-512 first: the first "=" prefix wins: "sha-512".
+  {
+    value:
+      "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:, sha-256=:nRIVtM4I5bjHe8zXwvZzr4LRU7HqvqIqHjxSQnK3jbE=:",
+    expected: "sha-512",
+  },
+  // Mixed, sha-256 first: the first "=" prefix wins: "sha-256".
+  {
+    value:
+      "sha-256=:nRIVtM4I5bjHe8zXwvZzr4LRU7HqvqIqHjxSQnK3jbE=:, sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+    expected: "sha-256",
+  },
+  // sha-1 — an algorithm this library cannot emit: undefined.
+  { value: "sha-1=:abc=:", expected: undefined },
+  // sha-384 — likewise unemittable here: undefined.
+  { value: "sha-384=:abc=:", expected: undefined },
+  // Uppercase "SHA-512" — the comparison is case-sensitive: undefined.
+  {
+    value:
+      "SHA-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+    expected: undefined,
+  },
+  // Leading space — the prefix is " sha-512", not "sha-512": undefined.
+  {
+    value:
+      " sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+    expected: undefined,
+  },
+  // Bare "sha-512" with no "=" — no prefix to read: undefined.
+  { value: "sha-512", expected: undefined },
+  // Empty string: undefined.
+  { value: "", expected: undefined },
+];
+
+/**
+ * `contentDigestAlgOf` steady state: one measured call is one
+ * pass over the whole fixed corpus (10 identifications per
+ * op) — the prefix scan a signer appending a second signature
+ * pays to pin itself to the existing wire digest algorithm,
+ * before any hashing runs. Self-checks: every corpus entry is
+ * verified against its hand-pinned expectation outside timing
+ * first — in particular the unknown and malformed entries must
+ * all come back `undefined` (the fail-closed shape a caller
+ * turns into an explicit rejection) — and the measured loop
+ * re-pins every entry's result on every pass. Zero network,
+ * zero randomness, no wall-clock assertions.
+ */
+function benchmarkContentDigestAlgOf(): number {
+  for (const entry of DIGEST_ALG_CORPUS) {
+    const actual = contentDigestAlgOf(entry.value);
+    if (actual !== entry.expected)
+      throw new Error(
+        `benchmark self-check failed: contentDigestAlgOf(${JSON.stringify(entry.value)}) gave ${JSON.stringify(actual)} ` +
+          `(expected ${JSON.stringify(entry.expected)})`,
+      );
+  }
+  return measure(() => {
+    for (const entry of DIGEST_ALG_CORPUS) {
+      if (contentDigestAlgOf(entry.value) !== entry.expected)
+        throw new Error(
+          `benchmark self-check failed: contentDigestAlgOf(${JSON.stringify(entry.value)}) diverged from the pinned value`,
+        );
+    }
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -2277,6 +2397,11 @@ results.push({
   alg: "joinHeaderValues (9 cases)",
   op: "join",
   ops: benchmarkJoinHeaderValues(),
+});
+results.push({
+  alg: "contentDigestAlgOf (10 cases)",
+  op: "identify",
+  ops: benchmarkContentDigestAlgOf(),
 });
 
 console.log("alg                                    op      throughput");
