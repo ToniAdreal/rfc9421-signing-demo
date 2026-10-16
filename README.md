@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 674 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 676 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -67,7 +67,17 @@ Decimal member, a Byte Sequence member, an Inner List member and
 a bare key) and printed as key -> serialized-value pairs — the
 member value without its Dictionary key, which is what a `;key`
 covered component contributes — and a missing key is shown
-rejected with its `not present` error:
+rejected with its `not present` error. The demo closes with a
+signature-params serialization segment: five fixed (covered
+components, parameters) cases — an empty component list, the
+shared four components with created + keyid + alg, the same four
+with all six parameters set, four parameterized component ids,
+and a nonce whose quote and backslash must serialize escaped —
+are run through `serializeSignatureParams` and printed as
+name -> serialized pairs, showing how the inner list and the
+parameters in fixed order (created, expires, keyid, alg, nonce,
+tag) assemble into the `@signature-params` line a verifier
+rebuilds byte-for-byte:
 
 ```bash
 npm run demo
@@ -1396,7 +1406,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 674 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 676 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  signature-params serialization segment: five fixed (covered
+  components, parameters) cases — an empty component list
+  carrying the RFC 9421 §B.2.1 parameters, the shared four
+  covered components with created + keyid + alg, the same four
+  with all six parameters set, four parameterized component ids
+  (`;req` / `;tr` / `;name=` / `;key=`), and a nonce whose quote
+  and backslash characters must serialize escaped — are run
+  through `serializeSignatureParams` and printed as name ->
+  serialized pairs, showing how the inner list and the parameters
+  in fixed order (created, expires, keyid, alg, nonce, tag)
+  assemble into the `@signature-params` line a verifier rebuilds
+  byte-for-byte. Every expectation is hand-pinned from the
+  serializer's contract, matching the bench corpus and the
+  values pinned in the Appendix B, golden,
+  parameterized-component and nonce test suites; the segment
+  performs zero network I/O and is byte-identical between runs.
 - The benchmark (`npm run bench`) now also measures
   `getHeader` / `getHeaderRaw` — the case-insensitive header
   lookup every covered-component resolution pays on the

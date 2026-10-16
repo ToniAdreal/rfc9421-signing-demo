@@ -53,6 +53,15 @@
  * outside the printed extractions and its rejection is printed as
  * one line. Every input and expectation is a fixed constant, so
  * the segment is byte-identical between runs.
+ * The demo closes with a signature-params serialization segment:
+ * five fixed (covered components, parameters) cases — the same
+ * corpus the benchmark measures for this function — are run
+ * through `serializeSignatureParams` and printed as name ->
+ * serialized pairs, showing how the covered-component inner list
+ * and the created/expires/keyid/alg/nonce/tag parameters are
+ * assembled into the single `@signature-params` line a verifier
+ * rebuilds byte-for-byte before comparing. Every expectation is
+ * a fixed constant, so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -89,12 +98,14 @@ import {
   ReplayCache,
   secretKey,
   serializeDictionaryMemberValue,
+  serializeSignatureParams,
   signRequest,
   verifyAllLabels,
   verifyRequest,
   type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
   type RequestLike,
+  type SignatureParams,
   type SignedHttpRequest,
   type VerifyResult,
 } from "./index.js";
@@ -252,6 +263,94 @@ export const DEMO_DICT_MEMBER_EXTRACTION: ReadonlyArray<{
  * empty or whole-field value.
  */
 export const DEMO_DICT_MEMBER_MISSING_KEY = "zzz";
+/**
+ * Fixed corpus of the closing signature-params serialization
+ * segment: the same five (componentIds, params) cases the bench
+ * corpus pins for `serializeSignatureParams` (backlog #320),
+ * written out literally here so the demo and the bench pin them
+ * independently. Every expected serialization is hand-pinned from
+ * the serializer's contract — the inner list is the covered
+ * component ids in canonical wire form (quoted base, then
+ * `;req` / `;tr` / `;name=` / `;key=` parameters), followed by the
+ * signature parameters in the fixed order created, expires, keyid,
+ * alg, nonce, tag, with string values quoted and backslash / quote
+ * characters escaped — and matches the values pinned in
+ * `test/rfc9421AppendixB.test.ts` (empty), `test/golden.test.ts`
+ * (golden), the parameterized-component tests (parameterized) and
+ * `test/nonce.test.ts` (escaped) — the demo never derives an
+ * expectation from the function it demonstrates:
+ * - empty: no covered components, created + keyid + nonce.
+ * - golden: the shared four components with created + keyid + alg.
+ * - full: the same four components with all six parameters set
+ *   (expires sits between created and keyid, tag last).
+ * - parameterized: four component ids carrying `;req`, `;tr`,
+ *   `;name="amount"` and `;key="b"`.
+ * - escaped: a nonce carrying a quote and a backslash
+ *   (`a"b\c d`) serializes with both escaped.
+ */
+export const DEMO_SIG_PARAMS_SERIALIZATION: ReadonlyArray<{
+  name: string;
+  componentIds: string[];
+  params: SignatureParams;
+  expected: string;
+}> = [
+  {
+    name: "empty",
+    componentIds: [],
+    params: {
+      created: 1618884473,
+      keyid: "test-key-rsa-pss",
+      nonce: "b3k2pp5k7z-50gnwp.yemd",
+    },
+    expected:
+      '();created=1618884473;keyid="test-key-rsa-pss";nonce="b3k2pp5k7z-50gnwp.yemd"',
+  },
+  {
+    name: "golden",
+    componentIds: ["@method", "@authority", "@path", "content-digest"],
+    params: { created: 1700000000, keyid: "k1", alg: "hmac-sha256" },
+    expected:
+      '("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="k1";alg="hmac-sha256"',
+  },
+  {
+    name: "full",
+    componentIds: ["@method", "@authority", "@path", "content-digest"],
+    params: {
+      created: 1700000000,
+      expires: 1700000300,
+      keyid: "demo-key-1",
+      alg: "ed25519",
+      nonce: "demo-nonce-001",
+      tag: "payment-webhook-v1",
+    },
+    expected:
+      '("@method" "@authority" "@path" "content-digest");created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"',
+  },
+  {
+    name: "parameterized",
+    componentIds: [
+      "@method;req",
+      "x-checksum;tr",
+      '@query-param;name="amount"',
+      'x-dict;key="b"',
+    ],
+    params: { created: 1700000000, keyid: "k1", alg: "ed25519" },
+    expected:
+      '("@method";req "x-checksum";tr "@query-param";name="amount" "x-dict";key="b");created=1700000000;keyid="k1";alg="ed25519"',
+  },
+  {
+    name: "escaped",
+    componentIds: ["@method"],
+    params: {
+      created: 1700000000,
+      keyid: "k",
+      alg: "ed25519",
+      nonce: 'a"b\\c d',
+    },
+    expected:
+      '("@method");created=1700000000;keyid="k";alg="ed25519";nonce="a\\"b\\\\c d"',
+  },
+];
 
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
@@ -390,6 +489,15 @@ export interface DemoResult {
    * which the demo tests reject).
    */
   dictMemberMissingKeyError: string;
+  /**
+   * The closing serialization segment's results: each fixed case
+   * name paired with its `serializeSignatureParams` output over
+   * `DEMO_SIG_PARAMS_SERIALIZATION`.
+   */
+  sigParamsSerialization: ReadonlyArray<{
+    name: string;
+    serialized: string;
+  }>;
   lines: string[];
 }
 
@@ -744,6 +852,19 @@ export function runDemo(): DemoResult {
       err instanceof Error ? err.message : String(err);
   }
 
+  // Serialization segment: the `@signature-params` line is not a
+  // header the signer invents freely — it is the canonical
+  // serialization of the covered-component inner list plus the
+  // signature parameters in one fixed order, and the verifier
+  // rebuilds exactly this string before comparing. All five cases
+  // and their expectations are fixed constants (hand-pinned in
+  // DEMO_SIG_PARAMS_SERIALIZATION), so this segment is
+  // deterministic.
+  const sigParamsSerialization = DEMO_SIG_PARAMS_SERIALIZATION.map((c) => ({
+    name: c.name,
+    serialized: serializeSignatureParams(c.componentIds, c.params),
+  }));
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -827,6 +948,11 @@ export function runDemo(): DemoResult {
       (c) => `Extract member ${c.key}: ${c.value}`,
     ),
     `Extract member ${DEMO_DICT_MEMBER_MISSING_KEY}: FAILED (${dictMemberMissingKeyError})`,
+    "",
+    "Signature-params serialization: the covered-component inner list plus its parameters in fixed order (created, expires, keyid, alg, nonce, tag), strings quoted and escaped — the \"@signature-params\" value a verifier rebuilds byte-for-byte",
+    ...sigParamsSerialization.map(
+      (c) => `Serialize ${c.name}: ${c.serialized}`,
+    ),
   ];
 
   return {
@@ -858,6 +984,7 @@ export function runDemo(): DemoResult {
     sfCanonicalization,
     dictMemberExtraction,
     dictMemberMissingKeyError,
+    sigParamsSerialization,
     lines,
   };
 }

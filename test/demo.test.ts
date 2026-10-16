@@ -20,6 +20,7 @@ import {
   DEMO_DICT_MEMBER_MISSING_KEY,
   DEMO_DICT_MEMBER_VALUE,
   DEMO_SF_CANONICALIZATION,
+  DEMO_SIG_PARAMS_SERIALIZATION,
   DEMO_JWKS_FETCHED_AT_SEC,
   DEMO_JWKS_URL,
   DEMO_KEY_ID,
@@ -630,12 +631,16 @@ test("demo lines contain the member-extraction segment (key -> value pairs, miss
       'Extract member zzz: FAILED (dictionary member "zzz" is not present in the field value)',
     ),
   );
-  // The segment closes the demo: the missing-key line is final, and
-  // the extraction block sits after the canonicalization segment.
-  assert.equal(
-    lines[lines.length - 1],
-    'Extract member zzz: FAILED (dictionary member "zzz" is not present in the field value)',
+  // The extraction block sits after the canonicalization segment,
+  // and the serialization segment follows it: the missing-key line
+  // is the extraction block's last line, not the demo's last line.
+  const missingIdx = lines.findIndex((l) =>
+    l.startsWith("Extract member zzz:"),
   );
+  const serializeIdx = lines.findIndex((l) =>
+    l.startsWith("Signature-params serialization:"),
+  );
+  assert.ok(missingIdx !== -1 && serializeIdx !== -1 && missingIdx < serializeIdx);
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Dictionary-member extraction (;key):"),
   );
@@ -651,6 +656,85 @@ test("demo lines contain the member-extraction segment (key -> value pairs, miss
     "Extract member sig: :aGVsbG8=:;x=?0",
     "Extract member c: (a b c)",
     "Extract member d: ?1",
+  ]);
+});
+
+test("demo signature-params segment serializes the fixed corpus to the hand-pinned strings", () => {
+  const { sigParamsSerialization } = runDemo();
+
+  // Expectations are the literal values pinned in
+  // DEMO_SIG_PARAMS_SERIALIZATION (hand-derived from the
+  // serializer's contract, matching the bench corpus and the
+  // Appendix B / golden / parameterized-component / nonce test
+  // suites) — the test pins them again here so a drift in either
+  // place fails loudly.
+  assert.deepEqual(sigParamsSerialization, [
+    {
+      name: "empty",
+      serialized:
+        '();created=1618884473;keyid="test-key-rsa-pss";nonce="b3k2pp5k7z-50gnwp.yemd"',
+    },
+    {
+      name: "golden",
+      serialized:
+        '("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="k1";alg="hmac-sha256"',
+    },
+    {
+      name: "full",
+      serialized:
+        '("@method" "@authority" "@path" "content-digest");created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"',
+    },
+    {
+      name: "parameterized",
+      serialized:
+        '("@method";req "x-checksum";tr "@query-param";name="amount" "x-dict";key="b");created=1700000000;keyid="k1";alg="ed25519"',
+    },
+    {
+      name: "escaped",
+      serialized:
+        '("@method");created=1700000000;keyid="k";alg="ed25519";nonce="a\\"b\\\\c d"',
+    },
+  ]);
+  assert.deepEqual(
+    DEMO_SIG_PARAMS_SERIALIZATION.map((c) => c.expected),
+    sigParamsSerialization.map((c) => c.serialized),
+  );
+  assert.deepEqual(
+    DEMO_SIG_PARAMS_SERIALIZATION.map((c) => c.name),
+    sigParamsSerialization.map((c) => c.name),
+  );
+});
+
+test("demo lines contain the signature-params segment (name -> serialized pairs, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Signature-params serialization: the covered-component inner list plus its parameters in fixed order \(created, expires, keyid, alg, nonce, tag\), strings quoted and escaped/);
+  assert.ok(out.includes('Serialize empty: ();created=1618884473;keyid="test-key-rsa-pss";nonce="b3k2pp5k7z-50gnwp.yemd"'));
+  assert.ok(out.includes('Serialize golden: ("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="k1";alg="hmac-sha256"'));
+  assert.ok(out.includes('Serialize full: ("@method" "@authority" "@path" "content-digest");created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"'));
+  assert.ok(out.includes('Serialize parameterized: ("@method";req "x-checksum";tr "@query-param";name="amount" "x-dict";key="b");created=1700000000;keyid="k1";alg="ed25519"'));
+  assert.ok(out.includes('Serialize escaped: ("@method");created=1700000000;keyid="k";alg="ed25519";nonce="a\\"b\\\\c d"'));
+  // The segment closes the demo: the escaped line is final, and
+  // the serialization block sits after the member-extraction
+  // segment's missing-key line.
+  assert.equal(
+    lines[lines.length - 1],
+    'Serialize escaped: ("@method");created=1700000000;keyid="k";alg="ed25519";nonce="a\\"b\\\\c d"',
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Signature-params serialization:"),
+  );
+  const missingIdx = lines.findIndex((l) =>
+    l.startsWith("Extract member zzz:"),
+  );
+  assert.ok(missingIdx !== -1 && headerIdx !== -1 && missingIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 6), [
+    'Serialize empty: ();created=1618884473;keyid="test-key-rsa-pss";nonce="b3k2pp5k7z-50gnwp.yemd"',
+    'Serialize golden: ("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="k1";alg="hmac-sha256"',
+    'Serialize full: ("@method" "@authority" "@path" "content-digest");created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"',
+    'Serialize parameterized: ("@method";req "x-checksum";tr "@query-param";name="amount" "x-dict";key="b");created=1700000000;keyid="k1";alg="ed25519"',
+    'Serialize escaped: ("@method");created=1700000000;keyid="k";alg="ed25519";nonce="a\\"b\\\\c d"',
   ]);
 });
 
@@ -710,4 +794,9 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /Extract member c: \(a b c\)/);
   assert.match(out, /Extract member d: \?1/);
   assert.match(out, /Extract member zzz: FAILED \(dictionary member "zzz" is not present in the field value\)/);
+  assert.match(out, /Signature-params serialization: the covered-component inner list/);
+  assert.match(out, /Serialize empty: \(\);created=1618884473;keyid="test-key-rsa-pss";nonce="b3k2pp5k7z-50gnwp\.yemd"/);
+  assert.match(out, /Serialize golden: \("@method" "@authority" "@path" "content-digest"\);created=1700000000;keyid="k1";alg="hmac-sha256"/);
+  assert.match(out, /Serialize full: \("@method" "@authority" "@path" "content-digest"\);created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"/);
+  assert.match(out, /Serialize escaped: \("@method"\);created=1700000000;keyid="k";alg="ed25519";nonce=/);
 });
