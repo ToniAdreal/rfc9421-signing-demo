@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  dictionary-member extraction segment: one fixed multi-member
+  Dictionary value is run through
+  `serializeDictionaryMemberValue` once per fixed key (an Integer
+  member, a member with parameters, a Decimal member, a Byte
+  Sequence member, an Inner List member and a bare key) and each
+  extraction is printed as a key -> serialized-value pair, showing
+  the member value without its Dictionary key (parameters still
+  attached) that a `;key` covered component contributes to the
+  signature base. A missing key's `not present` rejection is
+  printed as one line. Every expectation is hand-pinned from the
+  RFC 8941 §4.1.2 rules, matching the values pinned in the
+  `;key` / `;sf` component tests and the bench corpus; the
+  segment performs zero network I/O and is byte-identical
+  between runs.
 - The benchmark (`npm run bench`) now also measures
   `serializeSignatureParams` — the inner-list-plus-parameters
   serialization every sign and verify pays before any

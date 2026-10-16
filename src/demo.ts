@@ -40,6 +40,19 @@
  * fractional digits, leading-zero Integers collapse, Byte Sequences
  * are re-encoded). Every input and expectation is a fixed constant,
  * so the segment is byte-identical between runs.
+ * The demo closes with a dictionary-member extraction segment:
+ * one fixed multi-member Dictionary value is run through
+ * `serializeDictionaryMemberValue` once per fixed key (an Integer
+ * member, a member with parameters, a Decimal member, a Byte
+ * Sequence member, an Inner List member and a bare key), and each
+ * extraction is printed as a key -> serialized-value pair — the
+ * member value WITHOUT its Dictionary key, parameters still
+ * attached, which is what a `;key` covered component contributes
+ * to the signature base when a gateway forwards only the single
+ * member its signature covers. A missing key is asserted to throw
+ * outside the printed extractions and its rejection is printed as
+ * one line. Every input and expectation is a fixed constant, so
+ * the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -75,6 +88,7 @@ import {
   JwksKeyStore,
   ReplayCache,
   secretKey,
+  serializeDictionaryMemberValue,
   signRequest,
   verifyAllLabels,
   verifyRequest,
@@ -196,6 +210,48 @@ export const DEMO_SF_CANONICALIZATION: ReadonlyArray<{
     expected: "sig=:aGVsbG8=:;x=?0",
   },
 ];
+/**
+ * Fixed Dictionary value of the closing member-extraction segment:
+ * the same multi-member value pinned in the bench corpus for
+ * `serializeDictionaryMemberValue` (backlog #314), written out
+ * literally here so the demo and the bench pin it independently.
+ */
+export const DEMO_DICT_MEMBER_VALUE =
+  "a=1, b=2;x=1;y=2, n=1.5, sig=:aGVsbG8=:;x=?0, c=(a b c), d";
+/**
+ * Fixed key set of the closing member-extraction segment, with the
+ * serialized value of each member hand-pinned from the RFC 8941
+ * §4.1.2 member-serialization rules — the member value WITHOUT its
+ * Dictionary key, parameters still attached — and matching the
+ * values pinned independently in `test/keyComponent.test.ts`,
+ * `test/sfComponent.test.ts` and the bench corpus — the demo never
+ * derives an expectation from the function it demonstrates:
+ * - a: an Integer member, already canonical -> `1`.
+ * - b: a member carrying parameters -> `2;x=1;y=2`.
+ * - n: a Decimal member -> `1.500`.
+ * - sig: a Byte Sequence member with a Boolean parameter ->
+ *   `:aGVsbG8=:;x=?0`.
+ * - c: an Inner List member -> `(a b c)`.
+ * - d: a bare key (Boolean-true member) -> `?1`.
+ */
+export const DEMO_DICT_MEMBER_EXTRACTION: ReadonlyArray<{
+  key: string;
+  expected: string;
+}> = [
+  { key: "a", expected: "1" },
+  { key: "b", expected: "2;x=1;y=2" },
+  { key: "n", expected: "1.500" },
+  { key: "sig", expected: ":aGVsbG8=:;x=?0" },
+  { key: "c", expected: "(a b c)" },
+  { key: "d", expected: "?1" },
+];
+/**
+ * Key absent from `DEMO_DICT_MEMBER_VALUE`: extracting it must
+ * throw `dictionary member "zzz" is not present in the field
+ * value` — the extraction fails closed rather than returning an
+ * empty or whole-field value.
+ */
+export const DEMO_DICT_MEMBER_MISSING_KEY = "zzz";
 
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
@@ -318,6 +374,22 @@ export interface DemoResult {
     input: string;
     canonical: string;
   }>;
+  /**
+   * The closing member-extraction segment's results: each fixed
+   * key paired with its `serializeDictionaryMemberValue` output
+   * over `DEMO_DICT_MEMBER_VALUE`.
+   */
+  dictMemberExtraction: ReadonlyArray<{
+    key: string;
+    value: string;
+  }>;
+  /**
+   * Error message thrown when extracting
+   * `DEMO_DICT_MEMBER_MISSING_KEY` from `DEMO_DICT_MEMBER_VALUE`
+   * (empty only if the extraction unexpectedly did not throw,
+   * which the demo tests reject).
+   */
+  dictMemberMissingKeyError: string;
   lines: string[];
 }
 
@@ -645,6 +717,33 @@ export function runDemo(): DemoResult {
     canonical: canonicalizeStructuredFieldValue(c.input),
   }));
 
+  // Member-extraction segment: a `;key` covered component does not
+  // contribute the whole Dictionary field — it contributes only the
+  // one named member, re-serialized without its key. A gateway that
+  // forwards a single member therefore pays and signs exactly the
+  // values below, not the whole field. All keys and expectations
+  // are fixed constants (hand-pinned in
+  // DEMO_DICT_MEMBER_EXTRACTION), so this segment is deterministic.
+  const dictMemberExtraction = DEMO_DICT_MEMBER_EXTRACTION.map((c) => ({
+    key: c.key,
+    value: serializeDictionaryMemberValue(DEMO_DICT_MEMBER_VALUE, c.key),
+  }));
+
+  // A missing key fails closed: the extraction throws instead of
+  // returning an empty or whole-field value. The throw is asserted
+  // here, outside the printed extractions; only its (fixed) message
+  // is printed, as one line.
+  let dictMemberMissingKeyError = "";
+  try {
+    serializeDictionaryMemberValue(
+      DEMO_DICT_MEMBER_VALUE,
+      DEMO_DICT_MEMBER_MISSING_KEY,
+    );
+  } catch (err) {
+    dictMemberMissingKeyError =
+      err instanceof Error ? err.message : String(err);
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -721,6 +820,13 @@ export function runDemo(): DemoResult {
     ...sfCanonicalization.map(
       (c) => `Canonicalize ${c.name}: ${c.input} -> ${c.canonical}`,
     ),
+    "",
+    "Dictionary-member extraction (;key): a ;key covered component contributes only the named member, re-serialized without its Dictionary key",
+    `Dictionary: ${DEMO_DICT_MEMBER_VALUE}`,
+    ...dictMemberExtraction.map(
+      (c) => `Extract member ${c.key}: ${c.value}`,
+    ),
+    `Extract member ${DEMO_DICT_MEMBER_MISSING_KEY}: FAILED (${dictMemberMissingKeyError})`,
   ];
 
   return {
@@ -750,6 +856,8 @@ export function runDemo(): DemoResult {
     thumbprintSigned,
     thumbprintVerification,
     sfCanonicalization,
+    dictMemberExtraction,
+    dictMemberMissingKeyError,
     lines,
   };
 }

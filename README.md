@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 672 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 674 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -59,7 +59,15 @@ with a Decimal member, an Integer Item with leading zeros, a
 Dictionary Byte Sequence member) are run through
 `canonicalizeStructuredFieldValue` and printed as raw -> canonical
 pairs — the canonical form is what a verifier actually compares
-for a `;sf` covered component:
+for a `;sf` covered component. The demo closes with a
+dictionary-member extraction segment: one fixed multi-member
+Dictionary value is run through `serializeDictionaryMemberValue`
+once per fixed key (an Integer member, a member with parameters, a
+Decimal member, a Byte Sequence member, an Inner List member and
+a bare key) and printed as key -> serialized-value pairs — the
+member value without its Dictionary key, which is what a `;key`
+covered component contributes — and a missing key is shown
+rejected with its `not present` error:
 
 ```bash
 npm run demo
@@ -1332,7 +1340,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 672 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 674 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

@@ -16,6 +16,9 @@ import {
   DEMO_INBOUND_WRONG_SCHEME,
   DEMO_GATEWAY_LABEL,
   DEMO_GATEWAY_SECRET,
+  DEMO_DICT_MEMBER_EXTRACTION,
+  DEMO_DICT_MEMBER_MISSING_KEY,
+  DEMO_DICT_MEMBER_VALUE,
   DEMO_SF_CANONICALIZATION,
   DEMO_JWKS_FETCHED_AT_SEC,
   DEMO_JWKS_URL,
@@ -558,11 +561,97 @@ test("demo lines contain the canonicalization segment (raw -> canonical pairs)",
   assert.ok(out.includes("Canonicalize dictionary-decimal: limit=1500, remaining=1.5 -> limit=1500, remaining=1.500"));
   assert.ok(out.includes("Canonicalize item-leading-zero-integer: 007 -> 7"));
   assert.ok(out.includes("Canonicalize dictionary-byte-sequence: sig=:aGVsbG8=:;x=?0 -> sig=:aGVsbG8=:;x=?0"));
-  // The segment closes the demo: its last pair is the final line.
+  // The canonicalization segment is followed by the member-extraction
+  // segment: its header comes after the last canonicalization pair.
+  const canonIdx = lines.findIndex((l) =>
+    l.startsWith("Canonicalize dictionary-byte-sequence:"),
+  );
+  const extractIdx = lines.findIndex((l) =>
+    l.startsWith("Dictionary-member extraction (;key):"),
+  );
+  assert.ok(canonIdx !== -1 && extractIdx !== -1 && canonIdx < extractIdx);
+});
+
+test("demo member-extraction segment extracts the fixed keys to the hand-pinned values", () => {
+  const { dictMemberExtraction, dictMemberMissingKeyError } = runDemo();
+
+  // The demo's Dictionary value is the literal pinned here and in
+  // the bench corpus — the same multi-member value, pinned
+  // independently in both places.
+  assert.equal(
+    DEMO_DICT_MEMBER_VALUE,
+    "a=1, b=2;x=1;y=2, n=1.5, sig=:aGVsbG8=:;x=?0, c=(a b c), d",
+  );
+
+  // Expectations are the literal values pinned in
+  // DEMO_DICT_MEMBER_EXTRACTION (hand-derived from RFC 8941
+  // §4.1.2, matching test/keyComponent.test.ts,
+  // test/sfComponent.test.ts and the bench corpus) — the test pins
+  // them again here so a drift in either place fails loudly.
+  assert.deepEqual(dictMemberExtraction, [
+    { key: "a", value: "1" },
+    { key: "b", value: "2;x=1;y=2" },
+    { key: "n", value: "1.500" },
+    { key: "sig", value: ":aGVsbG8=:;x=?0" },
+    { key: "c", value: "(a b c)" },
+    { key: "d", value: "?1" },
+  ]);
+  assert.deepEqual(
+    DEMO_DICT_MEMBER_EXTRACTION.map((c) => c.expected),
+    dictMemberExtraction.map((c) => c.value),
+  );
+  assert.deepEqual(
+    DEMO_DICT_MEMBER_EXTRACTION.map((c) => c.key),
+    dictMemberExtraction.map((c) => c.key),
+  );
+
+  // A missing key fails closed with the pinned message.
+  assert.equal(DEMO_DICT_MEMBER_MISSING_KEY, "zzz");
+  assert.equal(
+    dictMemberMissingKeyError,
+    'dictionary member "zzz" is not present in the field value',
+  );
+});
+
+test("demo lines contain the member-extraction segment (key -> value pairs, missing key rejected)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Dictionary-member extraction \(;key\): a ;key covered component contributes only the named member, re-serialized without its Dictionary key/);
+  assert.ok(out.includes("Dictionary: a=1, b=2;x=1;y=2, n=1.5, sig=:aGVsbG8=:;x=?0, c=(a b c), d"));
+  assert.ok(out.includes("Extract member a: 1"));
+  assert.ok(out.includes("Extract member b: 2;x=1;y=2"));
+  assert.ok(out.includes("Extract member n: 1.500"));
+  assert.ok(out.includes("Extract member sig: :aGVsbG8=:;x=?0"));
+  assert.ok(out.includes("Extract member c: (a b c)"));
+  assert.ok(out.includes("Extract member d: ?1"));
+  assert.ok(
+    out.includes(
+      'Extract member zzz: FAILED (dictionary member "zzz" is not present in the field value)',
+    ),
+  );
+  // The segment closes the demo: the missing-key line is final, and
+  // the extraction block sits after the canonicalization segment.
   assert.equal(
     lines[lines.length - 1],
-    "Canonicalize dictionary-byte-sequence: sig=:aGVsbG8=:;x=?0 -> sig=:aGVsbG8=:;x=?0",
+    'Extract member zzz: FAILED (dictionary member "zzz" is not present in the field value)',
   );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Dictionary-member extraction (;key):"),
+  );
+  const canonIdx = lines.findIndex((l) =>
+    l.startsWith("Structured-field canonicalization (;sf):"),
+  );
+  assert.ok(canonIdx !== -1 && headerIdx !== -1 && canonIdx < headerIdx);
+  assert.equal(lines[headerIdx + 1], `Dictionary: ${DEMO_DICT_MEMBER_VALUE}`);
+  assert.deepEqual(lines.slice(headerIdx + 2, headerIdx + 8), [
+    "Extract member a: 1",
+    "Extract member b: 2;x=1;y=2",
+    "Extract member n: 1.500",
+    "Extract member sig: :aGVsbG8=:;x=?0",
+    "Extract member c: (a b c)",
+    "Extract member d: ?1",
+  ]);
 });
 
 test("compiled demo script exits 0 and prints success plus tamper rejection", () => {
@@ -613,4 +702,12 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /Structured-field canonicalization \(;sf\):/);
   assert.match(out, /Canonicalize dictionary-decimal: limit=1500, remaining=1\.5 -> limit=1500, remaining=1\.500/);
   assert.match(out, /Canonicalize item-leading-zero-integer: 007 -> 7/);
+  assert.match(out, /Dictionary-member extraction \(;key\):/);
+  assert.match(out, /Extract member a: 1/);
+  assert.match(out, /Extract member b: 2;x=1;y=2/);
+  assert.match(out, /Extract member n: 1\.500/);
+  assert.match(out, /Extract member sig: :aGVsbG8=:;x=\?0/);
+  assert.match(out, /Extract member c: \(a b c\)/);
+  assert.match(out, /Extract member d: \?1/);
+  assert.match(out, /Extract member zzz: FAILED \(dictionary member "zzz" is not present in the field value\)/);
 });
