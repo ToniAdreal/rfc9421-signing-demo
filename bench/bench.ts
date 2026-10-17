@@ -171,7 +171,20 @@
  * field value (`label=` plus the serialized parameters);
  * it does not look a label up in a request, so there is
  * no missing-label / undefined outcome to pin — an empty
- * parameter set renders as the bare inner list.
+ * parameter set renders as the bare inner list, plus the
+ * content-digest algorithm guard every sign/verify that
+ * selects a digest algorithm pays before any hashing runs:
+ * `assertContentDigestAlg` over a fixed ten-case corpus
+ * (see DIGEST_GUARD_* below) spanning the two emittable
+ * algorithms (sha-512 and sha-256, both pass) and eight
+ * illegal shapes (sha-1, md5, the empty string, two
+ * wrong-case spellings, a trailing-space spelling, and the
+ * non-string values undefined and null, each throwing the
+ * pinned full configuration-error message) — self-checked
+ * on every measured pass against hand-pinned pass/throw
+ * outcomes, so the fail-fast configuration check is visible
+ * apart from the digest hashing and sign/verify rows that
+ * bundle it.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -185,6 +198,7 @@ import {
 import { cpus } from "node:os";
 import {
   addSignature,
+  assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
   buildSignatureBase,
@@ -2679,6 +2693,133 @@ function benchmarkSignatureInputValue(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed corpus for the `assertContentDigestAlg` path — ten
+ * cases written out here, with the hand-pinned outcome for
+ * each. Composition:
+ * - the two emittable algorithms: "sha-512" (the default)
+ *   and "sha-256" -> both pass;
+ * - unknown algorithms: "sha-1" (the shape the
+ *   contentDigestAlg suite pins as a configuration error on
+ *   the sign side and as an unemittable header algorithm)
+ *   and "md5" (the shape that same suite pins through
+ *   `contentDigest` directly) -> both throw;
+ * - the empty string "" (pinned as a configuration error
+ *   by the contentDigestAlg suite) -> throws;
+ * - wrong-case spellings: "SHA-512" and "Sha-256" -> both
+ *   throw (the comparison is exact and case-sensitive);
+ * - a trailing-space spelling "sha-512 " -> throws (no
+ *   trimming is performed);
+ * - non-string values: undefined and null -> both throw.
+ * Every pinned throw is the guard's full message
+ * `contentDigest: "alg" must be "sha-512" or "sha-256", got
+ * <JSON.stringify(value)>` — for undefined the JSON form
+ * renders as the bare word `undefined`, for null as
+ * `null`. No expected outcome is derived from
+ * `assertContentDigestAlg` at bench time.
+ */
+const DIGEST_GUARD_CORPUS: ReadonlyArray<{
+  label: string;
+  alg: unknown;
+  /** Pinned full throw message, or null when the call passes. */
+  expectedError: string | null;
+}> = [
+  { label: "sha-512", alg: "sha-512", expectedError: null },
+  { label: "sha-256", alg: "sha-256", expectedError: null },
+  {
+    label: "sha-1",
+    alg: "sha-1",
+    expectedError:
+      'contentDigest: "alg" must be "sha-512" or "sha-256", got "sha-1"',
+  },
+  {
+    label: "md5",
+    alg: "md5",
+    expectedError:
+      'contentDigest: "alg" must be "sha-512" or "sha-256", got "md5"',
+  },
+  {
+    label: "empty string",
+    alg: "",
+    expectedError:
+      'contentDigest: "alg" must be "sha-512" or "sha-256", got ""',
+  },
+  {
+    label: "SHA-512 (uppercase)",
+    alg: "SHA-512",
+    expectedError:
+      'contentDigest: "alg" must be "sha-512" or "sha-256", got "SHA-512"',
+  },
+  {
+    label: "Sha-256 (mixed case)",
+    alg: "Sha-256",
+    expectedError:
+      'contentDigest: "alg" must be "sha-512" or "sha-256", got "Sha-256"',
+  },
+  {
+    label: "sha-512 with trailing space",
+    alg: "sha-512 ",
+    expectedError:
+      'contentDigest: "alg" must be "sha-512" or "sha-256", got "sha-512 "',
+  },
+  {
+    label: "undefined",
+    alg: undefined,
+    expectedError:
+      'contentDigest: "alg" must be "sha-512" or "sha-256", got undefined',
+  },
+  {
+    label: "null",
+    alg: null,
+    expectedError:
+      'contentDigest: "alg" must be "sha-512" or "sha-256", got null',
+  },
+];
+
+/** Run one corpus case and return its outcome: null on pass, the thrown message otherwise. */
+function digestGuardOutcome(
+  entry: (typeof DIGEST_GUARD_CORPUS)[number],
+): string | null {
+  try {
+    assertContentDigestAlg(entry.alg);
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+function assertDigestGuardCorpus(label: string): void {
+  for (const entry of DIGEST_GUARD_CORPUS) {
+    const outcome = digestGuardOutcome(entry);
+    if (outcome !== entry.expectedError)
+      throw new Error(
+        `benchmark self-check failed (${label}): assertContentDigestAlg(${entry.label}) gave ${JSON.stringify(outcome)} ` +
+          `(expected ${JSON.stringify(entry.expectedError)})`,
+      );
+  }
+}
+
+/**
+ * `assertContentDigestAlg` steady state: one measured call
+ * is one pass over the whole fixed corpus (10 guard checks
+ * per op, eight of which throw and are caught inside the
+ * outcome helper — the fail-closed rejection is part of
+ * the steady state, exactly as a caller selecting a digest
+ * algorithm pays it) — the configuration guard the signer
+ * and `contentDigest` enforce before any hashing runs, so
+ * an unsupported algorithm can never be emitted on the
+ * wire. Self-checks: the whole corpus is asserted
+ * exhaustively outside timing first, and the measured loop
+ * re-pins every case's pass/throw outcome on every pass.
+ * Zero network, zero randomness, no wall-clock assertions.
+ */
+function benchmarkAssertContentDigestAlg(): number {
+  assertDigestGuardCorpus("outside timing");
+  return measure(() => {
+    assertDigestGuardCorpus("measured pass");
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -2878,6 +3019,11 @@ results.push({
   alg: "signatureInputValue (4 cases)",
   op: "serialize",
   ops: benchmarkSignatureInputValue(),
+});
+results.push({
+  alg: "assertContentDigestAlg (10 cases)",
+  op: "guard",
+  ops: benchmarkAssertContentDigestAlg(),
 });
 
 console.log("alg                                    op      throughput");

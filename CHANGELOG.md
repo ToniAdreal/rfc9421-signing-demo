@@ -12,6 +12,30 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `assertContentDigestAlg` — the content-digest algorithm
+  guard every sign/verify that selects a digest algorithm
+  pays before any hashing runs (only `sha-512` and
+  `sha-256` can be emitted; anything else is a caller
+  configuration error) — as one pass over a fixed ten-case
+  corpus per measured call: the two emittable algorithms
+  (both pass), unknown algorithms (`sha-1` and `md5`),
+  the empty string, two wrong-case spellings, a
+  trailing-space spelling, and the non-string values
+  `undefined` and `null` (all eight illegal shapes throw
+  the pinned full configuration-error message). Eight of
+  the ten cases throw and are caught inside the measured
+  pass — the fail-closed rejection is part of the steady
+  state a caller pays. Every expected pass/throw outcome
+  is hand-pinned in the bench from the guard's documented
+  contract (matching the rejections the contentDigestAlg
+  test suite pins independently), never derived from the
+  implementation at bench time, self-checked exhaustively
+  outside timing, and re-pinned on every measured pass.
+  The README Benchmarks table was refreshed wholesale
+  from one real run and now carries the third `guard`
+  row. The bench performs zero network I/O, zero
+  randomness, and no wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `signatureInputValue` — the full `Signature-Input` field
   value a signer builds once per label (`label=` plus the
   serialized inner list and parameters) — as one pass over
