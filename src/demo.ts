@@ -62,6 +62,19 @@
  * assembled into the single `@signature-params` line a verifier
  * rebuilds byte-for-byte before comparing. Every expectation is
  * a fixed constant, so the segment is byte-identical between runs.
+ * The demo closes with a PEM key round-trip segment: the main
+ * line's ed25519 key pair is exported with `exportPublicKeyPem` /
+ * `exportPrivateKeyPem`, only the first line of each PEM (its type
+ * header) is printed, the PEM texts are imported back with
+ * `importPublicKey` / `importPrivateKey`, and the imported keys
+ * complete a fresh sign -> verify round-trip — the PEM
+ * export -> import -> verify path a gateway or ops tool performs
+ * when keys are distributed as PEM files rather than JWKs. Outside
+ * the printed lines the demo asserts the round-trip verification
+ * passed and that both PEM headers equal the hand-pinned
+ * expectations below. The request, `created` and nonce are fixed
+ * constants, so the segment's printed lines are identical between
+ * runs even though the key pair itself is fresh.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -90,9 +103,13 @@ import {
   addSignature,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
+  exportPrivateKeyPem,
   exportPublicKeyJwk,
+  exportPublicKeyPem,
   fromNodeRequest,
   generateEd25519KeyPair,
+  importPrivateKey,
+  importPublicKey,
   jwkThumbprint,
   JwksKeyStore,
   ReplayCache,
@@ -352,6 +369,20 @@ export const DEMO_SIG_PARAMS_SERIALIZATION: ReadonlyArray<{
   },
 ];
 
+/** Nonce of the PEM round-trip segment's signed request. */
+export const DEMO_PEM_NONCE = "demo-nonce-pem-001";
+/**
+ * Hand-pinned first lines (PEM type headers) of the PEM round-trip
+ * segment: `exportPublicKeyPem` exports in SPKI form, whose PEM
+ * header is `-----BEGIN PUBLIC KEY-----`, and
+ * `exportPrivateKeyPem` exports in PKCS#8 form, whose PEM header is
+ * `-----BEGIN PRIVATE KEY-----` — the formats written literally in
+ * `src/keys.ts` (spki / pkcs8). The expectations are written out
+ * here, never derived from the exported text the demo is checking.
+ */
+export const DEMO_PEM_PUBLIC_HEADER = "-----BEGIN PUBLIC KEY-----";
+export const DEMO_PEM_PRIVATE_HEADER = "-----BEGIN PRIVATE KEY-----";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -498,6 +529,20 @@ export interface DemoResult {
     name: string;
     serialized: string;
   }>;
+  /** First line (type header) of the main public key's PEM export. */
+  pemPublicHeader: string;
+  /** First line (type header) of the main private key's PEM export. */
+  pemPrivateHeader: string;
+  /**
+   * The request signed in the PEM segment with the private key
+   * imported back from its PEM export.
+   */
+  pemSigned: SignedHttpRequest;
+  /**
+   * Verification of `pemSigned` with the public key imported back
+   * from its PEM export (ok — the PEM round-trip holds).
+   */
+  pemVerification: VerifyResult;
   lines: string[];
 }
 
@@ -865,6 +910,56 @@ export function runDemo(): DemoResult {
     serialized: serializeSignatureParams(c.componentIds, c.params),
   }));
 
+  // PEM segment: JWK is not the only key-distribution format — a
+  // gateway or ops tool usually ships keys as PEM files. The main
+  // line's ed25519 key pair is exported as PEM (SPKI public /
+  // PKCS#8 private, see src/keys.ts), imported back, and the
+  // imported keys complete a fresh sign -> verify round-trip over
+  // the same fixed request. Only the first line of each PEM — its
+  // type header — is printed; the key bytes themselves are fresh
+  // per run, like the main signature. Outside the printed lines,
+  // the demo asserts both headers equal the hand-pinned
+  // expectations (DEMO_PEM_PUBLIC_HEADER / DEMO_PEM_PRIVATE_HEADER)
+  // and that the round-trip verification passed — a mismatch throws
+  // instead of printing a misleading segment.
+  const pemPublic = exportPublicKeyPem(publicKey);
+  const pemPrivate = exportPrivateKeyPem(privateKey);
+  const pemPublicHeader = pemPublic.split("\n")[0] ?? "";
+  const pemPrivateHeader = pemPrivate.split("\n")[0] ?? "";
+  if (
+    pemPublicHeader !== DEMO_PEM_PUBLIC_HEADER ||
+    pemPrivateHeader !== DEMO_PEM_PRIVATE_HEADER
+  ) {
+    throw new Error(
+      `demo fixture broken: PEM headers "${pemPublicHeader}" / "${pemPrivateHeader}" ` +
+        `do not match the pinned "${DEMO_PEM_PUBLIC_HEADER}" / "${DEMO_PEM_PRIVATE_HEADER}"`,
+    );
+  }
+  const pemSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: importPrivateKey(pemPrivate),
+      created: DEMO_CREATED,
+      nonce: DEMO_PEM_NONCE,
+    },
+  );
+  const pemVerification = verifyRequest(pemSigned, {
+    key: importPublicKey(pemPublic),
+    now: DEMO_CREATED + 60,
+  });
+  if (!pemVerification.ok) {
+    throw new Error(
+      `demo fixture broken: PEM round-trip verification failed (code ${pemVerification.code}: ${pemVerification.reason})`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -953,6 +1048,13 @@ export function runDemo(): DemoResult {
     ...sigParamsSerialization.map(
       (c) => `Serialize ${c.name}: ${c.serialized}`,
     ),
+    "",
+    "PEM key round-trip: the main ed25519 key pair exported as PEM, imported back, and the imported keys sign and verify a fresh request",
+    `PEM public key header: ${pemPublicHeader}`,
+    `PEM private key header: ${pemPrivateHeader}`,
+    pemVerification.ok
+      ? `PEM round-trip verification: OK (label ${pemVerification.label}, keyid="${pemVerification.keyId}", alg="${pemVerification.alg}")`
+      : `PEM round-trip verification: FAILED (code ${pemVerification.code}: ${pemVerification.reason})`,
   ];
 
   return {
@@ -985,6 +1087,10 @@ export function runDemo(): DemoResult {
     dictMemberExtraction,
     dictMemberMissingKeyError,
     sigParamsSerialization,
+    pemPublicHeader,
+    pemPrivateHeader,
+    pemSigned,
+    pemVerification,
     lines,
   };
 }

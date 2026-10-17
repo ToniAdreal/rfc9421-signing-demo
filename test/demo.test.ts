@@ -25,6 +25,9 @@ import {
   DEMO_JWKS_URL,
   DEMO_KEY_ID,
   DEMO_NONCE,
+  DEMO_PEM_NONCE,
+  DEMO_PEM_PRIVATE_HEADER,
+  DEMO_PEM_PUBLIC_HEADER,
   DEMO_OTHER_NONCE,
   DEMO_REPLAY_CACHE_MAX_ENTRIES,
   DEMO_REPLAY_CACHE_TTL_SEC,
@@ -705,7 +708,7 @@ test("demo signature-params segment serializes the fixed corpus to the hand-pinn
   );
 });
 
-test("demo lines contain the signature-params segment (name -> serialized pairs, closing the demo)", () => {
+test("demo lines contain the signature-params segment (name -> serialized pairs)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
@@ -715,11 +718,19 @@ test("demo lines contain the signature-params segment (name -> serialized pairs,
   assert.ok(out.includes('Serialize full: ("@method" "@authority" "@path" "content-digest");created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"'));
   assert.ok(out.includes('Serialize parameterized: ("@method";req "x-checksum";tr "@query-param";name="amount" "x-dict";key="b");created=1700000000;keyid="k1";alg="ed25519"'));
   assert.ok(out.includes('Serialize escaped: ("@method");created=1700000000;keyid="k";alg="ed25519";nonce="a\\"b\\\\c d"'));
-  // The segment closes the demo: the escaped line is final, and
-  // the serialization block sits after the member-extraction
-  // segment's missing-key line.
+  // The serialization block sits after the member-extraction
+  // segment's missing-key line, and the PEM round-trip segment
+  // follows it (the escaped line is no longer the demo's last line).
+  const pemIdx = lines.findIndex((l) =>
+    l.startsWith("PEM key round-trip:"),
+  );
+  assert.ok(pemIdx !== -1);
   assert.equal(
-    lines[lines.length - 1],
+    lines[pemIdx - 1],
+    "",
+  );
+  assert.equal(
+    lines[pemIdx - 2],
     'Serialize escaped: ("@method");created=1700000000;keyid="k";alg="ed25519";nonce="a\\"b\\\\c d"',
   );
   const headerIdx = lines.findIndex((l) =>
@@ -735,6 +746,74 @@ test("demo lines contain the signature-params segment (name -> serialized pairs,
     'Serialize full: ("@method" "@authority" "@path" "content-digest");created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"',
     'Serialize parameterized: ("@method";req "x-checksum";tr "@query-param";name="amount" "x-dict";key="b");created=1700000000;keyid="k1";alg="ed25519"',
     'Serialize escaped: ("@method");created=1700000000;keyid="k";alg="ed25519";nonce="a\\"b\\\\c d"',
+  ]);
+});
+
+test("demo PEM segment exports the main key pair as PEM, imports it back, and the imported keys sign and verify", () => {
+  const { pemPublicHeader, pemPrivateHeader, pemSigned, pemVerification } =
+    runDemo();
+
+  // Expectations are the literal PEM type headers hand-pinned in
+  // DEMO_PEM_*_HEADER (SPKI public / PKCS#8 private, per src/keys.ts)
+  // — the test pins them again here so a drift in either place fails.
+  assert.equal(DEMO_PEM_PUBLIC_HEADER, "-----BEGIN PUBLIC KEY-----");
+  assert.equal(DEMO_PEM_PRIVATE_HEADER, "-----BEGIN PRIVATE KEY-----");
+  assert.equal(pemPublicHeader, DEMO_PEM_PUBLIC_HEADER);
+  assert.equal(pemPrivateHeader, DEMO_PEM_PRIVATE_HEADER);
+
+  // The round-trip request is the same fixed request, signed under
+  // the imported private key with the PEM segment's own nonce.
+  assert.equal(pemSigned.body, DEMO_BODY);
+  assert.ok(
+    pemSigned.headers["signature-input"].includes(`keyid="${DEMO_KEY_ID}"`),
+  );
+  assert.ok(
+    pemSigned.headers["signature-input"].includes(
+      `nonce="${DEMO_PEM_NONCE}"`,
+    ),
+  );
+  assert.notEqual(DEMO_PEM_NONCE, DEMO_NONCE);
+
+  // Verification with the imported public key passes.
+  assert.equal(pemVerification.ok, true);
+  assert.equal(pemVerification.keyId, DEMO_KEY_ID);
+  assert.equal(pemVerification.alg, "ed25519");
+});
+
+test("demo lines contain the PEM segment (headers printed, round-trip verifies, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /PEM key round-trip: the main ed25519 key pair exported as PEM, imported back, and the imported keys sign and verify a fresh request/,
+  );
+  assert.ok(out.includes("PEM public key header: -----BEGIN PUBLIC KEY-----"));
+  assert.ok(
+    out.includes("PEM private key header: -----BEGIN PRIVATE KEY-----"),
+  );
+  assert.match(
+    out,
+    new RegExp(
+      `PEM round-trip verification: OK \\(label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519"\\)`,
+    ),
+  );
+  // The PEM segment closes the demo: its verification line is final,
+  // and the block sits after the signature-params segment.
+  assert.equal(
+    lines[lines.length - 1],
+    `PEM round-trip verification: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("PEM key round-trip:"),
+  );
+  const serializeIdx = lines.findIndex((l) =>
+    l.startsWith("Serialize escaped:"),
+  );
+  assert.ok(serializeIdx !== -1 && headerIdx !== -1 && serializeIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 3), [
+    "PEM public key header: -----BEGIN PUBLIC KEY-----",
+    "PEM private key header: -----BEGIN PRIVATE KEY-----",
   ]);
 });
 
@@ -799,4 +878,8 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /Serialize golden: \("@method" "@authority" "@path" "content-digest"\);created=1700000000;keyid="k1";alg="hmac-sha256"/);
   assert.match(out, /Serialize full: \("@method" "@authority" "@path" "content-digest"\);created=1700000000;expires=1700000300;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001";tag="payment-webhook-v1"/);
   assert.match(out, /Serialize escaped: \("@method"\);created=1700000000;keyid="k";alg="ed25519";nonce=/);
+  assert.match(out, /PEM key round-trip: the main ed25519 key pair exported as PEM, imported back/);
+  assert.match(out, /PEM public key header: -----BEGIN PUBLIC KEY-----/);
+  assert.match(out, /PEM private key header: -----BEGIN PRIVATE KEY-----/);
+  assert.match(out, /PEM round-trip verification: OK /);
 });

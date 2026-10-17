@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a PEM key
+  round-trip segment: the main line's ed25519 key pair is
+  exported with `exportPublicKeyPem` / `exportPrivateKeyPem`,
+  only the first line of each PEM (its type header — SPKI
+  `-----BEGIN PUBLIC KEY-----` for the public key, PKCS#8
+  `-----BEGIN PRIVATE KEY-----` for the private key, both
+  hand-pinned) is printed, the PEM texts are imported back
+  with `importPublicKey` / `importPrivateKey`, and the
+  imported keys complete a fresh sign -> verify round-trip
+  over the same fixed request. Outside the printed lines the
+  demo asserts the round-trip verification passed and that
+  both PEM headers equal the pinned expectations. The segment
+  performs zero network I/O; its printed lines are identical
+  between runs even though the key pair itself is fresh.
 - The benchmark (`npm run bench`) now also measures
   `assertContentDigestAlg` — the content-digest algorithm
   guard every sign/verify that selects a digest algorithm

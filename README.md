@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 676 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 678 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -77,7 +77,14 @@ are run through `serializeSignatureParams` and printed as
 name -> serialized pairs, showing how the inner list and the
 parameters in fixed order (created, expires, keyid, alg, nonce,
 tag) assemble into the `@signature-params` line a verifier
-rebuilds byte-for-byte:
+rebuilds byte-for-byte. The demo closes with a PEM key round-trip
+segment: the main ed25519 key pair is exported with
+`exportPublicKeyPem` / `exportPrivateKeyPem` (only the first line
+of each PEM — its type header — is printed), imported back with
+`importPublicKey` / `importPrivateKey`, and the imported keys
+complete a fresh sign -> verify round-trip, showing the PEM
+export -> import -> verify path a gateway or ops tool performs
+when keys are distributed as PEM files rather than JWKs:
 
 ```bash
 npm run demo
@@ -1623,7 +1630,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 676 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 678 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
