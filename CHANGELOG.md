@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now enumerates the dual-signed
+  request's signature labels right after the multi-party signing
+  segment: `listSignatureLabels` is called over the merged
+  `Signature-Input` value and the labels are printed in wire
+  order (`sig1`, `gateway` — 2 labels), the enumerate-first
+  entry point a receiver uses before verifying each label.
+  Outside the printed lines the demo asserts the enumerated
+  labels equal the hand-pinned expectation in set and order
+  (the same two-label wire-order shape the benchmark pins as
+  `PARSER_EXPECTED_LABELS`). `DemoResult` carries the
+  enumerated labels, and the demo tests pin the field and the
+  printed lines. The segment performs zero network I/O and
+  its printed lines are identical between runs.
 - The CLI demo (`npm run demo`) now closes with a
   throwing-verification segment: the main signed request is
   verified with `verifyRequestOrThrow`, which returns the

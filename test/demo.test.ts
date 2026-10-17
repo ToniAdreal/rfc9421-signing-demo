@@ -29,6 +29,7 @@ import {
   DEMO_PEM_PRIVATE_HEADER,
   DEMO_PEM_PUBLIC_HEADER,
   DEMO_OTHER_NONCE,
+  DEMO_SIGNATURE_LABELS,
   DEMO_REPLAY_CACHE_MAX_ENTRIES,
   DEMO_REPLAY_CACHE_TTL_SEC,
   DEMO_TAMPERED_BODY,
@@ -232,6 +233,8 @@ test("demo lines contain the dual headers, dual verification, and tamper isolati
   assert.match(out, /Dual Signature: sig1=:.*gateway=:/);
   assert.match(out, /Dual verification sig1: OK /);
   assert.match(out, /Dual verification gateway: OK /);
+  assert.match(out, /Signature labels: listSignatureLabels enumerates the labels in the dual-signed request's Signature-Input in wire order/);
+  assert.match(out, /Signature labels in the dual-signed request: sig1, gateway \(2 labels\)/);
   assert.match(out, /Tampered content-type: text\/plain /);
   assert.match(out, /After content-type tampering sig1: OK /);
   assert.match(
@@ -886,6 +889,51 @@ test("demo lines contain the throwing-verification segment (identity returned, V
   assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 3), [
     `verifyRequestOrThrow on the main request: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${DEMO_NONCE}")`,
     "verifyRequestOrThrow on the tampered-body request: FAILED (threw VerifyError, code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  ]);
+});
+
+test("demo signature-labels segment enumerates the dual-signed request's labels in wire order", () => {
+  const { dualSigned, signatureLabels } = runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_SIGNATURE_LABELS: the main signature carries the library
+  // default label `sig1` and the gateway appends `gateway` second —
+  // the same two-label wire-order shape the bench pins as
+  // PARSER_EXPECTED_LABELS and the addSignature tests pin for
+  // their own dual-signed requests.
+  assert.deepEqual(DEMO_SIGNATURE_LABELS, ["sig1", "gateway"]);
+  assert.equal(DEMO_SIGNATURE_LABELS[1], DEMO_GATEWAY_LABEL);
+  assert.deepEqual(signatureLabels, [...DEMO_SIGNATURE_LABELS]);
+  assert.ok(dualSigned.headers["signature-input"].startsWith("sig1="));
+  assert.ok(dualSigned.headers["signature-input"].includes(", gateway="));
+});
+
+test("demo lines contain the signature-labels segment (right after dual verification, before content-type tampering)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.ok(
+    out.includes(
+      "Signature labels: listSignatureLabels enumerates the labels in the dual-signed request's Signature-Input in wire order — enumerate first, then verify each label",
+    ),
+  );
+  assert.ok(
+    out.includes("Signature labels in the dual-signed request: sig1, gateway (2 labels)"),
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Signature labels: listSignatureLabels"),
+  );
+  const dualIdx = lines.findIndex((l) =>
+    l.startsWith("Dual verification gateway:"),
+  );
+  const tamperIdx = lines.findIndex((l) =>
+    l.startsWith("Tampered content-type:"),
+  );
+  assert.ok(dualIdx !== -1 && headerIdx !== -1 && tamperIdx !== -1);
+  assert.ok(dualIdx < headerIdx && headerIdx < tamperIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 2), [
+    "Signature labels: listSignatureLabels enumerates the labels in the dual-signed request's Signature-Input in wire order — enumerate first, then verify each label",
+    "Signature labels in the dual-signed request: sig1, gateway (2 labels)",
   ]);
 });
 

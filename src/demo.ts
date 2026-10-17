@@ -5,7 +5,14 @@
  * script, the demo runs the canonical multi-party payments flow: the
  * payment gateway appends a second signature with `addSignature`
  * (label `gateway`, hmac-sha256), the merged wire headers are printed,
- * and `verifyAllLabels` verifies each label independently. Finally the
+ * and `verifyAllLabels` verifies each label independently. Right
+ * after that multi-party script, the demo enumerates the finished
+ * request's signature labels with `listSignatureLabels` over its
+ * `Signature-Input` value and prints them in wire order — the
+ * enumerate-first entry point a receiver uses before verifying
+ * each label — asserting outside the printed lines that the
+ * enumerated labels equal the hand-pinned `sig1`, `gateway`
+ * expectation below. Finally the
  * demo tampers `content-type` — a component only the gateway signature
  * covers — to show one label failing while the other still verifies.
  * The next segment demonstrates nonce replay protection: the demo
@@ -125,6 +132,7 @@ import {
   isVerifyError,
   jwkThumbprint,
   JwksKeyStore,
+  listSignatureLabels,
   ReplayCache,
   secretKey,
   serializeDictionaryMemberValue,
@@ -167,6 +175,21 @@ export const DEMO_COVERED_COMPONENTS: string[] = [
 /** Label of the gateway's appended second signature. */
 export const DEMO_GATEWAY_LABEL = "gateway";
 export const DEMO_GATEWAY_KEY_ID = "gateway-key-1";
+/**
+ * Hand-pinned labels of the dual-signed request, in wire order:
+ * the main `signRequest` call passes no label, so its signature
+ * carries the library default `sig1` (see `src/sign.ts`), and the
+ * gateway appends `DEMO_GATEWAY_LABEL` second. The two-label
+ * wire-order shape is the same one the bench pins independently
+ * as `PARSER_EXPECTED_LABELS` (`["merchant", "gateway"]`) and
+ * the parser / `addSignature` tests pin for their own dual-signed
+ * requests — the demo never derives this expectation from the
+ * `listSignatureLabels` output it is checking.
+ */
+export const DEMO_SIGNATURE_LABELS: ReadonlyArray<string> = [
+  "sig1",
+  "gateway",
+];
 /**
  * Demo-only gateway HMAC secret: 49 bytes (the hmac-sha256 floor is
  * 32), fixed so the gateway signature is deterministic, and labelled
@@ -461,6 +484,12 @@ export interface DemoResult {
   /** Per-label results for the dual-signed request (both ok). */
   dualVerification: VerifyResult[];
   /**
+   * Labels enumerated by `listSignatureLabels` over the
+   * dual-signed request's `Signature-Input` value, in wire order
+   * (`DEMO_SIGNATURE_LABELS`: `sig1`, then `gateway`).
+   */
+  signatureLabels: string[];
+  /**
    * Per-label results after `content-type` was tampered: the merchant
    * `sig1` label still verifies, the `gateway` label fails.
    */
@@ -676,6 +705,27 @@ export function runDemo(): DemoResult {
     now: DEMO_CREATED + 60,
   };
   const dualVerification = verifyAllLabels(dualSigned, dualVerifyOptions);
+
+  // Label-enumeration segment: before verifying labels one by one,
+  // a receiver first enumerates which labels a multi-label request
+  // actually carries. `listSignatureLabels` splits the merged
+  // `Signature-Input` value on top-level commas, so the gateway's
+  // appended member does not hide inside the merchant's. Outside
+  // the printed lines the demo asserts the enumerated labels equal
+  // the hand-pinned DEMO_SIGNATURE_LABELS in set and wire order —
+  // a mismatch throws instead of printing a misleading segment.
+  const signatureLabels = listSignatureLabels(
+    dualSigned.headers["signature-input"],
+  );
+  if (
+    signatureLabels.length !== DEMO_SIGNATURE_LABELS.length ||
+    signatureLabels.some((label, i) => label !== DEMO_SIGNATURE_LABELS[i])
+  ) {
+    throw new Error(
+      `demo fixture broken: listSignatureLabels enumerated ${JSON.stringify(signatureLabels)} ` +
+        `instead of the pinned ${JSON.stringify(DEMO_SIGNATURE_LABELS)}`,
+    );
+  }
 
   // Tamper isolation: `content-type` is covered only by the gateway
   // signature, so changing it must fail the gateway label while the
@@ -1089,6 +1139,9 @@ export function runDemo(): DemoResult {
     `Dual Signature: ${dualSigned.headers["signature"]}`,
     ...dualVerification.map((r) => formatLabelResult("Dual verification", r)),
     "",
+    "Signature labels: listSignatureLabels enumerates the labels in the dual-signed request's Signature-Input in wire order — enumerate first, then verify each label",
+    `Signature labels in the dual-signed request: ${signatureLabels.join(", ")} (${signatureLabels.length} labels)`,
+    "",
     `Tampered content-type: ${DEMO_TAMPERED_CONTENT_TYPE} (only the gateway signature covers "content-type")`,
     ...contentTypeTamperedVerification.map((r) =>
       formatLabelResult("After content-type tampering", r),
@@ -1173,6 +1226,7 @@ export function runDemo(): DemoResult {
     tamperedVerification,
     dualSigned,
     dualVerification,
+    signatureLabels,
     contentTypeTamperedVerification,
     replayFirstVerification,
     replaySecondVerification,
