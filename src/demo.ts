@@ -23,7 +23,13 @@
  * peer that only accepts sha-256 digests: its `content-digest` header
  * and verification are printed alongside the main line's sha-512
  * header, and a one-byte body tamper is rejected with
- * `BODY_DIGEST_MISMATCH`. The next segment demonstrates inbound
+ * `BODY_DIGEST_MISMATCH`. Right after that segment, the demo
+ * identifies the digest algorithm of both already-emitted headers
+ * with `contentDigestAlgOf` — the receiver's first step on an
+ * inbound `Content-Digest` value, before any hashing — and shows
+ * an unrecognized sha-1-shaped value coming back `undefined`,
+ * the fail-closed shape a caller must turn into a rejection.
+ * The next segment demonstrates inbound
  * normalization: a mock Node `IncomingMessage`-shaped object
  * (mixed-case headers, a multi-value header, a host with a port) is
  * normalized with `fromNodeRequest` and verifies, while rebuilding
@@ -122,6 +128,7 @@ import {
   addSignature,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
+  contentDigestAlgOf,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyPem,
@@ -141,6 +148,7 @@ import {
   verifyAllLabels,
   verifyRequest,
   verifyRequestOrThrow,
+  type ContentDigestAlg,
   type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
   type RequestLike,
@@ -218,6 +226,26 @@ export const DEMO_TAMPERED_CONTENT_TYPE = "text/plain";
  * rejects *repeats*, not new nonces.
  */
 export const DEMO_OTHER_NONCE = "demo-nonce-002";
+/**
+ * Hand-pinned digest algorithms of the identification segment:
+ * the main line emits the library default `sha-512` and the
+ * sha-256 peer line emits `sha-256` — the only two algorithms
+ * this library can emit (see `src/digest.ts`), pinned
+ * independently in `test/contentDigestAlg.test.ts` and the bench
+ * `DIGEST_ALG_CORPUS`. The demo never derives these expectations
+ * from the `contentDigestAlgOf` output it is checking.
+ */
+export const DEMO_MAIN_DIGEST_ALG: ContentDigestAlg = "sha-512";
+export const DEMO_SHA256_DIGEST_ALG: ContentDigestAlg = "sha-256";
+/**
+ * Unrecognized `Content-Digest` value of the identification
+ * segment: a sha-1-shaped value (the same shape the
+ * contentDigestAlg tests pin for the `addSignature` rejection of
+ * a header this library cannot emit, and the bench corpus pins
+ * for this helper). `contentDigestAlgOf` must return `undefined`
+ * for it — the fail-closed shape a caller rejects explicitly.
+ */
+export const DEMO_UNRECOGNIZED_DIGEST_VALUE = "sha-1=:abc=:";
 /**
  * Replay-cache configuration for the closing segment: capacity 100
  * entries, a nonce stays tracked for 3600 seconds, and the clock is
@@ -519,6 +547,22 @@ export interface DemoResult {
    * byte: rejected with `BODY_DIGEST_MISMATCH`.
    */
   sha256TamperedVerification: VerifyResult;
+  /**
+   * Algorithm `contentDigestAlgOf` reads off the main line's
+   * `content-digest` header (`DEMO_MAIN_DIGEST_ALG`: `sha-512`).
+   */
+  contentDigestAlg: ContentDigestAlg | undefined;
+  /**
+   * Algorithm `contentDigestAlgOf` reads off the sha-256 peer
+   * line's `content-digest` header (`DEMO_SHA256_DIGEST_ALG`).
+   */
+  sha256ContentDigestAlg: ContentDigestAlg | undefined;
+  /**
+   * Result of `contentDigestAlgOf` on
+   * `DEMO_UNRECOGNIZED_DIGEST_VALUE`: `undefined` — an algorithm
+   * this library cannot emit fails closed for the caller.
+   */
+  unrecognizedContentDigestAlg: ContentDigestAlg | undefined;
   /** The request signed for the inbound segment (host with port). */
   inboundSigned: SignedHttpRequest;
   /** `inboundSigned`'s wire form normalized by `fromNodeRequest`. */
@@ -816,6 +860,37 @@ export function runDemo(): DemoResult {
     { ...sha256Signed, body: DEMO_TAMPERED_BODY },
     { key: publicKey, now: DEMO_CREATED + 60 },
   );
+
+  // Digest-algorithm identification segment: a receiver holding an
+  // already-emitted `Content-Digest` header reads its algorithm off
+  // with `contentDigestAlgOf` before deciding whether it can verify
+  // the digest at all — the helper reads only the prefix before the
+  // first `=` and returns `undefined` for anything this library
+  // cannot emit. Outside the printed lines the demo asserts all
+  // three identifications equal the hand-pinned expectations
+  // (DEMO_MAIN_DIGEST_ALG / DEMO_SHA256_DIGEST_ALG / `undefined`
+  // for the sha-1-shaped value) — a mismatch throws instead of
+  // printing a misleading segment.
+  const contentDigestAlg = contentDigestAlgOf(
+    signed.headers["content-digest"],
+  );
+  const sha256ContentDigestAlg = contentDigestAlgOf(
+    sha256Signed.headers["content-digest"],
+  );
+  const unrecognizedContentDigestAlg = contentDigestAlgOf(
+    DEMO_UNRECOGNIZED_DIGEST_VALUE,
+  );
+  if (
+    contentDigestAlg !== DEMO_MAIN_DIGEST_ALG ||
+    sha256ContentDigestAlg !== DEMO_SHA256_DIGEST_ALG ||
+    unrecognizedContentDigestAlg !== undefined
+  ) {
+    throw new Error(
+      `demo fixture broken: contentDigestAlgOf gave ${JSON.stringify(contentDigestAlg)} / ` +
+        `${JSON.stringify(sha256ContentDigestAlg)} / ${JSON.stringify(unrecognizedContentDigestAlg)} ` +
+        `instead of the pinned "${DEMO_MAIN_DIGEST_ALG}" / "${DEMO_SHA256_DIGEST_ALG}" / undefined`,
+    );
+  }
 
   // Inbound segment: a real webhook gateway never sees a hand-built
   // RequestLike — it receives a Node IncomingMessage. The demo signs
@@ -1167,6 +1242,11 @@ export function runDemo(): DemoResult {
       ? "sha-256 verification after tampering: OK (unexpected — tampering was not detected)"
       : `sha-256 verification after tampering: FAILED (code ${sha256TamperedVerification.code}: ${sha256TamperedVerification.reason})`,
     "",
+    "Content-Digest algorithm identification: contentDigestAlgOf reads the algorithm off an existing Content-Digest header — the receiver's first step before deciding whether to verify",
+    `contentDigestAlgOf on the main line's Content-Digest: ${contentDigestAlg}`,
+    `contentDigestAlgOf on the sha-256 peer line's Content-Digest: ${sha256ContentDigestAlg}`,
+    `contentDigestAlgOf on the unrecognized value "${DEMO_UNRECOGNIZED_DIGEST_VALUE}": ${unrecognizedContentDigestAlg} (an algorithm this library cannot emit — a caller must reject it)`,
+    "",
     "Inbound normalization: mock Node IncomingMessage normalized with fromNodeRequest (mixed-case headers, multi-value x-trace-hops, host with port)",
     `Inbound normalized: ${inboundNormalized.method} ${inboundNormalized.url} (host "${inboundNormalized.headers["host"]}", x-trace-hops "${inboundNormalized.headers["x-trace-hops"]}", content-type "${inboundNormalized.headers["content-type"]}")`,
     inboundVerification.ok
@@ -1234,6 +1314,9 @@ export function runDemo(): DemoResult {
     sha256Signed,
     sha256Verification,
     sha256TamperedVerification,
+    contentDigestAlg,
+    sha256ContentDigestAlg,
+    unrecognizedContentDigestAlg,
     inboundSigned,
     inboundNormalized,
     inboundVerification,

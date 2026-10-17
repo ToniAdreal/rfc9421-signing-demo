@@ -24,6 +24,7 @@ import {
   DEMO_JWKS_FETCHED_AT_SEC,
   DEMO_JWKS_URL,
   DEMO_KEY_ID,
+  DEMO_MAIN_DIGEST_ALG,
   DEMO_NONCE,
   DEMO_PEM_NONCE,
   DEMO_PEM_PRIVATE_HEADER,
@@ -32,11 +33,13 @@ import {
   DEMO_SIGNATURE_LABELS,
   DEMO_REPLAY_CACHE_MAX_ENTRIES,
   DEMO_REPLAY_CACHE_TTL_SEC,
+  DEMO_SHA256_DIGEST_ALG,
   DEMO_TAMPERED_BODY,
   DEMO_TAMPERED_CONTENT_TYPE,
   DEMO_THUMBPRINT_NONCE,
   DEMO_THROW_TAMPERED_CODE,
   DEMO_UNKNOWN_KEY_ID,
+  DEMO_UNRECOGNIZED_DIGEST_VALUE,
   runDemo,
 } from "../src/demo.js";
 
@@ -362,6 +365,71 @@ test("demo lines contain the sha-256 segment (comparison, verification, tamper r
     out,
     /sha-256 verification after tampering: FAILED \(code BODY_DIGEST_MISMATCH:/,
   );
+});
+
+test("demo digest-alg identification segment reads the algorithm off both emitted headers and fails closed on an unrecognized value", () => {
+  const {
+    contentDigestAlg,
+    sha256ContentDigestAlg,
+    unrecognizedContentDigestAlg,
+  } = runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_MAIN_DIGEST_ALG / DEMO_SHA256_DIGEST_ALG: the main line
+  // emits the library default and the peer line emits sha-256 —
+  // the same two values pinned in test/contentDigestAlg.test.ts
+  // and the bench DIGEST_ALG_CORPUS.
+  assert.equal(DEMO_MAIN_DIGEST_ALG, "sha-512");
+  assert.equal(DEMO_SHA256_DIGEST_ALG, "sha-256");
+  assert.equal(contentDigestAlg, DEMO_MAIN_DIGEST_ALG);
+  assert.equal(sha256ContentDigestAlg, DEMO_SHA256_DIGEST_ALG);
+
+  // The sha-1-shaped value is not an algorithm this library can
+  // emit, so identification returns undefined (fail-closed) — the
+  // same shape the contentDigestAlg tests pin for the
+  // addSignature rejection and the bench corpus pins here.
+  assert.equal(DEMO_UNRECOGNIZED_DIGEST_VALUE, "sha-1=:abc=:");
+  assert.equal(unrecognizedContentDigestAlg, undefined);
+});
+
+test("demo lines contain the digest-alg identification segment (after the sha-256 segment, before inbound normalization)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /Content-Digest algorithm identification: contentDigestAlgOf reads the algorithm off an existing Content-Digest header/,
+  );
+  assert.ok(
+    out.includes("contentDigestAlgOf on the main line's Content-Digest: sha-512"),
+  );
+  assert.ok(
+    out.includes(
+      "contentDigestAlgOf on the sha-256 peer line's Content-Digest: sha-256",
+    ),
+  );
+  assert.ok(
+    out.includes(
+      `contentDigestAlgOf on the unrecognized value "${DEMO_UNRECOGNIZED_DIGEST_VALUE}": undefined (an algorithm this library cannot emit — a caller must reject it)`,
+    ),
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Content-Digest algorithm identification:"),
+  );
+  const sha256Idx = lines.findIndex((l) =>
+    l.startsWith("sha-256 verification after tampering:"),
+  );
+  const inboundIdx = lines.findIndex((l) =>
+    l.startsWith("Inbound normalization:"),
+  );
+  assert.ok(sha256Idx !== -1 && headerIdx !== -1 && inboundIdx !== -1);
+  assert.ok(sha256Idx < headerIdx && headerIdx < inboundIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "Content-Digest algorithm identification: contentDigestAlgOf reads the algorithm off an existing Content-Digest header — the receiver's first step before deciding whether to verify",
+    "contentDigestAlgOf on the main line's Content-Digest: sha-512",
+    "contentDigestAlgOf on the sha-256 peer line's Content-Digest: sha-256",
+    `contentDigestAlgOf on the unrecognized value "${DEMO_UNRECOGNIZED_DIGEST_VALUE}": undefined (an algorithm this library cannot emit — a caller must reject it)`,
+  ]);
 });
 
 test("demo inbound segment normalizes a mock IncomingMessage and verifies it", () => {
@@ -969,6 +1037,10 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
     out,
     /sha-256 verification after tampering: FAILED \(code BODY_DIGEST_MISMATCH:/,
   );
+  assert.match(out, /Content-Digest algorithm identification: contentDigestAlgOf reads the algorithm off an existing Content-Digest header/);
+  assert.match(out, /contentDigestAlgOf on the main line's Content-Digest: sha-512/);
+  assert.match(out, /contentDigestAlgOf on the sha-256 peer line's Content-Digest: sha-256/);
+  assert.match(out, /contentDigestAlgOf on the unrecognized value "sha-1=:abc=:": undefined/);
   assert.match(out, /Inbound normalization: mock Node IncomingMessage normalized with fromNodeRequest/);
   assert.match(out, /Inbound verification: OK /);
   assert.match(

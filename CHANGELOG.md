@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now identifies the digest
+  algorithm of its already-emitted `Content-Digest` headers
+  with `contentDigestAlgOf`, right after the sha-256 segment:
+  the main line's header is identified as `sha-512` and the
+  sha-256 peer line's as `sha-256`, while a pinned
+  sha-1-shaped value (`sha-1=:abc=:`) comes back `undefined`
+  — the fail-closed shape a caller must reject, since this
+  library cannot emit sha-1. Outside the printed lines the
+  demo asserts all three identifications equal the
+  hand-pinned expectations. `DemoResult` carries the three
+  identification results, and the demo tests pin the fields
+  and the printed lines. The segment performs zero network
+  I/O and its printed lines are identical between runs.
 - The CLI demo (`npm run demo`) now enumerates the dual-signed
   request's signature labels right after the multi-party signing
   segment: `listSignatureLabels` is called over the merged
