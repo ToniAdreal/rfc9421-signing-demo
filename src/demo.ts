@@ -151,6 +151,21 @@
  * `test/memoizeKeyResolver.test.ts` pins for its counting
  * store). No key bytes are printed — only keyids and counts —
  * so the segment is byte-identical between runs.
+ * The demo closes with an HMAC secret-length guard segment: the
+ * gateway line above signs with hmac-sha256, but the demo never
+ * showed the setup-time guard every HMAC secret passes through.
+ * Fixed secrets built from a fixed fill byte (only their lengths
+ * matter) are run through `assertHmacSecretLength`: a 32-byte
+ * secret passes for `hmac-sha256` and a 64-byte secret passes
+ * for `hmac-sha512`, while a secret one byte below each floor
+ * (31 bytes for sha256, 63 bytes for sha512) is rejected.
+ * Outside the printed lines the demo asserts the accepted group
+ * all passed and both rejection messages equal the hand-pinned
+ * expectations below (the same messages `src/keys.ts` builds
+ * from `MIN_HMAC_SECRET_BYTES` / `MIN_HMAC_SHA512_SECRET_BYTES`
+ * and the keyLength / hmacSha512 suites pin). Only algorithm
+ * names and byte lengths are printed, never key bytes, so the
+ * segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -179,8 +194,10 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { createSecretKey } from "node:crypto";
 import {
   addSignature,
+  assertHmacSecretLength,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
   contentDigestAlgOf,
@@ -586,6 +603,46 @@ export const DEMO_MEMOIZED_TTL_SEC = 300;
 export const DEMO_MEMOIZED_CALLS_AFTER_REPEAT = 1;
 export const DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY = 2;
 
+/**
+ * Fixed HMAC secret-length guard corpus of the closing guard
+ * segment: each case is a secret of a fixed byte length (built
+ * from a fixed 0xab fill — only the length matters to the guard,
+ * never the content) paired with its algorithm. The accepted
+ * lengths sit exactly on each algorithm's floor
+ * (`MIN_HMAC_SECRET_BYTES` 32 for hmac-sha256,
+ * `MIN_HMAC_SHA512_SECRET_BYTES` 64 for hmac-sha512, RFC 2104
+ * §3); the rejected lengths sit exactly one byte below each
+ * floor — the same boundary shape the bench corpus
+ * (`HMAC_GUARD_CORPUS`) and the keyLength / hmacSha512 suites
+ * pin. No outcome is derived from `assertHmacSecretLength`
+ * itself.
+ */
+export const DEMO_HMAC_GUARD_ACCEPTED: ReadonlyArray<{
+  alg: "hmac-sha256" | "hmac-sha512";
+  bytes: number;
+}> = [
+  { alg: "hmac-sha256", bytes: 32 },
+  { alg: "hmac-sha512", bytes: 64 },
+];
+export const DEMO_HMAC_GUARD_REJECTED: ReadonlyArray<{
+  alg: "hmac-sha256" | "hmac-sha512";
+  bytes: number;
+}> = [
+  { alg: "hmac-sha256", bytes: 31 },
+  { alg: "hmac-sha512", bytes: 63 },
+];
+/**
+ * Hand-pinned rejection messages of the guard segment, one per
+ * rejected case in `DEMO_HMAC_GUARD_REJECTED` order: the exact
+ * strings `assertHmacSecretLength` throws for a 31-byte
+ * hmac-sha256 secret and a 63-byte hmac-sha512 secret (written
+ * out here, never derived from the guard under test).
+ */
+export const DEMO_HMAC_GUARD_ERRORS: ReadonlyArray<string> = [
+  "assertHmacSecretLength: hmac-sha256 secret must be at least 32 bytes (RFC 2104: the key SHOULD be at least as long as the hash output; sha-256 → 32 bytes), got 31 bytes",
+  "assertHmacSecretLength: hmac-sha512 secret must be at least 64 bytes (RFC 2104: the key SHOULD be at least as long as the hash output; sha-512 → 64 bytes), got 63 bytes",
+];
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -853,6 +910,26 @@ export interface DemoResult {
    * verification (`DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY`: 2).
    */
   memoizedResolverCallsAfterSecondKey: number;
+  /**
+   * The closing HMAC guard segment's accepted cases: each fixed
+   * secret length passed `assertHmacSecretLength` for its
+   * algorithm (exactly on the per-algorithm floor).
+   */
+  hmacGuardAccepted: ReadonlyArray<{
+    alg: "hmac-sha256" | "hmac-sha512";
+    bytes: number;
+  }>;
+  /**
+   * The closing HMAC guard segment's rejections: each fixed
+   * secret length (one byte below its algorithm's floor) was
+   * rejected, paired with the exact error message the guard
+   * threw (`DEMO_HMAC_GUARD_ERRORS`).
+   */
+  hmacGuardRejections: ReadonlyArray<{
+    alg: "hmac-sha256" | "hmac-sha512";
+    bytes: number;
+    error: string;
+  }>;
   lines: string[];
 }
 
@@ -1575,6 +1652,59 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // HMAC secret-length guard segment: the gateway line signs
+  // with hmac-sha256, and every HMAC secret the sign and verify
+  // paths consume passes the per-algorithm length floor in
+  // `assertHmacSecretLength` — hmac-sha256 needs at least 32
+  // bytes, hmac-sha512 at least 64 (RFC 2104 §3). The demo runs
+  // fixed secrets (fixed 0xab fill; only the length matters)
+  // through the guard directly: lengths exactly on each floor
+  // pass, lengths one byte below are rejected. Outside the
+  // printed lines the demo asserts the accepted group all
+  // passed and both rejection messages equal the hand-pinned
+  // DEMO_HMAC_GUARD_ERRORS — a mismatch throws instead of
+  // printing a misleading segment. No key bytes are printed.
+  const hmacGuardAccepted: Array<{
+    alg: "hmac-sha256" | "hmac-sha512";
+    bytes: number;
+  }> = [];
+  for (const entry of DEMO_HMAC_GUARD_ACCEPTED) {
+    assertHmacSecretLength(
+      createSecretKey(Buffer.alloc(entry.bytes, 0xab)),
+      entry.alg,
+    );
+    hmacGuardAccepted.push({ alg: entry.alg, bytes: entry.bytes });
+  }
+  const hmacGuardRejections: Array<{
+    alg: "hmac-sha256" | "hmac-sha512";
+    bytes: number;
+    error: string;
+  }> = [];
+  for (const entry of DEMO_HMAC_GUARD_REJECTED) {
+    let error = "";
+    try {
+      assertHmacSecretLength(
+        createSecretKey(Buffer.alloc(entry.bytes, 0xab)),
+        entry.alg,
+      );
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+    hmacGuardRejections.push({ alg: entry.alg, bytes: entry.bytes, error });
+  }
+  if (
+    hmacGuardAccepted.length !== DEMO_HMAC_GUARD_ACCEPTED.length ||
+    hmacGuardRejections.some(
+      (r, i) => r.error !== DEMO_HMAC_GUARD_ERRORS[i],
+    )
+  ) {
+    throw new Error(
+      `demo fixture broken: HMAC guard rejections ` +
+        `${JSON.stringify(hmacGuardRejections.map((r) => r.error))} ` +
+        `instead of the pinned ${JSON.stringify(DEMO_HMAC_GUARD_ERRORS)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -1708,6 +1838,16 @@ export function runDemo(): DemoResult {
       ? `Memoized verification for keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": OK (label ${memoizedSecondKeyVerification.label}, keyid="${memoizedSecondKeyVerification.keyId}", alg="${memoizedSecondKeyVerification.alg}")`
       : `Memoized verification for keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": FAILED (code ${memoizedSecondKeyVerification.code}: ${memoizedSecondKeyVerification.reason})`,
     `Underlying resolver calls after verifying keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": ${memoizedResolverCallsAfterSecondKey} (a new keyid misses the cache and resolves once)`,
+    "",
+    "HMAC secret-length guard: assertHmacSecretLength enforces the per-algorithm secret floor before any MAC runs — hmac-sha256 secrets at least 32 bytes, hmac-sha512 secrets at least 64 bytes (RFC 2104: the key SHOULD be at least as long as the hash output)",
+    ...hmacGuardAccepted.map(
+      (a) =>
+        `assertHmacSecretLength for ${a.alg} with a ${a.bytes}-byte secret: OK (meets the ${a.alg === "hmac-sha512" ? 64 : 32}-byte floor)`,
+    ),
+    ...hmacGuardRejections.map(
+      (r) =>
+        `assertHmacSecretLength for ${r.alg} with a ${r.bytes}-byte secret: FAILED (${r.error})`,
+    ),
   ];
 
   return {
@@ -1763,6 +1903,8 @@ export function runDemo(): DemoResult {
     memoizedSecondKeyVerification,
     memoizedResolverCallsAfterRepeat,
     memoizedResolverCallsAfterSecondKey,
+    hmacGuardAccepted,
+    hmacGuardRejections,
     lines,
   };
 }

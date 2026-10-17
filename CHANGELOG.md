@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with an HMAC
+  secret-length guard segment: fixed secrets built from a
+  fixed fill byte (only their lengths matter) are run through
+  `assertHmacSecretLength` — a 32-byte secret passes for
+  `hmac-sha256` and a 64-byte secret passes for
+  `hmac-sha512` (exactly each algorithm's RFC 2104 floor),
+  while a secret one byte below each floor (31 bytes for
+  sha256, 63 bytes for sha512) is rejected. The demo's
+  earlier segments sign and verify with HMAC keys but never
+  showed this setup-time guard, so a weak gateway secret
+  being blocked at the boundary was invisible to readers.
+  Outside the printed lines the demo asserts the accepted
+  group all passed and both rejection messages equal the
+  hand-pinned expectations (the same messages `src/keys.ts`
+  builds from `MIN_HMAC_SECRET_BYTES` /
+  `MIN_HMAC_SHA512_SECRET_BYTES` and the keyLength /
+  hmacSha512 suites pin). `DemoResult` carries the accepted
+  cases and the rejections, and the demo tests pin the
+  fields and the printed lines. The segment prints only
+  algorithm names and byte lengths, never key bytes,
+  performs zero network I/O, and its printed lines are
+  identical between runs.
+
 - The CLI demo (`npm run demo`) now closes with a key-resolver
   memoization segment: a counting resolver over a fixed two-key
   store (the main demo key plus a fresh second keypair) is

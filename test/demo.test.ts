@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createSecretKey } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { assertHmacSecretLength } from "../src/index.js";
 import {
   DEMO_BODY,
   DEMO_COVERED_COMPONENTS,
@@ -27,6 +29,9 @@ import {
   DEMO_SIG_PARAMS_SERIALIZATION,
   DEMO_JWKS_FETCHED_AT_SEC,
   DEMO_JWKS_URL,
+  DEMO_HMAC_GUARD_ACCEPTED,
+  DEMO_HMAC_GUARD_ERRORS,
+  DEMO_HMAC_GUARD_REJECTED,
   DEMO_JWK_TAMPERED_CODE,
   DEMO_KEY_ID,
   DEMO_MAIN_DIGEST_ALG,
@@ -1259,6 +1264,11 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /Underlying resolver calls after verifying keyid "demo-key-1" twice: 1 \(the second verification was served from the cache\)/);
   assert.match(out, /Memoized verification for keyid "demo-key-2": OK \(label sig1, keyid="demo-key-2", alg="ed25519"\)/);
   assert.match(out, /Underlying resolver calls after verifying keyid "demo-key-2": 2 \(a new keyid misses the cache and resolves once\)/);
+  assert.match(out, /HMAC secret-length guard: assertHmacSecretLength enforces the per-algorithm secret floor/);
+  assert.match(out, /assertHmacSecretLength for hmac-sha256 with a 32-byte secret: OK \(meets the 32-byte floor\)/);
+  assert.match(out, /assertHmacSecretLength for hmac-sha512 with a 64-byte secret: OK \(meets the 64-byte floor\)/);
+  assert.match(out, /assertHmacSecretLength for hmac-sha256 with a 31-byte secret: FAILED \(assertHmacSecretLength: hmac-sha256 secret must be at least 32 bytes/);
+  assert.match(out, /assertHmacSecretLength for hmac-sha512 with a 63-byte secret: FAILED \(assertHmacSecretLength: hmac-sha512 secret must be at least 64 bytes/);
 });
 
 test("demo key-resolver memoization segment resolves each keyid once (repeat is a cache hit, second keyid advances the count)", () => {
@@ -1304,7 +1314,7 @@ test("demo key-resolver memoization segment resolves each keyid once (repeat is 
   assert.equal(again.memoizedResolverCallsAfterSecondKey, 2);
 });
 
-test("demo lines contain the key-resolver memoization segment (counts printed, closing the demo)", () => {
+test("demo lines contain the key-resolver memoization segment (counts printed, followed by the HMAC guard segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
@@ -1312,13 +1322,17 @@ test("demo lines contain the key-resolver memoization segment (counts printed, c
     out,
     /Key-resolver memoization: memoizeKeyResolver caches each keyid's resolved key for a TTL/,
   );
-  // The memoization segment closes the demo: its second-keyid
-  // count line is final, and the block sits after the JWK import
-  // segment.
-  assert.equal(
-    lines[lines.length - 1],
-    `Underlying resolver calls after verifying keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": 2 (a new keyid misses the cache and resolves once)`,
+  // The memoization segment sits after the JWK import segment
+  // and is followed by the HMAC secret-length guard segment.
+  const guardIdx = lines.findIndex((l) =>
+    l.startsWith("HMAC secret-length guard:"),
   );
+  const memoLineIdx = lines.findIndex((l) =>
+    l.startsWith(
+      `Underlying resolver calls after verifying keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}"`,
+    ),
+  );
+  assert.ok(memoLineIdx !== -1 && guardIdx !== -1 && memoLineIdx < guardIdx);
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Key-resolver memoization:"),
   );
@@ -1331,4 +1345,99 @@ test("demo lines contain the key-resolver memoization segment (counts printed, c
     `Memoized verification for keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": OK (label sig1, keyid="${DEMO_MEMOIZED_SECOND_KEY_ID}", alg="ed25519")`,
     `Underlying resolver calls after verifying keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": 2 (a new keyid misses the cache and resolves once)`,
   ]);
+});
+
+test("demo HMAC secret-length guard segment accepts floor lengths and rejects one byte below (per algorithm)", () => {
+  const { hmacGuardAccepted, hmacGuardRejections } = runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_HMAC_GUARD_ACCEPTED / DEMO_HMAC_GUARD_REJECTED /
+  // DEMO_HMAC_GUARD_ERRORS and cross-checked against
+  // src/keys.ts (MIN_HMAC_SECRET_BYTES 32 /
+  // MIN_HMAC_SHA512_SECRET_BYTES 64) and the keyLength /
+  // hmacSha512 suites. The test pins the literals again here
+  // so a drift in either place fails.
+  assert.deepEqual(DEMO_HMAC_GUARD_ACCEPTED, [
+    { alg: "hmac-sha256", bytes: 32 },
+    { alg: "hmac-sha512", bytes: 64 },
+  ]);
+  assert.deepEqual(DEMO_HMAC_GUARD_REJECTED, [
+    { alg: "hmac-sha256", bytes: 31 },
+    { alg: "hmac-sha512", bytes: 63 },
+  ]);
+  assert.deepEqual(DEMO_HMAC_GUARD_ERRORS, [
+    "assertHmacSecretLength: hmac-sha256 secret must be at least 32 bytes (RFC 2104: the key SHOULD be at least as long as the hash output; sha-256 → 32 bytes), got 31 bytes",
+    "assertHmacSecretLength: hmac-sha512 secret must be at least 64 bytes (RFC 2104: the key SHOULD be at least as long as the hash output; sha-512 → 64 bytes), got 63 bytes",
+  ]);
+  assert.deepEqual(hmacGuardAccepted, [...DEMO_HMAC_GUARD_ACCEPTED]);
+  assert.deepEqual(
+    hmacGuardRejections,
+    DEMO_HMAC_GUARD_REJECTED.map((r, i) => ({
+      ...r,
+      error: DEMO_HMAC_GUARD_ERRORS[i],
+    })),
+  );
+
+  // Cross-check against the library guard called directly:
+  // the same lengths pass / throw with the same messages.
+  for (const entry of DEMO_HMAC_GUARD_ACCEPTED) {
+    assert.doesNotThrow(() =>
+      assertHmacSecretLength(
+        createSecretKey(Buffer.alloc(entry.bytes, 0xab)),
+        entry.alg,
+      ),
+    );
+  }
+  DEMO_HMAC_GUARD_REJECTED.forEach((entry, i) => {
+    assert.throws(
+      () =>
+        assertHmacSecretLength(
+          createSecretKey(Buffer.alloc(entry.bytes, 0xab)),
+          entry.alg,
+        ),
+      (e: unknown) =>
+        e instanceof Error && e.message === DEMO_HMAC_GUARD_ERRORS[i],
+    );
+  });
+});
+
+test("demo lines contain the HMAC secret-length guard segment (accepted and rejected lines, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /HMAC secret-length guard: assertHmacSecretLength enforces the per-algorithm secret floor/,
+  );
+  // The guard segment closes the demo: its last rejection line
+  // is final, and the block sits after the memoization segment.
+  assert.equal(
+    lines[lines.length - 1],
+    `assertHmacSecretLength for hmac-sha512 with a 63-byte secret: FAILED (${DEMO_HMAC_GUARD_ERRORS[1]})`,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("HMAC secret-length guard:"),
+  );
+  const memoIdx = lines.findIndex((l) =>
+    l.startsWith("Key-resolver memoization:"),
+  );
+  assert.ok(memoIdx !== -1 && headerIdx !== -1 && memoIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), [
+    "HMAC secret-length guard: assertHmacSecretLength enforces the per-algorithm secret floor before any MAC runs — hmac-sha256 secrets at least 32 bytes, hmac-sha512 secrets at least 64 bytes (RFC 2104: the key SHOULD be at least as long as the hash output)",
+    "assertHmacSecretLength for hmac-sha256 with a 32-byte secret: OK (meets the 32-byte floor)",
+    "assertHmacSecretLength for hmac-sha512 with a 64-byte secret: OK (meets the 64-byte floor)",
+    `assertHmacSecretLength for hmac-sha256 with a 31-byte secret: FAILED (${DEMO_HMAC_GUARD_ERRORS[0]})`,
+    `assertHmacSecretLength for hmac-sha512 with a 63-byte secret: FAILED (${DEMO_HMAC_GUARD_ERRORS[1]})`,
+  ]);
+
+  // Deterministic double run: the guard segment's lines are
+  // pinned constants, identical between runs.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("HMAC secret-length guard:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 5),
+    lines.slice(headerIdx, headerIdx + 5),
+  );
 });

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 690 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 692 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -120,7 +120,16 @@ default, injected clock pinned to the demo's fixed verify
 instant) and passed as `keyResolver` — the main request
 verifies twice under the same keyid while the underlying
 resolver is called only once, then a request signed under a
-second keyid verifies and the printed count advances to two:
+second keyid verifies and the printed count advances to two.
+The demo closes with an HMAC secret-length guard segment:
+fixed secrets (only their byte lengths matter) are run
+through `assertHmacSecretLength` — a 32-byte secret passes
+for `hmac-sha256` and a 64-byte secret passes for
+`hmac-sha512`, while a secret one byte below each floor
+(31 / 63 bytes) is printed rejected with the guard's exact
+message, asserted outside the printed lines against
+hand-pinned expectations; only algorithm names and byte
+lengths are printed, never key bytes:
 
 ```bash
 npm run demo
@@ -1669,7 +1678,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 690 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 692 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
