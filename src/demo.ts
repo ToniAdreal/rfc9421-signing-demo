@@ -116,6 +116,25 @@
  * values themselves are fresh on every run — like the key pair,
  * only their shapes are stable — so this segment is the one
  * deliberate exception to the demo's fixed-nonce determinism.
+ * The demo closes with a JWK public-key import segment: the main
+ * line's ed25519 public key is exported with `exportPublicKeyJwk`,
+ * carried through a JSON stringify/parse round-trip exactly as it
+ * would cross the wire to a gateway, and read back with
+ * `importPublicKeyJwk` — the inbound half of JWK key distribution,
+ * which the thumbprint segment above (export only) never showed and
+ * the PEM round-trip segment covers only for the PEM format. The
+ * main signed request is then verified with the imported key and
+ * the result printed. A detached copy of the JWK whose `x`
+ * coordinate has its first character flipped is imported as well:
+ * the flipped coordinate is still a well-formed 32-byte value, so
+ * the import succeeds, but verification against that wrong key is
+ * rejected with `SIGNATURE_MISMATCH` — asserted outside the printed
+ * lines against the hand-pinned expectation below (the rejection
+ * shape `test/jwk.test.ts` pins for an imported key facing a
+ * request it did not sign). Only the exported JWK's shape
+ * (`kty`/`crv`/the 43-character `x` length) is printed, never the
+ * key bytes, so the segment's printed lines are identical between
+ * runs even though the key pair itself is fresh.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -157,6 +176,7 @@ import {
   generateNonce,
   importPrivateKey,
   importPublicKey,
+  importPublicKeyJwk,
   isVerifyError,
   jwkThumbprint,
   JwksKeyStore,
@@ -170,6 +190,7 @@ import {
   verifyRequest,
   verifyRequestOrThrow,
   type ContentDigestAlg,
+  type Ed25519PublicJwk,
   type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
   type RequestLike,
@@ -500,6 +521,22 @@ export const DEMO_GENERATED_NONCE_LENGTH = 22;
 export const DEMO_GENERATED_LONG_NONCE_BYTES = 32;
 export const DEMO_GENERATED_LONG_NONCE_LENGTH = 43;
 
+/**
+ * Hand-pinned failure code of the JWK import segment's tampered
+ * copy: flipping the first character of the exported JWK's `x`
+ * coordinate yields a different, still well-formed ed25519 public
+ * key, so `importPublicKeyJwk` accepts it but verification of the
+ * main signed request against that wrong key must fail with
+ * `SIGNATURE_MISMATCH` — the same code the verifier reports for
+ * any signature checked against a key that did not produce it
+ * (pinned independently for the imported-key shape in
+ * `test/jwk.test.ts`, which rejects requests an imported key did
+ * not sign). The expectation is written out here, never derived
+ * from the verification the demo is checking.
+ */
+export const DEMO_JWK_TAMPERED_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -720,6 +757,25 @@ export interface DemoResult {
    * verifier parses back out equals `generatedNonce` exactly).
    */
   generatedNonceVerification: VerifyResult;
+  /**
+   * The JWK the closing import segment exports from the main
+   * line's ed25519 public key (`kty "OKP"`, `crv "Ed25519"`, a
+   * 43-character base64url `x`; the key itself is fresh per run).
+   */
+  exportedJwk: Ed25519PublicJwk;
+  /**
+   * Verification of the main signed request with the public key
+   * imported back from `exportedJwk` via `importPublicKeyJwk`
+   * after a JSON wire round-trip (ok — the JWK import holds).
+   */
+  jwkImportedVerification: VerifyResult;
+  /**
+   * Verification of the main signed request with the key imported
+   * from a detached copy of `exportedJwk` whose `x` first
+   * character was flipped: rejected with
+   * `DEMO_JWK_TAMPERED_CODE` (`SIGNATURE_MISMATCH`).
+   */
+  jwkTamperedVerification: VerifyResult;
   lines: string[];
 }
 
@@ -1314,6 +1370,55 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // JWK import segment: the thumbprint and JWKS segments above
+  // only ever *export* the demo public key as a JWK. A gateway on
+  // the receiving end performs the inverse: it takes the JWK as
+  // JSON off the wire and imports it before verifying anything.
+  // The exported JWK is carried through a JSON stringify/parse
+  // round-trip (the exact wire shape `test/jwk.test.ts` pins),
+  // imported with `importPublicKeyJwk`, and the main signed
+  // request is verified with the imported key. Outside the
+  // printed lines the demo asserts the imported-key verification
+  // passed, that a detached copy with the first character of its
+  // `x` coordinate flipped imports as a different well-formed key
+  // but fails verification with the hand-pinned
+  // DEMO_JWK_TAMPERED_CODE, and that the original exported JWK is
+  // untouched by the tamper copy — a mismatch throws instead of
+  // printing a misleading segment.
+  const exportedJwk = exportPublicKeyJwk(publicKey);
+  const wireJwk: unknown = JSON.parse(JSON.stringify(exportedJwk));
+  const jwkImportedVerification = verifyRequest(signed, {
+    key: importPublicKeyJwk(wireJwk),
+    now: DEMO_CREATED + 60,
+  });
+  if (!jwkImportedVerification.ok) {
+    throw new Error(
+      `demo fixture broken: JWK imported-key verification failed (code ${jwkImportedVerification.code}: ${jwkImportedVerification.reason})`,
+    );
+  }
+  const tamperedJwk: Ed25519PublicJwk = {
+    ...exportedJwk,
+    x:
+      (exportedJwk.x[0] === "A" ? "B" : "A") + exportedJwk.x.slice(1),
+  };
+  const jwkTamperedVerification = verifyRequest(signed, {
+    key: importPublicKeyJwk(tamperedJwk),
+    now: DEMO_CREATED + 60,
+  });
+  if (
+    jwkTamperedVerification.ok ||
+    jwkTamperedVerification.code !== DEMO_JWK_TAMPERED_CODE ||
+    tamperedJwk.x === exportedJwk.x ||
+    exportedJwk.x.length !== 43
+  ) {
+    throw new Error(
+      `demo fixture broken: tampered-JWK verification ` +
+        (jwkTamperedVerification.ok
+          ? `unexpectedly passed`
+          : `gave code ${jwkTamperedVerification.code} instead of the pinned "${DEMO_JWK_TAMPERED_CODE}"`),
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -1428,6 +1533,15 @@ export function runDemo(): DemoResult {
     generatedNonceVerification.ok
       ? `Verification with the generated nonce: OK (label ${generatedNonceVerification.label}, keyid="${generatedNonceVerification.keyId}", alg="${generatedNonceVerification.alg}", nonce="${generatedNonceVerification.nonce}")`
       : `Verification with the generated nonce: FAILED (code ${generatedNonceVerification.code}: ${generatedNonceVerification.reason})`,
+    "",
+    "JWK public-key import: exportPublicKeyJwk ships the main ed25519 public key as a JWK, a JSON wire round-trip carries it, and importPublicKeyJwk reads it back — the gateway side of JWK key distribution",
+    `Exported JWK: kty="${exportedJwk.kty}", crv="${exportedJwk.crv}", x is ${exportedJwk.x.length} base64url chars (the key itself is fresh per run; only its shape is printed)`,
+    jwkImportedVerification.ok
+      ? `Verification with the imported JWK key: OK (label ${jwkImportedVerification.label}, keyid="${jwkImportedVerification.keyId}", alg="${jwkImportedVerification.alg}")`
+      : `Verification with the imported JWK key: FAILED (code ${jwkImportedVerification.code}: ${jwkImportedVerification.reason})`,
+    jwkTamperedVerification.ok
+      ? "Verification with a tampered JWK (first x character flipped): OK (unexpected — the wrong key was not detected)"
+      : `Verification with a tampered JWK (first x character flipped): FAILED (code ${jwkTamperedVerification.code}: ${jwkTamperedVerification.reason})`,
   ];
 
   return {
@@ -1475,6 +1589,9 @@ export function runDemo(): DemoResult {
     generatedLongNonce,
     generatedNonceSigned,
     generatedNonceVerification,
+    exportedJwk,
+    jwkImportedVerification,
+    jwkTamperedVerification,
     lines,
   };
 }

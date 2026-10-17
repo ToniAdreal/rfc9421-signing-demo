@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a JWK
+  public-key import segment: the main line's ed25519 public
+  key is exported with `exportPublicKeyJwk`, carried through
+  a JSON stringify/parse round-trip exactly as it would
+  cross the wire to a gateway, and read back with
+  `importPublicKeyJwk` — the inbound half of JWK key
+  distribution, which the demo's thumbprint segment (export
+  only) never showed and its PEM round-trip segment covers
+  only for the PEM format. The main signed request verifies
+  with the imported key, and a detached copy of the JWK
+  whose `x` coordinate has its first character flipped —
+  still a well-formed 32-byte value, so the import succeeds
+  — is rejected at verification with `SIGNATURE_MISMATCH`.
+  Outside the printed lines the demo asserts the
+  imported-key verification, the tampered copy's rejection
+  against the hand-pinned code (the rejection shape
+  `test/jwk.test.ts` pins for an imported key), and that
+  the tamper copy left the exported JWK untouched.
+  `DemoResult` carries the exported JWK and both
+  verifications, and the demo tests pin the fields and the
+  printed lines. Only the exported JWK's shape is printed
+  (never the key bytes), the segment performs zero network
+  I/O, and no assertion depends on the fresh key's value.
 - The CLI demo (`npm run demo`) now closes with a
   nonce-generation segment: `generateNonce()` (the default
   16-byte draw) and `generateNonce(32)` produce fresh

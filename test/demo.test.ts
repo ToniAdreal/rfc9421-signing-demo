@@ -27,6 +27,7 @@ import {
   DEMO_SIG_PARAMS_SERIALIZATION,
   DEMO_JWKS_FETCHED_AT_SEC,
   DEMO_JWKS_URL,
+  DEMO_JWK_TAMPERED_CODE,
   DEMO_KEY_ID,
   DEMO_MAIN_DIGEST_ALG,
   DEMO_NONCE,
@@ -1022,7 +1023,7 @@ test("demo nonce-generation segment draws pinned-shape base64url nonces and the 
   assert.equal(generatedNonceVerification.alg, "ed25519");
 });
 
-test("demo lines contain the nonce-generation segment (shapes printed, generated nonce verifies, closing the demo)", () => {
+test("demo lines contain the nonce-generation segment (shapes printed, generated nonce verifies)", () => {
   const { lines, generatedNonce, generatedLongNonce } = runDemo();
   const out = lines.join("\n");
 
@@ -1040,11 +1041,16 @@ test("demo lines contain the nonce-generation segment (shapes printed, generated
       `generateNonce(32): "${generatedLongNonce}" (43 chars, base64url, decodes to 32 bytes)`,
     ),
   );
-  // The nonce-generation segment closes the demo: its verification
-  // line is final, and the block sits after the throwing segment.
-  assert.equal(
-    lines[lines.length - 1],
-    `Verification with the generated nonce: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${generatedNonce}")`,
+  // The nonce-generation segment sits after the throwing segment,
+  // and the JWK import segment follows it (the nonce line is no
+  // longer the demo's last line).
+  const nonceLineIdx = lines.findIndex(
+    (l) => l === `Verification with the generated nonce: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${generatedNonce}")`,
+  );
+  assert.ok(nonceLineIdx !== -1);
+  assert.ok(
+    lines.findIndex((l) => l.startsWith("JWK public-key import:")) >
+      nonceLineIdx,
   );
   const headerIdx = lines.findIndex((l) => l.startsWith("Nonce generation:"));
   const throwIdx = lines.findIndex((l) =>
@@ -1055,6 +1061,66 @@ test("demo lines contain the nonce-generation segment (shapes printed, generated
     `generateNonce(): "${generatedNonce}" (22 chars, base64url, decodes to 16 bytes)`,
     `generateNonce(32): "${generatedLongNonce}" (43 chars, base64url, decodes to 32 bytes)`,
     `Verification with the generated nonce: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${generatedNonce}")`,
+  ]);
+});
+
+test("demo JWK import segment verifies the main request with the imported key and rejects a tampered x", () => {
+  const { exportedJwk, jwkImportedVerification, jwkTamperedVerification } =
+    runDemo();
+
+  // Expectations are the RFC 8037 ed25519 JWK shape hand-pinned in
+  // DEMO_JWK_TAMPERED_CODE and test/jwk.test.ts: kty OKP, crv
+  // Ed25519, a 43-character base64url x (32 bytes), and no private
+  // material — the test pins them again here so a drift in either
+  // place fails. The key value itself is fresh per run, never pinned.
+  assert.equal(DEMO_JWK_TAMPERED_CODE, "SIGNATURE_MISMATCH");
+  assert.equal(exportedJwk.kty, "OKP");
+  assert.equal(exportedJwk.crv, "Ed25519");
+  assert.match(exportedJwk.x, /^[A-Za-z0-9_-]{43}$/);
+  assert.ok(!("d" in exportedJwk), "public JWK must not carry private material");
+  assert.deepEqual(Object.keys(exportedJwk).sort(), ["crv", "kty", "x"]);
+
+  // The key imported back from the wire JWK verifies the main
+  // signed request, with the main line's identity.
+  assert.equal(jwkImportedVerification.ok, true);
+  assert.equal(jwkImportedVerification.keyId, DEMO_KEY_ID);
+  assert.equal(jwkImportedVerification.alg, "ed25519");
+  assert.equal(jwkImportedVerification.nonce, DEMO_NONCE);
+
+  // The tampered copy (first x character flipped) imports as a
+  // different well-formed key, so verification against it fails
+  // with the pinned code — the wrong key does not verify.
+  assert.equal(jwkTamperedVerification.ok, false);
+  assert.equal(jwkTamperedVerification.code, DEMO_JWK_TAMPERED_CODE);
+});
+
+test("demo lines contain the JWK import segment (imported key verifies, tampered x rejected, closing the demo)", () => {
+  const { lines, exportedJwk } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /JWK public-key import: exportPublicKeyJwk ships the main ed25519 public key as a JWK, a JSON wire round-trip carries it, and importPublicKeyJwk reads it back/,
+  );
+  assert.ok(
+    out.includes(
+      `Exported JWK: kty="OKP", crv="Ed25519", x is ${exportedJwk.x.length} base64url chars (the key itself is fresh per run; only its shape is printed)`,
+    ),
+  );
+  // The JWK import segment closes the demo: its tampered line is
+  // final, and the block sits after the nonce-generation segment.
+  assert.equal(
+    lines[lines.length - 1],
+    "Verification with a tampered JWK (first x character flipped): FAILED (code SIGNATURE_MISMATCH: signature mismatch)",
+  );
+  const headerIdx = lines.findIndex((l) => l.startsWith("JWK public-key import:"));
+  const nonceIdx = lines.findIndex((l) => l.startsWith("Nonce generation:"));
+  assert.ok(nonceIdx !== -1 && headerIdx !== -1 && nonceIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "JWK public-key import: exportPublicKeyJwk ships the main ed25519 public key as a JWK, a JSON wire round-trip carries it, and importPublicKeyJwk reads it back — the gateway side of JWK key distribution",
+    `Exported JWK: kty="OKP", crv="Ed25519", x is 43 base64url chars (the key itself is fresh per run; only its shape is printed)`,
+    `Verification with the imported JWK key: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+    "Verification with a tampered JWK (first x character flipped): FAILED (code SIGNATURE_MISMATCH: signature mismatch)",
   ]);
 });
 
@@ -1179,4 +1245,8 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /generateNonce\(\): "[A-Za-z0-9_-]{22}" \(22 chars, base64url, decodes to 16 bytes\)/);
   assert.match(out, /generateNonce\(32\): "[A-Za-z0-9_-]{43}" \(43 chars, base64url, decodes to 32 bytes\)/);
   assert.match(out, /Verification with the generated nonce: OK \(label sig1, keyid="demo-key-1", alg="ed25519", nonce="[A-Za-z0-9_-]{22}"\)/);
+  assert.match(out, /JWK public-key import: exportPublicKeyJwk ships the main ed25519 public key as a JWK/);
+  assert.match(out, /Exported JWK: kty="OKP", crv="Ed25519", x is 43 base64url chars/);
+  assert.match(out, /Verification with the imported JWK key: OK \(label sig1, keyid="demo-key-1", alg="ed25519"\)/);
+  assert.match(out, /Verification with a tampered JWK \(first x character flipped\): FAILED \(code SIGNATURE_MISMATCH:/);
 });
