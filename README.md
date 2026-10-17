@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 678 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 680 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -84,7 +84,14 @@ of each PEM — its type header — is printed), imported back with
 `importPublicKey` / `importPrivateKey`, and the imported keys
 complete a fresh sign -> verify round-trip, showing the PEM
 export -> import -> verify path a gateway or ops tool performs
-when keys are distributed as PEM files rather than JWKs:
+when keys are distributed as PEM files rather than JWKs. The demo
+closes with a throwing-verification segment: the main signed
+request is verified with `verifyRequestOrThrow`, which returns
+the verified identity (label, keyid, alg, nonce) instead of a
+result object, and the same request with the body tampered by
+one byte throws a `VerifyError` whose stable code
+(`BODY_DIGEST_MISMATCH`, asserted against the `isVerifyError`
+guard outside the printed lines) is printed:
 
 ```bash
 npm run demo
@@ -1630,7 +1637,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 678 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 680 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

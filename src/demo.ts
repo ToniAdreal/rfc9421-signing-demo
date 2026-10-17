@@ -75,6 +75,18 @@
  * expectations below. The request, `created` and nonce are fixed
  * constants, so the segment's printed lines are identical between
  * runs even though the key pair itself is fresh.
+ * The demo closes with a throwing-verification segment: the main
+ * signed request is verified with `verifyRequestOrThrow`, which
+ * returns the verified identity (label, keyid, alg, nonce) instead
+ * of a result object, and the same request with the body tampered
+ * by one byte is verified again — this time the call throws a
+ * `VerifyError` whose stable `code` is printed, and the demo
+ * asserts outside the printed lines that the caught error passes
+ * the `isVerifyError` guard and that its code equals the
+ * hand-pinned `BODY_DIGEST_MISMATCH` expectation below (the same
+ * rejection the returning `verifyRequest` reports for the same
+ * tamper). Every input is a fixed demo constant, so the segment
+ * is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -110,6 +122,7 @@ import {
   generateEd25519KeyPair,
   importPrivateKey,
   importPublicKey,
+  isVerifyError,
   jwkThumbprint,
   JwksKeyStore,
   ReplayCache,
@@ -119,11 +132,14 @@ import {
   signRequest,
   verifyAllLabels,
   verifyRequest,
+  verifyRequestOrThrow,
   type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
   type RequestLike,
   type SignatureParams,
   type SignedHttpRequest,
+  type VerifyError,
+  type VerifyFailureCode,
   type VerifyResult,
 } from "./index.js";
 
@@ -383,6 +399,19 @@ export const DEMO_PEM_NONCE = "demo-nonce-pem-001";
 export const DEMO_PEM_PUBLIC_HEADER = "-----BEGIN PUBLIC KEY-----";
 export const DEMO_PEM_PRIVATE_HEADER = "-----BEGIN PRIVATE KEY-----";
 
+/**
+ * Hand-pinned failure code of the throwing-verification segment:
+ * verifying the main signed request with its body tampered by the
+ * same one byte as the main line (amount 100 -> 101) must throw a
+ * `VerifyError` carrying `BODY_DIGEST_MISMATCH` — the same code
+ * the returning `verifyRequest` reports for that tamper (pinned
+ * independently in the demo tamper test above). The expectation
+ * is written out here, never derived from the thrown error the
+ * demo is checking.
+ */
+export const DEMO_THROW_TAMPERED_CODE: VerifyFailureCode =
+  "BODY_DIGEST_MISMATCH";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -543,6 +572,24 @@ export interface DemoResult {
    * from its PEM export (ok — the PEM round-trip holds).
    */
   pemVerification: VerifyResult;
+  /**
+   * Identity returned by `verifyRequestOrThrow` for the main
+   * signed request (label, keyid, alg, nonce — no result object).
+   */
+  throwVerification: {
+    label: string;
+    keyId?: string;
+    alg?: string;
+    nonce?: string;
+    tag?: string;
+  };
+  /**
+   * The `VerifyError` thrown by `verifyRequestOrThrow` for the
+   * tampered-body request (code `DEMO_THROW_TAMPERED_CODE`).
+   */
+  throwTamperedError: VerifyError;
+  /** Whether the caught tamper error passed the `isVerifyError` guard. */
+  throwTamperedIsVerifyError: boolean;
   lines: string[];
 }
 
@@ -960,6 +1007,63 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // Throwing-verification segment: callers that prefer exceptions
+  // over result-branching use `verifyRequestOrThrow`, the throwing
+  // twin of `verifyRequest`. On the main signed request it returns
+  // the verified identity directly; on the same request with the
+  // body tampered by the main line's one byte it throws a
+  // `VerifyError` carrying the stable code. Outside the printed
+  // lines the demo asserts the returned identity and the thrown
+  // code both equal the hand-pinned expectations (label `sig1`,
+  // `DEMO_KEY_ID`, `ed25519`, `DEMO_NONCE`, and
+  // `DEMO_THROW_TAMPERED_CODE`) and that the caught error passes
+  // the `isVerifyError` guard — a mismatch throws instead of
+  // printing a misleading segment.
+  const throwVerification = verifyRequestOrThrow(signed, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  if (
+    throwVerification.label !== "sig1" ||
+    throwVerification.keyId !== DEMO_KEY_ID ||
+    throwVerification.alg !== "ed25519" ||
+    throwVerification.nonce !== DEMO_NONCE ||
+    throwVerification.tag !== undefined
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyRequestOrThrow identity ${JSON.stringify(throwVerification)} ` +
+        `does not match the pinned label "sig1", keyid "${DEMO_KEY_ID}", alg "ed25519", nonce "${DEMO_NONCE}"`,
+    );
+  }
+  let throwTamperedError: VerifyError | null = null;
+  let throwTamperedIsVerifyError = false;
+  try {
+    verifyRequestOrThrow(
+      { ...signed, body: DEMO_TAMPERED_BODY },
+      { key: publicKey, now: DEMO_CREATED + 60 },
+    );
+  } catch (err) {
+    throwTamperedIsVerifyError = isVerifyError(err);
+    if (throwTamperedIsVerifyError && isVerifyError(err)) {
+      throwTamperedError = err;
+    }
+  }
+  if (
+    !throwTamperedIsVerifyError ||
+    throwTamperedError === null ||
+    throwTamperedError.code !== DEMO_THROW_TAMPERED_CODE ||
+    throwTamperedError.label !== "sig1" ||
+    throwTamperedError.keyId !== DEMO_KEY_ID ||
+    throwTamperedError.alg !== "ed25519" ||
+    throwTamperedError.nonce !== DEMO_NONCE
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyRequestOrThrow on the tampered-body request ` +
+        `did not throw a VerifyError with the pinned code "${DEMO_THROW_TAMPERED_CODE}" ` +
+        `(isVerifyError=${throwTamperedIsVerifyError}, code=${throwTamperedError?.code})`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -1055,6 +1159,10 @@ export function runDemo(): DemoResult {
     pemVerification.ok
       ? `PEM round-trip verification: OK (label ${pemVerification.label}, keyid="${pemVerification.keyId}", alg="${pemVerification.alg}")`
       : `PEM round-trip verification: FAILED (code ${pemVerification.code}: ${pemVerification.reason})`,
+    "",
+    "Throwing verification: verifyRequestOrThrow returns the verified identity on success and throws a VerifyError carrying a stable code on failure",
+    `verifyRequestOrThrow on the main request: OK (label ${throwVerification.label}, keyid="${throwVerification.keyId}", alg="${throwVerification.alg}", nonce="${throwVerification.nonce}")`,
+    `verifyRequestOrThrow on the tampered-body request: FAILED (threw VerifyError, code ${throwTamperedError.code}: ${throwTamperedError.message})`,
   ];
 
   return {
@@ -1091,6 +1199,9 @@ export function runDemo(): DemoResult {
     pemPrivateHeader,
     pemSigned,
     pemVerification,
+    throwVerification,
+    throwTamperedError,
+    throwTamperedIsVerifyError,
     lines,
   };
 }

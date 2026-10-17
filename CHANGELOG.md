@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  throwing-verification segment: the main signed request is
+  verified with `verifyRequestOrThrow`, which returns the
+  verified identity (label `sig1`, the demo keyid, `ed25519`,
+  the demo nonce) instead of a result object, and the same
+  request with the body tampered by one byte (amount 100 ->
+  101) is verified again — the call throws a `VerifyError`
+  whose stable code is printed. Outside the printed lines the
+  demo asserts the returned identity and the thrown code equal
+  the hand-pinned expectations (`BODY_DIGEST_MISMATCH`, the
+  same code the returning `verifyRequest` reports for that
+  tamper) and that the caught error passes the `isVerifyError`
+  guard. `DemoResult` carries the returned identity, the
+  caught error and the guard result, and the demo tests pin
+  all three. The segment performs zero network I/O and its
+  printed lines are identical between runs.
 - The CLI demo (`npm run demo`) now closes with a PEM key
   round-trip segment: the main line's ed25519 key pair is
   exported with `exportPublicKeyPem` / `exportPrivateKeyPem`,

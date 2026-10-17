@@ -34,6 +34,7 @@ import {
   DEMO_TAMPERED_BODY,
   DEMO_TAMPERED_CONTENT_TYPE,
   DEMO_THUMBPRINT_NONCE,
+  DEMO_THROW_TAMPERED_CODE,
   DEMO_UNKNOWN_KEY_ID,
   runDemo,
 } from "../src/demo.js";
@@ -780,7 +781,7 @@ test("demo PEM segment exports the main key pair as PEM, imports it back, and th
   assert.equal(pemVerification.alg, "ed25519");
 });
 
-test("demo lines contain the PEM segment (headers printed, round-trip verifies, closing the demo)", () => {
+test("demo lines contain the PEM segment (headers printed, round-trip verifies)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
@@ -798,10 +799,15 @@ test("demo lines contain the PEM segment (headers printed, round-trip verifies, 
       `PEM round-trip verification: OK \\(label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519"\\)`,
     ),
   );
-  // The PEM segment closes the demo: its verification line is final,
-  // and the block sits after the signature-params segment.
+  // The PEM block sits after the signature-params segment, and the
+  // throwing-verification segment follows it (the PEM verification
+  // line is no longer the demo's last line).
+  const throwIdx = lines.findIndex((l) =>
+    l.startsWith("Throwing verification:"),
+  );
+  assert.ok(throwIdx !== -1);
   assert.equal(
-    lines[lines.length - 1],
+    lines[throwIdx - 2],
     `PEM round-trip verification: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
   );
   const headerIdx = lines.findIndex((l) =>
@@ -814,6 +820,72 @@ test("demo lines contain the PEM segment (headers printed, round-trip verifies, 
   assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 3), [
     "PEM public key header: -----BEGIN PUBLIC KEY-----",
     "PEM private key header: -----BEGIN PRIVATE KEY-----",
+  ]);
+});
+
+test("demo throwing-verification segment returns the identity on success and throws a VerifyError with the pinned code on tamper", () => {
+  const { throwVerification, throwTamperedError, throwTamperedIsVerifyError } =
+    runDemo();
+
+  // The hand-pinned tamper code is the same BODY_DIGEST_MISMATCH the
+  // returning verifyRequest reports for the main line's one-byte
+  // tamper — pinned again here so a drift in either place fails.
+  assert.equal(DEMO_THROW_TAMPERED_CODE, "BODY_DIGEST_MISMATCH");
+
+  // Success returns the verified identity directly, no result object.
+  assert.deepEqual(throwVerification, {
+    label: "sig1",
+    keyId: DEMO_KEY_ID,
+    alg: "ed25519",
+    nonce: DEMO_NONCE,
+    tag: undefined,
+  });
+
+  // The tampered-body call threw, the caught error passes the
+  // isVerifyError guard (as recorded by the demo), and it carries
+  // the pinned code plus the same identity fields.
+  assert.equal(throwTamperedIsVerifyError, true);
+  assert.equal(throwTamperedError.name, "VerifyError");
+  assert.equal(throwTamperedError.code, DEMO_THROW_TAMPERED_CODE);
+  assert.equal(throwTamperedError.message, "body does not match content-digest");
+  assert.equal(throwTamperedError.label, "sig1");
+  assert.equal(throwTamperedError.keyId, DEMO_KEY_ID);
+  assert.equal(throwTamperedError.alg, "ed25519");
+  assert.equal(throwTamperedError.nonce, DEMO_NONCE);
+});
+
+test("demo lines contain the throwing-verification segment (identity returned, VerifyError thrown, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /Throwing verification: verifyRequestOrThrow returns the verified identity on success and throws a VerifyError carrying a stable code on failure/,
+  );
+  assert.ok(
+    out.includes(
+      `verifyRequestOrThrow on the main request: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${DEMO_NONCE}")`,
+    ),
+  );
+  assert.ok(
+    out.includes(
+      "verifyRequestOrThrow on the tampered-body request: FAILED (threw VerifyError, code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+    ),
+  );
+  // The throwing-verification segment closes the demo: its tamper
+  // line is final, and the block sits after the PEM segment.
+  assert.equal(
+    lines[lines.length - 1],
+    "verifyRequestOrThrow on the tampered-body request: FAILED (threw VerifyError, code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Throwing verification:"),
+  );
+  const pemIdx = lines.findIndex((l) => l.startsWith("PEM key round-trip:"));
+  assert.ok(pemIdx !== -1 && headerIdx !== -1 && pemIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 3), [
+    `verifyRequestOrThrow on the main request: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${DEMO_NONCE}")`,
+    "verifyRequestOrThrow on the tampered-body request: FAILED (threw VerifyError, code BODY_DIGEST_MISMATCH: body does not match content-digest)",
   ]);
 });
 
@@ -882,4 +954,7 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /PEM public key header: -----BEGIN PUBLIC KEY-----/);
   assert.match(out, /PEM private key header: -----BEGIN PRIVATE KEY-----/);
   assert.match(out, /PEM round-trip verification: OK /);
+  assert.match(out, /Throwing verification: verifyRequestOrThrow returns the verified identity on success/);
+  assert.match(out, /verifyRequestOrThrow on the main request: OK \(label sig1, keyid="demo-key-1", alg="ed25519", nonce="demo-nonce-001"\)/);
+  assert.match(out, /verifyRequestOrThrow on the tampered-body request: FAILED \(threw VerifyError, code BODY_DIGEST_MISMATCH: body does not match content-digest\)/);
 });
