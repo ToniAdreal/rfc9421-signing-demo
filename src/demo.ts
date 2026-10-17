@@ -100,6 +100,22 @@
  * rejection the returning `verifyRequest` reports for the same
  * tamper). Every input is a fixed demo constant, so the segment
  * is byte-identical between runs.
+ * The demo closes with a nonce-generation segment: every earlier
+ * segment signs with a hand-written nonce constant, but a real
+ * signer must not hand-roll its replay-protection nonce — a
+ * predictable nonce makes the replay cache meaningless.
+ * `generateNonce()` draws from the CSPRNG and base64url-encodes
+ * the bytes: the demo calls it once with the default (16 bytes)
+ * and once with 32 bytes, prints both nonces with their lengths,
+ * signs a fresh request with the short one, and prints the nonce
+ * the verifier parses back out. Outside the printed lines the
+ * demo asserts both shapes against the hand-pinned expectations
+ * below (decoded byte lengths, character lengths, base64url
+ * alphabet, the two draws distinct) and that the parsed-back
+ * nonce equals the signed one character for character. The nonce
+ * values themselves are fresh on every run — like the key pair,
+ * only their shapes are stable — so this segment is the one
+ * deliberate exception to the demo's fixed-nonce determinism.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -121,6 +137,10 @@
  * identical. The gateway HMAC secret below is a fixed demo value (never
  * use it anywhere else), so the gateway signature itself is
  * deterministic; only the merchant's fresh-key signature varies.
+ * The nonce-generation segment's two nonces are likewise fresh on
+ * every run (that is the segment's point); only their printed
+ * shapes — character lengths, decoded byte lengths, alphabet —
+ * are stable between runs.
  */
 
 import { fileURLToPath } from "node:url";
@@ -134,6 +154,7 @@ import {
   exportPublicKeyPem,
   fromNodeRequest,
   generateEd25519KeyPair,
+  generateNonce,
   importPrivateKey,
   importPublicKey,
   isVerifyError,
@@ -463,6 +484,22 @@ export const DEMO_PEM_PRIVATE_HEADER = "-----BEGIN PRIVATE KEY-----";
 export const DEMO_THROW_TAMPERED_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
 
+/**
+ * Hand-pinned shapes of the closing nonce-generation segment:
+ * `generateNonce()` defaults to 16 bytes (128 bits), which
+ * base64url-encodes to 22 characters with no padding, and
+ * `generateNonce(32)` draws 32 bytes, encoding to 43 characters —
+ * the same shapes pinned independently in
+ * `test/generateNonce.test.ts` and the `src/keys.ts` doc. The
+ * expectations are written out here, never derived from the
+ * generated values the demo is checking; the values themselves
+ * are random per run, only the shapes are pinned.
+ */
+export const DEMO_GENERATED_NONCE_BYTES = 16;
+export const DEMO_GENERATED_NONCE_LENGTH = 22;
+export const DEMO_GENERATED_LONG_NONCE_BYTES = 32;
+export const DEMO_GENERATED_LONG_NONCE_LENGTH = 43;
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -663,6 +700,26 @@ export interface DemoResult {
   throwTamperedError: VerifyError;
   /** Whether the caught tamper error passed the `isVerifyError` guard. */
   throwTamperedIsVerifyError: boolean;
+  /**
+   * Fresh nonce drawn by `generateNonce()` in the closing segment
+   * (default draw: decodes to `DEMO_GENERATED_NONCE_BYTES` bytes,
+   * `DEMO_GENERATED_NONCE_LENGTH` base64url characters). Random
+   * per run — only its shape is pinned.
+   */
+  generatedNonce: string;
+  /**
+   * Fresh nonce drawn by `generateNonce(DEMO_GENERATED_LONG_NONCE_BYTES)`
+   * in the closing segment (decodes to 32 bytes,
+   * `DEMO_GENERATED_LONG_NONCE_LENGTH` base64url characters).
+   */
+  generatedLongNonce: string;
+  /** The request signed in the closing segment with `generatedNonce`. */
+  generatedNonceSigned: SignedHttpRequest;
+  /**
+   * Verification of `generatedNonceSigned` (ok — and the nonce the
+   * verifier parses back out equals `generatedNonce` exactly).
+   */
+  generatedNonceVerification: VerifyResult;
   lines: string[];
 }
 
@@ -1189,6 +1246,74 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // Nonce-generation segment: every segment above signs with a
+  // hand-written nonce constant, but production signers must not
+  // hand-roll nonces — a predictable nonce makes the replay cache
+  // above meaningless, because an attacker can pre-claim the values
+  // they intend to replay. `generateNonce()` is the standard entry
+  // point: it draws from the CSPRNG (`node:crypto` `randomBytes`)
+  // and base64url-encodes the bytes, so the values are fresh on
+  // every run (like the key pair) and only their shapes are pinned:
+  // the default draw decodes to 16 bytes / 22 characters, the
+  // explicit 32-byte draw to 32 bytes / 43 characters, both in the
+  // base64url alphabet, and the two draws differ. Outside the
+  // printed lines the demo asserts all of that, signs a fresh
+  // request with the short nonce, and asserts the nonce the
+  // verifier parses back out equals the signed one character for
+  // character — a mismatch throws instead of printing a misleading
+  // segment.
+  const generatedNonce = generateNonce();
+  const generatedLongNonce = generateNonce(DEMO_GENERATED_LONG_NONCE_BYTES);
+  const BASE64URL = /^[A-Za-z0-9_-]+$/;
+  if (
+    generatedNonce.length !== DEMO_GENERATED_NONCE_LENGTH ||
+    !BASE64URL.test(generatedNonce) ||
+    Buffer.from(generatedNonce, "base64url").length !==
+      DEMO_GENERATED_NONCE_BYTES ||
+    generatedLongNonce.length !== DEMO_GENERATED_LONG_NONCE_LENGTH ||
+    !BASE64URL.test(generatedLongNonce) ||
+    Buffer.from(generatedLongNonce, "base64url").length !==
+      DEMO_GENERATED_LONG_NONCE_BYTES ||
+    generatedNonce === generatedLongNonce
+  ) {
+    throw new Error(
+      `demo fixture broken: generateNonce gave "${generatedNonce}" (${generatedNonce.length} chars) / ` +
+        `"${generatedLongNonce}" (${generatedLongNonce.length} chars) instead of distinct base64url ` +
+        `nonces of ${DEMO_GENERATED_NONCE_LENGTH} chars / ${DEMO_GENERATED_NONCE_BYTES} bytes and ` +
+        `${DEMO_GENERATED_LONG_NONCE_LENGTH} chars / ${DEMO_GENERATED_LONG_NONCE_BYTES} bytes`,
+    );
+  }
+  const generatedNonceSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: generatedNonce,
+    },
+  );
+  const generatedNonceVerification = verifyRequest(generatedNonceSigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  if (
+    !generatedNonceVerification.ok ||
+    generatedNonceVerification.nonce !== generatedNonce
+  ) {
+    throw new Error(
+      `demo fixture broken: verification with the generated nonce ` +
+        (generatedNonceVerification.ok
+          ? `parsed back nonce "${generatedNonceVerification.nonce}" instead of the signed "${generatedNonce}"`
+          : `failed (code ${generatedNonceVerification.code}: ${generatedNonceVerification.reason})`),
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -1296,6 +1421,13 @@ export function runDemo(): DemoResult {
     "Throwing verification: verifyRequestOrThrow returns the verified identity on success and throws a VerifyError carrying a stable code on failure",
     `verifyRequestOrThrow on the main request: OK (label ${throwVerification.label}, keyid="${throwVerification.keyId}", alg="${throwVerification.alg}", nonce="${throwVerification.nonce}")`,
     `verifyRequestOrThrow on the tampered-body request: FAILED (threw VerifyError, code ${throwTamperedError.code}: ${throwTamperedError.message})`,
+    "",
+    "Nonce generation: generateNonce draws a fresh nonce from the CSPRNG and base64url-encodes it — the standard entry point for replay-protection nonces, instead of hand-writing a nonce string",
+    `generateNonce(): "${generatedNonce}" (${generatedNonce.length} chars, base64url, decodes to ${DEMO_GENERATED_NONCE_BYTES} bytes)`,
+    `generateNonce(${DEMO_GENERATED_LONG_NONCE_BYTES}): "${generatedLongNonce}" (${generatedLongNonce.length} chars, base64url, decodes to ${DEMO_GENERATED_LONG_NONCE_BYTES} bytes)`,
+    generatedNonceVerification.ok
+      ? `Verification with the generated nonce: OK (label ${generatedNonceVerification.label}, keyid="${generatedNonceVerification.keyId}", alg="${generatedNonceVerification.alg}", nonce="${generatedNonceVerification.nonce}")`
+      : `Verification with the generated nonce: FAILED (code ${generatedNonceVerification.code}: ${generatedNonceVerification.reason})`,
   ];
 
   return {
@@ -1339,6 +1471,10 @@ export function runDemo(): DemoResult {
     throwVerification,
     throwTamperedError,
     throwTamperedIsVerifyError,
+    generatedNonce,
+    generatedLongNonce,
+    generatedNonceSigned,
+    generatedNonceVerification,
     lines,
   };
 }

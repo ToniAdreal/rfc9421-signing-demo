@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  nonce-generation segment: `generateNonce()` (the default
+  16-byte draw) and `generateNonce(32)` produce fresh
+  replay-protection nonces, both printed with their shapes
+  (22 / 43 base64url characters, decoding to 16 / 32 bytes),
+  and the short nonce signs a fresh request whose verification
+  prints the nonce parsed back out. Every earlier segment
+  signs with a hand-written nonce constant; this segment
+  shows the standard CSPRNG entry point a real signer uses
+  instead, since a predictable nonce makes the replay cache
+  meaningless. Outside the printed lines the demo asserts
+  both shapes against hand-pinned expectations (character
+  lengths, decoded byte lengths, base64url alphabet — the
+  same shapes `test/generateNonce.test.ts` pins), that the
+  two draws differ, and that the parsed-back nonce equals
+  the signed one character for character. `DemoResult`
+  carries the two nonces, the signed request and its
+  verification, and the demo tests pin the fields and the
+  printed lines. The segment performs zero network I/O; the
+  nonce values are random per run (like the key pair), so
+  no assertion depends on their values — only their shapes
+  and the sign → verify round-trip are pinned.
 - The benchmark (`npm run bench`) now also measures the
   PEM round trip — `exportPublicKeyPem` +
   `exportPrivateKeyPem` on one fixed ed25519 key pair (the

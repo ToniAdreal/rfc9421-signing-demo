@@ -16,6 +16,10 @@ import {
   DEMO_INBOUND_WRONG_SCHEME,
   DEMO_GATEWAY_LABEL,
   DEMO_GATEWAY_SECRET,
+  DEMO_GENERATED_LONG_NONCE_BYTES,
+  DEMO_GENERATED_LONG_NONCE_LENGTH,
+  DEMO_GENERATED_NONCE_BYTES,
+  DEMO_GENERATED_NONCE_LENGTH,
   DEMO_DICT_MEMBER_EXTRACTION,
   DEMO_DICT_MEMBER_MISSING_KEY,
   DEMO_DICT_MEMBER_VALUE,
@@ -305,7 +309,13 @@ test("demo request data is deterministic across runs (fresh key aside)", () => {
         // The thumbprint is derived from the fresh key, so it (and the
         // verification line quoting it as keyid) varies like a signature.
         !l.startsWith("JWK thumbprint: ") &&
-        !l.startsWith("Thumbprint-as-keyid verification: "),
+        !l.startsWith("Thumbprint-as-keyid verification: ") &&
+        // The nonce-generation segment's nonces are fresh CSPRNG draws
+        // per run (that is the segment's point), so the lines quoting
+        // them vary like a signature; only their shapes are pinned.
+        !l.startsWith("generateNonce(): ") &&
+        !l.startsWith("generateNonce(32): ") &&
+        !l.startsWith("Verification with the generated nonce: "),
     );
   assert.deepEqual(withoutSignature(a.lines), withoutSignature(b.lines));
   assert.equal(a.signed.headers["signature-input"], b.signed.headers["signature-input"]);
@@ -925,7 +935,7 @@ test("demo throwing-verification segment returns the identity on success and thr
   assert.equal(throwTamperedError.nonce, DEMO_NONCE);
 });
 
-test("demo lines contain the throwing-verification segment (identity returned, VerifyError thrown, closing the demo)", () => {
+test("demo lines contain the throwing-verification segment (identity returned, VerifyError thrown, followed by the nonce-generation segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
@@ -943,10 +953,13 @@ test("demo lines contain the throwing-verification segment (identity returned, V
       "verifyRequestOrThrow on the tampered-body request: FAILED (threw VerifyError, code BODY_DIGEST_MISMATCH: body does not match content-digest)",
     ),
   );
-  // The throwing-verification segment closes the demo: its tamper
-  // line is final, and the block sits after the PEM segment.
+  // The throwing-verification block sits after the PEM segment, and
+  // the nonce-generation segment follows it (the tamper line is no
+  // longer the demo's last line).
+  const nonceIdx = lines.findIndex((l) => l.startsWith("Nonce generation:"));
+  assert.ok(nonceIdx !== -1);
   assert.equal(
-    lines[lines.length - 1],
+    lines[nonceIdx - 2],
     "verifyRequestOrThrow on the tampered-body request: FAILED (threw VerifyError, code BODY_DIGEST_MISMATCH: body does not match content-digest)",
   );
   const headerIdx = lines.findIndex((l) =>
@@ -957,6 +970,91 @@ test("demo lines contain the throwing-verification segment (identity returned, V
   assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 3), [
     `verifyRequestOrThrow on the main request: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${DEMO_NONCE}")`,
     "verifyRequestOrThrow on the tampered-body request: FAILED (threw VerifyError, code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  ]);
+});
+
+test("demo nonce-generation segment draws pinned-shape base64url nonces and the short one round-trips through sign and verify", () => {
+  const {
+    generatedNonce,
+    generatedLongNonce,
+    generatedNonceSigned,
+    generatedNonceVerification,
+  } = runDemo();
+
+  // Expectations are the literals hand-pinned in DEMO_GENERATED_*:
+  // the default draw is 16 bytes -> 22 base64url chars, the explicit
+  // draw is 32 bytes -> 43 chars — the same shapes pinned
+  // independently in test/generateNonce.test.ts and src/keys.ts.
+  // The test pins them again here so a drift in either place fails.
+  assert.equal(DEMO_GENERATED_NONCE_BYTES, 16);
+  assert.equal(DEMO_GENERATED_NONCE_LENGTH, 22);
+  assert.equal(DEMO_GENERATED_LONG_NONCE_BYTES, 32);
+  assert.equal(DEMO_GENERATED_LONG_NONCE_LENGTH, 43);
+
+  // Shape only: the values are CSPRNG draws, never pinned — charset,
+  // character length and decoded byte length are what must hold.
+  const BASE64URL = /^[A-Za-z0-9_-]+$/;
+  assert.match(generatedNonce, BASE64URL);
+  assert.equal(generatedNonce.length, DEMO_GENERATED_NONCE_LENGTH);
+  assert.equal(
+    Buffer.from(generatedNonce, "base64url").length,
+    DEMO_GENERATED_NONCE_BYTES,
+  );
+  assert.match(generatedLongNonce, BASE64URL);
+  assert.equal(generatedLongNonce.length, DEMO_GENERATED_LONG_NONCE_LENGTH);
+  assert.equal(
+    Buffer.from(generatedLongNonce, "base64url").length,
+    DEMO_GENERATED_LONG_NONCE_BYTES,
+  );
+  assert.notEqual(generatedNonce, generatedLongNonce);
+
+  // The short nonce is the one signed into the segment's request,
+  // and the verifier parses exactly that nonce back out.
+  assert.ok(
+    generatedNonceSigned.headers["signature-input"].includes(
+      `nonce="${generatedNonce}"`,
+    ),
+  );
+  assert.equal(generatedNonceSigned.body, DEMO_BODY);
+  assert.equal(generatedNonceVerification.ok, true);
+  assert.equal(generatedNonceVerification.nonce, generatedNonce);
+  assert.equal(generatedNonceVerification.keyId, DEMO_KEY_ID);
+  assert.equal(generatedNonceVerification.alg, "ed25519");
+});
+
+test("demo lines contain the nonce-generation segment (shapes printed, generated nonce verifies, closing the demo)", () => {
+  const { lines, generatedNonce, generatedLongNonce } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /Nonce generation: generateNonce draws a fresh nonce from the CSPRNG and base64url-encodes it — the standard entry point for replay-protection nonces, instead of hand-writing a nonce string/,
+  );
+  assert.ok(
+    out.includes(
+      `generateNonce(): "${generatedNonce}" (22 chars, base64url, decodes to 16 bytes)`,
+    ),
+  );
+  assert.ok(
+    out.includes(
+      `generateNonce(32): "${generatedLongNonce}" (43 chars, base64url, decodes to 32 bytes)`,
+    ),
+  );
+  // The nonce-generation segment closes the demo: its verification
+  // line is final, and the block sits after the throwing segment.
+  assert.equal(
+    lines[lines.length - 1],
+    `Verification with the generated nonce: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${generatedNonce}")`,
+  );
+  const headerIdx = lines.findIndex((l) => l.startsWith("Nonce generation:"));
+  const throwIdx = lines.findIndex((l) =>
+    l.startsWith("Throwing verification:"),
+  );
+  assert.ok(throwIdx !== -1 && headerIdx !== -1 && throwIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 4), [
+    `generateNonce(): "${generatedNonce}" (22 chars, base64url, decodes to 16 bytes)`,
+    `generateNonce(32): "${generatedLongNonce}" (43 chars, base64url, decodes to 32 bytes)`,
+    `Verification with the generated nonce: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${generatedNonce}")`,
   ]);
 });
 
@@ -1077,4 +1175,8 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /Throwing verification: verifyRequestOrThrow returns the verified identity on success/);
   assert.match(out, /verifyRequestOrThrow on the main request: OK \(label sig1, keyid="demo-key-1", alg="ed25519", nonce="demo-nonce-001"\)/);
   assert.match(out, /verifyRequestOrThrow on the tampered-body request: FAILED \(threw VerifyError, code BODY_DIGEST_MISMATCH: body does not match content-digest\)/);
+  assert.match(out, /Nonce generation: generateNonce draws a fresh nonce from the CSPRNG and base64url-encodes it/);
+  assert.match(out, /generateNonce\(\): "[A-Za-z0-9_-]{22}" \(22 chars, base64url, decodes to 16 bytes\)/);
+  assert.match(out, /generateNonce\(32\): "[A-Za-z0-9_-]{43}" \(43 chars, base64url, decodes to 32 bytes\)/);
+  assert.match(out, /Verification with the generated nonce: OK \(label sig1, keyid="demo-key-1", alg="ed25519", nonce="[A-Za-z0-9_-]{22}"\)/);
 });

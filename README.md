@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 684 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 686 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -93,7 +93,15 @@ the verified identity (label, keyid, alg, nonce) instead of a
 result object, and the same request with the body tampered by
 one byte throws a `VerifyError` whose stable code
 (`BODY_DIGEST_MISMATCH`, asserted against the `isVerifyError`
-guard outside the printed lines) is printed:
+guard outside the printed lines) is printed. The demo closes
+with a nonce-generation segment: `generateNonce()` (default
+16 bytes) and `generateNonce(32)` draw fresh replay-protection
+nonces from the CSPRNG, both are printed with their shapes
+(22 / 43 base64url characters, decoding to 16 / 32 bytes), and
+the short one signs a fresh request whose verification parses
+exactly that nonce back out — outside the printed lines the
+demo asserts both shapes, that the two draws differ, and the
+sign -> verify nonce round-trip:
 
 ```bash
 npm run demo
@@ -101,8 +109,10 @@ npm run demo
 
 The request data (method, URL, body, `created` timestamp, key id, and
 nonce) is fixed in `src/demo.ts` — no network, no wall clock — so every
-line except the freshly generated signature itself and the
-thumbprint derived from the fresh key is identical between runs.
+line except the freshly generated signature itself, the
+thumbprint derived from the fresh key, and the nonce-generation
+segment's two fresh nonces (only their shapes are stable) is
+identical between runs.
 
 ## Quickstart
 
@@ -1640,7 +1650,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 684 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 686 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
