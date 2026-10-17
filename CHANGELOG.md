@@ -11,6 +11,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a key-resolver
+  memoization segment: a counting resolver over a fixed two-key
+  store (the main demo key plus a fresh second keypair) is
+  wrapped with `memoizeKeyResolver` — TTL at the library
+  default of 300 seconds, the wrapper's injected clock pinned
+  to the demo's fixed verify instant so no entry can expire
+  mid-segment — and passed as `keyResolver` to
+  `verifyRequest`. The main signed request verifies twice
+  under the same keyid while the underlying resolver is
+  called only once (the second verification is served from
+  the cache), and a request signed under a second keyid then
+  verifies and advances the underlying call count to two —
+  the per-keyid cache shape a gateway in front of a remote
+  keystore relies on, which the demo's earlier resolver
+  segments (JWKS store, thumbprint pinning) never showed for
+  a plain resolver. Outside the printed lines the demo
+  asserts all three verifications passed and both call
+  counts equal the hand-pinned expectations (1 after the
+  repeat, 2 after the second keyid — the same counts
+  `test/memoizeKeyResolver.test.ts` pins for its counting
+  store). `DemoResult` carries the three verifications and
+  both counts, and the demo tests pin the fields and the
+  printed lines. The segment prints only keyids and counts,
+  never key bytes, performs zero network I/O, and its
+  printed lines are identical between runs.
+
 - The CLI demo (`npm run demo`) now closes with a JWK
   public-key import segment: the main line's ed25519 public
   key is exported with `exportPublicKeyJwk`, carried through

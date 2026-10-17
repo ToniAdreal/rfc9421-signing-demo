@@ -135,6 +135,22 @@
  * (`kty`/`crv`/the 43-character `x` length) is printed, never the
  * key bytes, so the segment's printed lines are identical between
  * runs even though the key pair itself is fresh.
+ * The demo closes with a key-resolver memoization segment: the
+ * JWKS segment above resolves keys through a store, but a plain
+ * `keyResolver` is called on *every* `verifyRequest` — in front
+ * of a remote or slow keystore that is one lookup per request.
+ * A counting resolver over a fixed two-key store is wrapped with
+ * `memoizeKeyResolver` (TTL pinned, injected clock pinned to the
+ * demo's fixed verify instant) and passed as `keyResolver`: the
+ * main request verifies twice under the same `keyid` while the
+ * underlying resolver is called only once, then a request signed
+ * under a second `keyid` verifies and the count advances to two.
+ * Outside the printed lines the demo asserts all three
+ * verifications passed and that both counts equal the
+ * hand-pinned expectations below (the same counts
+ * `test/memoizeKeyResolver.test.ts` pins for its counting
+ * store). No key bytes are printed — only keyids and counts —
+ * so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -181,6 +197,7 @@ import {
   jwkThumbprint,
   JwksKeyStore,
   listSignatureLabels,
+  memoizeKeyResolver,
   ReplayCache,
   secretKey,
   serializeDictionaryMemberValue,
@@ -537,6 +554,38 @@ export const DEMO_GENERATED_LONG_NONCE_LENGTH = 43;
 export const DEMO_JWK_TAMPERED_CODE: VerifyFailureCode =
   "SIGNATURE_MISMATCH";
 
+/**
+ * Key id of the second key in the closing key-resolver
+ * memoization segment: its public key sits next to the main
+ * demo key in the segment's fixed two-key store, under a keyid
+ * no other segment uses, so its first verification must miss
+ * the memoization cache exactly once.
+ */
+export const DEMO_MEMOIZED_SECOND_KEY_ID = "demo-key-2";
+/** Nonce of the memoization segment's second-key signed request. */
+export const DEMO_MEMOIZED_NONCE = "demo-nonce-memoized-001";
+/**
+ * TTL (seconds) of the memoization segment's
+ * `memoizeKeyResolver` wrapper: the library default (300), with
+ * the wrapper's injected clock pinned to the demo's fixed
+ * verify instant (`DEMO_CREATED + 60`), so no entry can expire
+ * mid-segment and the call counts below are deterministic.
+ */
+export const DEMO_MEMOIZED_TTL_SEC = 300;
+/**
+ * Hand-pinned underlying-resolver call counts of the
+ * memoization segment: verifying the main request twice under
+ * `DEMO_KEY_ID` resolves the keyid exactly once (the second
+ * verification is a cache hit), and verifying the second keyid
+ * afterwards advances the count to exactly two (one miss, one
+ * resolution) — the same counting-store expectations
+ * `test/memoizeKeyResolver.test.ts` pins. The expectations are
+ * written out here, never derived from the counter the demo is
+ * checking.
+ */
+export const DEMO_MEMOIZED_CALLS_AFTER_REPEAT = 1;
+export const DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY = 2;
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -776,6 +825,34 @@ export interface DemoResult {
    * `DEMO_JWK_TAMPERED_CODE` (`SIGNATURE_MISMATCH`).
    */
   jwkTamperedVerification: VerifyResult;
+  /**
+   * First verification of the main signed request through the
+   * closing segment's memoized resolver (ok — a cache miss that
+   * resolves `DEMO_KEY_ID` once).
+   */
+  memoizedFirstVerification: VerifyResult;
+  /**
+   * Second verification of the same request through the same
+   * memoized resolver (ok — served from the cache, so the
+   * underlying resolver is not called again).
+   */
+  memoizedRepeatVerification: VerifyResult;
+  /**
+   * Verification of the request signed under
+   * `DEMO_MEMOIZED_SECOND_KEY_ID` through the same memoized
+   * resolver (ok — a new keyid misses the cache and resolves).
+   */
+  memoizedSecondKeyVerification: VerifyResult;
+  /**
+   * Underlying resolver calls after the two `DEMO_KEY_ID`
+   * verifications (`DEMO_MEMOIZED_CALLS_AFTER_REPEAT`: 1).
+   */
+  memoizedResolverCallsAfterRepeat: number;
+  /**
+   * Underlying resolver calls after the second keyid's
+   * verification (`DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY`: 2).
+   */
+  memoizedResolverCallsAfterSecondKey: number;
   lines: string[];
 }
 
@@ -1419,6 +1496,85 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // Key-resolver memoization segment: the JWKS segment above
+  // resolves through a store, but a verifier handing
+  // `verifyRequest` a plain `keyResolver` pays one resolver call
+  // per request — in front of a remote keystore, one lookup per
+  // signature at gateway rates. `memoizeKeyResolver` is the
+  // library's cache primitive for exactly that shape: successful
+  // resolutions are cached per keyid for a TTL. The demo wraps a
+  // counting resolver over a fixed two-key store (the main demo
+  // key plus a fresh second keypair), with the TTL at the library
+  // default and the wrapper clock pinned to the fixed verify
+  // instant so nothing expires mid-segment. The main request
+  // verifies twice: the first verification misses and resolves,
+  // the second is served from the cache. A request signed under
+  // the second keyid then misses once and resolves. Outside the
+  // printed lines the demo asserts all three verifications
+  // passed and both call counts equal the hand-pinned
+  // expectations (DEMO_MEMOIZED_CALLS_AFTER_REPEAT /
+  // DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY) — a mismatch throws
+  // instead of printing a misleading segment.
+  const memoizedSecondKeyPair = generateEd25519KeyPair();
+  const memoizedStore = new Map([
+    [DEMO_KEY_ID, publicKey],
+    [DEMO_MEMOIZED_SECOND_KEY_ID, memoizedSecondKeyPair.publicKey],
+  ]);
+  let memoizedResolverCalls = 0;
+  const memoizedResolver = memoizeKeyResolver(
+    (keyId: string) => {
+      memoizedResolverCalls++;
+      return memoizedStore.get(keyId);
+    },
+    { ttlSec: DEMO_MEMOIZED_TTL_SEC, now: () => DEMO_CREATED + 60 },
+  );
+  const memoizedFirstVerification = verifyRequest(signed, {
+    keyResolver: memoizedResolver,
+    now: DEMO_CREATED + 60,
+  });
+  const memoizedRepeatVerification = verifyRequest(signed, {
+    keyResolver: memoizedResolver,
+    now: DEMO_CREATED + 60,
+  });
+  const memoizedResolverCallsAfterRepeat = memoizedResolverCalls;
+  const memoizedSecondSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_MEMOIZED_SECOND_KEY_ID,
+      alg: "ed25519",
+      key: memoizedSecondKeyPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_MEMOIZED_NONCE,
+    },
+  );
+  const memoizedSecondKeyVerification = verifyRequest(memoizedSecondSigned, {
+    keyResolver: memoizedResolver,
+    now: DEMO_CREATED + 60,
+  });
+  const memoizedResolverCallsAfterSecondKey = memoizedResolverCalls;
+  if (
+    !memoizedFirstVerification.ok ||
+    !memoizedRepeatVerification.ok ||
+    !memoizedSecondKeyVerification.ok ||
+    memoizedSecondKeyVerification.keyId !== DEMO_MEMOIZED_SECOND_KEY_ID ||
+    memoizedResolverCallsAfterRepeat !== DEMO_MEMOIZED_CALLS_AFTER_REPEAT ||
+    memoizedResolverCallsAfterSecondKey !==
+      DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY
+  ) {
+    throw new Error(
+      `demo fixture broken: memoized verifications ` +
+        `${memoizedFirstVerification.ok}/${memoizedRepeatVerification.ok}/${memoizedSecondKeyVerification.ok} ` +
+        `with resolver calls ${memoizedResolverCallsAfterRepeat} after the repeat and ` +
+        `${memoizedResolverCallsAfterSecondKey} after the second keyid, instead of the pinned ` +
+        `${DEMO_MEMOIZED_CALLS_AFTER_REPEAT} / ${DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -1542,6 +1698,16 @@ export function runDemo(): DemoResult {
     jwkTamperedVerification.ok
       ? "Verification with a tampered JWK (first x character flipped): OK (unexpected — the wrong key was not detected)"
       : `Verification with a tampered JWK (first x character flipped): FAILED (code ${jwkTamperedVerification.code}: ${jwkTamperedVerification.reason})`,
+    "",
+    "Key-resolver memoization: memoizeKeyResolver caches each keyid's resolved key for a TTL, so a gateway verifying at high rate pays the keystore lookup once per keyid instead of once per request",
+    memoizedFirstVerification.ok
+      ? `Memoized verification, first verification of keyid "${DEMO_KEY_ID}": OK (label ${memoizedFirstVerification.label}, keyid="${memoizedFirstVerification.keyId}", alg="${memoizedFirstVerification.alg}")`
+      : `Memoized verification, first verification of keyid "${DEMO_KEY_ID}": FAILED (code ${memoizedFirstVerification.code}: ${memoizedFirstVerification.reason})`,
+    `Underlying resolver calls after verifying keyid "${DEMO_KEY_ID}" twice: ${memoizedResolverCallsAfterRepeat} (the second verification was served from the cache)`,
+    memoizedSecondKeyVerification.ok
+      ? `Memoized verification for keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": OK (label ${memoizedSecondKeyVerification.label}, keyid="${memoizedSecondKeyVerification.keyId}", alg="${memoizedSecondKeyVerification.alg}")`
+      : `Memoized verification for keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": FAILED (code ${memoizedSecondKeyVerification.code}: ${memoizedSecondKeyVerification.reason})`,
+    `Underlying resolver calls after verifying keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": ${memoizedResolverCallsAfterSecondKey} (a new keyid misses the cache and resolves once)`,
   ];
 
   return {
@@ -1592,6 +1758,11 @@ export function runDemo(): DemoResult {
     exportedJwk,
     jwkImportedVerification,
     jwkTamperedVerification,
+    memoizedFirstVerification,
+    memoizedRepeatVerification,
+    memoizedSecondKeyVerification,
+    memoizedResolverCallsAfterRepeat,
+    memoizedResolverCallsAfterSecondKey,
     lines,
   };
 }

@@ -30,6 +30,11 @@ import {
   DEMO_JWK_TAMPERED_CODE,
   DEMO_KEY_ID,
   DEMO_MAIN_DIGEST_ALG,
+  DEMO_MEMOIZED_CALLS_AFTER_REPEAT,
+  DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY,
+  DEMO_MEMOIZED_NONCE,
+  DEMO_MEMOIZED_SECOND_KEY_ID,
+  DEMO_MEMOIZED_TTL_SEC,
   DEMO_NONCE,
   DEMO_PEM_NONCE,
   DEMO_PEM_PRIVATE_HEADER,
@@ -1094,7 +1099,7 @@ test("demo JWK import segment verifies the main request with the imported key an
   assert.equal(jwkTamperedVerification.code, DEMO_JWK_TAMPERED_CODE);
 });
 
-test("demo lines contain the JWK import segment (imported key verifies, tampered x rejected, closing the demo)", () => {
+test("demo lines contain the JWK import segment (imported key verifies, tampered x rejected, followed by the key-resolver memoization segment)", () => {
   const { lines, exportedJwk } = runDemo();
   const out = lines.join("\n");
 
@@ -1107,13 +1112,13 @@ test("demo lines contain the JWK import segment (imported key verifies, tampered
       `Exported JWK: kty="OKP", crv="Ed25519", x is ${exportedJwk.x.length} base64url chars (the key itself is fresh per run; only its shape is printed)`,
     ),
   );
-  // The JWK import segment closes the demo: its tampered line is
-  // final, and the block sits after the nonce-generation segment.
-  assert.equal(
-    lines[lines.length - 1],
-    "Verification with a tampered JWK (first x character flipped): FAILED (code SIGNATURE_MISMATCH: signature mismatch)",
+  // The JWK import block sits after the nonce-generation segment
+  // and is followed by the key-resolver memoization segment.
+  const memoIdx = lines.findIndex((l) =>
+    l.startsWith("Key-resolver memoization:"),
   );
   const headerIdx = lines.findIndex((l) => l.startsWith("JWK public-key import:"));
+  assert.ok(headerIdx !== -1 && memoIdx !== -1 && headerIdx < memoIdx);
   const nonceIdx = lines.findIndex((l) => l.startsWith("Nonce generation:"));
   assert.ok(nonceIdx !== -1 && headerIdx !== -1 && nonceIdx < headerIdx);
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
@@ -1249,4 +1254,81 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /Exported JWK: kty="OKP", crv="Ed25519", x is 43 base64url chars/);
   assert.match(out, /Verification with the imported JWK key: OK \(label sig1, keyid="demo-key-1", alg="ed25519"\)/);
   assert.match(out, /Verification with a tampered JWK \(first x character flipped\): FAILED \(code SIGNATURE_MISMATCH:/);
+  assert.match(out, /Key-resolver memoization: memoizeKeyResolver caches each keyid's resolved key/);
+  assert.match(out, /Memoized verification, first verification of keyid "demo-key-1": OK \(label sig1, keyid="demo-key-1", alg="ed25519"\)/);
+  assert.match(out, /Underlying resolver calls after verifying keyid "demo-key-1" twice: 1 \(the second verification was served from the cache\)/);
+  assert.match(out, /Memoized verification for keyid "demo-key-2": OK \(label sig1, keyid="demo-key-2", alg="ed25519"\)/);
+  assert.match(out, /Underlying resolver calls after verifying keyid "demo-key-2": 2 \(a new keyid misses the cache and resolves once\)/);
+});
+
+test("demo key-resolver memoization segment resolves each keyid once (repeat is a cache hit, second keyid advances the count)", () => {
+  const {
+    memoizedFirstVerification,
+    memoizedRepeatVerification,
+    memoizedSecondKeyVerification,
+    memoizedResolverCallsAfterRepeat,
+    memoizedResolverCallsAfterSecondKey,
+  } = runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_MEMOIZED_CALLS_AFTER_REPEAT /
+  // DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY and cross-checked
+  // against test/memoizeKeyResolver.test.ts, whose counting
+  // store pins the same shape: three verifies of one keyid cost
+  // one underlying call, and distinct keyids cache independently.
+  // The test pins the literals again here so a drift in either
+  // place fails.
+  assert.equal(DEMO_MEMOIZED_SECOND_KEY_ID, "demo-key-2");
+  assert.equal(DEMO_MEMOIZED_NONCE, "demo-nonce-memoized-001");
+  assert.equal(DEMO_MEMOIZED_TTL_SEC, 300);
+  assert.equal(DEMO_MEMOIZED_CALLS_AFTER_REPEAT, 1);
+  assert.equal(DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY, 2);
+
+  assert.equal(memoizedFirstVerification.ok, true);
+  assert.equal(memoizedFirstVerification.keyId, DEMO_KEY_ID);
+  assert.equal(memoizedFirstVerification.alg, "ed25519");
+  assert.equal(memoizedRepeatVerification.ok, true);
+  assert.equal(memoizedRepeatVerification.keyId, DEMO_KEY_ID);
+  assert.equal(memoizedResolverCallsAfterRepeat, 1);
+
+  assert.equal(memoizedSecondKeyVerification.ok, true);
+  assert.equal(memoizedSecondKeyVerification.keyId, DEMO_MEMOIZED_SECOND_KEY_ID);
+  assert.equal(memoizedSecondKeyVerification.alg, "ed25519");
+  assert.equal(memoizedSecondKeyVerification.nonce, DEMO_MEMOIZED_NONCE);
+  assert.equal(memoizedResolverCallsAfterSecondKey, 2);
+
+  // Deterministic double run: the counts are pinned constants,
+  // not values read off a wall clock or a random keystore.
+  const again = runDemo();
+  assert.equal(again.memoizedResolverCallsAfterRepeat, 1);
+  assert.equal(again.memoizedResolverCallsAfterSecondKey, 2);
+});
+
+test("demo lines contain the key-resolver memoization segment (counts printed, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /Key-resolver memoization: memoizeKeyResolver caches each keyid's resolved key for a TTL/,
+  );
+  // The memoization segment closes the demo: its second-keyid
+  // count line is final, and the block sits after the JWK import
+  // segment.
+  assert.equal(
+    lines[lines.length - 1],
+    `Underlying resolver calls after verifying keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": 2 (a new keyid misses the cache and resolves once)`,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Key-resolver memoization:"),
+  );
+  const jwkIdx = lines.findIndex((l) => l.startsWith("JWK public-key import:"));
+  assert.ok(jwkIdx !== -1 && headerIdx !== -1 && jwkIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), [
+    "Key-resolver memoization: memoizeKeyResolver caches each keyid's resolved key for a TTL, so a gateway verifying at high rate pays the keystore lookup once per keyid instead of once per request",
+    `Memoized verification, first verification of keyid "${DEMO_KEY_ID}": OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+    `Underlying resolver calls after verifying keyid "${DEMO_KEY_ID}" twice: 1 (the second verification was served from the cache)`,
+    `Memoized verification for keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": OK (label sig1, keyid="${DEMO_MEMOIZED_SECOND_KEY_ID}", alg="ed25519")`,
+    `Underlying resolver calls after verifying keyid "${DEMO_MEMOIZED_SECOND_KEY_ID}": 2 (a new keyid misses the cache and resolves once)`,
+  ]);
 });

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 688 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 690 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -113,7 +113,14 @@ character flipped imports as a different well-formed key, and
 verification against it is printed rejected with
 `SIGNATURE_MISMATCH`; only the exported JWK's shape
 (`kty`/`crv`/43-character `x` length) is printed, never the key
-bytes:
+bytes. The demo closes with a key-resolver memoization
+segment: a counting resolver over a fixed two-key store is
+wrapped with `memoizeKeyResolver` (TTL at the 300-second
+default, injected clock pinned to the demo's fixed verify
+instant) and passed as `keyResolver` — the main request
+verifies twice under the same keyid while the underlying
+resolver is called only once, then a request signed under a
+second keyid verifies and the printed count advances to two:
 
 ```bash
 npm run demo
@@ -1662,7 +1669,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 688 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 690 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
