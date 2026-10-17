@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures the
+  PEM round trip — `exportPublicKeyPem` +
+  `exportPrivateKeyPem` on one fixed ed25519 key pair (the
+  same shape the CLI demo's PEM segment round-trips,
+  generated once outside timing), re-imported with
+  `importPublicKey` / `importPrivateKey` — the
+  serialization-plus-reparse cost of handing keys over as
+  PEM files (SPKI public / PKCS#8 private), the standard
+  encoding for gateways, KMS tooling and peer verifiers,
+  which the per-curve JWK round-trip rows do not cover.
+  Every measured pass asserts both PEM first lines equal
+  the hand-pinned type headers and that the re-imported
+  public key's JWK thumbprint equals the original's;
+  outside timing, the re-imported keys must additionally
+  complete a sign → verify over the shared fixture. The
+  README Benchmarks table was refreshed wholesale from
+  one real run (on a heavily loaded shared host, so the
+  absolute numbers are depressed versus earlier tables —
+  they remain machine-local measurements, not
+  guarantees) and now carries the `PEM round-trip
+  ed25519` row. The bench performs zero network I/O and
+  no wall-clock assertions; the key pair is random per
+  run but no assertion depends on its value.
 - The CLI demo (`npm run demo`) now identifies the digest
   algorithm of its already-emitted `Content-Digest` headers
   with `contentDigestAlgOf`, right after the sha-256 segment:

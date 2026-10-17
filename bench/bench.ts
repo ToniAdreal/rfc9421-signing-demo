@@ -44,7 +44,20 @@
  * self-checked outside timing by comparing the re-imported public
  * key's SPKI DER byte-for-byte against the original's — an
  * independent node:crypto encoding, not the JWK helpers' own
- * output, plus the pure string-building step every sign/verify pays
+ * output, plus the PEM (SPKI / PKCS#8) round trip a signer /
+ * verifier pays when keys are handed over as PEM files — the
+ * standard encoding for gateways, KMS tooling and peer verifiers:
+ * `exportPublicKeyPem` + `exportPrivateKeyPem` on one fixed
+ * ed25519 key pair (the same shape the CLI demo's PEM segment
+ * uses, generated once outside timing), re-imported with
+ * `importPublicKey` / `importPrivateKey`, self-checked on every
+ * measured pass — both PEM first lines must equal the hand-pinned
+ * type headers and the re-imported public key's JWK thumbprint
+ * must equal the original's — with a full sign → verify over the
+ * re-imported keys asserted outside timing (see PEM_* below), so
+ * the serialization-plus-reparse cost of the PEM form is visible
+ * apart from the JWK round-trip rows above that cover the JSON
+ * form, plus the pure string-building step every sign/verify pays
  * before any cryptography runs: `buildSignatureBase` over the
  * shared fixture request with the fixed covered set
  * `@method @authority @path content-digest`, self-checked outside
@@ -205,11 +218,13 @@ import {
   canonicalizeStructuredFieldValue,
   contentDigest,
   contentDigestAlgOf,
+  exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
   exportPublicKeyJwkP384,
   exportPublicKeyJwkP521,
   exportPublicKeyJwkRsa,
+  exportPublicKeyPem,
   fromNodeRequest,
   generateEd25519KeyPair,
   generateNonce,
@@ -220,6 +235,8 @@ import {
   generateRsaV15KeyPair,
   getHeader,
   getHeaderRaw,
+  importPrivateKey,
+  importPublicKey,
   importPublicKeyJwkP256,
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
@@ -1090,6 +1107,115 @@ function benchmarkJwkRoundTrip(
     );
   return measure(() => {
     importJwk(JSON.parse(JSON.stringify(exportJwk(publicKey))));
+  }, ITERATIONS);
+}
+
+/**
+ * Hand-pinned first lines (PEM type headers) for the PEM round-trip
+ * path: `exportPublicKeyPem` exports in SPKI form, whose PEM header
+ * is `-----BEGIN PUBLIC KEY-----`, and `exportPrivateKeyPem`
+ * exports in PKCS#8 form, whose PEM header is
+ * `-----BEGIN PRIVATE KEY-----` — the formats written literally in
+ * `src/keys.ts` (spki / pkcs8), the same expectations the CLI demo
+ * pins as DEMO_PEM_PUBLIC_HEADER / DEMO_PEM_PRIVATE_HEADER. Written
+ * out here, never derived from the exported text the bench is
+ * checking.
+ */
+const PEM_PUBLIC_HEADER = "-----BEGIN PUBLIC KEY-----";
+const PEM_PRIVATE_HEADER = "-----BEGIN PRIVATE KEY-----";
+/** Fixed `created` for the PEM path's outside-timing sign → verify. */
+const PEM_CREATED = 1_700_000_000;
+
+/**
+ * One PEM round trip over a fixed ed25519 key pair: export both
+ * PEMs and re-import both keys, asserting the two hand-pinned type
+ * headers and that the re-imported public key's JWK thumbprint
+ * (RFC 7638, over the generic `exportPublicKeyJwk` form) equals the
+ * original public key's — the fingerprint identity check a receiver
+ * runs before trusting a re-imported key. Returns the re-imported
+ * pair so the caller can additionally sign → verify with it outside
+ * timing.
+ */
+function pemRoundTripOnce(
+  publicKey: KeyObject,
+  privateKey: KeyObject,
+  expectedThumbprint: string,
+  label: string,
+): { revivedPublic: KeyObject; revivedPrivate: KeyObject } {
+  const pemPublic = exportPublicKeyPem(publicKey);
+  const pemPrivate = exportPrivateKeyPem(privateKey);
+  const publicHeader = pemPublic.split("\n")[0] ?? "";
+  const privateHeader = pemPrivate.split("\n")[0] ?? "";
+  if (publicHeader !== PEM_PUBLIC_HEADER)
+    throw new Error(
+      `benchmark self-check failed (${label}): public PEM header ` +
+        `${JSON.stringify(publicHeader)} (expected ${JSON.stringify(PEM_PUBLIC_HEADER)})`,
+    );
+  if (privateHeader !== PEM_PRIVATE_HEADER)
+    throw new Error(
+      `benchmark self-check failed (${label}): private PEM header ` +
+        `${JSON.stringify(privateHeader)} (expected ${JSON.stringify(PEM_PRIVATE_HEADER)})`,
+    );
+  const revivedPublic = importPublicKey(pemPublic);
+  const revivedPrivate = importPrivateKey(pemPrivate);
+  const revivedThumbprint = jwkThumbprint(exportPublicKeyJwk(revivedPublic));
+  if (revivedThumbprint !== expectedThumbprint)
+    throw new Error(
+      `benchmark self-check failed (${label}): re-imported public key ` +
+        `thumbprint ${revivedThumbprint} (expected ${expectedThumbprint})`,
+    );
+  return { revivedPublic, revivedPrivate };
+}
+
+/**
+ * PEM round-trip steady state: one measured call exports the fixed
+ * ed25519 pair as PEM (SPKI public / PKCS#8 private) and re-imports
+ * both keys — the key-handover work a signer pays when shipping
+ * keys to a gateway / KMS / peer verifier as PEM files and the
+ * receiver pays when loading them, in the encoding the JWK
+ * round-trip rows above do not cover.
+ *
+ * Fixture caliber (fixed, stated here as the backlog requires):
+ * one ed25519 key pair — the same shape the CLI demo's PEM segment
+ * round-trips — generated ONCE before timing with the library's own
+ * `generateEd25519KeyPair`. The key is random per bench run, but
+ * nothing measured depends on its value: the only assertions are
+ * the round-trip properties (pinned PEM type headers, thumbprint
+ * identity) and the outside-timing sign → verify below — no wall
+ * clock, no network, no assertion on a random value.
+ *
+ * Self-checks: every measured pass re-runs the full round trip with
+ * its header and thumbprint assertions (see `pemRoundTripOnce`);
+ * outside timing, the keys re-imported by one such round trip must
+ * complete a sign → verify over the shared fixture (created pinned
+ * at PEM_CREATED, verified at created+60).
+ */
+function benchmarkPemRoundTrip(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const expectedThumbprint = jwkThumbprint(exportPublicKeyJwk(publicKey));
+  const { revivedPublic, revivedPrivate } = pemRoundTripOnce(
+    publicKey,
+    privateKey,
+    expectedThumbprint,
+    "outside timing",
+  );
+  const signed = signRequest(fixture, {
+    keyId: "bench-key",
+    alg: "ed25519",
+    key: revivedPrivate,
+    created: PEM_CREATED,
+  });
+  const verified = verifyRequest(signed, {
+    key: revivedPublic,
+    now: PEM_CREATED + 60,
+  });
+  if (!verified.ok)
+    throw new Error(
+      `benchmark self-check failed: PEM round-trip sign → verify gave ` +
+        `${verified.code}: ${verified.reason}`,
+    );
+  return measure(() => {
+    pemRoundTripOnce(publicKey, privateKey, expectedThumbprint, "measured pass");
   }, ITERATIONS);
 }
 
@@ -2939,6 +3065,11 @@ results.push({
     exportPublicKeyJwkRsa,
     importPublicKeyJwkRsa,
   ),
+});
+results.push({
+  alg: "PEM round-trip ed25519",
+  op: "roundtrip",
+  ops: benchmarkPemRoundTrip(),
 });
 results.push({
   alg: "buildSignatureBase (4 components)",
