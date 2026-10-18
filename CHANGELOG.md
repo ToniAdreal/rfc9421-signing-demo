@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with an RSA
+  modulus-length guard segment: fixed-shape keys are run
+  through `assertRsaModulusLength` under a fixed caller
+  context (`assertRsaModulusLength demo`) — an RSA public
+  key exactly at the 2048-bit floor passes, while a
+  1024-bit RSA public key (below the floor) and the main
+  line's ed25519 public key (not an RSA key at all) are
+  rejected. The demo's earlier segments sign and verify
+  with RSA keys but never showed this setup-time guard, so
+  a weak or wrong-type RSA key being blocked at the
+  boundary was invisible to readers. Outside the printed
+  lines the demo asserts the accepted case passed and
+  both rejection messages equal the hand-pinned
+  expectations (the same messages `src/keys.ts` builds
+  from `MIN_RSA_MODULUS_BITS` and the bench corpus /
+  rsaV15 suite pin). `DemoResult` carries the accepted
+  case and the rejections, and the demo tests pin the
+  fields and the printed lines. The RSA key pairs are
+  generated once per process (only their types and
+  modulus lengths matter), the segment prints only key
+  types and modulus lengths, never key bytes, performs
+  zero network I/O, and its printed lines are identical
+  between runs.
+
 - The CLI demo (`npm run demo`) now closes with an HMAC
   secret-length guard segment: fixed secrets built from a
   fixed fill byte (only their lengths matter) are run through

@@ -1,10 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createSecretKey } from "node:crypto";
+import { createSecretKey, generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { assertHmacSecretLength } from "../src/index.js";
+import {
+  assertHmacSecretLength,
+  assertRsaModulusLength,
+  generateEd25519KeyPair,
+  generateRsaPssKeyPair,
+} from "../src/index.js";
 import {
   DEMO_BODY,
   DEMO_COVERED_COMPONENTS,
@@ -32,6 +37,10 @@ import {
   DEMO_HMAC_GUARD_ACCEPTED,
   DEMO_HMAC_GUARD_ERRORS,
   DEMO_HMAC_GUARD_REJECTED,
+  DEMO_RSA_GUARD_ACCEPTED,
+  DEMO_RSA_GUARD_CONTEXT,
+  DEMO_RSA_GUARD_ERRORS,
+  DEMO_RSA_GUARD_REJECTED,
   DEMO_JWK_TAMPERED_CODE,
   DEMO_KEY_ID,
   DEMO_MAIN_DIGEST_ALG,
@@ -1269,6 +1278,10 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /assertHmacSecretLength for hmac-sha512 with a 64-byte secret: OK \(meets the 64-byte floor\)/);
   assert.match(out, /assertHmacSecretLength for hmac-sha256 with a 31-byte secret: FAILED \(assertHmacSecretLength: hmac-sha256 secret must be at least 32 bytes/);
   assert.match(out, /assertHmacSecretLength for hmac-sha512 with a 63-byte secret: FAILED \(assertHmacSecretLength: hmac-sha512 secret must be at least 64 bytes/);
+  assert.match(out, /RSA modulus-length guard: assertRsaModulusLength enforces the RSA modulus floor/);
+  assert.match(out, /assertRsaModulusLength for rsa-2048 public key \(2048 bits\): OK \(meets the 2048-bit floor\)/);
+  assert.match(out, /assertRsaModulusLength for rsa-1024 public key \(1024 bits\): FAILED \(assertRsaModulusLength demo: RSA modulus must be at least 2048 bits, got 1024 bits\)/);
+  assert.match(out, /assertRsaModulusLength for ed25519 public key: FAILED \(assertRsaModulusLength demo: expected an RSA key, got an asymmetric ed25519 key\)/);
 });
 
 test("demo key-resolver memoization segment resolves each keyid once (repeat is a cache hit, second keyid advances the count)", () => {
@@ -1401,7 +1414,7 @@ test("demo HMAC secret-length guard segment accepts floor lengths and rejects on
   });
 });
 
-test("demo lines contain the HMAC secret-length guard segment (accepted and rejected lines, closing the demo)", () => {
+test("demo lines contain the HMAC secret-length guard segment (accepted and rejected lines, followed by the RSA guard segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
@@ -1409,12 +1422,12 @@ test("demo lines contain the HMAC secret-length guard segment (accepted and reje
     out,
     /HMAC secret-length guard: assertHmacSecretLength enforces the per-algorithm secret floor/,
   );
-  // The guard segment closes the demo: its last rejection line
-  // is final, and the block sits after the memoization segment.
-  assert.equal(
-    lines[lines.length - 1],
-    `assertHmacSecretLength for hmac-sha512 with a 63-byte secret: FAILED (${DEMO_HMAC_GUARD_ERRORS[1]})`,
+  // The guard block sits after the memoization segment and is
+  // followed by the RSA modulus-length guard segment.
+  const rsaIdx = lines.findIndex((l) =>
+    l.startsWith("RSA modulus-length guard:"),
   );
+  assert.ok(rsaIdx !== -1 && rsaIdx > lines.findIndex((l) => l.startsWith("HMAC secret-length guard:")));
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("HMAC secret-length guard:"),
   );
@@ -1439,5 +1452,103 @@ test("demo lines contain the HMAC secret-length guard segment (accepted and reje
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 5),
     lines.slice(headerIdx, headerIdx + 5),
+  );
+});
+
+test("demo RSA modulus-length guard segment accepts the floor key and rejects weak and non-RSA keys", () => {
+  const { rsaGuardAccepted, rsaGuardRejections } = runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_RSA_GUARD_ACCEPTED / DEMO_RSA_GUARD_REJECTED /
+  // DEMO_RSA_GUARD_ERRORS and cross-checked against
+  // src/keys.ts (MIN_RSA_MODULUS_BITS 2048) and the bench
+  // corpus / rsaV15 suite. The test pins the literals again
+  // here so a drift in either place fails.
+  assert.equal(DEMO_RSA_GUARD_CONTEXT, "assertRsaModulusLength demo");
+  assert.deepEqual(DEMO_RSA_GUARD_ACCEPTED, [
+    { label: "rsa-2048 public", bits: 2048 },
+  ]);
+  assert.deepEqual(DEMO_RSA_GUARD_REJECTED, [
+    { label: "rsa-1024 public", bits: 1024 },
+    { label: "ed25519 public", bits: null },
+  ]);
+  assert.deepEqual(DEMO_RSA_GUARD_ERRORS, [
+    "assertRsaModulusLength demo: RSA modulus must be at least 2048 bits, got 1024 bits",
+    "assertRsaModulusLength demo: expected an RSA key, got an asymmetric ed25519 key",
+  ]);
+  assert.deepEqual(rsaGuardAccepted, [...DEMO_RSA_GUARD_ACCEPTED]);
+  assert.deepEqual(
+    rsaGuardRejections,
+    DEMO_RSA_GUARD_REJECTED.map((r, i) => ({
+      ...r,
+      error: DEMO_RSA_GUARD_ERRORS[i],
+    })),
+  );
+
+  // Cross-check against the library guard called directly:
+  // the same key shapes pass / throw with the same messages.
+  assert.doesNotThrow(() =>
+    assertRsaModulusLength(
+      generateRsaPssKeyPair().publicKey,
+      DEMO_RSA_GUARD_CONTEXT,
+    ),
+  );
+  assert.throws(
+    () =>
+      assertRsaModulusLength(
+        generateKeyPairSync("rsa", { modulusLength: 1024 }).publicKey,
+        DEMO_RSA_GUARD_CONTEXT,
+      ),
+    (e: unknown) =>
+      e instanceof Error && e.message === DEMO_RSA_GUARD_ERRORS[0],
+  );
+  assert.throws(
+    () =>
+      assertRsaModulusLength(
+        generateEd25519KeyPair().publicKey,
+        DEMO_RSA_GUARD_CONTEXT,
+      ),
+    (e: unknown) =>
+      e instanceof Error && e.message === DEMO_RSA_GUARD_ERRORS[1],
+  );
+});
+
+test("demo lines contain the RSA modulus-length guard segment (accepted and rejected lines, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /RSA modulus-length guard: assertRsaModulusLength enforces the RSA modulus floor/,
+  );
+  // The RSA guard segment closes the demo: its last rejection
+  // line is final, and the block sits after the HMAC segment.
+  assert.equal(
+    lines[lines.length - 1],
+    `assertRsaModulusLength for ed25519 public key: FAILED (${DEMO_RSA_GUARD_ERRORS[1]})`,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("RSA modulus-length guard:"),
+  );
+  const hmacIdx = lines.findIndex((l) =>
+    l.startsWith("HMAC secret-length guard:"),
+  );
+  assert.ok(hmacIdx !== -1 && headerIdx !== -1 && hmacIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "RSA modulus-length guard: assertRsaModulusLength enforces the RSA modulus floor before any RSA operation runs — RSA keys at least 2048 bits, and non-RSA keys are rejected as a caller configuration error",
+    "assertRsaModulusLength for rsa-2048 public key (2048 bits): OK (meets the 2048-bit floor)",
+    `assertRsaModulusLength for rsa-1024 public key (1024 bits): FAILED (${DEMO_RSA_GUARD_ERRORS[0]})`,
+    `assertRsaModulusLength for ed25519 public key: FAILED (${DEMO_RSA_GUARD_ERRORS[1]})`,
+  ]);
+
+  // Deterministic double run: the guard segment's lines are
+  // pinned constants, identical between runs.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("RSA modulus-length guard:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
   );
 });

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 692 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 694 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -129,7 +129,15 @@ for `hmac-sha256` and a 64-byte secret passes for
 (31 / 63 bytes) is printed rejected with the guard's exact
 message, asserted outside the printed lines against
 hand-pinned expectations; only algorithm names and byte
-lengths are printed, never key bytes:
+lengths are printed, never key bytes. The demo closes with an
+RSA modulus-length guard segment: fixed-shape keys are run
+through `assertRsaModulusLength` under a fixed caller context
+— an RSA public key exactly at the 2048-bit floor passes,
+while a 1024-bit RSA public key and the main line's ed25519
+public key (not an RSA key at all) are printed rejected with
+the guard's exact messages, asserted outside the printed
+lines against hand-pinned expectations; only key types and
+modulus lengths are printed, never key bytes:
 
 ```bash
 npm run demo
@@ -1678,7 +1686,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 692 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 694 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

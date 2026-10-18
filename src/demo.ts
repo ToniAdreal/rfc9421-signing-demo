@@ -166,6 +166,24 @@
  * and the keyLength / hmacSha512 suites pin). Only algorithm
  * names and byte lengths are printed, never key bytes, so the
  * segment is byte-identical between runs.
+ * The demo closes with an RSA modulus-length guard segment: the
+ * RSA lines above sign and verify with RSA keys, but the demo
+ * never showed the setup-time guard every RSA key passes
+ * through on the `rsa-v1_5-sha256` sign and verify paths.
+ * Fixed-shape keys (an RSA public key exactly at the
+ * 2048-bit floor, an RSA public key at 1024 bits, and the main
+ * line's ed25519 public key — the RSA pairs are generated once
+ * per process, only their types and modulus lengths matter)
+ * are run through `assertRsaModulusLength` under a fixed
+ * caller context: the at-floor RSA key passes, while the
+ * 1024-bit RSA key and the non-RSA ed25519 key are each
+ * rejected. Outside the printed lines the demo asserts the
+ * accepted case passed and both rejection messages equal the
+ * hand-pinned expectations below (the same messages
+ * `src/keys.ts` builds from `MIN_RSA_MODULUS_BITS` and the
+ * bench corpus / rsaV15 suite pin). Only key types and
+ * modulus lengths are printed, never key bytes, so the
+ * segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -194,10 +212,15 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { createSecretKey } from "node:crypto";
+import {
+  createSecretKey,
+  generateKeyPairSync,
+  type KeyObject,
+} from "node:crypto";
 import {
   addSignature,
   assertHmacSecretLength,
+  assertRsaModulusLength,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
   contentDigestAlgOf,
@@ -207,6 +230,7 @@ import {
   fromNodeRequest,
   generateEd25519KeyPair,
   generateNonce,
+  generateRsaPssKeyPair,
   importPrivateKey,
   importPublicKey,
   importPublicKeyJwk,
@@ -643,6 +667,49 @@ export const DEMO_HMAC_GUARD_ERRORS: ReadonlyArray<string> = [
   "assertHmacSecretLength: hmac-sha512 secret must be at least 64 bytes (RFC 2104: the key SHOULD be at least as long as the hash output; sha-512 → 64 bytes), got 63 bytes",
 ];
 
+/**
+ * Fixed caller context the closing RSA guard segment passes to
+ * `assertRsaModulusLength` — the guard prefixes every throw
+ * with the caller-supplied context, exactly as the sign/verify
+ * paths pass theirs (see `src/keys.ts`) and as the bench
+ * corpus passes its own (`assertRsaModulusLength bench`).
+ */
+export const DEMO_RSA_GUARD_CONTEXT = "assertRsaModulusLength demo";
+/**
+ * Fixed RSA modulus-length guard corpus of the closing guard
+ * segment: the accepted case is an RSA public key exactly on
+ * the floor (`MIN_RSA_MODULUS_BITS` 2048, `src/keys.ts`); the
+ * rejected cases are an RSA public key at 1024 bits (below the
+ * floor) and an ed25519 public key (not an RSA key at all) —
+ * the same shapes the bench corpus (`RSA_GUARD_CORPUS`) and
+ * the rsaV15 suite pin. Only key types and modulus lengths
+ * matter to the guard, never the key bytes. No outcome is
+ * derived from `assertRsaModulusLength` itself.
+ */
+export const DEMO_RSA_GUARD_ACCEPTED: ReadonlyArray<{
+  label: string;
+  bits: number;
+}> = [{ label: "rsa-2048 public", bits: 2048 }];
+export const DEMO_RSA_GUARD_REJECTED: ReadonlyArray<{
+  label: string;
+  bits: number | null;
+}> = [
+  { label: "rsa-1024 public", bits: 1024 },
+  { label: "ed25519 public", bits: null },
+];
+/**
+ * Hand-pinned rejection messages of the RSA guard segment, one
+ * per rejected case in `DEMO_RSA_GUARD_REJECTED` order: the
+ * exact strings `assertRsaModulusLength` throws under
+ * `DEMO_RSA_GUARD_CONTEXT` for a 1024-bit RSA key and for an
+ * ed25519 key (written out here, never derived from the guard
+ * under test).
+ */
+export const DEMO_RSA_GUARD_ERRORS: ReadonlyArray<string> = [
+  "assertRsaModulusLength demo: RSA modulus must be at least 2048 bits, got 1024 bits",
+  "assertRsaModulusLength demo: expected an RSA key, got an asymmetric ed25519 key",
+];
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -930,7 +997,55 @@ export interface DemoResult {
     bytes: number;
     error: string;
   }>;
+  /**
+   * The closing RSA guard segment's accepted cases: each
+   * fixed-shape key passed `assertRsaModulusLength` under
+   * `DEMO_RSA_GUARD_CONTEXT` (exactly on the 2048-bit floor).
+   */
+  rsaGuardAccepted: ReadonlyArray<{
+    label: string;
+    bits: number;
+  }>;
+  /**
+   * The closing RSA guard segment's rejections: the 1024-bit
+   * RSA key (below the floor) and the ed25519 key (not RSA)
+   * were each rejected, paired with the exact error message
+   * the guard threw (`DEMO_RSA_GUARD_ERRORS`).
+   */
+  rsaGuardRejections: ReadonlyArray<{
+    label: string;
+    bits: number | null;
+    error: string;
+  }>;
   lines: string[];
+}
+
+/**
+ * RSA key pairs for the closing RSA guard segment, generated
+ * once per process and reused across `runDemo()` calls — the
+ * same generate-once shape the bench corpus uses
+ * (`RSA_GUARD_STRONG` / `RSA_GUARD_WEAK`), so the demo tests,
+ * which call `runDemo()` many times, do not pay RSA key
+ * generation on every call. Only the keys' types and modulus
+ * lengths are ever printed, never their bytes.
+ */
+let demoRsaGuardKeys: {
+  strongPublic: KeyObject;
+  weakPublic: KeyObject;
+} | null = null;
+function rsaGuardKeys(): {
+  strongPublic: KeyObject;
+  weakPublic: KeyObject;
+} {
+  if (demoRsaGuardKeys === null) {
+    demoRsaGuardKeys = {
+      strongPublic: generateRsaPssKeyPair().publicKey,
+      weakPublic: generateKeyPairSync("rsa", {
+        modulusLength: 1024,
+      }).publicKey,
+    };
+  }
+  return demoRsaGuardKeys;
 }
 
 function formatLabelResult(prefix: string, result: VerifyResult): string {
@@ -1705,6 +1820,64 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // RSA modulus-length guard segment: the `rsa-v1_5-sha256`
+  // sign and verify paths pass every RSA key through
+  // `assertRsaModulusLength` — the key must be RSA and its
+  // modulus must reach MIN_RSA_MODULUS_BITS (2048). The demo
+  // runs fixed-shape keys through the guard directly under
+  // DEMO_RSA_GUARD_CONTEXT: the at-floor RSA public key
+  // passes, the 1024-bit RSA public key and the main line's
+  // ed25519 public key (not RSA at all) are rejected.
+  // Outside the printed lines the demo asserts the accepted
+  // case passed and both rejection messages equal the
+  // hand-pinned DEMO_RSA_GUARD_ERRORS — a mismatch throws
+  // instead of printing a misleading segment. No key bytes
+  // are printed.
+  const rsaGuardKeyByLabel: ReadonlyMap<string, KeyObject> = new Map([
+    ["rsa-2048 public", rsaGuardKeys().strongPublic],
+    ["rsa-1024 public", rsaGuardKeys().weakPublic],
+    ["ed25519 public", publicKey],
+  ]);
+  const rsaGuardAccepted: Array<{ label: string; bits: number }> = [];
+  for (const entry of DEMO_RSA_GUARD_ACCEPTED) {
+    assertRsaModulusLength(
+      rsaGuardKeyByLabel.get(entry.label)!,
+      DEMO_RSA_GUARD_CONTEXT,
+    );
+    rsaGuardAccepted.push({ label: entry.label, bits: entry.bits });
+  }
+  const rsaGuardRejections: Array<{
+    label: string;
+    bits: number | null;
+    error: string;
+  }> = [];
+  for (const entry of DEMO_RSA_GUARD_REJECTED) {
+    let error = "";
+    try {
+      assertRsaModulusLength(
+        rsaGuardKeyByLabel.get(entry.label)!,
+        DEMO_RSA_GUARD_CONTEXT,
+      );
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+    rsaGuardRejections.push({
+      label: entry.label,
+      bits: entry.bits,
+      error,
+    });
+  }
+  if (
+    rsaGuardAccepted.length !== DEMO_RSA_GUARD_ACCEPTED.length ||
+    rsaGuardRejections.some((r, i) => r.error !== DEMO_RSA_GUARD_ERRORS[i])
+  ) {
+    throw new Error(
+      `demo fixture broken: RSA guard rejections ` +
+        `${JSON.stringify(rsaGuardRejections.map((r) => r.error))} ` +
+        `instead of the pinned ${JSON.stringify(DEMO_RSA_GUARD_ERRORS)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -1848,6 +2021,16 @@ export function runDemo(): DemoResult {
       (r) =>
         `assertHmacSecretLength for ${r.alg} with a ${r.bytes}-byte secret: FAILED (${r.error})`,
     ),
+    "",
+    "RSA modulus-length guard: assertRsaModulusLength enforces the RSA modulus floor before any RSA operation runs — RSA keys at least 2048 bits, and non-RSA keys are rejected as a caller configuration error",
+    ...rsaGuardAccepted.map(
+      (a) =>
+        `assertRsaModulusLength for ${a.label} key (${a.bits} bits): OK (meets the 2048-bit floor)`,
+    ),
+    ...rsaGuardRejections.map(
+      (r) =>
+        `assertRsaModulusLength for ${r.label} key${r.bits === null ? "" : ` (${r.bits} bits)`}: FAILED (${r.error})`,
+    ),
   ];
 
   return {
@@ -1905,6 +2088,8 @@ export function runDemo(): DemoResult {
     memoizedResolverCallsAfterSecondKey,
     hmacGuardAccepted,
     hmacGuardRejections,
+    rsaGuardAccepted,
+    rsaGuardRejections,
     lines,
   };
 }
