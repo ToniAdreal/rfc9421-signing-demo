@@ -240,6 +240,28 @@
  * exported entry after the restored cache records the
  * fresh nonce. Every input is a fixed demo constant, so
  * the segment is byte-identical between runs.
+ * The demo closes with an ECDSA P-384 signing segment: the
+ * same fixed payment request is signed under
+ * `ecdsa-p384-sha384` with a P-384 key pair from
+ * `generateP384KeyPair` — the generator the library's ecdsa
+ * tests and bench corpus use — its `Signature-Input` is
+ * printed (algorithm and keyid, never key bytes),
+ * verification is printed passing, and the same request
+ * with its body tampered by one byte is printed rejected
+ * with `BODY_DIGEST_MISMATCH`, because the covered
+ * `content-digest` no longer matches the body. P-384 is
+ * the wider of the two NIST curves the demo shows: its
+ * signatures are the 96-octet raw r‖s form of RFC 9421
+ * §3.3.5 (48 octets per limb), against the P-256 segment's
+ * 64-octet form. Outside the printed lines the demo
+ * asserts the verified identity (label, keyid, alg,
+ * nonce) and the tamper rejection code equal the
+ * hand-pinned expectations below (the same identity and
+ * code `test/ecdsaP384.test.ts` pins for its round-trip
+ * and tampered-body cases). The P-384 key pair is fresh
+ * on every run, like the P-256 segment's pair, so the
+ * signature bytes differ between runs while every printed
+ * line is identical.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -288,6 +310,7 @@ import {
   generateEd25519KeyPair,
   generateNonce,
   generateP256KeyPair,
+  generateP384KeyPair,
   generateRsaPssKeyPair,
   importPrivateKey,
   importPublicKey,
@@ -902,6 +925,36 @@ export const DEMO_REPLAY_SNAPSHOT_CODE: VerifyFailureCode = "NONCE_REPLAY";
 export const DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE = 2;
 export const DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE = 1;
 
+/** Key id of the closing ECDSA P-384 segment's signed request. */
+export const DEMO_P384_KEY_ID = "demo-p384-key-1";
+/** Nonce of the closing ECDSA P-384 segment's signed request. */
+export const DEMO_P384_NONCE = "demo-nonce-p384-001";
+/**
+ * Hand-pinned verified identity of the closing ECDSA P-384
+ * segment: the segment passes no label, so its signature
+ * carries the library default `sig1`, and verification must
+ * report the segment's own keyid, the `ecdsa-p384-sha384`
+ * algorithm and its nonce — the same identity shape
+ * `test/ecdsaP384.test.ts` pins for its round-trip case
+ * (label default, keyid, alg). The expectations are written
+ * out here, never derived from the verification the demo is
+ * checking.
+ */
+export const DEMO_P384_LABEL = "sig1";
+export const DEMO_P384_ALG = "ecdsa-p384-sha384";
+/**
+ * Hand-pinned failure code of the closing ECDSA P-384
+ * segment's tampered request: changing the body by the same
+ * one byte as the main line (amount 100 -> 101) leaves the
+ * covered `content-digest` stale, so verification must fail
+ * with `BODY_DIGEST_MISMATCH` — the same code
+ * `test/ecdsaP384.test.ts` pins for its tampered-body case.
+ * The expectation is written out here, never derived from
+ * the verification the demo is checking.
+ */
+export const DEMO_P384_TAMPERED_CODE: VerifyFailureCode =
+  "BODY_DIGEST_MISMATCH";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1290,6 +1343,23 @@ export interface DemoResult {
    * is detached, the original is unaffected).
    */
   replaySnapshotOriginalSize: number;
+  /**
+   * The request signed in the closing ECDSA P-384 segment
+   * with a fresh P-384 key pair under `ecdsa-p384-sha384`
+   * (keyid `DEMO_P384_KEY_ID`, nonce `DEMO_P384_NONCE`).
+   */
+  p384Signed: SignedHttpRequest;
+  /**
+   * Verification of `p384Signed` (ok — label, keyid, alg and
+   * nonce equal the hand-pinned `DEMO_P384_*` expectations).
+   */
+  p384Verification: VerifyResult;
+  /**
+   * Verification of `p384Signed` with the body tampered by
+   * one byte: rejected with `DEMO_P384_TAMPERED_CODE`
+   * (`BODY_DIGEST_MISMATCH`).
+   */
+  p384TamperedVerification: VerifyResult;
   lines: string[];
 }
 
@@ -2386,6 +2456,67 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // ECDSA P-384 signing segment: the P-256 segment above
+  // shows the narrower NIST curve, but the library's wider
+  // curve — `ecdsa-p384-sha384`, RFC 9421 §3.3.5 — was
+  // never shown. A P-384 key pair from
+  // `generateP384KeyPair` (the generator the ecdsa tests
+  // and bench corpus use) signs the same fixed payment
+  // request under the segment's own keyid and nonce,
+  // verification passes, and the same one-byte body tamper
+  // as the main line (amount 100 -> 101) is rejected
+  // because the covered `content-digest` no longer matches
+  // the body. Its signatures are the 96-octet raw r||s
+  // form (48 octets per limb), against the P-256 segment's
+  // 64-octet form. Outside the printed lines the demo
+  // asserts the verified identity (label, keyid, alg,
+  // nonce) and the tamper code equal the hand-pinned
+  // DEMO_P384_* expectations — a mismatch throws instead
+  // of printing a misleading segment. No key bytes are
+  // printed.
+  const p384KeyPair = generateP384KeyPair();
+  const p384Signed = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_P384_KEY_ID,
+      alg: "ecdsa-p384-sha384",
+      key: p384KeyPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_P384_NONCE,
+    },
+  );
+  const p384Verification = verifyRequest(p384Signed, {
+    key: p384KeyPair.publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  const p384TamperedVerification = verifyRequest(
+    { ...p384Signed, body: DEMO_TAMPERED_BODY },
+    { key: p384KeyPair.publicKey, now: DEMO_CREATED + 60 },
+  );
+  if (
+    !p384Verification.ok ||
+    p384Verification.label !== DEMO_P384_LABEL ||
+    p384Verification.keyId !== DEMO_P384_KEY_ID ||
+    p384Verification.alg !== DEMO_P384_ALG ||
+    p384Verification.nonce !== DEMO_P384_NONCE ||
+    p384TamperedVerification.ok ||
+    p384TamperedVerification.code !== DEMO_P384_TAMPERED_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: P-384 verification ` +
+        `${p384Verification.ok}/${p384Verification.label}/${p384Verification.keyId}/` +
+        `${p384Verification.alg}/${p384Verification.nonce} with tamper code ` +
+        `${p384TamperedVerification.code}, instead of the pinned ` +
+        `true/${DEMO_P384_LABEL}/${DEMO_P384_KEY_ID}/${DEMO_P384_ALG}/` +
+        `${DEMO_P384_NONCE} with tamper code ${DEMO_P384_TAMPERED_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -2571,6 +2702,15 @@ export function runDemo(): DemoResult {
       ? `Replay snapshot, new request with nonce "${DEMO_REPLAY_SNAPSHOT_FRESH_NONCE}" against the restored cache: OK (a fresh nonce is not a replay — recorded only in the restored cache)`
       : `Replay snapshot, new request with nonce "${DEMO_REPLAY_SNAPSHOT_FRESH_NONCE}" against the restored cache: FAILED (code ${replaySnapshotFreshVerification.code}: ${replaySnapshotFreshVerification.reason})`,
     `Original ReplayCache after the restored cache recorded the fresh nonce: ${replaySnapshotOriginalSize} entry (restored cache: ${replaySnapshotRestoredSize} entries — the restore is detached, the original is unaffected)`,
+    "",
+    "ECDSA P-384 signing: ecdsa-p384-sha384 signs the same fixed payment request with a P-384 key — the wider NIST curve whose 96-byte raw signature the P-256 segment's 64-byte form never showed",
+    `P-384 Signature-Input: ${p384Signed.headers["signature-input"]}`,
+    p384Verification.ok
+      ? `P-384 verification: OK (label ${p384Verification.label}, keyid="${p384Verification.keyId}", alg="${p384Verification.alg}", nonce="${p384Verification.nonce}")`
+      : `P-384 verification: FAILED (code ${p384Verification.code}: ${p384Verification.reason})`,
+    p384TamperedVerification.ok
+      ? "P-384 verification after tampering: OK (unexpected — tampering was not detected)"
+      : `P-384 verification after tampering: FAILED (code ${p384TamperedVerification.code}: ${p384TamperedVerification.reason})`,
   ];
 
   return {
@@ -2642,6 +2782,9 @@ export function runDemo(): DemoResult {
     replaySnapshotFreshVerification,
     replaySnapshotRestoredSize,
     replaySnapshotOriginalSize,
+    p384Signed,
+    p384Verification,
+    p384TamperedVerification,
     lines,
   };
 }

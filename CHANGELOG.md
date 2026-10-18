@@ -11,6 +11,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with an ECDSA
+  P-384 signing segment: the same fixed payment request is
+  signed under `ecdsa-p384-sha384` with a P-384 key pair
+  from `generateP384KeyPair` — the generator the library's
+  ecdsa tests and bench corpus use — its `Signature-Input`
+  is printed, verification passes, and the same request
+  with its body tampered by one byte (amount 100 -> 101)
+  is rejected with `BODY_DIGEST_MISMATCH`, because the
+  covered `content-digest` no longer matches the body.
+  The demo's earlier segments show the ed25519 main line,
+  the hmac-sha256 gateway line and the narrower P-256
+  curve, so the wider NIST curve — whose signatures are
+  the 96-octet raw r‖s form of RFC 9421 §3.3.5 (48 octets
+  per limb), against the P-256 segment's 64-octet form —
+  was invisible to demo readers. Outside the printed
+  lines the demo asserts the verified identity (label,
+  keyid, alg, nonce) and the tamper rejection code equal
+  the hand-pinned expectations (the same identity and
+  code `test/ecdsaP384.test.ts` pins for its round-trip
+  and tampered-body cases). `DemoResult` carries the
+  signed request and both verifications, and the demo
+  tests pin the fields, the 96-octet wire length and the
+  printed lines. No key bytes are printed, the segment
+  performs zero network I/O, and its printed lines are
+  identical between runs.
+
 - The CLI demo (`npm run demo`) now closes with a
   ReplayCache snapshot persistence segment: a request
   signed with a fixed nonce verifies against a

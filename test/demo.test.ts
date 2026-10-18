@@ -10,6 +10,7 @@ import {
   assertRsaModulusLength,
   generateEd25519KeyPair,
   generateP256KeyPair,
+  generateP384KeyPair,
   generateRsaPssKeyPair,
   ReplayCache,
   signRequest,
@@ -63,6 +64,11 @@ import {
   DEMO_P256_LABEL,
   DEMO_P256_NONCE,
   DEMO_P256_TAMPERED_CODE,
+  DEMO_P384_ALG,
+  DEMO_P384_KEY_ID,
+  DEMO_P384_LABEL,
+  DEMO_P384_NONCE,
+  DEMO_P384_TAMPERED_CODE,
   DEMO_PEM_NONCE,
   DEMO_PEM_PRIVATE_HEADER,
   DEMO_PEM_PUBLIC_HEADER,
@@ -1869,13 +1875,14 @@ test("demo ReplayCache snapshot segment exports the seen nonce and the restored 
   assert.equal(restored.check(DEMO_REPLAY_SNAPSHOT_FRESH_NONCE), false);
 });
 
-test("demo lines contain the ReplayCache snapshot segment (export, restored replay rejection and detached original, closing the demo)", () => {
+test("demo lines contain the ReplayCache snapshot segment (export, restored replay rejection and detached original, followed by the ECDSA P-384 segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /ReplayCache snapshot persistence: exportSnapshot carries/);
-  // The snapshot block closes the demo and sits after the
-  // Content-Digest algorithm guard segment.
+  // The snapshot block sits after the Content-Digest
+  // algorithm guard segment and is followed by the ECDSA
+  // P-384 signing segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("ReplayCache snapshot persistence:"),
   );
@@ -1883,6 +1890,10 @@ test("demo lines contain the ReplayCache snapshot segment (export, restored repl
     l.startsWith("Content-Digest algorithm guard:"),
   );
   assert.ok(digestIdx !== -1 && headerIdx !== -1 && digestIdx < headerIdx);
+  const p384Idx = lines.findIndex((l) =>
+    l.startsWith("ECDSA P-384 signing:"),
+  );
+  assert.ok(p384Idx !== -1 && headerIdx < p384Idx);
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), [
     "ReplayCache snapshot persistence: exportSnapshot carries the seen nonces across a restart — ReplayCache.restore rebuilds the cache at startup, so a nonce seen before the restart is still a replay after it",
     `Replay snapshot, first verification of nonce "${DEMO_REPLAY_SNAPSHOT_NONCE}": OK (recorded in the segment's ReplayCache)`,
@@ -1891,13 +1902,6 @@ test("demo lines contain the ReplayCache snapshot segment (export, restored repl
     `Replay snapshot, new request with nonce "${DEMO_REPLAY_SNAPSHOT_FRESH_NONCE}" against the restored cache: OK (a fresh nonce is not a replay — recorded only in the restored cache)`,
     `Original ReplayCache after the restored cache recorded the fresh nonce: 1 entry (restored cache: 2 entries — the restore is detached, the original is unaffected)`,
   ]);
-  // The snapshot segment closes the demo: its detached-original
-  // line is final.
-  assert.equal(
-    lines[lines.length - 1],
-    `Original ReplayCache after the restored cache recorded the fresh nonce: 1 entry (restored cache: 2 entries — the restore is detached, the original is unaffected)`,
-  );
-
   // Deterministic double run: the segment's printed lines
   // carry no key or signature bytes, so they are pinned
   // constants, identical between runs.
@@ -1908,5 +1912,120 @@ test("demo lines contain the ReplayCache snapshot segment (export, restored repl
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 6),
     lines.slice(headerIdx, headerIdx + 6),
+  );
+});
+
+test("demo ECDSA P-384 segment signs the fixed request, verifies, and rejects the one-byte tamper", () => {
+  const { p384Signed, p384Verification, p384TamperedVerification } =
+    runDemo();
+
+  // Expectations are the literals hand-pinned in DEMO_P384_*
+  // and cross-checked against test/ecdsaP384.test.ts (its
+  // round-trip case pins the same keyid/alg identity shape and
+  // its tampered-body case pins the same rejection code).
+  // The test pins the literals again here so a drift in
+  // either place fails.
+  assert.equal(DEMO_P384_KEY_ID, "demo-p384-key-1");
+  assert.equal(DEMO_P384_NONCE, "demo-nonce-p384-001");
+  assert.equal(DEMO_P384_LABEL, "sig1");
+  assert.equal(DEMO_P384_ALG, "ecdsa-p384-sha384");
+  assert.equal(DEMO_P384_TAMPERED_CODE, "BODY_DIGEST_MISMATCH");
+
+  assert.equal(
+    p384Signed.headers["signature-input"],
+    `sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_P384_KEY_ID}";alg="${DEMO_P384_ALG}";nonce="${DEMO_P384_NONCE}"`,
+  );
+  assert.ok(p384Signed.headers["content-digest"].startsWith("sha-512=:"));
+  // RFC 9421 §3.3.5 wire form: the signature is the raw
+  // 96-octet r||s concatenation (48 octets per limb), never
+  // a DER value and never the 64-octet P-256 width.
+  const raw = Buffer.from(
+    p384Signed.headers["signature"].slice("sig1=:".length, -1),
+    "base64",
+  );
+  assert.equal(raw.length, 96);
+
+  assert.equal(p384Verification.ok, true);
+  assert.equal(p384Verification.label, DEMO_P384_LABEL);
+  assert.equal(p384Verification.keyId, DEMO_P384_KEY_ID);
+  assert.equal(p384Verification.alg, DEMO_P384_ALG);
+  assert.equal(p384Verification.nonce, DEMO_P384_NONCE);
+
+  assert.equal(p384TamperedVerification.ok, false);
+  assert.equal(p384TamperedVerification.code, DEMO_P384_TAMPERED_CODE);
+
+  // Cross-check against the library called directly: a fresh
+  // P-384 pair signing the same fixed request shape verifies
+  // with the same identity, and the same body tamper is
+  // rejected with the same code.
+  const { publicKey, privateKey } = generateP384KeyPair();
+  const direct = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_P384_KEY_ID,
+      alg: "ecdsa-p384-sha384",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_P384_NONCE,
+    },
+  );
+  const directOk = verifyRequest(direct, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(directOk.ok, true);
+  assert.equal(directOk.keyId, DEMO_P384_KEY_ID);
+  assert.equal(directOk.alg, DEMO_P384_ALG);
+  const directTampered = verifyRequest(
+    { ...direct, body: DEMO_TAMPERED_BODY },
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+  assert.equal(directTampered.ok, false);
+  assert.equal(directTampered.code, DEMO_P384_TAMPERED_CODE);
+});
+
+test("demo lines contain the ECDSA P-384 signing segment (signature-input, verification and tamper rejection, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /ECDSA P-384 signing: ecdsa-p384-sha384 signs/);
+  // The P-384 block sits after the ReplayCache snapshot
+  // persistence segment and closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("ECDSA P-384 signing:"),
+  );
+  const snapshotIdx = lines.findIndex((l) =>
+    l.startsWith("ReplayCache snapshot persistence:"),
+  );
+  assert.ok(snapshotIdx !== -1 && headerIdx !== -1 && snapshotIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "ECDSA P-384 signing: ecdsa-p384-sha384 signs the same fixed payment request with a P-384 key — the wider NIST curve whose 96-byte raw signature the P-256 segment's 64-byte form never showed",
+    `P-384 Signature-Input: sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_P384_KEY_ID}";alg="${DEMO_P384_ALG}";nonce="${DEMO_P384_NONCE}"`,
+    `P-384 verification: OK (label ${DEMO_P384_LABEL}, keyid="${DEMO_P384_KEY_ID}", alg="${DEMO_P384_ALG}", nonce="${DEMO_P384_NONCE}")`,
+    "P-384 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  ]);
+  // The P-384 segment closes the demo: its tamper-rejection
+  // line is final.
+  assert.equal(
+    lines[lines.length - 1],
+    "P-384 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  );
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key or signature bytes, so they are pinned
+  // constants, identical between runs even though the
+  // P-384 key pair itself is fresh.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("ECDSA P-384 signing:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
   );
 });
