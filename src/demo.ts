@@ -262,6 +262,26 @@
  * on every run, like the P-256 segment's pair, so the
  * signature bytes differ between runs while every printed
  * line is identical.
+ * The demo closes with a Signature-Input parsing segment:
+ * every earlier segment consumes the parsed signature
+ * parameters only inside `verifyRequest`, but a receiver
+ * debugging an inbound request looks at the parse layer
+ * first. The main signed request's `signature-input` value
+ * is read back raw with `getHeaderRaw` and printed
+ * truncated to a pinned preview length, then parsed with
+ * `parseSignatureInput` for the main label: the parsed
+ * label, keyid, alg, created and covered components are
+ * printed. Outside the printed lines the demo asserts the
+ * raw value and every parsed field equal the hand-pinned
+ * expectations below (the same parse shape the bench
+ * parser fixture and the parser suites pin for their own
+ * inputs). A detached copy of the raw value with its
+ * closing parenthesis removed is parsed as well: the
+ * parser throws the pinned `unterminated inner list`
+ * error — the fail-closed shape a receiver sees on a
+ * truncated header — and that rejection is printed.
+ * Every input is a fixed demo constant, so the segment
+ * is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -312,6 +332,7 @@ import {
   generateP256KeyPair,
   generateP384KeyPair,
   generateRsaPssKeyPair,
+  getHeaderRaw,
   importPrivateKey,
   importPublicKey,
   importPublicKeyJwk,
@@ -320,6 +341,7 @@ import {
   JwksKeyStore,
   listSignatureLabels,
   memoizeKeyResolver,
+  parseSignatureInput,
   ReplayCache,
   secretKey,
   serializeDictionaryMemberValue,
@@ -332,6 +354,7 @@ import {
   type Ed25519PublicJwk,
   type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
+  type ParsedSignatureInput,
   type ReplayCacheSnapshot,
   type RequestLike,
   type SignatureParams,
@@ -955,6 +978,54 @@ export const DEMO_P384_ALG = "ecdsa-p384-sha384";
 export const DEMO_P384_TAMPERED_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
 
+/** Label of the closing Signature-Input parsing segment: the main line's label. */
+export const DEMO_PARSE_LABEL = "sig1";
+/**
+ * Hand-pinned raw `signature-input` value of the main signed
+ * request: the signer's serialization of the covered
+ * components (`DEMO_COVERED_COMPONENTS`) and the fixed
+ * main-line parameters (created 1700000000, keyid
+ * `demo-key-1`, alg `ed25519`, nonce `demo-nonce-001`) — the
+ * same serialization shape the demo's own per-segment
+ * signature-input literals and the bench `PARSER_INPUT`
+ * fixture pin for their own requests. Written out here,
+ * never derived from the header the demo is checking.
+ */
+export const DEMO_PARSE_RAW_INPUT =
+  'sig1=("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001"';
+/** Characters of the raw value the parsing segment prints before truncating. */
+export const DEMO_PARSE_PREVIEW_CHARS = 72;
+/**
+ * Hand-pinned printed preview: the first
+ * `DEMO_PARSE_PREVIEW_CHARS` characters of
+ * `DEMO_PARSE_RAW_INPUT`.
+ */
+export const DEMO_PARSE_RAW_PREVIEW =
+  'sig1=("@method" "@authority" "@path" "content-digest");created=170000000';
+/**
+ * Hand-pinned parsed parameters of the main signature: the
+ * fixed main-line keyid, algorithm, created instant and
+ * nonce the signer wrote into the `signature-input` value —
+ * the same parameter shape the bench parser fixture pins
+ * for its merchant member. Written out here, never derived
+ * from the parse the demo is checking.
+ */
+export const DEMO_PARSE_KEY_ID = "demo-key-1";
+export const DEMO_PARSE_ALG = "ed25519";
+export const DEMO_PARSE_CREATED = 1700000000;
+export const DEMO_PARSE_NONCE = "demo-nonce-001";
+/**
+ * Hand-pinned error of the closing segment's tampered
+ * parse: a detached copy of the raw value with its closing
+ * parenthesis removed leaves the inner list unterminated,
+ * so `parseSignatureInput` throws exactly the message
+ * `src/components.ts` builds for that shape — the same
+ * message the bench `PARSER_MALFORMED` corpus pins for its
+ * unterminated case.
+ */
+export const DEMO_PARSE_TAMPERED_ERROR =
+  "malformed Signature-Input: unterminated inner list";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1360,6 +1431,25 @@ export interface DemoResult {
    * (`BODY_DIGEST_MISMATCH`).
    */
   p384TamperedVerification: VerifyResult;
+  /**
+   * Raw `signature-input` value of the main signed request,
+   * read back with `getHeaderRaw` in the closing parsing
+   * segment (equals the hand-pinned `DEMO_PARSE_RAW_INPUT`).
+   */
+  signatureInputRaw: string;
+  /**
+   * `parseSignatureInput` result for the main label over
+   * `signatureInputRaw`: label, covered component ids and
+   * parameters, each equal to the hand-pinned
+   * `DEMO_PARSE_*` expectations.
+   */
+  parsedSignatureInput: ParsedSignatureInput;
+  /**
+   * Error message thrown when the detached,
+   * parenthesis-stripped copy of the raw value is parsed
+   * (equals the hand-pinned `DEMO_PARSE_TAMPERED_ERROR`).
+   */
+  parseTamperedError: string;
   lines: string[];
 }
 
@@ -2517,6 +2607,76 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // Signature-Input parsing segment: every verification
+  // above consumed the parsed parameters only inside
+  // `verifyRequest`, but a receiver debugging an inbound
+  // request reads the parse layer directly. The main
+  // signed request's `signature-input` value is read back
+  // raw with `getHeaderRaw` (no trimming or normalization)
+  // and parsed with `parseSignatureInput` for the main
+  // label. Outside the printed lines the demo asserts the
+  // raw value, its printed preview, the parsed label,
+  // every parsed parameter and the covered components
+  // equal the hand-pinned DEMO_PARSE_* expectations — a
+  // mismatch throws instead of printing a misleading
+  // segment. A detached copy of the raw value with its
+  // closing parenthesis removed is parsed too: the inner
+  // list is unterminated, so the parser throws the pinned
+  // error — the fail-closed shape a receiver sees on a
+  // truncated header.
+  const signatureInputRaw = getHeaderRaw(signed.headers, "signature-input");
+  if (signatureInputRaw === undefined) {
+    throw new Error(
+      "demo fixture broken: main signed request carries no signature-input header",
+    );
+  }
+  const signatureInputPreview = signatureInputRaw.slice(
+    0,
+    DEMO_PARSE_PREVIEW_CHARS,
+  );
+  const parsedSignatureInput = parseSignatureInput(
+    signatureInputRaw,
+    DEMO_PARSE_LABEL,
+  );
+  const tamperedInput = signatureInputRaw.slice(
+    0,
+    signatureInputRaw.indexOf(")"),
+  );
+  let parseTamperedError = "";
+  try {
+    parseSignatureInput(tamperedInput, DEMO_PARSE_LABEL);
+  } catch (e) {
+    parseTamperedError = e instanceof Error ? e.message : String(e);
+  }
+  if (
+    signatureInputRaw !== DEMO_PARSE_RAW_INPUT ||
+    signatureInputPreview !== DEMO_PARSE_RAW_PREVIEW ||
+    parsedSignatureInput.label !== DEMO_PARSE_LABEL ||
+    parsedSignatureInput.componentIds.length !==
+      DEMO_COVERED_COMPONENTS.length ||
+    parsedSignatureInput.componentIds.some(
+      (c, i) => c !== DEMO_COVERED_COMPONENTS[i],
+    ) ||
+    parsedSignatureInput.params.created !== DEMO_PARSE_CREATED ||
+    parsedSignatureInput.params.keyid !== DEMO_PARSE_KEY_ID ||
+    parsedSignatureInput.params.alg !== DEMO_PARSE_ALG ||
+    parsedSignatureInput.params.nonce !== DEMO_PARSE_NONCE ||
+    parsedSignatureInput.params.expires !== undefined ||
+    parseTamperedError !== DEMO_PARSE_TAMPERED_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: Signature-Input parsing gave ` +
+        `raw=${JSON.stringify(signatureInputRaw)}, ` +
+        `parsed=${JSON.stringify(parsedSignatureInput)}, ` +
+        `tamper error=${JSON.stringify(parseTamperedError)}, ` +
+        `instead of the pinned raw=${JSON.stringify(DEMO_PARSE_RAW_INPUT)}, ` +
+        `label=${DEMO_PARSE_LABEL}, components=${JSON.stringify(DEMO_COVERED_COMPONENTS)}, ` +
+        `created=${DEMO_PARSE_CREATED}, keyid=${DEMO_PARSE_KEY_ID}, ` +
+        `alg=${DEMO_PARSE_ALG}, nonce=${DEMO_PARSE_NONCE}, ` +
+        `tamper error=${JSON.stringify(DEMO_PARSE_TAMPERED_ERROR)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -2711,6 +2871,12 @@ export function runDemo(): DemoResult {
     p384TamperedVerification.ok
       ? "P-384 verification after tampering: OK (unexpected — tampering was not detected)"
       : `P-384 verification after tampering: FAILED (code ${p384TamperedVerification.code}: ${p384TamperedVerification.reason})`,
+    "",
+    "Signature-Input parsing: parseSignatureInput exposes the parse layer a receiver debugs first — the raw header value, then the label, parameters and covered components the verifier rebuilds from it",
+    `Raw Signature-Input (first ${DEMO_PARSE_PREVIEW_CHARS} of ${signatureInputRaw.length} chars): ${signatureInputPreview}…`,
+    `Parsed ${parsedSignatureInput.label}: keyid="${parsedSignatureInput.params.keyid}", alg="${parsedSignatureInput.params.alg}", created=${parsedSignatureInput.params.created}, nonce="${parsedSignatureInput.params.nonce}"`,
+    `Parsed covered components: ${parsedSignatureInput.componentIds.map((c) => `"${c}"`).join(" ")}`,
+    `Tampered Signature-Input (closing parenthesis removed): FAILED (${parseTamperedError})`,
   ];
 
   return {
@@ -2785,6 +2951,9 @@ export function runDemo(): DemoResult {
     p384Signed,
     p384Verification,
     p384TamperedVerification,
+    signatureInputRaw,
+    parsedSignatureInput,
+    parseTamperedError,
     lines,
   };
 }

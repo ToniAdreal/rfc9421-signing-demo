@@ -12,6 +12,8 @@ import {
   generateP256KeyPair,
   generateP384KeyPair,
   generateRsaPssKeyPair,
+  getHeaderRaw,
+  parseSignatureInput,
   ReplayCache,
   signRequest,
   verifyRequest,
@@ -69,6 +71,15 @@ import {
   DEMO_P384_LABEL,
   DEMO_P384_NONCE,
   DEMO_P384_TAMPERED_CODE,
+  DEMO_PARSE_ALG,
+  DEMO_PARSE_CREATED,
+  DEMO_PARSE_KEY_ID,
+  DEMO_PARSE_LABEL,
+  DEMO_PARSE_NONCE,
+  DEMO_PARSE_PREVIEW_CHARS,
+  DEMO_PARSE_RAW_INPUT,
+  DEMO_PARSE_RAW_PREVIEW,
+  DEMO_PARSE_TAMPERED_ERROR,
   DEMO_PEM_NONCE,
   DEMO_PEM_PRIVATE_HEADER,
   DEMO_PEM_PUBLIC_HEADER,
@@ -1989,13 +2000,14 @@ test("demo ECDSA P-384 segment signs the fixed request, verifies, and rejects th
   assert.equal(directTampered.code, DEMO_P384_TAMPERED_CODE);
 });
 
-test("demo lines contain the ECDSA P-384 signing segment (signature-input, verification and tamper rejection, closing the demo)", () => {
+test("demo lines contain the ECDSA P-384 signing segment (signature-input, verification and tamper rejection, followed by the Signature-Input parsing segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /ECDSA P-384 signing: ecdsa-p384-sha384 signs/);
   // The P-384 block sits after the ReplayCache snapshot
-  // persistence segment and closes the demo.
+  // persistence segment and is followed by the
+  // Signature-Input parsing segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("ECDSA P-384 signing:"),
   );
@@ -2009,12 +2021,10 @@ test("demo lines contain the ECDSA P-384 signing segment (signature-input, verif
     `P-384 verification: OK (label ${DEMO_P384_LABEL}, keyid="${DEMO_P384_KEY_ID}", alg="${DEMO_P384_ALG}", nonce="${DEMO_P384_NONCE}")`,
     "P-384 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
   ]);
-  // The P-384 segment closes the demo: its tamper-rejection
-  // line is final.
-  assert.equal(
-    lines[lines.length - 1],
-    "P-384 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  const parseIdx = lines.findIndex((l) =>
+    l.startsWith("Signature-Input parsing:"),
   );
+  assert.ok(parseIdx !== -1 && headerIdx < parseIdx);
 
   // Deterministic double run: the segment's printed lines
   // carry no key or signature bytes, so they are pinned
@@ -2027,5 +2037,114 @@ test("demo lines contain the ECDSA P-384 signing segment (signature-input, verif
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),
     lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo Signature-Input parsing segment parses the main signature and rejects the truncated copy", () => {
+  const { signed, signatureInputRaw, parsedSignatureInput, parseTamperedError } =
+    runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_PARSE_* and cross-checked against the bench parser
+  // fixture (its merchant member pins the same parameter
+  // shape) and src/components.ts (which builds the pinned
+  // tamper message). The test pins the literals again here
+  // so a drift in either place fails.
+  assert.equal(DEMO_PARSE_LABEL, "sig1");
+  assert.equal(DEMO_PARSE_KEY_ID, "demo-key-1");
+  assert.equal(DEMO_PARSE_ALG, "ed25519");
+  assert.equal(DEMO_PARSE_CREATED, 1700000000);
+  assert.equal(DEMO_PARSE_CREATED, DEMO_CREATED);
+  assert.equal(DEMO_PARSE_NONCE, "demo-nonce-001");
+  assert.equal(DEMO_PARSE_PREVIEW_CHARS, 72);
+  assert.equal(
+    DEMO_PARSE_RAW_INPUT,
+    'sig1=("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001"',
+  );
+  assert.equal(DEMO_PARSE_RAW_INPUT.length, 129);
+  assert.equal(
+    DEMO_PARSE_RAW_PREVIEW,
+    DEMO_PARSE_RAW_INPUT.slice(0, DEMO_PARSE_PREVIEW_CHARS),
+  );
+  assert.equal(
+    DEMO_PARSE_TAMPERED_ERROR,
+    "malformed Signature-Input: unterminated inner list",
+  );
+
+  // The raw read-back is the main signed request's own
+  // header, byte for byte.
+  assert.equal(signatureInputRaw, DEMO_PARSE_RAW_INPUT);
+  assert.equal(signatureInputRaw, signed.headers["signature-input"]);
+
+  assert.equal(parsedSignatureInput.label, DEMO_PARSE_LABEL);
+  assert.deepEqual(
+    parsedSignatureInput.componentIds,
+    DEMO_COVERED_COMPONENTS,
+  );
+  assert.equal(parsedSignatureInput.params.created, DEMO_PARSE_CREATED);
+  assert.equal(parsedSignatureInput.params.keyid, DEMO_PARSE_KEY_ID);
+  assert.equal(parsedSignatureInput.params.alg, DEMO_PARSE_ALG);
+  assert.equal(parsedSignatureInput.params.nonce, DEMO_PARSE_NONCE);
+  assert.equal(parsedSignatureInput.params.expires, undefined);
+
+  assert.equal(parseTamperedError, DEMO_PARSE_TAMPERED_ERROR);
+
+  // Cross-check against the library called directly: the
+  // same raw read and parse over the demo's signed request
+  // give the same shape, and the same truncated copy throws
+  // the same pinned message.
+  const directRaw = getHeaderRaw(signed.headers, "signature-input");
+  assert.equal(directRaw, DEMO_PARSE_RAW_INPUT);
+  const direct = parseSignatureInput(directRaw as string, DEMO_PARSE_LABEL);
+  assert.deepEqual(direct, parsedSignatureInput);
+  const directTampered = (directRaw as string).slice(
+    0,
+    (directRaw as string).indexOf(")"),
+  );
+  assert.throws(
+    () => parseSignatureInput(directTampered, DEMO_PARSE_LABEL),
+    (e: unknown) =>
+      e instanceof Error && e.message === DEMO_PARSE_TAMPERED_ERROR,
+  );
+});
+
+test("demo lines contain the Signature-Input parsing segment (raw preview, parsed fields and tamper rejection, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Signature-Input parsing: parseSignatureInput exposes/);
+  // The parsing block sits after the ECDSA P-384 signing
+  // segment and closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Signature-Input parsing:"),
+  );
+  const p384Idx = lines.findIndex((l) =>
+    l.startsWith("ECDSA P-384 signing:"),
+  );
+  assert.ok(p384Idx !== -1 && headerIdx !== -1 && p384Idx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), [
+    "Signature-Input parsing: parseSignatureInput exposes the parse layer a receiver debugs first — the raw header value, then the label, parameters and covered components the verifier rebuilds from it",
+    `Raw Signature-Input (first ${DEMO_PARSE_PREVIEW_CHARS} of ${DEMO_PARSE_RAW_INPUT.length} chars): ${DEMO_PARSE_RAW_PREVIEW}…`,
+    `Parsed ${DEMO_PARSE_LABEL}: keyid="${DEMO_PARSE_KEY_ID}", alg="${DEMO_PARSE_ALG}", created=${DEMO_PARSE_CREATED}, nonce="${DEMO_PARSE_NONCE}"`,
+    `Parsed covered components: ${DEMO_COVERED_COMPONENTS.map((c) => `"${c}"`).join(" ")}`,
+    `Tampered Signature-Input (closing parenthesis removed): FAILED (${DEMO_PARSE_TAMPERED_ERROR})`,
+  ]);
+  // The parsing segment closes the demo: its tamper-rejection
+  // line is final.
+  assert.equal(
+    lines[lines.length - 1],
+    `Tampered Signature-Input (closing parenthesis removed): FAILED (${DEMO_PARSE_TAMPERED_ERROR})`,
+  );
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key or signature bytes, so they are pinned
+  // constants, identical between runs.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Signature-Input parsing:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 5),
+    lines.slice(headerIdx, headerIdx + 5),
   );
 });

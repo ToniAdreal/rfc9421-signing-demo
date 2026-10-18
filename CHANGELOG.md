@@ -11,6 +11,31 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  Signature-Input parsing segment: the main signed
+  request's `signature-input` value is read back raw with
+  `getHeaderRaw` and printed truncated to a pinned
+  72-character preview, then parsed with
+  `parseSignatureInput` for the main label — the parsed
+  label, keyid, alg, created and covered components are
+  printed. Every earlier demo segment consumed the parsed
+  parameters only inside `verifyRequest`, so the parse
+  layer a receiver debugs first on an inbound request was
+  invisible to demo readers. Outside the printed lines
+  the demo asserts the raw value and every parsed field
+  equal the hand-pinned expectations (the same parse
+  shape the bench parser fixture pins for its own
+  inputs), and a detached copy of the raw value with its
+  closing parenthesis removed is asserted to throw the
+  pinned `malformed Signature-Input: unterminated inner
+  list` error — the fail-closed shape a receiver sees on
+  a truncated header — whose rejection is printed.
+  `DemoResult` carries the raw value, the parse result
+  and the tamper error, and the demo tests pin the
+  fields and the printed lines. The segment performs
+  zero network I/O, and its printed lines are identical
+  between runs.
+
 - The CLI demo (`npm run demo`) now closes with an ECDSA
   P-384 signing segment: the same fixed payment request is
   signed under `ecdsa-p384-sha384` with a P-384 key pair
