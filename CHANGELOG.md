@@ -11,6 +11,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `signRequest` end to end — one complete signing of the
+  shared fixture (signature-base construction, the ed25519
+  cryptography and the `signature-input` / `signature`
+  header serialization) as a standalone
+  `signRequest (ed25519, end-to-end)` row. The fixture is
+  fixed (`created=1700000000`, `keyid="bench-key"`,
+  `alg="ed25519"`, one ed25519 key pair generated once
+  outside timing), and every measured pass re-pins the
+  output shape — both signature headers present, the full
+  `signature-input` value and the single label `sig1`
+  equal to hand-written expectations, the `content-digest`
+  header equal to the pinned fixture digest, and the
+  signature a single member decoding to 64 bytes — while
+  outside timing the signed request is asserted to verify
+  with the pinned identity (label / keyid / alg) and the
+  same request with its body tampered by one byte
+  (amount 100 -> 101) is rejected with
+  `BODY_DIGEST_MISMATCH`. The per-algorithm scenario rows
+  also time `signRequest`, but they discard the output
+  unchecked, so this is the first checked total for the
+  sign side. The README Benchmarks table was refreshed
+  wholesale from one real run and now carries the new
+  `sign` row. The bench performs zero network I/O and no
+  wall-clock assertions, and never prints key or
+  signature bytes.
 - The CLI demo (`npm run demo`) now closes with an ECDSA
   P-521 signing segment: the same fixed payment request is
   signed under `ecdsa-p521-sha512` with a P-521 key pair

@@ -65,6 +65,18 @@
  * BASE_EXPECTED below), so the cost of resolving covered
  * components and serializing the signature base is visible apart
  * from the algorithm costs it is normally bundled into, plus the
+ * end-to-end signing step a signer actually calls: `signRequest`
+ * over the shared fixture with one fixed ed25519 key pair
+ * (generated once outside timing, `created` pinned — see
+ * SIGNREQ_* below), self-checked on every measured pass (both
+ * signature headers present, the label and the full
+ * `signature-input` value hand-pinned, the signature a 64-byte
+ * ed25519 value) with a full `verifyRequest` pass and a
+ * tampered-body rejection asserted outside timing, so the total
+ * sign cost (base building + cryptography + header
+ * serialization) has one checked row of its own apart from the
+ * per-algorithm scenario rows, whose sign calls discard their
+ * output unchecked, plus the
  * three standalone parsers a gateway pre-screen calls directly —
  * `listSignatureLabels`, `parseSignatureInput` and
  * `parseSignatureField` — over a fixed hand-written dual-label
@@ -1306,6 +1318,169 @@ function benchmarkBuildSignatureBase(): number {
       throw new Error(
         "benchmark self-check failed: buildSignatureBase diverged from the pinned base text",
       );
+  }, ITERATIONS);
+}
+
+/** Fixed `created` for the signRequest fixture (no wall clock). */
+const SIGNREQ_CREATED = 1_700_000_000;
+/**
+ * Hand-pinned label expectation for the signRequest path — written
+ * here as a literal, independently of the sign call below (which
+ * omits `label`, so the value on the wire is the library's default
+ * `sig1`): changing this expectation alone must fail the bench.
+ */
+const SIGNREQ_EXPECTED_LABEL = "sig1";
+/**
+ * Hand-pinned full `signature-input` value for the signRequest
+ * fixture — written out literally from the RFC 9421 §2.3
+ * serialization (the fixed four covered components named in the
+ * bench header, parameters in created / keyid / alg order), in
+ * the same hand-pinned style as BASE_EXPECTED above. Never
+ * derived from `signRequest` at bench time.
+ */
+const SIGNREQ_EXPECTED_INPUT =
+  'sig1=("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="bench-key";alg="ed25519"';
+/**
+ * Pinned failure code for the tampered signRequest fixture —
+ * written here as a literal, from the verify contract: changing
+ * the body after signing leaves the signature itself intact but
+ * breaks the covered `content-digest`, so the code is
+ * BODY_DIGEST_MISMATCH (the same pin the CLI demo's curve
+ * segments and the ecdsa test suites use for a one-byte body
+ * tamper).
+ */
+const SIGNREQ_TAMPERED_CODE = "BODY_DIGEST_MISMATCH";
+/** Tampered body for the signRequest fixture: amount 100 -> 101. */
+const SIGNREQ_TAMPERED_BODY = JSON.stringify({
+  amount: 101,
+  currency: "USD",
+});
+
+/**
+ * Fixed fixture for the `signRequest` end-to-end path: one
+ * ed25519 key pair generated once at bench start (outside
+ * timing; the key is random per bench run, but nothing measured
+ * or asserted depends on its value — ed25519 signing is
+ * deterministic per key/message, and the only pinned wire
+ * shapes are the label, the `signature-input` value and the
+ * 64-byte signature length), signing the shared fixture with
+ * `created` pinned at SIGNREQ_CREATED and verifying at
+ * created+60 — no wall clock, zero network.
+ */
+function buildSignRequestFixture(): {
+  signOpts: Parameters<typeof signRequest>[1];
+  verifyOpts: {
+    key: ReturnType<typeof generateEd25519KeyPair>["publicKey"];
+    now: number;
+  };
+} {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  return {
+    signOpts: {
+      keyId: "bench-key",
+      alg: "ed25519",
+      key: privateKey,
+      created: SIGNREQ_CREATED,
+    },
+    verifyOpts: { key: publicKey, now: SIGNREQ_CREATED + 60 },
+  };
+}
+
+/**
+ * Shape checks every signed output of the signRequest fixture
+ * must pass, on the outside-timing pass and on every measured
+ * pass alike: both signature headers present, the
+ * `signature-input` value equal to the hand-pinned
+ * SIGNREQ_EXPECTED_INPUT byte-for-byte, the label list exactly
+ * [SIGNREQ_EXPECTED_LABEL], the `content-digest` header equal
+ * to the pinned fixture digest carried by BASE_REQUEST, and the
+ * `signature` value a single `sig1=:base64:` member decoding to
+ * the 64 bytes an ed25519 signature occupies. No key or
+ * signature bytes are ever printed.
+ */
+function checkSignedShape(signed: SignedHttpRequest, label: string): void {
+  const input = signed.headers["signature-input"];
+  const signature = signed.headers["signature"];
+  if (typeof input !== "string" || typeof signature !== "string")
+    throw new Error(
+      `benchmark self-check failed (${label}): signRequest output is missing a signature header`,
+    );
+  if (input !== SIGNREQ_EXPECTED_INPUT)
+    throw new Error(
+      `benchmark self-check failed (${label}): signature-input ${JSON.stringify(input)} ` +
+        `(expected ${JSON.stringify(SIGNREQ_EXPECTED_INPUT)})`,
+    );
+  const labels = listSignatureLabels(input);
+  if (labels.length !== 1 || labels[0] !== SIGNREQ_EXPECTED_LABEL)
+    throw new Error(
+      `benchmark self-check failed (${label}): labels ${JSON.stringify(labels)} ` +
+        `(expected ["${SIGNREQ_EXPECTED_LABEL}"])`,
+    );
+  if (signed.headers["content-digest"] !== BASE_REQUEST.headers["content-digest"])
+    throw new Error(
+      `benchmark self-check failed (${label}): content-digest diverged from the pinned fixture digest`,
+    );
+  const m = /^sig1=:([A-Za-z0-9+/=]+):$/.exec(signature);
+  if (m === null || Buffer.from(m[1], "base64").length !== 64)
+    throw new Error(
+      `benchmark self-check failed (${label}): signature is not a single 64-byte ed25519 member`,
+    );
+}
+
+/**
+ * Exhaustive outside-timing assertion for the signRequest
+ * fixture: a fresh signed request passes the shape checks, is
+ * verified by `verifyRequest` with the pinned identity (label /
+ * keyid / alg), and the same request with its body tampered by
+ * one byte (amount 100 -> 101, the demo/test tamper shape) is
+ * rejected with the pinned SIGNREQ_TAMPERED_CODE.
+ */
+function assertSignRequestFixture(
+  fx: ReturnType<typeof buildSignRequestFixture>,
+): void {
+  const signed = signRequest(fixture, fx.signOpts);
+  checkSignedShape(signed, "outside timing");
+  const verified = verifyRequest(signed, fx.verifyOpts);
+  if (
+    !verified.ok ||
+    verified.label !== SIGNREQ_EXPECTED_LABEL ||
+    verified.keyId !== "bench-key" ||
+    verified.alg !== "ed25519"
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyRequest(signRequest) gave ${JSON.stringify(verified)}`,
+    );
+  const tampered: SignedHttpRequest = { ...signed, body: SIGNREQ_TAMPERED_BODY };
+  const rejected = verifyRequest(tampered, fx.verifyOpts);
+  if (rejected.ok || rejected.code !== SIGNREQ_TAMPERED_CODE)
+    throw new Error(
+      `benchmark self-check failed: tampered signRequest output gave ${JSON.stringify(rejected)} ` +
+        `(expected code ${SIGNREQ_TAMPERED_CODE})`,
+    );
+}
+
+/**
+ * `signRequest` end-to-end steady state: one measured call is
+ * one complete signing of the shared fixture — signature-base
+ * construction, the ed25519 cryptography and the
+ * `signature-input` / `signature` header serialization — the
+ * total a signer pays per request, isolated as its own checked
+ * row. The per-algorithm scenario rows at the top of the bench
+ * also time `signRequest`, but they discard the output
+ * unchecked; here every measured pass re-pins the full output
+ * shape (see checkSignedShape), and the verify / tamper
+ * assertions run exhaustively outside timing (in the
+ * PEM-round-trip row's style, so the measured number stays the
+ * sign cost alone, not a sign+verify pair). Zero network, the
+ * only randomness is the one key pair generated outside timing,
+ * no wall-clock assertions, no key bytes printed.
+ */
+function benchmarkSignRequest(): number {
+  const fx = buildSignRequestFixture();
+  assertSignRequestFixture(fx);
+  return measure(() => {
+    const signed = signRequest(fixture, fx.signOpts);
+    checkSignedShape(signed, "measured pass");
   }, ITERATIONS);
 }
 
@@ -3075,6 +3250,11 @@ results.push({
   alg: "buildSignatureBase (4 components)",
   op: "build",
   ops: benchmarkBuildSignatureBase(),
+});
+results.push({
+  alg: "signRequest (ed25519, end-to-end)",
+  op: "sign",
+  ops: benchmarkSignRequest(),
 });
 results.push({
   alg: "listSignatureLabels (2 labels)",
