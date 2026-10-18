@@ -11,6 +11,7 @@ import {
   generateEd25519KeyPair,
   generateP256KeyPair,
   generateRsaPssKeyPair,
+  ReplayCache,
   signRequest,
   verifyRequest,
 } from "../src/index.js";
@@ -69,6 +70,12 @@ import {
   DEMO_SIGNATURE_LABELS,
   DEMO_REPLAY_CACHE_MAX_ENTRIES,
   DEMO_REPLAY_CACHE_TTL_SEC,
+  DEMO_REPLAY_SNAPSHOT_CODE,
+  DEMO_REPLAY_SNAPSHOT_ENTRIES,
+  DEMO_REPLAY_SNAPSHOT_FRESH_NONCE,
+  DEMO_REPLAY_SNAPSHOT_NONCE,
+  DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE,
+  DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE,
   DEMO_SHA256_DIGEST_ALG,
   DEMO_TAMPERED_BODY,
   DEMO_TAMPERED_CONTENT_TYPE,
@@ -1734,7 +1741,7 @@ test("demo Content-Digest algorithm guard segment accepts the two emittable algo
   });
 });
 
-test("demo lines contain the Content-Digest algorithm guard segment (accepted and rejected lines, closing the demo)", () => {
+test("demo lines contain the Content-Digest algorithm guard segment (accepted and rejected lines, followed by the ReplayCache snapshot segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
@@ -1742,8 +1749,9 @@ test("demo lines contain the Content-Digest algorithm guard segment (accepted an
     out,
     /Content-Digest algorithm guard: assertContentDigestAlg enforces the emittable digest set/,
   );
-  // The digest guard block closes the demo and sits after
-  // the ECDSA P-256 signing segment.
+  // The digest guard block sits after the ECDSA P-256
+  // signing segment and is followed by the ReplayCache
+  // snapshot persistence segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Content-Digest algorithm guard:"),
   );
@@ -1751,6 +1759,10 @@ test("demo lines contain the Content-Digest algorithm guard segment (accepted an
     l.startsWith("ECDSA P-256 signing:"),
   );
   assert.ok(p256Idx !== -1 && headerIdx !== -1 && p256Idx < headerIdx);
+  const snapshotIdx = lines.findIndex((l) =>
+    l.startsWith("ReplayCache snapshot persistence:"),
+  );
+  assert.ok(snapshotIdx !== -1 && headerIdx < snapshotIdx);
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 11), [
     "Content-Digest algorithm guard: assertContentDigestAlg enforces the emittable digest set before any hashing runs — only \"sha-512\" and \"sha-256\" pass, every other value is rejected as a caller configuration error",
     "assertContentDigestAlg for sha-512: OK (emittable digest algorithm)",
@@ -1764,13 +1776,6 @@ test("demo lines contain the Content-Digest algorithm guard segment (accepted an
     `assertContentDigestAlg for undefined: FAILED (${DEMO_DIGEST_GUARD_ERRORS[6]})`,
     `assertContentDigestAlg for null: FAILED (${DEMO_DIGEST_GUARD_ERRORS[7]})`,
   ]);
-  // The guard segment closes the demo: its last rejection
-  // line is final.
-  assert.equal(
-    lines[lines.length - 1],
-    `assertContentDigestAlg for null: FAILED (${DEMO_DIGEST_GUARD_ERRORS[7]})`,
-  );
-
   // Deterministic double run: the guard segment's lines are
   // pinned constants, identical between runs.
   const again = runDemo();
@@ -1780,5 +1785,128 @@ test("demo lines contain the Content-Digest algorithm guard segment (accepted an
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 11),
     lines.slice(headerIdx, headerIdx + 11),
+  );
+});
+
+test("demo ReplayCache snapshot segment exports the seen nonce and the restored cache still rejects it", () => {
+  const {
+    replaySnapshotSigned,
+    replaySnapshotFirstVerification,
+    replaySnapshotExport,
+    replaySnapshotReplayVerification,
+    replaySnapshotFreshVerification,
+    replaySnapshotRestoredSize,
+    replaySnapshotOriginalSize,
+  } = runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_REPLAY_SNAPSHOT_* and cross-checked against
+  // test/replaySnapshot.test.ts (snapshot round-trip shape
+  // and the end-to-end NONCE_REPLAY code). The test pins
+  // the literals again here so a drift in either place fails.
+  assert.equal(DEMO_REPLAY_SNAPSHOT_NONCE, "demo-nonce-replay-snapshot-001");
+  assert.equal(
+    DEMO_REPLAY_SNAPSHOT_FRESH_NONCE,
+    "demo-nonce-replay-snapshot-002",
+  );
+  assert.deepEqual(DEMO_REPLAY_SNAPSHOT_ENTRIES, [
+    [DEMO_REPLAY_SNAPSHOT_NONCE, DEMO_CREATED + 60],
+  ]);
+  assert.equal(DEMO_REPLAY_SNAPSHOT_CODE, "NONCE_REPLAY");
+  assert.equal(DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE, 2);
+  assert.equal(DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE, 1);
+
+  assert.ok(
+    replaySnapshotSigned.headers["signature-input"].includes(
+      `nonce="${DEMO_REPLAY_SNAPSHOT_NONCE}"`,
+    ),
+  );
+  assert.equal(replaySnapshotFirstVerification.ok, true);
+  assert.equal(
+    replaySnapshotFirstVerification.nonce,
+    DEMO_REPLAY_SNAPSHOT_NONCE,
+  );
+
+  // The exported snapshot is exactly the pinned v1 shape:
+  // one entry, the segment nonce at the fixed verify instant.
+  assert.deepEqual(replaySnapshotExport, {
+    v: 1,
+    entries: [...DEMO_REPLAY_SNAPSHOT_ENTRIES],
+  });
+
+  // After the "restart" the same request is a replay, while
+  // a fresh nonce still verifies against the restored cache.
+  assert.equal(replaySnapshotReplayVerification.ok, false);
+  assert.equal(
+    replaySnapshotReplayVerification.code,
+    DEMO_REPLAY_SNAPSHOT_CODE,
+  );
+  assert.equal(replaySnapshotFreshVerification.ok, true);
+  assert.equal(
+    replaySnapshotFreshVerification.nonce,
+    DEMO_REPLAY_SNAPSHOT_FRESH_NONCE,
+  );
+
+  // The fresh record landed only in the restored cache:
+  // restored holds both nonces, the original still holds
+  // only the exported one.
+  assert.equal(replaySnapshotRestoredSize, DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE);
+  assert.equal(replaySnapshotOriginalSize, DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE);
+
+  // Cross-check against the library called directly: a cache
+  // restored from the demo's exported snapshot (through the
+  // JSON persistence path) rejects the exported nonce and
+  // records a fresh one — the replaySnapshot suite's shape.
+  const restored = ReplayCache.restore(
+    JSON.parse(JSON.stringify(replaySnapshotExport)),
+    {
+      maxEntries: DEMO_REPLAY_CACHE_MAX_ENTRIES,
+      ttlSec: DEMO_REPLAY_CACHE_TTL_SEC,
+      now: () => DEMO_CREATED + 60,
+    },
+  );
+  assert.equal(restored.check(DEMO_REPLAY_SNAPSHOT_NONCE), true);
+  assert.equal(restored.check(DEMO_REPLAY_SNAPSHOT_FRESH_NONCE), false);
+});
+
+test("demo lines contain the ReplayCache snapshot segment (export, restored replay rejection and detached original, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /ReplayCache snapshot persistence: exportSnapshot carries/);
+  // The snapshot block closes the demo and sits after the
+  // Content-Digest algorithm guard segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("ReplayCache snapshot persistence:"),
+  );
+  const digestIdx = lines.findIndex((l) =>
+    l.startsWith("Content-Digest algorithm guard:"),
+  );
+  assert.ok(digestIdx !== -1 && headerIdx !== -1 && digestIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), [
+    "ReplayCache snapshot persistence: exportSnapshot carries the seen nonces across a restart — ReplayCache.restore rebuilds the cache at startup, so a nonce seen before the restart is still a replay after it",
+    `Replay snapshot, first verification of nonce "${DEMO_REPLAY_SNAPSHOT_NONCE}": OK (recorded in the segment's ReplayCache)`,
+    `Exported ReplayCache snapshot: 1 entry in a v1 snapshot (nonce "${DEMO_REPLAY_SNAPSHOT_NONCE}", first seen at ${DEMO_CREATED + 60})`,
+    `Replay snapshot, same request against the restored cache: FAILED (code NONCE_REPLAY: nonce replay detected: "${DEMO_REPLAY_SNAPSHOT_NONCE}" was already seen)`,
+    `Replay snapshot, new request with nonce "${DEMO_REPLAY_SNAPSHOT_FRESH_NONCE}" against the restored cache: OK (a fresh nonce is not a replay — recorded only in the restored cache)`,
+    `Original ReplayCache after the restored cache recorded the fresh nonce: 1 entry (restored cache: 2 entries — the restore is detached, the original is unaffected)`,
+  ]);
+  // The snapshot segment closes the demo: its detached-original
+  // line is final.
+  assert.equal(
+    lines[lines.length - 1],
+    `Original ReplayCache after the restored cache recorded the fresh nonce: 1 entry (restored cache: 2 entries — the restore is detached, the original is unaffected)`,
+  );
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key or signature bytes, so they are pinned
+  // constants, identical between runs.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("ReplayCache snapshot persistence:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 6),
+    lines.slice(headerIdx, headerIdx + 6),
   );
 });

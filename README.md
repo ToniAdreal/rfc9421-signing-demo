@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 698 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 700 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -156,7 +156,21 @@ spelling, and the non-string values `undefined` / `null`)
 is printed rejected with the guard's exact messages,
 asserted outside the printed lines against hand-pinned
 expectations; each rejected value is printed only as a
-fixed printable label:
+fixed printable label. The demo closes with a ReplayCache
+snapshot persistence segment: a request signed with a
+fixed nonce verifies against a `ReplayCache` on the
+demo's fixed clock, the cache is exported with
+`exportSnapshot()` (the printed line carries the entry
+count, the fixed nonce and its first-seen instant), a
+new cache is rebuilt with `ReplayCache.restore()`, and
+the same request verified against the restored cache is
+printed rejected with `NONCE_REPLAY` — the restart does
+not reopen the replay window — while a fresh-nonce
+request verifies against the restored cache and is
+recorded only there; outside the printed lines the demo
+asserts the restored rejection code and the exported
+snapshot against hand-pinned expectations and that the
+original cache still holds only the exported entry:
 
 ```bash
 npm run demo
@@ -1705,7 +1719,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 698 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 700 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

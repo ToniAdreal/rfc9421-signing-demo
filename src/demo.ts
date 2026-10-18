@@ -219,6 +219,27 @@
  * pin). Each rejected value is printed only as a fixed
  * printable label, so the segment is byte-identical
  * between runs.
+ * The demo closes with a ReplayCache snapshot persistence
+ * segment: the replay segment above shows a `ReplayCache`
+ * rejecting a second presentation inside one process, but
+ * never showed the cache's one cross-restart ability. A
+ * request signed with a fixed nonce verifies against a
+ * `ReplayCache` on the demo's fixed clock, the cache is
+ * exported with `exportSnapshot()` (only the entry count,
+ * the fixed nonce and its first-seen instant are printed),
+ * and a new cache is rebuilt with `ReplayCache.restore()` —
+ * the "restart". The same request verified against the
+ * restored cache is rejected with `NONCE_REPLAY`, and a
+ * fresh-nonce request verifies against the restored cache
+ * and is recorded only there. Outside the printed lines
+ * the demo asserts the restored rejection code and the
+ * exported snapshot equal the hand-pinned expectations
+ * below (the same snapshot shape and code
+ * `test/replaySnapshot.test.ts` pins for its round-trip
+ * case) and that the original cache still holds only the
+ * exported entry after the restored cache records the
+ * fresh nonce. Every input is a fixed demo constant, so
+ * the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -288,6 +309,7 @@ import {
   type Ed25519PublicJwk,
   type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
+  type ReplayCacheSnapshot,
   type RequestLike,
   type SignatureParams,
   type SignedHttpRequest,
@@ -833,6 +855,53 @@ export const DEMO_DIGEST_GUARD_ERRORS: ReadonlyArray<string> = [
   'contentDigest: "alg" must be "sha-512" or "sha-256", got null',
 ];
 
+/**
+ * Nonce of the closing ReplayCache snapshot segment's first
+ * signed request: it verifies against the segment's own
+ * cache and is the one entry the exported snapshot carries.
+ */
+export const DEMO_REPLAY_SNAPSHOT_NONCE = "demo-nonce-replay-snapshot-001";
+/**
+ * Nonce of the closing ReplayCache snapshot segment's second
+ * signed request: it verifies against the *restored* cache
+ * only, so the original cache must never record it — the
+ * detached-restore probe the segment asserts outside the
+ * printed lines.
+ */
+export const DEMO_REPLAY_SNAPSHOT_FRESH_NONCE =
+  "demo-nonce-replay-snapshot-002";
+/**
+ * Hand-pinned snapshot entries the closing segment exports
+ * after its first verification: exactly one entry — the
+ * segment's nonce first seen at the demo's fixed verify
+ * instant (`DEMO_CREATED + 60`, the instant `verifyRequest`
+ * passes to the cache and the cache's own pinned clock) —
+ * in a `v: 1` snapshot, the same entry shape
+ * `test/replaySnapshot.test.ts` pins for its round-trip
+ * case. Written out here, never derived from the cache the
+ * demo is checking.
+ */
+export const DEMO_REPLAY_SNAPSHOT_ENTRIES: ReadonlyArray<
+  readonly [string, number]
+> = [[DEMO_REPLAY_SNAPSHOT_NONCE, DEMO_CREATED + 60]];
+/**
+ * Hand-pinned failure code of the closing segment's restored
+ * verification: the nonce was seen before the snapshot was
+ * exported, so the restored cache must reject the same
+ * request with `NONCE_REPLAY` — the same code
+ * `test/replaySnapshot.test.ts` pins for its end-to-end
+ * restored verification.
+ */
+export const DEMO_REPLAY_SNAPSHOT_CODE: VerifyFailureCode = "NONCE_REPLAY";
+/**
+ * Hand-pinned entry counts of the closing segment: the
+ * restored cache holds 2 entries after it also records the
+ * fresh nonce, while the original cache still holds only
+ * the 1 exported entry.
+ */
+export const DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE = 2;
+export const DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE = 1;
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1179,6 +1248,48 @@ export interface DemoResult {
     alg: unknown;
     error: string;
   }>;
+  /**
+   * The request signed in the closing ReplayCache snapshot
+   * segment with `DEMO_REPLAY_SNAPSHOT_NONCE` under the main
+   * line's key and keyid.
+   */
+  replaySnapshotSigned: SignedHttpRequest;
+  /**
+   * Verification of `replaySnapshotSigned` against the
+   * segment's own cache (ok — the nonce is recorded).
+   */
+  replaySnapshotFirstVerification: VerifyResult;
+  /**
+   * The v1 snapshot exported from the segment's cache after
+   * the first verification (exactly the hand-pinned
+   * `DEMO_REPLAY_SNAPSHOT_ENTRIES`).
+   */
+  replaySnapshotExport: ReplayCacheSnapshot;
+  /**
+   * Verification of the same `replaySnapshotSigned` request
+   * against the cache restored from `replaySnapshotExport`:
+   * rejected with `DEMO_REPLAY_SNAPSHOT_CODE`
+   * (`NONCE_REPLAY`) — the restart did not reopen the window.
+   */
+  replaySnapshotReplayVerification: VerifyResult;
+  /**
+   * Verification of a request signed with
+   * `DEMO_REPLAY_SNAPSHOT_FRESH_NONCE` against the restored
+   * cache (ok — recorded only in the restored cache).
+   */
+  replaySnapshotFreshVerification: VerifyResult;
+  /**
+   * Entries in the restored cache after the fresh
+   * verification (`DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE`: 2).
+   */
+  replaySnapshotRestoredSize: number;
+  /**
+   * Entries in the original cache after the restored cache
+   * recorded the fresh nonce
+   * (`DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE`: 1 — the restore
+   * is detached, the original is unaffected).
+   */
+  replaySnapshotOriginalSize: number;
   lines: string[];
 }
 
@@ -2148,6 +2259,133 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // ReplayCache snapshot persistence segment: the replay
+  // segment above keeps its cache inside one process, so a
+  // restart would reopen its replay window — the one
+  // cross-restart ability `ReplayCache` has was never
+  // shown. A request signed with the segment's fixed nonce
+  // verifies against the segment's own cache (same capacity
+  // / TTL constants and pinned clock as the replay segment),
+  // the cache is exported with `exportSnapshot()`, and a new
+  // cache is rebuilt with `ReplayCache.restore()` — the
+  // "restart". The same request verified against the
+  // restored cache must be rejected with `NONCE_REPLAY`,
+  // and a fresh-nonce request verifies against the restored
+  // cache and is recorded only there. Outside the printed
+  // lines the demo asserts the first verification passed,
+  // the exported snapshot equals the hand-pinned
+  // DEMO_REPLAY_SNAPSHOT_ENTRIES, the restored rejection
+  // code equals the hand-pinned DEMO_REPLAY_SNAPSHOT_CODE
+  // (the same snapshot shape and code
+  // `test/replaySnapshot.test.ts` pins for its round-trip
+  // case), and the original cache still holds only the
+  // exported entry after the restored cache records the
+  // fresh nonce — probed through a second, non-mutating
+  // `exportSnapshot()` of the original. Only the entry
+  // count, the fixed nonces and the first-seen instant are
+  // printed, never key or signature bytes.
+  const replaySnapshotCacheOptions = {
+    maxEntries: DEMO_REPLAY_CACHE_MAX_ENTRIES,
+    ttlSec: DEMO_REPLAY_CACHE_TTL_SEC,
+    now: () => DEMO_CREATED + 60,
+  };
+  const replaySnapshotCache = new ReplayCache(replaySnapshotCacheOptions);
+  const replaySnapshotSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_REPLAY_SNAPSHOT_NONCE,
+    },
+  );
+  const replaySnapshotFirstVerification = verifyRequest(replaySnapshotSigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    replayCache: replaySnapshotCache,
+  });
+  const replaySnapshotExport = replaySnapshotCache.exportSnapshot();
+  const replaySnapshotRestored = ReplayCache.restore(
+    replaySnapshotExport,
+    replaySnapshotCacheOptions,
+  );
+  const replaySnapshotReplayVerification = verifyRequest(replaySnapshotSigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    replayCache: replaySnapshotRestored,
+  });
+  const replaySnapshotFreshSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_REPLAY_SNAPSHOT_FRESH_NONCE,
+    },
+  );
+  const replaySnapshotFreshVerification = verifyRequest(
+    replaySnapshotFreshSigned,
+    {
+      key: publicKey,
+      now: DEMO_CREATED + 60,
+      replayCache: replaySnapshotRestored,
+    },
+  );
+  const replaySnapshotRestoredSize = replaySnapshotRestored.size;
+  const replaySnapshotOriginalExportAfter =
+    replaySnapshotCache.exportSnapshot();
+  const replaySnapshotOriginalSize = replaySnapshotCache.size;
+  const snapshotEntriesMatch = (
+    entries: ReplayCacheSnapshot["entries"],
+  ): boolean =>
+    entries.length === DEMO_REPLAY_SNAPSHOT_ENTRIES.length &&
+    entries.every(
+      (entry, i) =>
+        entry[0] === DEMO_REPLAY_SNAPSHOT_ENTRIES[i][0] &&
+        entry[1] === DEMO_REPLAY_SNAPSHOT_ENTRIES[i][1],
+    );
+  if (
+    !replaySnapshotFirstVerification.ok ||
+    replaySnapshotFirstVerification.nonce !== DEMO_REPLAY_SNAPSHOT_NONCE ||
+    replaySnapshotExport.v !== 1 ||
+    !snapshotEntriesMatch(replaySnapshotExport.entries) ||
+    replaySnapshotReplayVerification.ok ||
+    replaySnapshotReplayVerification.code !== DEMO_REPLAY_SNAPSHOT_CODE ||
+    !replaySnapshotFreshVerification.ok ||
+    replaySnapshotFreshVerification.nonce !==
+      DEMO_REPLAY_SNAPSHOT_FRESH_NONCE ||
+    replaySnapshotRestoredSize !== DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE ||
+    replaySnapshotOriginalSize !== DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE ||
+    !snapshotEntriesMatch(replaySnapshotOriginalExportAfter.entries)
+  ) {
+    throw new Error(
+      `demo fixture broken: ReplayCache snapshot segment gave ` +
+        `first=${replaySnapshotFirstVerification.ok}/${replaySnapshotFirstVerification.nonce}, ` +
+        `export=${JSON.stringify(replaySnapshotExport)}, ` +
+        `restored=${replaySnapshotReplayVerification.ok}/${replaySnapshotReplayVerification.code}, ` +
+        `fresh=${replaySnapshotFreshVerification.ok}/${replaySnapshotFreshVerification.nonce}, ` +
+        `sizes restored/original=${replaySnapshotRestoredSize}/${replaySnapshotOriginalSize}, ` +
+        `original export after=${JSON.stringify(replaySnapshotOriginalExportAfter)}, ` +
+        `instead of the pinned first=true/${DEMO_REPLAY_SNAPSHOT_NONCE}, ` +
+        `export=${JSON.stringify({ v: 1, entries: DEMO_REPLAY_SNAPSHOT_ENTRIES })}, ` +
+        `restored=false/${DEMO_REPLAY_SNAPSHOT_CODE}, ` +
+        `fresh=true/${DEMO_REPLAY_SNAPSHOT_FRESH_NONCE}, ` +
+        `sizes restored/original=${DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE}/${DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -2320,6 +2558,19 @@ export function runDemo(): DemoResult {
       (r) =>
         `assertContentDigestAlg for ${r.label}: FAILED (${r.error})`,
     ),
+    "",
+    "ReplayCache snapshot persistence: exportSnapshot carries the seen nonces across a restart — ReplayCache.restore rebuilds the cache at startup, so a nonce seen before the restart is still a replay after it",
+    replaySnapshotFirstVerification.ok
+      ? `Replay snapshot, first verification of nonce "${DEMO_REPLAY_SNAPSHOT_NONCE}": OK (recorded in the segment's ReplayCache)`
+      : `Replay snapshot, first verification of nonce "${DEMO_REPLAY_SNAPSHOT_NONCE}": FAILED (code ${replaySnapshotFirstVerification.code}: ${replaySnapshotFirstVerification.reason})`,
+    `Exported ReplayCache snapshot: ${replaySnapshotExport.entries.length} entry in a v${replaySnapshotExport.v} snapshot (nonce "${DEMO_REPLAY_SNAPSHOT_NONCE}", first seen at ${DEMO_CREATED + 60})`,
+    replaySnapshotReplayVerification.ok
+      ? "Replay snapshot, same request against the restored cache: OK (unexpected — the restart reopened the replay window)"
+      : `Replay snapshot, same request against the restored cache: FAILED (code ${replaySnapshotReplayVerification.code}: ${replaySnapshotReplayVerification.reason})`,
+    replaySnapshotFreshVerification.ok
+      ? `Replay snapshot, new request with nonce "${DEMO_REPLAY_SNAPSHOT_FRESH_NONCE}" against the restored cache: OK (a fresh nonce is not a replay — recorded only in the restored cache)`
+      : `Replay snapshot, new request with nonce "${DEMO_REPLAY_SNAPSHOT_FRESH_NONCE}" against the restored cache: FAILED (code ${replaySnapshotFreshVerification.code}: ${replaySnapshotFreshVerification.reason})`,
+    `Original ReplayCache after the restored cache recorded the fresh nonce: ${replaySnapshotOriginalSize} entry (restored cache: ${replaySnapshotRestoredSize} entries — the restore is detached, the original is unaffected)`,
   ];
 
   return {
@@ -2384,6 +2635,13 @@ export function runDemo(): DemoResult {
     p256TamperedVerification,
     digestGuardAccepted,
     digestGuardRejections,
+    replaySnapshotSigned,
+    replaySnapshotFirstVerification,
+    replaySnapshotExport,
+    replaySnapshotReplayVerification,
+    replaySnapshotFreshVerification,
+    replaySnapshotRestoredSize,
+    replaySnapshotOriginalSize,
     lines,
   };
 }

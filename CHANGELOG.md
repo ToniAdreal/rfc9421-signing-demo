@@ -12,6 +12,37 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The CLI demo (`npm run demo`) now closes with a
+  ReplayCache snapshot persistence segment: a request
+  signed with a fixed nonce verifies against a
+  `ReplayCache` on the demo's fixed clock, the cache is
+  exported with `exportSnapshot()`, and a new cache is
+  rebuilt with `ReplayCache.restore()` — the restart.
+  The same request verified against the restored cache
+  is rejected with `NONCE_REPLAY`, and a fresh-nonce
+  request verifies against the restored cache and is
+  recorded only there. The demo's earlier replay segment
+  shows the cache rejecting a second presentation inside
+  one process, and its JWKS segment restores a *key*
+  store from a snapshot, but the replay cache's own
+  cross-restart persistence — the only way its seen
+  nonces survive a restart — was invisible to demo
+  readers. Outside the printed lines the demo asserts
+  the exported snapshot equals the hand-pinned v1 entry
+  (the segment nonce at the fixed verify instant), the
+  restored rejection code equals the hand-pinned
+  `NONCE_REPLAY` expectation (the same snapshot shape
+  and code `test/replaySnapshot.test.ts` pins for its
+  round-trip case), and the original cache still holds
+  only the exported entry after the restored cache
+  records the fresh nonce. `DemoResult` carries the
+  signed request, both caches' verifications, the
+  exported snapshot and both entry counts, and the demo
+  tests pin the fields and the printed lines. Only the
+  entry count, the fixed nonces and the first-seen
+  instant are printed, the segment performs zero network
+  I/O, and its printed lines are identical between runs.
+
+- The CLI demo (`npm run demo`) now closes with a
   Content-Digest algorithm guard segment: fixed values are
   run through `assertContentDigestAlg` — the two emittable
   algorithms (`sha-512`, the default, and `sha-256`) pass,
