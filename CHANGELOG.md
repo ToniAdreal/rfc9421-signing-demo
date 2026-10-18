@@ -12,6 +12,33 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The CLI demo (`npm run demo`) now closes with a
+  multi-value header combination segment: a fixed request
+  carrying one field twice (a padded two-element array) is
+  combined with `joinHeaderValues` and the combination is
+  printed — each element trimmed, the elements joined with
+  ", " per RFC 9421 §2.5, which is also the wire value the
+  signer emits for the field. A request signed over the
+  repeated field is printed verifying, and the same request
+  with the field replaced by the wrong combination (a bare
+  comma join, the space after the comma dropped) is printed
+  rejected with `SIGNATURE_MISMATCH`, because the verifier
+  rebuilds a different signature base from the wrongly
+  joined value. Every earlier segment consumed the
+  combination only inside sign/verify or the Node adapter,
+  so the combination rule itself — the multi-value
+  interop pitfall — was invisible to demo readers. Outside
+  the printed lines the demo asserts the combination
+  character for character, the signer's emitted wire
+  value, the verified identity and the rejection code
+  equal the hand-pinned expectations (the same combination
+  shape and code
+  `test/multiValueHeaderWhitespace.test.ts` pins for its
+  own padded fixture). `DemoResult` carries the
+  combination, the signed request and both verification
+  results, and the demo tests pin the fields and the
+  printed lines. Every input is a fixed demo constant, so
+  the segment is byte-identical between runs.
+- The CLI demo (`npm run demo`) now closes with a
   component-resolution segment: each covered component of
   the main signed request is run through `resolveComponent`
   — the per-component resolver `buildSignatureBase` applies

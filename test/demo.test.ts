@@ -14,6 +14,7 @@ import {
   generateP521KeyPair,
   generateRsaPssKeyPair,
   getHeaderRaw,
+  joinHeaderValues,
   parseSignatureInput,
   ReplayCache,
   resolveComponent,
@@ -55,6 +56,14 @@ import {
   DEMO_RSA_GUARD_ERRORS,
   DEMO_RSA_GUARD_REJECTED,
   DEMO_JWK_TAMPERED_CODE,
+  DEMO_JOIN_COVERED_COMPONENTS,
+  DEMO_JOIN_EXPECTED,
+  DEMO_JOIN_HEADER,
+  DEMO_JOIN_LABEL,
+  DEMO_JOIN_NONCE,
+  DEMO_JOIN_VALUES,
+  DEMO_JOIN_WRONG_CODE,
+  DEMO_JOIN_WRONG_VALUE,
   DEMO_KEY_ID,
   DEMO_MAIN_DIGEST_ALG,
   DEMO_MEMOIZED_CALLS_AFTER_REPEAT,
@@ -2355,13 +2364,14 @@ test("demo component-resolution segment resolves each covered component and reje
   }
 });
 
-test("demo lines contain the component-resolution segment (per-component values and illegal-component rejection, closing the demo)", () => {
+test("demo lines contain the component-resolution segment (per-component values and illegal-component rejection, followed by the multi-value header combination segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Component resolution: resolveComponent turns/);
   // The resolution block sits after the ECDSA P-521 signing
-  // segment and closes the demo.
+  // segment and is followed by the multi-value header
+  // combination segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Component resolution:"),
   );
@@ -2376,12 +2386,12 @@ test("demo lines contain the component-resolution segment (per-component values 
     ),
     `Resolve "${DEMO_RESOLVE_ILLEGAL_COMPONENT}": FAILED (${DEMO_RESOLVE_ILLEGAL_ERROR})`,
   ]);
-  // The resolution segment closes the demo: its
-  // illegal-component rejection line is final.
-  assert.equal(
-    lines[lines.length - 1],
-    `Resolve "${DEMO_RESOLVE_ILLEGAL_COMPONENT}": FAILED (${DEMO_RESOLVE_ILLEGAL_ERROR})`,
+  // The multi-value header combination segment follows
+  // the resolution segment.
+  const joinIdx = lines.findIndex((l) =>
+    l.startsWith("Multi-value header combination:"),
   );
+  assert.ok(headerIdx !== -1 && joinIdx !== -1 && headerIdx < joinIdx);
 
   // Deterministic double run: the segment's printed lines
   // are pinned constants, identical between runs.
@@ -2392,5 +2402,135 @@ test("demo lines contain the component-resolution segment (per-component values 
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 6),
     lines.slice(headerIdx, headerIdx + 6),
+  );
+});
+
+test("demo multi-value header combination segment joins the repeated field and rejects the wrong join", () => {
+  const {
+    joinedHeaderValue,
+    joinSigned,
+    joinVerification,
+    joinWrongVerification,
+  } = runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_JOIN_* and cross-checked against the multi-value
+  // suite's own pins (the padded fixture shape and the
+  // SIGNATURE_MISMATCH code for a genuinely different
+  // value in test/multiValueHeaderWhitespace.test.ts). The
+  // test pins the literals again here so a drift in either
+  // place fails.
+  assert.equal(DEMO_JOIN_HEADER, "x-foo");
+  assert.deepEqual(DEMO_JOIN_VALUES, ["  alpha ", " beta  "]);
+  assert.equal(DEMO_JOIN_EXPECTED, "alpha, beta");
+  assert.equal(DEMO_JOIN_WRONG_VALUE, "alpha,beta");
+  assert.equal(DEMO_JOIN_NONCE, "demo-nonce-join-001");
+  assert.equal(DEMO_JOIN_LABEL, "sig1");
+  assert.deepEqual(DEMO_JOIN_COVERED_COMPONENTS, [
+    "@method",
+    "@authority",
+    "@path",
+    "x-foo",
+  ]);
+  assert.equal(DEMO_JOIN_WRONG_CODE, "SIGNATURE_MISMATCH");
+
+  // The combination is exact, character for character, and
+  // the signer emits it as the field's wire value.
+  assert.equal(joinedHeaderValue, DEMO_JOIN_EXPECTED);
+  assert.equal(
+    joinSigned.headers[DEMO_JOIN_HEADER],
+    DEMO_JOIN_EXPECTED,
+  );
+  assert.equal(joinVerification.ok, true);
+  assert.equal(joinVerification.label, DEMO_JOIN_LABEL);
+  assert.equal(joinVerification.keyId, DEMO_KEY_ID);
+  assert.equal(joinVerification.alg, "ed25519");
+  assert.equal(joinVerification.nonce, DEMO_JOIN_NONCE);
+  assert.equal(joinWrongVerification.ok, false);
+  assert.equal(joinWrongVerification.code, DEMO_JOIN_WRONG_CODE);
+
+  // Cross-check against the library called directly: the
+  // helper combines the same values, a freshly signed copy
+  // of the same fixed request verifies, and the wrongly
+  // joined copy is rejected with the same code.
+  assert.equal(joinHeaderValues(DEMO_JOIN_VALUES), DEMO_JOIN_EXPECTED);
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const direct = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: {
+        "content-type": "application/json",
+        [DEMO_JOIN_HEADER]: [...DEMO_JOIN_VALUES],
+      },
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_JOIN_NONCE,
+      coveredComponents: DEMO_JOIN_COVERED_COMPONENTS,
+    },
+  );
+  assert.equal(direct.headers[DEMO_JOIN_HEADER], DEMO_JOIN_EXPECTED);
+  assert.equal(
+    verifyRequest(direct, { key: publicKey, now: DEMO_CREATED + 60 })
+      .ok,
+    true,
+  );
+  const wrong = verifyRequest(
+    {
+      ...direct,
+      headers: {
+        ...direct.headers,
+        [DEMO_JOIN_HEADER]: DEMO_JOIN_WRONG_VALUE,
+      },
+    },
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+  assert.equal(wrong.ok, false);
+  assert.equal(wrong.code, DEMO_JOIN_WRONG_CODE);
+});
+
+test("demo lines contain the multi-value header combination segment (joined value, verification and wrong-join rejection, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Multi-value header combination: joinHeaderValues combines/);
+  // The combination block sits after the
+  // component-resolution segment and closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Multi-value header combination:"),
+  );
+  const resolveIdx = lines.findIndex((l) =>
+    l.startsWith("Component resolution:"),
+  );
+  assert.ok(
+    resolveIdx !== -1 && headerIdx !== -1 && resolveIdx < headerIdx,
+  );
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "Multi-value header combination: joinHeaderValues combines a repeated field's values into the single value its signature-base line carries — each element trimmed, the elements joined with \", \" (RFC 9421 §2.5), so signer, verifier and adapters can never disagree on the bytes",
+    `Join "${DEMO_JOIN_HEADER}" values ${JSON.stringify(DEMO_JOIN_VALUES)}: ${DEMO_JOIN_EXPECTED}`,
+    `Multi-value verification: OK (label ${DEMO_JOIN_LABEL}, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${DEMO_JOIN_NONCE}")`,
+    `Multi-value verification with the wrong join "${DEMO_JOIN_WRONG_VALUE}" (space after the comma dropped): FAILED (code SIGNATURE_MISMATCH: signature mismatch)`,
+  ]);
+  // The combination segment closes the demo: its
+  // wrong-join rejection line is final.
+  assert.equal(
+    lines[lines.length - 1],
+    `Multi-value verification with the wrong join "${DEMO_JOIN_WRONG_VALUE}" (space after the comma dropped): FAILED (code SIGNATURE_MISMATCH: signature mismatch)`,
+  );
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key or signature bytes, so they are pinned
+  // constants, identical between runs.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Multi-value header combination:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
   );
 });

@@ -327,6 +327,25 @@
  * carry and the component suites pin for their own inputs).
  * Every input is a fixed demo constant, so the segment is
  * byte-identical between runs.
+ * The demo closes with a multi-value header combination
+ * segment: a fixed request carries one field twice, as a
+ * padded two-element array — the shape a receiver gets when
+ * a sender or an intermediary emitted the field on two
+ * lines. The values are combined with `joinHeaderValues`
+ * and the combination is printed; a request signed over
+ * the repeated field verifies, and the same request with
+ * the field replaced by the hand-pinned wrong combination
+ * (the elements joined with a bare comma, the space after
+ * the comma dropped) is rejected with
+ * `SIGNATURE_MISMATCH`, because the verifier rebuilds a
+ * different signature base from the wrongly joined value.
+ * Outside the printed lines the demo asserts the
+ * combination, the signer's emitted wire value and the
+ * verified identity equal the hand-pinned expectations
+ * below (the same combination and code
+ * `test/multiValueHeaderWhitespace.test.ts` pins for its
+ * own padded fixture). Every input is a fixed demo
+ * constant, so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -385,6 +404,7 @@ import {
   isVerifyError,
   jwkThumbprint,
   JwksKeyStore,
+  joinHeaderValues,
   listSignatureLabels,
   memoizeKeyResolver,
   parseSignatureInput,
@@ -1154,6 +1174,69 @@ export const DEMO_RESOLVE_ILLEGAL_COMPONENT = "content-digest;zz";
 export const DEMO_RESOLVE_ILLEGAL_ERROR =
   'unsupported component parameter ";zz" on component "content-digest": only ";req", ";bs", ";sf", ";key", ";tr" and ";name" are supported';
 
+/**
+ * Header field of the closing multi-value segment: the field
+ * appears twice on the segment's request, as the array
+ * `DEMO_JOIN_VALUES` — the shape a receiver gets when a
+ * sender or an intermediary emitted the field on two lines.
+ */
+export const DEMO_JOIN_HEADER = "x-foo";
+/**
+ * Fixed values of the closing multi-value segment's repeated
+ * field, padding included on purpose: each element carries
+ * surrounding whitespace a hand-rolled join would leak into
+ * the signature base. The same padded shape
+ * `test/multiValueHeaderWhitespace.test.ts` pins for its
+ * round-trip cases.
+ */
+export const DEMO_JOIN_VALUES: string[] = ["  alpha ", " beta  "];
+/**
+ * Hand-pinned combination of `DEMO_JOIN_VALUES`: every
+ * element trimmed, the elements joined with ", " — the
+ * RFC 9421 §2.5 combination `joinHeaderValues` performs and
+ * the signer emits as the field's wire value. Written out
+ * here, never derived from the helper under test.
+ */
+export const DEMO_JOIN_EXPECTED = "alpha, beta";
+/**
+ * Hand-pinned wrong combination of the same values: the
+ * elements trimmed but joined with a bare comma, the space
+ * after the comma dropped — the classic hand-rolled-join
+ * mistake. A request carrying this value rebuilds a
+ * different signature base than the signer signed, so
+ * verification must reject it.
+ */
+export const DEMO_JOIN_WRONG_VALUE = "alpha,beta";
+/** Nonce of the closing multi-value segment's signed request. */
+export const DEMO_JOIN_NONCE = "demo-nonce-join-001";
+/** Label of the closing multi-value segment's signature. */
+export const DEMO_JOIN_LABEL = "sig1";
+/**
+ * Covered components of the closing multi-value segment's
+ * signature: the request target plus the repeated field
+ * itself — the field is covered deliberately, because an
+ * uncovered repeated field's combination would never be
+ * checked at all. The segment's request carries no body,
+ * so no `content-digest` is covered (the same covered set
+ * `test/multiValueHeaderWhitespace.test.ts` signs with).
+ */
+export const DEMO_JOIN_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+  DEMO_JOIN_HEADER,
+];
+/**
+ * Hand-pinned rejection code of the closing multi-value
+ * segment: verification of the wrongly joined request fails
+ * with `SIGNATURE_MISMATCH` — the rebuilt base's line for
+ * the repeated field differs from the signed one (the same
+ * code the multi-value suite pins for its
+ * genuinely-different-value case).
+ */
+export const DEMO_JOIN_WRONG_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1613,6 +1696,31 @@ export interface DemoResult {
    * against outside the printed lines).
    */
   resolveIllegalComponentError: string;
+  /**
+   * The closing multi-value segment's combination:
+   * `joinHeaderValues(DEMO_JOIN_VALUES)` (equals the
+   * hand-pinned `DEMO_JOIN_EXPECTED`, and the wire value
+   * the segment's signer emits for the repeated field).
+   */
+  joinedHeaderValue: string;
+  /**
+   * The request signed in the closing multi-value segment
+   * over the repeated `DEMO_JOIN_HEADER` field (its wire
+   * value for that field is the canonical combination).
+   */
+  joinSigned: SignedHttpRequest;
+  /**
+   * Verification of `joinSigned` (ok — label, keyid, alg
+   * and nonce equal the hand-pinned `DEMO_JOIN_*`
+   * expectations).
+   */
+  joinVerification: VerifyResult;
+  /**
+   * Verification of `joinSigned` with the repeated field
+   * replaced by `DEMO_JOIN_WRONG_VALUE`: rejected with
+   * `DEMO_JOIN_WRONG_CODE` (`SIGNATURE_MISMATCH`).
+   */
+  joinWrongVerification: VerifyResult;
   lines: string[];
 }
 
@@ -2956,6 +3064,87 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // Multi-value header combination segment: the inbound
+  // segment above carries a multi-value field through the
+  // Node adapter, but the combination rule itself — how
+  // repeated field values become the single value a
+  // signature-base line carries — was never shown. A fixed
+  // request carries `DEMO_JOIN_HEADER` twice, as the padded
+  // array `DEMO_JOIN_VALUES`; `joinHeaderValues` combines
+  // it (each element trimmed, joined with ", " per
+  // RFC 9421 §2.5) and the signer emits exactly that
+  // combination as the field's wire value. A request signed
+  // over the repeated field verifies; the same request with
+  // the field replaced by the hand-pinned wrong combination
+  // (a bare comma join, the space after the comma dropped)
+  // is rejected with `SIGNATURE_MISMATCH`, because the
+  // verifier rebuilds a different signature base from the
+  // wrongly joined value. Outside the printed lines the
+  // demo asserts the combination character for character,
+  // the signer's emitted wire value, the verified identity
+  // and the rejection code equal the hand-pinned
+  // DEMO_JOIN_* expectations (the same combination shape
+  // and code `test/multiValueHeaderWhitespace.test.ts` pins
+  // for its own padded fixture). Every input is a fixed
+  // demo constant.
+  const joinedHeaderValue = joinHeaderValues(DEMO_JOIN_VALUES);
+  const joinSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: {
+        "content-type": "application/json",
+        [DEMO_JOIN_HEADER]: [...DEMO_JOIN_VALUES],
+      },
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_JOIN_NONCE,
+      coveredComponents: DEMO_JOIN_COVERED_COMPONENTS,
+    },
+  );
+  const joinVerification = verifyRequest(joinSigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  const joinWrongVerification = verifyRequest(
+    {
+      ...joinSigned,
+      headers: {
+        ...joinSigned.headers,
+        [DEMO_JOIN_HEADER]: DEMO_JOIN_WRONG_VALUE,
+      },
+    },
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+  if (
+    joinedHeaderValue !== DEMO_JOIN_EXPECTED ||
+    joinSigned.headers[DEMO_JOIN_HEADER] !== DEMO_JOIN_EXPECTED ||
+    !joinVerification.ok ||
+    joinVerification.label !== DEMO_JOIN_LABEL ||
+    joinVerification.keyId !== DEMO_KEY_ID ||
+    joinVerification.alg !== "ed25519" ||
+    joinVerification.nonce !== DEMO_JOIN_NONCE ||
+    joinWrongVerification.ok ||
+    joinWrongVerification.code !== DEMO_JOIN_WRONG_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: multi-value combination ` +
+        `${JSON.stringify(joinedHeaderValue)} with wire value ` +
+        `${JSON.stringify(joinSigned.headers[DEMO_JOIN_HEADER])}, verification ` +
+        `${joinVerification.ok}/${joinVerification.label}/${joinVerification.keyId}/` +
+        `${joinVerification.alg}/${joinVerification.nonce} and wrong-join code ` +
+        `${joinWrongVerification.code}, instead of the pinned ` +
+        `${JSON.stringify(DEMO_JOIN_EXPECTED)} with wire value ` +
+        `${JSON.stringify(DEMO_JOIN_EXPECTED)}, verification ` +
+        `true/${DEMO_JOIN_LABEL}/${DEMO_KEY_ID}/ed25519/` +
+        `${DEMO_JOIN_NONCE} and wrong-join code ${DEMO_JOIN_WRONG_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -3169,6 +3358,15 @@ export function runDemo(): DemoResult {
     "Component resolution: resolveComponent turns each covered component into the exact value its signature-base line carries — derived components from the request target, header fields from the normalized field value",
     ...resolvedComponents.map((r) => `Resolve "${r.component}": ${r.value}`),
     `Resolve "${DEMO_RESOLVE_ILLEGAL_COMPONENT}": FAILED (${resolveIllegalComponentError})`,
+    "",
+    "Multi-value header combination: joinHeaderValues combines a repeated field's values into the single value its signature-base line carries — each element trimmed, the elements joined with \", \" (RFC 9421 §2.5), so signer, verifier and adapters can never disagree on the bytes",
+    `Join "${DEMO_JOIN_HEADER}" values ${JSON.stringify(DEMO_JOIN_VALUES)}: ${joinedHeaderValue}`,
+    joinVerification.ok
+      ? `Multi-value verification: OK (label ${joinVerification.label}, keyid="${joinVerification.keyId}", alg="${joinVerification.alg}", nonce="${joinVerification.nonce}")`
+      : `Multi-value verification: FAILED (code ${joinVerification.code}: ${joinVerification.reason})`,
+    joinWrongVerification.ok
+      ? `Multi-value verification with the wrong join "${DEMO_JOIN_WRONG_VALUE}" (space after the comma dropped): OK (unexpected — the wrong combination was not detected)`
+      : `Multi-value verification with the wrong join "${DEMO_JOIN_WRONG_VALUE}" (space after the comma dropped): FAILED (code ${joinWrongVerification.code}: ${joinWrongVerification.reason})`,
   ];
 
   return {
@@ -3251,6 +3449,10 @@ export function runDemo(): DemoResult {
     p521TamperedVerification,
     resolvedComponents,
     resolveIllegalComponentError,
+    joinedHeaderValue,
+    joinSigned,
+    joinVerification,
+    joinWrongVerification,
     lines,
   };
 }
