@@ -11,6 +11,34 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with an ECDSA
+  P-256 signing segment: the same fixed payment request is
+  signed under `ecdsa-p256-sha256` with a P-256 key pair
+  from `generateP256KeyPair` — the generator the library's
+  ecdsa tests and bench corpus use — its `Signature-Input`
+  is printed, verification passes, and the same request
+  with its body tampered by one byte (amount 100 -> 101)
+  is rejected with `BODY_DIGEST_MISMATCH`, because the
+  covered `content-digest` no longer matches the body.
+  The demo's earlier segments sign and verify with
+  ed25519 and hmac-sha256 only, so the NIST-curve
+  algorithm line — supported since the ecdsa-p256-sha256
+  work and measured in the bench — was invisible to demo
+  readers. Outside the printed lines the demo asserts
+  the verified identity (label `sig1`, the segment's
+  keyid, alg and nonce) and the tamper rejection code
+  equal the hand-pinned expectations (the same identity
+  and code `test/ecdsaP256.test.ts` pins for its
+  round-trip and tampered-body cases). `DemoResult`
+  carries the signed request and both verification
+  results, and the demo tests pin the fields, the raw
+  64-octet r||s wire form, and the printed lines. The
+  segment prints only the `Signature-Input` (algorithm
+  and keyid), never key or signature bytes, performs
+  zero network I/O, and its printed lines are identical
+  between runs even though the P-256 key pair itself is
+  fresh per run.
+
 - The CLI demo (`npm run demo`) now closes with an RSA
   modulus-length guard segment: fixed-shape keys are run
   through `assertRsaModulusLength` under a fixed caller

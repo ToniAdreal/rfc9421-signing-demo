@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 694 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 696 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -137,7 +137,16 @@ while a 1024-bit RSA public key and the main line's ed25519
 public key (not an RSA key at all) are printed rejected with
 the guard's exact messages, asserted outside the printed
 lines against hand-pinned expectations; only key types and
-modulus lengths are printed, never key bytes:
+modulus lengths are printed, never key bytes. The demo closes
+with an ECDSA P-256 signing segment: the same fixed payment
+request is signed under `ecdsa-p256-sha256` with a P-256 key
+pair from `generateP256KeyPair`, its `Signature-Input` is
+printed (algorithm and keyid, never key bytes), verification
+is printed passing with its label / keyid / alg / nonce
+identity — asserted outside the printed lines against
+hand-pinned expectations — and the same request with its
+body tampered by one byte is printed rejected with
+`BODY_DIGEST_MISMATCH`:
 
 ```bash
 npm run demo
@@ -1686,7 +1695,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 694 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 696 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

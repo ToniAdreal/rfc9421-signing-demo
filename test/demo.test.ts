@@ -8,7 +8,10 @@ import {
   assertHmacSecretLength,
   assertRsaModulusLength,
   generateEd25519KeyPair,
+  generateP256KeyPair,
   generateRsaPssKeyPair,
+  signRequest,
+  verifyRequest,
 } from "../src/index.js";
 import {
   DEMO_BODY,
@@ -50,6 +53,11 @@ import {
   DEMO_MEMOIZED_SECOND_KEY_ID,
   DEMO_MEMOIZED_TTL_SEC,
   DEMO_NONCE,
+  DEMO_P256_ALG,
+  DEMO_P256_KEY_ID,
+  DEMO_P256_LABEL,
+  DEMO_P256_NONCE,
+  DEMO_P256_TAMPERED_CODE,
   DEMO_PEM_NONCE,
   DEMO_PEM_PRIVATE_HEADER,
   DEMO_PEM_PUBLIC_HEADER,
@@ -1513,7 +1521,7 @@ test("demo RSA modulus-length guard segment accepts the floor key and rejects we
   );
 });
 
-test("demo lines contain the RSA modulus-length guard segment (accepted and rejected lines, closing the demo)", () => {
+test("demo lines contain the RSA modulus-length guard segment (accepted and rejected lines, followed by the ECDSA P-256 segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
@@ -1521,15 +1529,15 @@ test("demo lines contain the RSA modulus-length guard segment (accepted and reje
     out,
     /RSA modulus-length guard: assertRsaModulusLength enforces the RSA modulus floor/,
   );
-  // The RSA guard segment closes the demo: its last rejection
-  // line is final, and the block sits after the HMAC segment.
-  assert.equal(
-    lines[lines.length - 1],
-    `assertRsaModulusLength for ed25519 public key: FAILED (${DEMO_RSA_GUARD_ERRORS[1]})`,
+  // The RSA guard block sits after the HMAC segment and is
+  // followed by the ECDSA P-256 signing segment.
+  const p256Idx = lines.findIndex((l) =>
+    l.startsWith("ECDSA P-256 signing:"),
   );
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("RSA modulus-length guard:"),
   );
+  assert.ok(p256Idx !== -1 && headerIdx !== -1 && headerIdx < p256Idx);
   const hmacIdx = lines.findIndex((l) =>
     l.startsWith("HMAC secret-length guard:"),
   );
@@ -1546,6 +1554,119 @@ test("demo lines contain the RSA modulus-length guard segment (accepted and reje
   const again = runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("RSA modulus-length guard:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo ECDSA P-256 segment signs the fixed request, verifies, and rejects the one-byte tamper", () => {
+  const { p256Signed, p256Verification, p256TamperedVerification } =
+    runDemo();
+
+  // Expectations are the literals hand-pinned in DEMO_P256_*
+  // and cross-checked against test/ecdsaP256.test.ts (its
+  // round-trip case pins the same keyid/alg identity shape and
+  // its tampered-body case pins the same rejection code).
+  // The test pins the literals again here so a drift in
+  // either place fails.
+  assert.equal(DEMO_P256_KEY_ID, "demo-p256-key-1");
+  assert.equal(DEMO_P256_NONCE, "demo-nonce-p256-001");
+  assert.equal(DEMO_P256_LABEL, "sig1");
+  assert.equal(DEMO_P256_ALG, "ecdsa-p256-sha256");
+  assert.equal(DEMO_P256_TAMPERED_CODE, "BODY_DIGEST_MISMATCH");
+
+  assert.equal(
+    p256Signed.headers["signature-input"],
+    `sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_P256_KEY_ID}";alg="${DEMO_P256_ALG}";nonce="${DEMO_P256_NONCE}"`,
+  );
+  assert.ok(p256Signed.headers["content-digest"].startsWith("sha-512=:"));
+  // RFC 9421 §3.3.4 wire form: the signature is the raw
+  // 64-octet r||s concatenation, never a DER value.
+  const raw = Buffer.from(
+    p256Signed.headers["signature"].slice("sig1=:".length, -1),
+    "base64",
+  );
+  assert.equal(raw.length, 64);
+
+  assert.equal(p256Verification.ok, true);
+  assert.equal(p256Verification.label, DEMO_P256_LABEL);
+  assert.equal(p256Verification.keyId, DEMO_P256_KEY_ID);
+  assert.equal(p256Verification.alg, DEMO_P256_ALG);
+  assert.equal(p256Verification.nonce, DEMO_P256_NONCE);
+
+  assert.equal(p256TamperedVerification.ok, false);
+  assert.equal(p256TamperedVerification.code, DEMO_P256_TAMPERED_CODE);
+
+  // Cross-check against the library called directly: a fresh
+  // P-256 pair signing the same fixed request shape verifies
+  // with the same identity, and the same body tamper is
+  // rejected with the same code.
+  const { publicKey, privateKey } = generateP256KeyPair();
+  const direct = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_P256_KEY_ID,
+      alg: "ecdsa-p256-sha256",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_P256_NONCE,
+    },
+  );
+  const directOk = verifyRequest(direct, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(directOk.ok, true);
+  assert.equal(directOk.keyId, DEMO_P256_KEY_ID);
+  assert.equal(directOk.alg, DEMO_P256_ALG);
+  const directTampered = verifyRequest(
+    { ...direct, body: DEMO_TAMPERED_BODY },
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+  assert.equal(directTampered.ok, false);
+  assert.equal(directTampered.code, DEMO_P256_TAMPERED_CODE);
+});
+
+test("demo lines contain the ECDSA P-256 signing segment (signature-input, verification and tamper rejection, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /ECDSA P-256 signing: ecdsa-p256-sha256 signs/);
+  // The P-256 segment closes the demo: its tamper-rejection
+  // line is final, and the block sits after the RSA guard
+  // segment.
+  assert.equal(
+    lines[lines.length - 1],
+    "P-256 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("ECDSA P-256 signing:"),
+  );
+  const rsaIdx = lines.findIndex((l) =>
+    l.startsWith("RSA modulus-length guard:"),
+  );
+  assert.ok(rsaIdx !== -1 && headerIdx !== -1 && rsaIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "ECDSA P-256 signing: ecdsa-p256-sha256 signs the same fixed payment request with a P-256 key — the NIST curve line the ed25519 main line and the hmac-sha256 gateway line never showed",
+    `P-256 Signature-Input: sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_P256_KEY_ID}";alg="${DEMO_P256_ALG}";nonce="${DEMO_P256_NONCE}"`,
+    `P-256 verification: OK (label ${DEMO_P256_LABEL}, keyid="${DEMO_P256_KEY_ID}", alg="${DEMO_P256_ALG}", nonce="${DEMO_P256_NONCE}")`,
+    "P-256 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  ]);
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key or signature bytes, so they are pinned
+  // constants, identical between runs even though the
+  // P-256 key pair itself is fresh.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("ECDSA P-256 signing:"),
   );
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),

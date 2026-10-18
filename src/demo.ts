@@ -184,6 +184,24 @@
  * bench corpus / rsaV15 suite pin). Only key types and
  * modulus lengths are printed, never key bytes, so the
  * segment is byte-identical between runs.
+ * The demo closes with an ECDSA P-256 signing segment: the
+ * same fixed payment request is signed under
+ * `ecdsa-p256-sha256` with a P-256 key pair from
+ * `generateP256KeyPair` — the generator the library's ecdsa
+ * tests and bench corpus use — its `Signature-Input` is
+ * printed (algorithm and keyid, never key bytes), verification
+ * is printed passing, and the same request with its body
+ * tampered by one byte is printed rejected with
+ * `BODY_DIGEST_MISMATCH`, because the covered
+ * `content-digest` no longer matches the body. Outside the
+ * printed lines the demo asserts the verified identity
+ * (label, keyid, alg, nonce) and the tamper rejection code
+ * equal the hand-pinned expectations below (the same
+ * identity and code `test/ecdsaP256.test.ts` pins for its
+ * round-trip and tampered-body cases). The P-256 key pair is
+ * fresh on every run, like the main line's ed25519 pair, so
+ * the signature bytes differ between runs while every
+ * printed line is identical.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -230,6 +248,7 @@ import {
   fromNodeRequest,
   generateEd25519KeyPair,
   generateNonce,
+  generateP256KeyPair,
   generateRsaPssKeyPair,
   importPrivateKey,
   importPublicKey,
@@ -710,6 +729,36 @@ export const DEMO_RSA_GUARD_ERRORS: ReadonlyArray<string> = [
   "assertRsaModulusLength demo: expected an RSA key, got an asymmetric ed25519 key",
 ];
 
+/** Key id of the closing ECDSA P-256 segment's signed request. */
+export const DEMO_P256_KEY_ID = "demo-p256-key-1";
+/** Nonce of the closing ECDSA P-256 segment's signed request. */
+export const DEMO_P256_NONCE = "demo-nonce-p256-001";
+/**
+ * Hand-pinned verified identity of the closing ECDSA P-256
+ * segment: the segment passes no label, so its signature
+ * carries the library default `sig1`, and verification must
+ * report the segment's own keyid, the `ecdsa-p256-sha256`
+ * algorithm and its nonce — the same identity shape
+ * `test/ecdsaP256.test.ts` pins for its round-trip case
+ * (label default, keyid, alg). The expectations are written
+ * out here, never derived from the verification the demo is
+ * checking.
+ */
+export const DEMO_P256_LABEL = "sig1";
+export const DEMO_P256_ALG = "ecdsa-p256-sha256";
+/**
+ * Hand-pinned failure code of the closing ECDSA P-256
+ * segment's tampered request: changing the body by the same
+ * one byte as the main line (amount 100 -> 101) leaves the
+ * covered `content-digest` stale, so verification must fail
+ * with `BODY_DIGEST_MISMATCH` — the same code
+ * `test/ecdsaP256.test.ts` pins for its tampered-body case.
+ * The expectation is written out here, never derived from
+ * the verification the demo is checking.
+ */
+export const DEMO_P256_TAMPERED_CODE: VerifyFailureCode =
+  "BODY_DIGEST_MISMATCH";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1017,6 +1066,23 @@ export interface DemoResult {
     bits: number | null;
     error: string;
   }>;
+  /**
+   * The request signed in the closing ECDSA P-256 segment
+   * with a fresh P-256 key pair under `ecdsa-p256-sha256`
+   * (keyid `DEMO_P256_KEY_ID`, nonce `DEMO_P256_NONCE`).
+   */
+  p256Signed: SignedHttpRequest;
+  /**
+   * Verification of `p256Signed` (ok — label, keyid, alg and
+   * nonce equal the hand-pinned `DEMO_P256_*` expectations).
+   */
+  p256Verification: VerifyResult;
+  /**
+   * Verification of `p256Signed` with the body tampered by
+   * one byte: rejected with `DEMO_P256_TAMPERED_CODE`
+   * (`BODY_DIGEST_MISMATCH`).
+   */
+  p256TamperedVerification: VerifyResult;
   lines: string[];
 }
 
@@ -1878,6 +1944,64 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // ECDSA P-256 signing segment: the demo's earlier lines sign
+  // with ed25519 (main line) and hmac-sha256 (gateway line),
+  // but the library's NIST-curve line — `ecdsa-p256-sha256`,
+  // RFC 9421 §3.3.4 — was never shown. A P-256 key pair from
+  // `generateP256KeyPair` (the generator the ecdsa tests and
+  // bench corpus use) signs the same fixed payment request
+  // under the segment's own keyid and nonce, verification
+  // passes, and the same one-byte body tamper as the main
+  // line (amount 100 -> 101) is rejected because the covered
+  // `content-digest` no longer matches the body. Outside the
+  // printed lines the demo asserts the verified identity
+  // (label, keyid, alg, nonce) and the tamper code equal the
+  // hand-pinned DEMO_P256_* expectations — a mismatch throws
+  // instead of printing a misleading segment. No key bytes
+  // are printed.
+  const p256KeyPair = generateP256KeyPair();
+  const p256Signed = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_P256_KEY_ID,
+      alg: "ecdsa-p256-sha256",
+      key: p256KeyPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_P256_NONCE,
+    },
+  );
+  const p256Verification = verifyRequest(p256Signed, {
+    key: p256KeyPair.publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  const p256TamperedVerification = verifyRequest(
+    { ...p256Signed, body: DEMO_TAMPERED_BODY },
+    { key: p256KeyPair.publicKey, now: DEMO_CREATED + 60 },
+  );
+  if (
+    !p256Verification.ok ||
+    p256Verification.label !== DEMO_P256_LABEL ||
+    p256Verification.keyId !== DEMO_P256_KEY_ID ||
+    p256Verification.alg !== DEMO_P256_ALG ||
+    p256Verification.nonce !== DEMO_P256_NONCE ||
+    p256TamperedVerification.ok ||
+    p256TamperedVerification.code !== DEMO_P256_TAMPERED_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: P-256 verification ` +
+        `${p256Verification.ok}/${p256Verification.label}/${p256Verification.keyId}/` +
+        `${p256Verification.alg}/${p256Verification.nonce} with tamper code ` +
+        `${p256TamperedVerification.code}, instead of the pinned ` +
+        `true/${DEMO_P256_LABEL}/${DEMO_P256_KEY_ID}/${DEMO_P256_ALG}/` +
+        `${DEMO_P256_NONCE} with tamper code ${DEMO_P256_TAMPERED_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -2031,6 +2155,15 @@ export function runDemo(): DemoResult {
       (r) =>
         `assertRsaModulusLength for ${r.label} key${r.bits === null ? "" : ` (${r.bits} bits)`}: FAILED (${r.error})`,
     ),
+    "",
+    "ECDSA P-256 signing: ecdsa-p256-sha256 signs the same fixed payment request with a P-256 key — the NIST curve line the ed25519 main line and the hmac-sha256 gateway line never showed",
+    `P-256 Signature-Input: ${p256Signed.headers["signature-input"]}`,
+    p256Verification.ok
+      ? `P-256 verification: OK (label ${p256Verification.label}, keyid="${p256Verification.keyId}", alg="${p256Verification.alg}", nonce="${p256Verification.nonce}")`
+      : `P-256 verification: FAILED (code ${p256Verification.code}: ${p256Verification.reason})`,
+    p256TamperedVerification.ok
+      ? "P-256 verification after tampering: OK (unexpected — tampering was not detected)"
+      : `P-256 verification after tampering: FAILED (code ${p256TamperedVerification.code}: ${p256TamperedVerification.reason})`,
   ];
 
   return {
@@ -2090,6 +2223,9 @@ export function runDemo(): DemoResult {
     hmacGuardRejections,
     rsaGuardAccepted,
     rsaGuardRejections,
+    p256Signed,
+    p256Verification,
+    p256TamperedVerification,
     lines,
   };
 }
