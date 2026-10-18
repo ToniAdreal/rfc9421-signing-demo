@@ -202,6 +202,23 @@
  * fresh on every run, like the main line's ed25519 pair, so
  * the signature bytes differ between runs while every
  * printed line is identical.
+ * The demo closes with a Content-Digest algorithm guard
+ * segment: the sha-512 / sha-256 lines above emit
+ * Content-Digest headers, but the demo never showed the
+ * write-side guard every digest algorithm passes through.
+ * Fixed values are run through `assertContentDigestAlg`:
+ * the two emittable algorithms (`sha-512`, `sha-256`) pass,
+ * while a fixed rejected corpus — unknown algorithms
+ * (`sha-1`, `md5`), the empty string, wrong-case spellings,
+ * a trailing-space spelling, and the non-string values
+ * `undefined` and `null` — is each rejected. Outside the
+ * printed lines the demo asserts the accepted group all
+ * passed and every rejection message equals the hand-pinned
+ * expectations below (the same messages `src/digest.ts`
+ * builds and the bench corpus / contentDigestAlg suite
+ * pin). Each rejected value is printed only as a fixed
+ * printable label, so the segment is byte-identical
+ * between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -237,6 +254,7 @@ import {
 } from "node:crypto";
 import {
   addSignature,
+  assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
   buildSignatureBase,
@@ -759,6 +777,62 @@ export const DEMO_P256_ALG = "ecdsa-p256-sha256";
 export const DEMO_P256_TAMPERED_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
 
+/**
+ * Fixed Content-Digest algorithm guard corpus of the closing
+ * guard segment: the accepted cases are the two algorithms
+ * this library can emit (`sha-512`, the default, and
+ * `sha-256`); the rejected cases are unknown algorithms
+ * (`sha-1`, `md5`), the empty string, wrong-case spellings
+ * (`SHA-512`, `Sha-256` — the comparison is exact and
+ * case-sensitive), a trailing-space spelling (`sha-512 `,
+ * no trimming), and the non-string values `undefined` and
+ * `null` — the same ten-case shape the bench corpus
+ * (`DIGEST_GUARD_CORPUS`) and the contentDigestAlg suite
+ * pin. Each case carries a fixed printable label, so a
+ * rejected value is only ever printed as that label, never
+ * as raw input. No outcome is derived from
+ * `assertContentDigestAlg` itself.
+ */
+export const DEMO_DIGEST_GUARD_ACCEPTED: ReadonlyArray<{
+  label: string;
+  alg: string;
+}> = [
+  { label: "sha-512", alg: "sha-512" },
+  { label: "sha-256", alg: "sha-256" },
+];
+export const DEMO_DIGEST_GUARD_REJECTED: ReadonlyArray<{
+  label: string;
+  alg: unknown;
+}> = [
+  { label: "sha-1", alg: "sha-1" },
+  { label: "md5", alg: "md5" },
+  { label: "empty string", alg: "" },
+  { label: "SHA-512 (uppercase)", alg: "SHA-512" },
+  { label: "Sha-256 (mixed case)", alg: "Sha-256" },
+  { label: "sha-512 with trailing space", alg: "sha-512 " },
+  { label: "undefined", alg: undefined },
+  { label: "null", alg: null },
+];
+/**
+ * Hand-pinned rejection messages of the digest guard
+ * segment, one per rejected case in
+ * `DEMO_DIGEST_GUARD_REJECTED` order: the exact strings
+ * `assertContentDigestAlg` throws for each value (the
+ * `JSON.stringify` rendering of the value — bare
+ * `undefined` / `null` for the non-string cases), written
+ * out here, never derived from the guard under test.
+ */
+export const DEMO_DIGEST_GUARD_ERRORS: ReadonlyArray<string> = [
+  'contentDigest: "alg" must be "sha-512" or "sha-256", got "sha-1"',
+  'contentDigest: "alg" must be "sha-512" or "sha-256", got "md5"',
+  'contentDigest: "alg" must be "sha-512" or "sha-256", got ""',
+  'contentDigest: "alg" must be "sha-512" or "sha-256", got "SHA-512"',
+  'contentDigest: "alg" must be "sha-512" or "sha-256", got "Sha-256"',
+  'contentDigest: "alg" must be "sha-512" or "sha-256", got "sha-512 "',
+  'contentDigest: "alg" must be "sha-512" or "sha-256", got undefined',
+  'contentDigest: "alg" must be "sha-512" or "sha-256", got null',
+];
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1083,6 +1157,28 @@ export interface DemoResult {
    * (`BODY_DIGEST_MISMATCH`).
    */
   p256TamperedVerification: VerifyResult;
+  /**
+   * The closing Content-Digest guard segment's accepted
+   * cases: each fixed value passed `assertContentDigestAlg`
+   * (the two emittable algorithms, `sha-512` / `sha-256`).
+   */
+  digestGuardAccepted: ReadonlyArray<{
+    label: string;
+    alg: string;
+  }>;
+  /**
+   * The closing Content-Digest guard segment's rejections:
+   * each fixed rejected value (unknown algorithms, the
+   * empty string, wrong-case and trailing-space spellings,
+   * and the non-string `undefined` / `null`) was rejected,
+   * paired with the exact error message the guard threw
+   * (`DEMO_DIGEST_GUARD_ERRORS`).
+   */
+  digestGuardRejections: ReadonlyArray<{
+    label: string;
+    alg: unknown;
+    error: string;
+  }>;
   lines: string[];
 }
 
@@ -2002,6 +2098,56 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // Content-Digest algorithm guard segment: the signer and
+  // `contentDigest` pass every digest algorithm through
+  // `assertContentDigestAlg` before any hashing runs — only
+  // `sha-512` and `sha-256` can be emitted, so an unsupported
+  // algorithm is a caller configuration error (thrown), never
+  // a wire value. The demo runs the fixed corpus through the
+  // guard directly: the two emittable algorithms pass, the
+  // eight rejected values (unknown, empty, wrong-case,
+  // trailing-space and non-string shapes) are each rejected.
+  // Outside the printed lines the demo asserts the accepted
+  // group all passed and every rejection message equals the
+  // hand-pinned DEMO_DIGEST_GUARD_ERRORS — a mismatch throws
+  // instead of printing a misleading segment. Rejected
+  // values are printed only as their fixed labels.
+  const digestGuardAccepted: Array<{ label: string; alg: string }> = [];
+  for (const entry of DEMO_DIGEST_GUARD_ACCEPTED) {
+    assertContentDigestAlg(entry.alg);
+    digestGuardAccepted.push({ label: entry.label, alg: entry.alg });
+  }
+  const digestGuardRejections: Array<{
+    label: string;
+    alg: unknown;
+    error: string;
+  }> = [];
+  for (const entry of DEMO_DIGEST_GUARD_REJECTED) {
+    let error = "";
+    try {
+      assertContentDigestAlg(entry.alg);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+    digestGuardRejections.push({
+      label: entry.label,
+      alg: entry.alg,
+      error,
+    });
+  }
+  if (
+    digestGuardAccepted.length !== DEMO_DIGEST_GUARD_ACCEPTED.length ||
+    digestGuardRejections.some(
+      (r, i) => r.error !== DEMO_DIGEST_GUARD_ERRORS[i],
+    )
+  ) {
+    throw new Error(
+      `demo fixture broken: Content-Digest guard rejections ` +
+        `${JSON.stringify(digestGuardRejections.map((r) => r.error))} ` +
+        `instead of the pinned ${JSON.stringify(DEMO_DIGEST_GUARD_ERRORS)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -2164,6 +2310,16 @@ export function runDemo(): DemoResult {
     p256TamperedVerification.ok
       ? "P-256 verification after tampering: OK (unexpected — tampering was not detected)"
       : `P-256 verification after tampering: FAILED (code ${p256TamperedVerification.code}: ${p256TamperedVerification.reason})`,
+    "",
+    "Content-Digest algorithm guard: assertContentDigestAlg enforces the emittable digest set before any hashing runs — only \"sha-512\" and \"sha-256\" pass, every other value is rejected as a caller configuration error",
+    ...digestGuardAccepted.map(
+      (a) =>
+        `assertContentDigestAlg for ${a.label}: OK (emittable digest algorithm)`,
+    ),
+    ...digestGuardRejections.map(
+      (r) =>
+        `assertContentDigestAlg for ${r.label}: FAILED (${r.error})`,
+    ),
   ];
 
   return {
@@ -2226,6 +2382,8 @@ export function runDemo(): DemoResult {
     p256Signed,
     p256Verification,
     p256TamperedVerification,
+    digestGuardAccepted,
+    digestGuardRejections,
     lines,
   };
 }

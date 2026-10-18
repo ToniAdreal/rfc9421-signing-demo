@@ -11,6 +11,31 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  Content-Digest algorithm guard segment: fixed values are
+  run through `assertContentDigestAlg` — the two emittable
+  algorithms (`sha-512`, the default, and `sha-256`) pass,
+  while a fixed rejected corpus (unknown algorithms
+  `sha-1` / `md5`, the empty string, wrong-case spellings
+  `SHA-512` / `Sha-256`, a trailing-space spelling
+  `sha-512 `, and the non-string values `undefined` /
+  `null`) is rejected. The demo's earlier segments emit
+  sha-512 / sha-256 `Content-Digest` headers and identify
+  their algorithms on the read side with
+  `contentDigestAlgOf`, but never showed this write-side
+  fail-closed guard, so an unsupported digest algorithm
+  being blocked before any hashing was invisible to demo
+  readers. Outside the printed lines the demo asserts the
+  accepted group all passed and every rejection message
+  equals the hand-pinned expectations (the same messages
+  `src/digest.ts` builds and the bench corpus /
+  contentDigestAlg suite pin). `DemoResult` carries the
+  accepted cases and the rejections, and the demo tests
+  pin the fields and the printed lines. Each rejected
+  value is printed only as a fixed printable label, the
+  segment performs zero network I/O, and its printed
+  lines are identical between runs.
+
 - The CLI demo (`npm run demo`) now closes with an ECDSA
   P-256 signing segment: the same fixed payment request is
   signed under `ecdsa-p256-sha256` with a P-256 key pair

@@ -5,6 +5,7 @@ import { createSecretKey, generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
+  assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
   generateEd25519KeyPair,
@@ -17,6 +18,9 @@ import {
   DEMO_BODY,
   DEMO_COVERED_COMPONENTS,
   DEMO_CREATED,
+  DEMO_DIGEST_GUARD_ACCEPTED,
+  DEMO_DIGEST_GUARD_ERRORS,
+  DEMO_DIGEST_GUARD_REJECTED,
   DEMO_GATEWAY_KEY_ID,
   DEMO_INBOUND_COVERED_COMPONENTS,
   DEMO_INBOUND_HOST,
@@ -1634,18 +1638,17 @@ test("demo ECDSA P-256 segment signs the fixed request, verifies, and rejects th
   assert.equal(directTampered.code, DEMO_P256_TAMPERED_CODE);
 });
 
-test("demo lines contain the ECDSA P-256 signing segment (signature-input, verification and tamper rejection, closing the demo)", () => {
+test("demo lines contain the ECDSA P-256 signing segment (signature-input, verification and tamper rejection, followed by the Content-Digest guard segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /ECDSA P-256 signing: ecdsa-p256-sha256 signs/);
-  // The P-256 segment closes the demo: its tamper-rejection
-  // line is final, and the block sits after the RSA guard
-  // segment.
-  assert.equal(
-    lines[lines.length - 1],
-    "P-256 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  // The P-256 block sits after the RSA guard segment and is
+  // followed by the Content-Digest algorithm guard segment.
+  const digestIdx = lines.findIndex((l) =>
+    l.startsWith("Content-Digest algorithm guard:"),
   );
+  assert.ok(digestIdx !== -1);
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("ECDSA P-256 signing:"),
   );
@@ -1653,6 +1656,7 @@ test("demo lines contain the ECDSA P-256 signing segment (signature-input, verif
     l.startsWith("RSA modulus-length guard:"),
   );
   assert.ok(rsaIdx !== -1 && headerIdx !== -1 && rsaIdx < headerIdx);
+  assert.ok(headerIdx < digestIdx);
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
     "ECDSA P-256 signing: ecdsa-p256-sha256 signs the same fixed payment request with a P-256 key — the NIST curve line the ed25519 main line and the hmac-sha256 gateway line never showed",
     `P-256 Signature-Input: sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_P256_KEY_ID}";alg="${DEMO_P256_ALG}";nonce="${DEMO_P256_NONCE}"`,
@@ -1671,5 +1675,110 @@ test("demo lines contain the ECDSA P-256 signing segment (signature-input, verif
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),
     lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo Content-Digest algorithm guard segment accepts the two emittable algorithms and rejects the fixed corpus", () => {
+  const { digestGuardAccepted, digestGuardRejections } = runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_DIGEST_GUARD_ACCEPTED / DEMO_DIGEST_GUARD_REJECTED /
+  // DEMO_DIGEST_GUARD_ERRORS and cross-checked against
+  // src/digest.ts and the bench corpus / contentDigestAlg
+  // suite. The test pins the literals again here so a drift
+  // in either place fails.
+  assert.deepEqual(DEMO_DIGEST_GUARD_ACCEPTED, [
+    { label: "sha-512", alg: "sha-512" },
+    { label: "sha-256", alg: "sha-256" },
+  ]);
+  assert.deepEqual(DEMO_DIGEST_GUARD_REJECTED, [
+    { label: "sha-1", alg: "sha-1" },
+    { label: "md5", alg: "md5" },
+    { label: "empty string", alg: "" },
+    { label: "SHA-512 (uppercase)", alg: "SHA-512" },
+    { label: "Sha-256 (mixed case)", alg: "Sha-256" },
+    { label: "sha-512 with trailing space", alg: "sha-512 " },
+    { label: "undefined", alg: undefined },
+    { label: "null", alg: null },
+  ]);
+  assert.deepEqual(DEMO_DIGEST_GUARD_ERRORS, [
+    'contentDigest: "alg" must be "sha-512" or "sha-256", got "sha-1"',
+    'contentDigest: "alg" must be "sha-512" or "sha-256", got "md5"',
+    'contentDigest: "alg" must be "sha-512" or "sha-256", got ""',
+    'contentDigest: "alg" must be "sha-512" or "sha-256", got "SHA-512"',
+    'contentDigest: "alg" must be "sha-512" or "sha-256", got "Sha-256"',
+    'contentDigest: "alg" must be "sha-512" or "sha-256", got "sha-512 "',
+    'contentDigest: "alg" must be "sha-512" or "sha-256", got undefined',
+    'contentDigest: "alg" must be "sha-512" or "sha-256", got null',
+  ]);
+  assert.deepEqual(digestGuardAccepted, [...DEMO_DIGEST_GUARD_ACCEPTED]);
+  assert.deepEqual(
+    digestGuardRejections,
+    DEMO_DIGEST_GUARD_REJECTED.map((r, i) => ({
+      ...r,
+      error: DEMO_DIGEST_GUARD_ERRORS[i],
+    })),
+  );
+
+  // Cross-check against the library guard called directly:
+  // the same values pass / throw with the same messages.
+  for (const entry of DEMO_DIGEST_GUARD_ACCEPTED) {
+    assert.doesNotThrow(() => assertContentDigestAlg(entry.alg));
+  }
+  DEMO_DIGEST_GUARD_REJECTED.forEach((entry, i) => {
+    assert.throws(
+      () => assertContentDigestAlg(entry.alg),
+      (e: unknown) =>
+        e instanceof Error && e.message === DEMO_DIGEST_GUARD_ERRORS[i],
+    );
+  });
+});
+
+test("demo lines contain the Content-Digest algorithm guard segment (accepted and rejected lines, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /Content-Digest algorithm guard: assertContentDigestAlg enforces the emittable digest set/,
+  );
+  // The digest guard block closes the demo and sits after
+  // the ECDSA P-256 signing segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Content-Digest algorithm guard:"),
+  );
+  const p256Idx = lines.findIndex((l) =>
+    l.startsWith("ECDSA P-256 signing:"),
+  );
+  assert.ok(p256Idx !== -1 && headerIdx !== -1 && p256Idx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 11), [
+    "Content-Digest algorithm guard: assertContentDigestAlg enforces the emittable digest set before any hashing runs — only \"sha-512\" and \"sha-256\" pass, every other value is rejected as a caller configuration error",
+    "assertContentDigestAlg for sha-512: OK (emittable digest algorithm)",
+    "assertContentDigestAlg for sha-256: OK (emittable digest algorithm)",
+    `assertContentDigestAlg for sha-1: FAILED (${DEMO_DIGEST_GUARD_ERRORS[0]})`,
+    `assertContentDigestAlg for md5: FAILED (${DEMO_DIGEST_GUARD_ERRORS[1]})`,
+    `assertContentDigestAlg for empty string: FAILED (${DEMO_DIGEST_GUARD_ERRORS[2]})`,
+    `assertContentDigestAlg for SHA-512 (uppercase): FAILED (${DEMO_DIGEST_GUARD_ERRORS[3]})`,
+    `assertContentDigestAlg for Sha-256 (mixed case): FAILED (${DEMO_DIGEST_GUARD_ERRORS[4]})`,
+    `assertContentDigestAlg for sha-512 with trailing space: FAILED (${DEMO_DIGEST_GUARD_ERRORS[5]})`,
+    `assertContentDigestAlg for undefined: FAILED (${DEMO_DIGEST_GUARD_ERRORS[6]})`,
+    `assertContentDigestAlg for null: FAILED (${DEMO_DIGEST_GUARD_ERRORS[7]})`,
+  ]);
+  // The guard segment closes the demo: its last rejection
+  // line is final.
+  assert.equal(
+    lines[lines.length - 1],
+    `assertContentDigestAlg for null: FAILED (${DEMO_DIGEST_GUARD_ERRORS[7]})`,
+  );
+
+  // Deterministic double run: the guard segment's lines are
+  // pinned constants, identical between runs.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Content-Digest algorithm guard:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 11),
+    lines.slice(headerIdx, headerIdx + 11),
   );
 });

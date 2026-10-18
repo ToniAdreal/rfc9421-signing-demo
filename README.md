@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 696 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 698 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -146,7 +146,17 @@ is printed passing with its label / keyid / alg / nonce
 identity — asserted outside the printed lines against
 hand-pinned expectations — and the same request with its
 body tampered by one byte is printed rejected with
-`BODY_DIGEST_MISMATCH`:
+`BODY_DIGEST_MISMATCH`. The demo closes with a
+Content-Digest algorithm guard segment: fixed values are
+run through `assertContentDigestAlg` — the two emittable
+algorithms (`sha-512`, `sha-256`) pass, while a fixed
+rejected corpus (unknown algorithms `sha-1` / `md5`, the
+empty string, wrong-case spellings, a trailing-space
+spelling, and the non-string values `undefined` / `null`)
+is printed rejected with the guard's exact messages,
+asserted outside the printed lines against hand-pinned
+expectations; each rejected value is printed only as a
+fixed printable label:
 
 ```bash
 npm run demo
@@ -1695,7 +1705,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 696 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 698 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
