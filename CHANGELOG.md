@@ -11,6 +11,34 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  component-resolution segment: each covered component of
+  the main signed request is run through `resolveComponent`
+  — the per-component resolver `buildSignatureBase` applies
+  — and printed as component -> resolved value (`@method`
+  uppercased and `@authority` lowercased from the request
+  target, `@path` from the URL, and the `content-digest`
+  field's normalized value), and a detached illegal
+  component id (`content-digest` carrying the unsupported
+  `;zz` parameter) is printed rejected with the resolver's
+  exact unsupported-parameter error. Every earlier segment
+  showed the finished signature base or consumed resolution
+  only inside sign/verify, so how one covered component
+  becomes one base line — quoted-field, `;sf` / `;bs` /
+  `;tr` and the other parameter semantics included — was
+  invisible to demo readers. Outside the printed lines the
+  demo asserts every resolved value and the rejection
+  message equal the hand-pinned expectations (the same
+  values the signature-base segment's printed lines carry,
+  and the same `;zz` rejection shape
+  `test/reqComponent.test.ts` pins on the sign side).
+  `DemoResult` carries the resolved pairs and the rejection
+  message, and the demo tests pin the fields and the
+  printed lines. To make the segment possible,
+  `resolveComponent` is now also exported from the package
+  entry point (it was previously reachable only inside
+  `src/components.ts`). Every input is a fixed demo
+  constant, so the segment is byte-identical between runs.
 - The benchmark (`npm run bench`) now also measures
   `signRequest` end to end — one complete signing of the
   shared fixture (signature-base construction, the ed25519

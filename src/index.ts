@@ -69,6 +69,7 @@ export {
   listSignatureLabels,
   parseSignatureField,
   parseSignatureInput,
+  resolveComponent,
   serializeSignatureParams,
   signatureInputValue,
 } from "./components.js";

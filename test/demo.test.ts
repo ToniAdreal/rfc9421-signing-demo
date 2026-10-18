@@ -16,6 +16,7 @@ import {
   getHeaderRaw,
   parseSignatureInput,
   ReplayCache,
+  resolveComponent,
   signRequest,
   verifyRequest,
 } from "../src/index.js";
@@ -87,6 +88,9 @@ import {
   DEMO_PARSE_RAW_PREVIEW,
   DEMO_PARSE_TAMPERED_ERROR,
   DEMO_PEM_NONCE,
+  DEMO_RESOLVE_COMPONENTS,
+  DEMO_RESOLVE_ILLEGAL_COMPONENT,
+  DEMO_RESOLVE_ILLEGAL_ERROR,
   DEMO_PEM_PRIVATE_HEADER,
   DEMO_PEM_PUBLIC_HEADER,
   DEMO_OTHER_NONCE,
@@ -2228,13 +2232,14 @@ test("demo ECDSA P-521 segment signs the fixed request, verifies, and rejects th
   assert.equal(directTampered.code, DEMO_P521_TAMPERED_CODE);
 });
 
-test("demo lines contain the ECDSA P-521 signing segment (signature-input, verification and tamper rejection, closing the demo)", () => {
+test("demo lines contain the ECDSA P-521 signing segment (signature-input, verification and tamper rejection, followed by the component-resolution segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /ECDSA P-521 signing: ecdsa-p521-sha512 signs/);
   // The P-521 block sits after the Signature-Input parsing
-  // segment and closes the demo.
+  // segment and is followed by the component-resolution
+  // segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("ECDSA P-521 signing:"),
   );
@@ -2248,12 +2253,10 @@ test("demo lines contain the ECDSA P-521 signing segment (signature-input, verif
     `P-521 verification: OK (label ${DEMO_P521_LABEL}, keyid="${DEMO_P521_KEY_ID}", alg="${DEMO_P521_ALG}", nonce="${DEMO_P521_NONCE}")`,
     "P-521 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
   ]);
-  // The P-521 segment closes the demo: its tamper-rejection
-  // line is final.
-  assert.equal(
-    lines[lines.length - 1],
-    "P-521 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  const resolveIdx = lines.findIndex((l) =>
+    l.startsWith("Component resolution:"),
   );
+  assert.ok(headerIdx !== -1 && resolveIdx !== -1 && headerIdx < resolveIdx);
 
   // Deterministic double run: the segment's printed lines
   // carry no key or signature bytes, so they are pinned
@@ -2266,5 +2269,128 @@ test("demo lines contain the ECDSA P-521 signing segment (signature-input, verif
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),
     lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo component-resolution segment resolves each covered component and rejects the illegal component", () => {
+  const { resolvedComponents, resolveIllegalComponentError, signed } =
+    runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_RESOLVE_* and cross-checked against the
+  // signature-base lines the demo prints for the same
+  // request and the component suites' own pins (the
+  // `;zz` rejection shape is the one
+  // test/reqComponent.test.ts pins on the sign side). The
+  // test pins the literals again here so a drift in either
+  // place fails.
+  assert.deepEqual(DEMO_RESOLVE_COMPONENTS, [
+    { component: "@method", expected: "POST" },
+    { component: "@authority", expected: "api.example.com" },
+    { component: "@path", expected: "/v1/payments" },
+    {
+      component: "content-digest",
+      expected:
+        "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+    },
+  ]);
+  assert.equal(DEMO_RESOLVE_ILLEGAL_COMPONENT, "content-digest;zz");
+  assert.equal(
+    DEMO_RESOLVE_ILLEGAL_ERROR,
+    'unsupported component parameter ";zz" on component "content-digest": only ";req", ";bs", ";sf", ";key", ";tr" and ";name" are supported',
+  );
+
+  // The segment resolves exactly the main signature's
+  // covered components, in covered order.
+  assert.deepEqual(
+    resolvedComponents.map((r) => r.component),
+    [...DEMO_COVERED_COMPONENTS],
+  );
+  assert.deepEqual(
+    resolvedComponents,
+    DEMO_RESOLVE_COMPONENTS.map(({ component, expected }) => ({
+      component,
+      value: expected,
+    })),
+  );
+  assert.equal(resolveIllegalComponentError, DEMO_RESOLVE_ILLEGAL_ERROR);
+
+  // Cross-check against the library called directly: the
+  // resolver over a freshly signed copy of the same fixed
+  // request returns the same values, and the illegal
+  // component throws the same message.
+  const { privateKey } = generateEd25519KeyPair();
+  const direct = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_NONCE,
+    },
+  );
+  const params = {
+    created: DEMO_CREATED,
+    keyid: DEMO_KEY_ID,
+    alg: "ed25519",
+    nonce: DEMO_NONCE,
+  };
+  for (const { component, expected } of DEMO_RESOLVE_COMPONENTS) {
+    assert.equal(resolveComponent(component, direct, params), expected);
+  }
+  assert.throws(
+    () => resolveComponent(DEMO_RESOLVE_ILLEGAL_COMPONENT, direct, params),
+    (e: unknown) =>
+      e instanceof Error && e.message === DEMO_RESOLVE_ILLEGAL_ERROR,
+  );
+  // The demo's own signed request resolves identically.
+  for (const { component, expected } of DEMO_RESOLVE_COMPONENTS) {
+    assert.equal(resolveComponent(component, signed, params), expected);
+  }
+});
+
+test("demo lines contain the component-resolution segment (per-component values and illegal-component rejection, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Component resolution: resolveComponent turns/);
+  // The resolution block sits after the ECDSA P-521 signing
+  // segment and closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Component resolution:"),
+  );
+  const p521Idx = lines.findIndex((l) =>
+    l.startsWith("ECDSA P-521 signing:"),
+  );
+  assert.ok(p521Idx !== -1 && headerIdx !== -1 && p521Idx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), [
+    "Component resolution: resolveComponent turns each covered component into the exact value its signature-base line carries — derived components from the request target, header fields from the normalized field value",
+    ...DEMO_RESOLVE_COMPONENTS.map(
+      ({ component, expected }) => `Resolve "${component}": ${expected}`,
+    ),
+    `Resolve "${DEMO_RESOLVE_ILLEGAL_COMPONENT}": FAILED (${DEMO_RESOLVE_ILLEGAL_ERROR})`,
+  ]);
+  // The resolution segment closes the demo: its
+  // illegal-component rejection line is final.
+  assert.equal(
+    lines[lines.length - 1],
+    `Resolve "${DEMO_RESOLVE_ILLEGAL_COMPONENT}": FAILED (${DEMO_RESOLVE_ILLEGAL_ERROR})`,
+  );
+
+  // Deterministic double run: the segment's printed lines
+  // are pinned constants, identical between runs.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Component resolution:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 6),
+    lines.slice(headerIdx, headerIdx + 6),
   );
 });

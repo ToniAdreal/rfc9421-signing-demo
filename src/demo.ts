@@ -305,6 +305,28 @@
  * is fresh on every run, like the P-384 segment's pair, so
  * the signature bytes differ between runs while every
  * printed line is identical.
+ * The demo closes with a component-resolution segment: the
+ * signature-base segment above shows the finished base, but
+ * not how one covered component becomes one base line. Each
+ * of the main signed request's covered components is run
+ * through `resolveComponent` — the resolver
+ * `buildSignatureBase` applies per component — and printed
+ * as component -> resolved value: the derived components
+ * come from the request target (`@method` uppercased,
+ * `@authority` lowercased, `@path` from the URL) and the
+ * header field component from its normalized field value.
+ * A detached illegal component id — `content-digest` with
+ * the unsupported `;zz` parameter — is resolved as well:
+ * `resolveComponent` throws the pinned unsupported-parameter
+ * error (a plain `Error`, no failure code — resolution is a
+ * caller configuration error, not a verification outcome),
+ * and that rejection is printed. Outside the printed lines
+ * the demo asserts every resolved value and the rejection
+ * message equal the hand-pinned expectations below (the
+ * same values the signature-base segment's printed lines
+ * carry and the component suites pin for their own inputs).
+ * Every input is a fixed demo constant, so the segment is
+ * byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -367,6 +389,7 @@ import {
   memoizeKeyResolver,
   parseSignatureInput,
   ReplayCache,
+  resolveComponent,
   secretKey,
   serializeDictionaryMemberValue,
   serializeSignatureParams,
@@ -1080,6 +1103,57 @@ export const DEMO_P521_ALG = "ecdsa-p521-sha512";
 export const DEMO_P521_TAMPERED_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
 
+/**
+ * Fixed component-resolution corpus of the closing segment:
+ * the main signed request's covered components
+ * (`DEMO_COVERED_COMPONENTS`, in that order) paired with the
+ * value `resolveComponent` must return for each — the exact
+ * value the component contributes to its signature-base line.
+ * Hand-pinned from the resolver's contract: `@method` is the
+ * request method uppercased, `@authority` is the URL host
+ * lowercased, `@path` is the URL pathname, and
+ * `content-digest` is the signed request's normalized field
+ * value — the sha-512 digest of the fixed `DEMO_BODY`, the
+ * same value the golden `Content-Digest` vector and the
+ * signature-base segment's printed lines pin. The
+ * expectations are written out here, never derived from the
+ * resolver the demo is checking.
+ */
+export const DEMO_RESOLVE_COMPONENTS: ReadonlyArray<{
+  component: string;
+  expected: string;
+}> = [
+  { component: "@method", expected: "POST" },
+  { component: "@authority", expected: "api.example.com" },
+  { component: "@path", expected: "/v1/payments" },
+  {
+    component: "content-digest",
+    expected:
+      "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+  },
+];
+/**
+ * Illegal component id of the closing segment: a real field
+ * component carrying the unsupported `;zz` parameter.
+ * `resolveComponent` must reject it before any value is
+ * produced — an unsupported parameter is never silently
+ * ignored, because ignoring it would rebuild a different
+ * signature base than the signer signed (the same shape
+ * `test/reqComponent.test.ts` pins for its sign-side
+ * rejection of the same parameter).
+ */
+export const DEMO_RESOLVE_ILLEGAL_COMPONENT = "content-digest;zz";
+/**
+ * Hand-pinned rejection message of the closing segment: the
+ * exact string `resolveComponent` throws for
+ * `DEMO_RESOLVE_ILLEGAL_COMPONENT` — the message
+ * `src/components.ts` builds for an unsupported component
+ * parameter (a plain `Error`, no failure code). Written out
+ * here, never derived from the resolver under test.
+ */
+export const DEMO_RESOLVE_ILLEGAL_ERROR =
+  'unsupported component parameter ";zz" on component "content-digest": only ";req", ";bs", ";sf", ";key", ";tr" and ";name" are supported';
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1521,6 +1595,24 @@ export interface DemoResult {
    * (`BODY_DIGEST_MISMATCH`).
    */
   p521TamperedVerification: VerifyResult;
+  /**
+   * The closing component-resolution segment's results: each
+   * covered component of the main signed request paired with
+   * its `resolveComponent` output (equal to the hand-pinned
+   * `DEMO_RESOLVE_COMPONENTS` expectations).
+   */
+  resolvedComponents: ReadonlyArray<{
+    component: string;
+    value: string;
+  }>;
+  /**
+   * Error message thrown when resolving
+   * `DEMO_RESOLVE_ILLEGAL_COMPONENT` (equals the hand-pinned
+   * `DEMO_RESOLVE_ILLEGAL_ERROR`; empty only if the resolver
+   * unexpectedly did not throw, which the demo asserts
+   * against outside the printed lines).
+   */
+  resolveIllegalComponentError: string;
   lines: string[];
 }
 
@@ -2810,6 +2902,60 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // Component-resolution segment: the signature-base segment
+  // above prints the finished base, but a reader never sees
+  // how one covered component becomes one base line. Each
+  // covered component of the main signed request is resolved
+  // with `resolveComponent` — the per-component resolver
+  // `buildSignatureBase` applies — against the signed request
+  // itself and the main line's fixed signature parameters:
+  // the derived components resolve from the request target
+  // (`@method` uppercased, `@authority` lowercased, `@path`
+  // from the URL) and `content-digest` from its normalized
+  // field value on the signed request. A detached illegal
+  // component id (`content-digest` carrying the unsupported
+  // `;zz` parameter) is resolved as well: the resolver throws
+  // before producing any value, because an unsupported
+  // parameter silently ignored would rebuild a different
+  // base than the signer signed. Outside the printed lines
+  // the demo asserts every resolved value and the rejection
+  // message equal the hand-pinned DEMO_RESOLVE_* expectations
+  // — a mismatch throws instead of printing a misleading
+  // segment. Every input is a fixed demo constant.
+  const resolveParams: SignatureParams = {
+    created: DEMO_CREATED,
+    keyid: DEMO_KEY_ID,
+    alg: "ed25519",
+    nonce: DEMO_NONCE,
+  };
+  const resolvedComponents = DEMO_RESOLVE_COMPONENTS.map(
+    ({ component }) => ({
+      component,
+      value: resolveComponent(component, signed, resolveParams),
+    }),
+  );
+  let resolveIllegalComponentError = "";
+  try {
+    resolveComponent(DEMO_RESOLVE_ILLEGAL_COMPONENT, signed, resolveParams);
+  } catch (err) {
+    resolveIllegalComponentError =
+      err instanceof Error ? err.message : String(err);
+  }
+  if (
+    resolvedComponents.some(
+      (r, i) => r.value !== DEMO_RESOLVE_COMPONENTS[i].expected,
+    ) ||
+    resolveIllegalComponentError !== DEMO_RESOLVE_ILLEGAL_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: component resolution ` +
+        `${JSON.stringify(resolvedComponents)} with illegal-component error ` +
+        `${JSON.stringify(resolveIllegalComponentError)}, instead of the pinned ` +
+        `${JSON.stringify(DEMO_RESOLVE_COMPONENTS)} with error ` +
+        `${JSON.stringify(DEMO_RESOLVE_ILLEGAL_ERROR)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -3019,6 +3165,10 @@ export function runDemo(): DemoResult {
     p521TamperedVerification.ok
       ? "P-521 verification after tampering: OK (unexpected — tampering was not detected)"
       : `P-521 verification after tampering: FAILED (code ${p521TamperedVerification.code}: ${p521TamperedVerification.reason})`,
+    "",
+    "Component resolution: resolveComponent turns each covered component into the exact value its signature-base line carries — derived components from the request target, header fields from the normalized field value",
+    ...resolvedComponents.map((r) => `Resolve "${r.component}": ${r.value}`),
+    `Resolve "${DEMO_RESOLVE_ILLEGAL_COMPONENT}": FAILED (${resolveIllegalComponentError})`,
   ];
 
   return {
@@ -3099,6 +3249,8 @@ export function runDemo(): DemoResult {
     p521Signed,
     p521Verification,
     p521TamperedVerification,
+    resolvedComponents,
+    resolveIllegalComponentError,
     lines,
   };
 }
