@@ -11,6 +11,7 @@ import {
   generateEd25519KeyPair,
   generateP256KeyPair,
   generateP384KeyPair,
+  generateP521KeyPair,
   generateRsaPssKeyPair,
   getHeaderRaw,
   parseSignatureInput,
@@ -71,6 +72,11 @@ import {
   DEMO_P384_LABEL,
   DEMO_P384_NONCE,
   DEMO_P384_TAMPERED_CODE,
+  DEMO_P521_ALG,
+  DEMO_P521_KEY_ID,
+  DEMO_P521_LABEL,
+  DEMO_P521_NONCE,
+  DEMO_P521_TAMPERED_CODE,
   DEMO_PARSE_ALG,
   DEMO_PARSE_CREATED,
   DEMO_PARSE_KEY_ID,
@@ -2108,13 +2114,14 @@ test("demo Signature-Input parsing segment parses the main signature and rejects
   );
 });
 
-test("demo lines contain the Signature-Input parsing segment (raw preview, parsed fields and tamper rejection, closing the demo)", () => {
+test("demo lines contain the Signature-Input parsing segment (raw preview, parsed fields and tamper rejection, followed by the ECDSA P-521 segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Signature-Input parsing: parseSignatureInput exposes/);
   // The parsing block sits after the ECDSA P-384 signing
-  // segment and closes the demo.
+  // segment and is followed by the ECDSA P-521 signing
+  // segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Signature-Input parsing:"),
   );
@@ -2129,12 +2136,10 @@ test("demo lines contain the Signature-Input parsing segment (raw preview, parse
     `Parsed covered components: ${DEMO_COVERED_COMPONENTS.map((c) => `"${c}"`).join(" ")}`,
     `Tampered Signature-Input (closing parenthesis removed): FAILED (${DEMO_PARSE_TAMPERED_ERROR})`,
   ]);
-  // The parsing segment closes the demo: its tamper-rejection
-  // line is final.
-  assert.equal(
-    lines[lines.length - 1],
-    `Tampered Signature-Input (closing parenthesis removed): FAILED (${DEMO_PARSE_TAMPERED_ERROR})`,
+  const p521Idx = lines.findIndex((l) =>
+    l.startsWith("ECDSA P-521 signing:"),
   );
+  assert.ok(headerIdx !== -1 && p521Idx !== -1 && headerIdx < p521Idx);
 
   // Deterministic double run: the segment's printed lines
   // carry no key or signature bytes, so they are pinned
@@ -2146,5 +2151,120 @@ test("demo lines contain the Signature-Input parsing segment (raw preview, parse
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 5),
     lines.slice(headerIdx, headerIdx + 5),
+  );
+});
+
+test("demo ECDSA P-521 segment signs the fixed request, verifies, and rejects the one-byte tamper", () => {
+  const { p521Signed, p521Verification, p521TamperedVerification } =
+    runDemo();
+
+  // Expectations are the literals hand-pinned in DEMO_P521_*
+  // and cross-checked against test/ecdsaP521.test.ts (its
+  // round-trip case pins the same keyid/alg identity shape and
+  // its tampered-body case pins the same rejection code).
+  // The test pins the literals again here so a drift in
+  // either place fails.
+  assert.equal(DEMO_P521_KEY_ID, "demo-p521-key-1");
+  assert.equal(DEMO_P521_NONCE, "demo-nonce-p521-001");
+  assert.equal(DEMO_P521_LABEL, "sig1");
+  assert.equal(DEMO_P521_ALG, "ecdsa-p521-sha512");
+  assert.equal(DEMO_P521_TAMPERED_CODE, "BODY_DIGEST_MISMATCH");
+
+  assert.equal(
+    p521Signed.headers["signature-input"],
+    `sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_P521_KEY_ID}";alg="${DEMO_P521_ALG}";nonce="${DEMO_P521_NONCE}"`,
+  );
+  assert.ok(p521Signed.headers["content-digest"].startsWith("sha-512=:"));
+  // RFC 9421 §3.3.6 wire form: the signature is the raw
+  // 132-octet r||s concatenation (66 octets per limb), never
+  // a DER value and never the 96-octet P-384 width.
+  const raw = Buffer.from(
+    p521Signed.headers["signature"].slice("sig1=:".length, -1),
+    "base64",
+  );
+  assert.equal(raw.length, 132);
+
+  assert.equal(p521Verification.ok, true);
+  assert.equal(p521Verification.label, DEMO_P521_LABEL);
+  assert.equal(p521Verification.keyId, DEMO_P521_KEY_ID);
+  assert.equal(p521Verification.alg, DEMO_P521_ALG);
+  assert.equal(p521Verification.nonce, DEMO_P521_NONCE);
+
+  assert.equal(p521TamperedVerification.ok, false);
+  assert.equal(p521TamperedVerification.code, DEMO_P521_TAMPERED_CODE);
+
+  // Cross-check against the library called directly: a fresh
+  // P-521 pair signing the same fixed request shape verifies
+  // with the same identity, and the same body tamper is
+  // rejected with the same code.
+  const { publicKey, privateKey } = generateP521KeyPair();
+  const direct = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_P521_KEY_ID,
+      alg: "ecdsa-p521-sha512",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_P521_NONCE,
+    },
+  );
+  const directOk = verifyRequest(direct, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(directOk.ok, true);
+  assert.equal(directOk.keyId, DEMO_P521_KEY_ID);
+  assert.equal(directOk.alg, DEMO_P521_ALG);
+  const directTampered = verifyRequest(
+    { ...direct, body: DEMO_TAMPERED_BODY },
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+  assert.equal(directTampered.ok, false);
+  assert.equal(directTampered.code, DEMO_P521_TAMPERED_CODE);
+});
+
+test("demo lines contain the ECDSA P-521 signing segment (signature-input, verification and tamper rejection, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /ECDSA P-521 signing: ecdsa-p521-sha512 signs/);
+  // The P-521 block sits after the Signature-Input parsing
+  // segment and closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("ECDSA P-521 signing:"),
+  );
+  const parseIdx = lines.findIndex((l) =>
+    l.startsWith("Signature-Input parsing:"),
+  );
+  assert.ok(parseIdx !== -1 && headerIdx !== -1 && parseIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "ECDSA P-521 signing: ecdsa-p521-sha512 signs the same fixed payment request with a P-521 key — the widest NIST curve, whose 132-byte raw signature completes the ladder the P-256 segment's 64-byte and the P-384 segment's 96-byte forms began",
+    `P-521 Signature-Input: sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_P521_KEY_ID}";alg="${DEMO_P521_ALG}";nonce="${DEMO_P521_NONCE}"`,
+    `P-521 verification: OK (label ${DEMO_P521_LABEL}, keyid="${DEMO_P521_KEY_ID}", alg="${DEMO_P521_ALG}", nonce="${DEMO_P521_NONCE}")`,
+    "P-521 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  ]);
+  // The P-521 segment closes the demo: its tamper-rejection
+  // line is final.
+  assert.equal(
+    lines[lines.length - 1],
+    "P-521 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  );
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key or signature bytes, so they are pinned
+  // constants, identical between runs even though the
+  // P-521 key pair itself is fresh.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("ECDSA P-521 signing:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
   );
 });

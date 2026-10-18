@@ -282,6 +282,29 @@
  * truncated header — and that rejection is printed.
  * Every input is a fixed demo constant, so the segment
  * is byte-identical between runs.
+ * The demo closes with an ECDSA P-521 signing segment: the
+ * same fixed payment request is signed under
+ * `ecdsa-p521-sha512` with a P-521 key pair from
+ * `generateP521KeyPair` — the generator the library's ecdsa
+ * tests and bench corpus use — its `Signature-Input` is
+ * printed (algorithm and keyid, never key bytes),
+ * verification is printed passing, and the same request
+ * with its body tampered by one byte is printed rejected
+ * with `BODY_DIGEST_MISMATCH`, because the covered
+ * `content-digest` no longer matches the body. P-521 is
+ * the widest of the three NIST curves the demo shows: its
+ * signatures are the 132-octet raw r‖s form of RFC 9421
+ * §3.3.6 (66 octets per limb), completing the signature
+ * length ladder against the P-256 segment's 64-octet form
+ * and the P-384 segment's 96-octet form. Outside the
+ * printed lines the demo asserts the verified identity
+ * (label, keyid, alg, nonce) and the tamper rejection code
+ * equal the hand-pinned expectations below (the same
+ * identity and code `test/ecdsaP521.test.ts` pins for its
+ * round-trip and tampered-body cases). The P-521 key pair
+ * is fresh on every run, like the P-384 segment's pair, so
+ * the signature bytes differ between runs while every
+ * printed line is identical.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -331,6 +354,7 @@ import {
   generateNonce,
   generateP256KeyPair,
   generateP384KeyPair,
+  generateP521KeyPair,
   generateRsaPssKeyPair,
   getHeaderRaw,
   importPrivateKey,
@@ -1026,6 +1050,36 @@ export const DEMO_PARSE_NONCE = "demo-nonce-001";
 export const DEMO_PARSE_TAMPERED_ERROR =
   "malformed Signature-Input: unterminated inner list";
 
+/** Key id of the closing ECDSA P-521 segment's signed request. */
+export const DEMO_P521_KEY_ID = "demo-p521-key-1";
+/** Nonce of the closing ECDSA P-521 segment's signed request. */
+export const DEMO_P521_NONCE = "demo-nonce-p521-001";
+/**
+ * Hand-pinned verified identity of the closing ECDSA P-521
+ * segment: the segment passes no label, so its signature
+ * carries the library default `sig1`, and verification must
+ * report the segment's own keyid, the `ecdsa-p521-sha512`
+ * algorithm and its nonce — the same identity shape
+ * `test/ecdsaP521.test.ts` pins for its round-trip case
+ * (label default, keyid, alg). The expectations are written
+ * out here, never derived from the verification the demo is
+ * checking.
+ */
+export const DEMO_P521_LABEL = "sig1";
+export const DEMO_P521_ALG = "ecdsa-p521-sha512";
+/**
+ * Hand-pinned failure code of the closing ECDSA P-521
+ * segment's tampered request: changing the body by the same
+ * one byte as the main line (amount 100 -> 101) leaves the
+ * covered `content-digest` stale, so verification must fail
+ * with `BODY_DIGEST_MISMATCH` — the same code
+ * `test/ecdsaP521.test.ts` pins for its tampered-body case.
+ * The expectation is written out here, never derived from
+ * the verification the demo is checking.
+ */
+export const DEMO_P521_TAMPERED_CODE: VerifyFailureCode =
+  "BODY_DIGEST_MISMATCH";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1450,6 +1504,23 @@ export interface DemoResult {
    * (equals the hand-pinned `DEMO_PARSE_TAMPERED_ERROR`).
    */
   parseTamperedError: string;
+  /**
+   * The request signed in the closing ECDSA P-521 segment
+   * with a fresh P-521 key pair under `ecdsa-p521-sha512`
+   * (keyid `DEMO_P521_KEY_ID`, nonce `DEMO_P521_NONCE`).
+   */
+  p521Signed: SignedHttpRequest;
+  /**
+   * Verification of `p521Signed` (ok — label, keyid, alg and
+   * nonce equal the hand-pinned `DEMO_P521_*` expectations).
+   */
+  p521Verification: VerifyResult;
+  /**
+   * Verification of `p521Signed` with the body tampered by
+   * one byte: rejected with `DEMO_P521_TAMPERED_CODE`
+   * (`BODY_DIGEST_MISMATCH`).
+   */
+  p521TamperedVerification: VerifyResult;
   lines: string[];
 }
 
@@ -2677,6 +2748,68 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // ECDSA P-521 signing segment: the P-256 and P-384
+  // segments above show the two narrower NIST curves, but
+  // the library's widest curve — `ecdsa-p521-sha512`,
+  // RFC 9421 §3.3.6 — was never shown. A P-521 key pair
+  // from `generateP521KeyPair` (the generator the ecdsa
+  // tests and bench corpus use) signs the same fixed
+  // payment request under the segment's own keyid and
+  // nonce, verification passes, and the same one-byte body
+  // tamper as the main line (amount 100 -> 101) is rejected
+  // because the covered `content-digest` no longer matches
+  // the body. Its signatures are the 132-octet raw r||s
+  // form (66 octets per limb), completing the ladder
+  // against the P-256 segment's 64-octet form and the
+  // P-384 segment's 96-octet form. Outside the printed
+  // lines the demo asserts the verified identity (label,
+  // keyid, alg, nonce) and the tamper code equal the
+  // hand-pinned DEMO_P521_* expectations — a mismatch
+  // throws instead of printing a misleading segment. No
+  // key bytes are printed.
+  const p521KeyPair = generateP521KeyPair();
+  const p521Signed = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_P521_KEY_ID,
+      alg: "ecdsa-p521-sha512",
+      key: p521KeyPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_P521_NONCE,
+    },
+  );
+  const p521Verification = verifyRequest(p521Signed, {
+    key: p521KeyPair.publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  const p521TamperedVerification = verifyRequest(
+    { ...p521Signed, body: DEMO_TAMPERED_BODY },
+    { key: p521KeyPair.publicKey, now: DEMO_CREATED + 60 },
+  );
+  if (
+    !p521Verification.ok ||
+    p521Verification.label !== DEMO_P521_LABEL ||
+    p521Verification.keyId !== DEMO_P521_KEY_ID ||
+    p521Verification.alg !== DEMO_P521_ALG ||
+    p521Verification.nonce !== DEMO_P521_NONCE ||
+    p521TamperedVerification.ok ||
+    p521TamperedVerification.code !== DEMO_P521_TAMPERED_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: P-521 verification ` +
+        `${p521Verification.ok}/${p521Verification.label}/${p521Verification.keyId}/` +
+        `${p521Verification.alg}/${p521Verification.nonce} with tamper code ` +
+        `${p521TamperedVerification.code}, instead of the pinned ` +
+        `true/${DEMO_P521_LABEL}/${DEMO_P521_KEY_ID}/${DEMO_P521_ALG}/` +
+        `${DEMO_P521_NONCE} with tamper code ${DEMO_P521_TAMPERED_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -2877,6 +3010,15 @@ export function runDemo(): DemoResult {
     `Parsed ${parsedSignatureInput.label}: keyid="${parsedSignatureInput.params.keyid}", alg="${parsedSignatureInput.params.alg}", created=${parsedSignatureInput.params.created}, nonce="${parsedSignatureInput.params.nonce}"`,
     `Parsed covered components: ${parsedSignatureInput.componentIds.map((c) => `"${c}"`).join(" ")}`,
     `Tampered Signature-Input (closing parenthesis removed): FAILED (${parseTamperedError})`,
+    "",
+    "ECDSA P-521 signing: ecdsa-p521-sha512 signs the same fixed payment request with a P-521 key — the widest NIST curve, whose 132-byte raw signature completes the ladder the P-256 segment's 64-byte and the P-384 segment's 96-byte forms began",
+    `P-521 Signature-Input: ${p521Signed.headers["signature-input"]}`,
+    p521Verification.ok
+      ? `P-521 verification: OK (label ${p521Verification.label}, keyid=\"${p521Verification.keyId}\", alg=\"${p521Verification.alg}\", nonce=\"${p521Verification.nonce}\")`
+      : `P-521 verification: FAILED (code ${p521Verification.code}: ${p521Verification.reason})`,
+    p521TamperedVerification.ok
+      ? "P-521 verification after tampering: OK (unexpected — tampering was not detected)"
+      : `P-521 verification after tampering: FAILED (code ${p521TamperedVerification.code}: ${p521TamperedVerification.reason})`,
   ];
 
   return {
@@ -2954,6 +3096,9 @@ export function runDemo(): DemoResult {
     signatureInputRaw,
     parsedSignatureInput,
     parseTamperedError,
+    p521Signed,
+    p521Verification,
+    p521TamperedVerification,
     lines,
   };
 }

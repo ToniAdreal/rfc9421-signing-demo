@@ -11,6 +11,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with an ECDSA
+  P-521 signing segment: the same fixed payment request is
+  signed under `ecdsa-p521-sha512` with a P-521 key pair
+  from `generateP521KeyPair` — the generator the library's
+  ecdsa tests and bench corpus use — its `Signature-Input`
+  is printed, verification passes, and the same request
+  with its body tampered by one byte (amount 100 -> 101)
+  is rejected with `BODY_DIGEST_MISMATCH`, because the
+  covered `content-digest` no longer matches the body.
+  The demo's earlier segments show the ed25519 main line,
+  the hmac-sha256 gateway line and the P-256 / P-384
+  curves, so the widest NIST curve — whose signatures are
+  the 132-octet raw r‖s form of RFC 9421 §3.3.6 (66 octets
+  per limb), completing the ladder against the P-256
+  segment's 64-octet form and the P-384 segment's 96-octet
+  form — was invisible to demo readers. Outside the
+  printed lines the demo asserts the verified identity
+  (label, keyid, alg, nonce) and the tamper rejection
+  code equal the hand-pinned expectations (the same
+  identity and code `test/ecdsaP521.test.ts` pins for its
+  round-trip and tampered-body cases). `DemoResult`
+  carries the signed request and both verifications, and
+  the demo tests pin the fields, the 132-octet wire
+  length and the printed lines. The P-521 key pair is
+  fresh on every run, so the signature bytes differ
+  between runs while every printed line is identical.
+
 - The CLI demo (`npm run demo`) now closes with a
   Signature-Input parsing segment: the main signed
   request's `signature-input` value is read back raw with
