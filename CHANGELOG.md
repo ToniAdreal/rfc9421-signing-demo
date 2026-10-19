@@ -11,6 +11,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with an RSA
+  v1_5 signing segment: the same fixed payment request
+  is signed under `rsa-v1_5-sha256` (RSASSA-PKCS1-v1_5,
+  RFC 9421 §3.3.2 — the legacy-interop algorithm) with
+  an RSA key pair from `generateRsaV15KeyPair`, generated
+  once per process, and its `Signature-Input` is printed
+  (algorithm and keyid, never key bytes). The same
+  request is signed a second time with the same key and
+  the two signatures are shown byte-identical — v1_5 is
+  deterministic, unlike RSA-PSS — verification is
+  printed passing with its label / keyid / alg / nonce
+  identity, and the same request with its body tampered
+  by one byte is printed rejected with
+  `BODY_DIGEST_MISMATCH`. Every earlier RSA demo segment
+  signed with RSA-PSS or only guarded RSA keys, so an
+  actual v1_5 signing — and its determinism — was
+  invisible to demo readers. Outside the printed lines
+  the demo asserts the verified identity, the
+  byte-identity of the two signatures and the tamper
+  rejection code against hand-pinned expectations.
+  `DemoResult` carries both signed requests, the
+  determinism verdict and both verification results,
+  and the demo tests pin the fields and the printed
+  lines. Only the determinism verdict is printed, never
+  the signature bytes, so the segment's printed lines
+  are identical between runs.
 - The CLI demo (`npm run demo`) now closes with a
   signature-input value construction segment: the main
   line's covered components and fixed parameters are run

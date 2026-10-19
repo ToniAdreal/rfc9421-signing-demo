@@ -470,6 +470,33 @@
  * created/expires/keyid/alg/nonce/tag order the serializer
  * always uses. Every input is a fixed constant, so the
  * segment is byte-identical between runs.
+ * The demo closes with an RSA v1_5 signing segment: the
+ * same fixed payment request is signed under
+ * `rsa-v1_5-sha256` (RSASSA-PKCS1-v1_5, RFC 9421 §3.3.2 —
+ * the legacy-interop algorithm) with an RSA key pair from
+ * `generateRsaV15KeyPair` — the generator the library's
+ * rsaV15 tests and bench corpus use — its `Signature-Input`
+ * is printed (algorithm and keyid, never key bytes), the
+ * same request is signed a second time with the same key
+ * and the two signatures are shown byte-identical — v1_5
+ * is deterministic, unlike RSA-PSS — verification is
+ * printed passing, and the same request with its body
+ * tampered by one byte is printed rejected with
+ * `BODY_DIGEST_MISMATCH`, because the covered
+ * `content-digest` no longer matches the body. Outside
+ * the printed lines the demo asserts the verified identity
+ * (label, keyid, alg, nonce), the byte-identity of the two
+ * signatures and the tamper rejection code equal the
+ * hand-pinned expectations below (the same identity,
+ * determinism and code `test/rsaV15.test.ts` pins for its
+ * round-trip and deterministic cases and the other signing
+ * segments pin for their tampered-body cases). The RSA
+ * key pair is generated once per process, like the RSA
+ * guard and RSA JWK segments' pairs, so repeated
+ * `runDemo()` calls do not repay RSA key generation; only
+ * the printed determinism verdict — never the signature
+ * bytes themselves — is shown, so the segment's printed
+ * lines are identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -525,6 +552,7 @@ import {
   generateP384KeyPair,
   generateP521KeyPair,
   generateRsaPssKeyPair,
+  generateRsaV15KeyPair,
   getHeader,
   getHeaderRaw,
   importPrivateKey,
@@ -1657,6 +1685,37 @@ export const DEMO_SIG_INPUT_ALT_PARAMS: SignatureParams = {
 export const DEMO_SIG_INPUT_ALT_EXPECTED =
   'webhook=("@method" "@path");created=1700000000;expires=1700000300;keyid="webhook-key-1";alg="hmac-sha256";nonce="demo-nonce-webhook-001";tag="payment-webhook-v1"';
 
+/** Key id of the closing RSA v1_5 segment's signed request. */
+export const DEMO_RSA_V15_KEY_ID = "demo-rsa-v15-key-1";
+/** Nonce of the closing RSA v1_5 segment's signed request. */
+export const DEMO_RSA_V15_NONCE = "demo-nonce-rsa-v15-001";
+/**
+ * Hand-pinned verified identity of the closing RSA v1_5
+ * segment: the segment passes no label, so its signature
+ * carries the library default `sig1`, and verification must
+ * report the segment's own keyid, the `rsa-v1_5-sha256`
+ * algorithm and its nonce — the same identity shape
+ * `test/rsaV15.test.ts` pins for its round-trip case
+ * (label default, keyid, alg). The expectations are written
+ * out here, never derived from the verification the demo is
+ * checking.
+ */
+export const DEMO_RSA_V15_LABEL = "sig1";
+export const DEMO_RSA_V15_ALG = "rsa-v1_5-sha256";
+/**
+ * Hand-pinned failure code of the closing RSA v1_5
+ * segment's tampered request: changing the body by the same
+ * one byte as the main line (amount 100 -> 101) leaves the
+ * covered `content-digest` stale, so verification must fail
+ * with `BODY_DIGEST_MISMATCH` — the same code the other
+ * signing segments (P-256 / P-384 / P-521) pin for their
+ * tampered-body cases, the digest check being
+ * algorithm-agnostic. The expectation is written out here,
+ * never derived from the verification the demo is checking.
+ */
+export const DEMO_RSA_V15_TAMPERED_CODE: VerifyFailureCode =
+  "BODY_DIGEST_MISMATCH";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -2335,6 +2394,39 @@ export interface DemoResult {
    * `DEMO_SIG_INPUT_ALT_EXPECTED`).
    */
   signatureInputValueAlt: string;
+  /**
+   * The request signed in the closing RSA v1_5 segment
+   * with the segment's once-per-process RSA key pair under
+   * `rsa-v1_5-sha256` (keyid `DEMO_RSA_V15_KEY_ID`, nonce
+   * `DEMO_RSA_V15_NONCE`).
+   */
+  rsaV15Signed: SignedHttpRequest;
+  /**
+   * The same fixed request signed a second time in the
+   * closing RSA v1_5 segment with the same key and the
+   * same parameters — RSASSA-PKCS1-v1_5 is deterministic,
+   * so its `signature` header must equal `rsaV15Signed`'s
+   * byte for byte, unlike an RSA-PSS re-signing.
+   */
+  rsaV15Resigned: SignedHttpRequest;
+  /**
+   * Whether the two RSA v1_5 signings above produced
+   * byte-identical `signature` headers (`true` — the
+   * determinism the segment exists to show).
+   */
+  rsaV15SignaturesIdentical: boolean;
+  /**
+   * Verification of `rsaV15Signed` (ok — label, keyid, alg
+   * and nonce equal the hand-pinned `DEMO_RSA_V15_*`
+   * expectations).
+   */
+  rsaV15Verification: VerifyResult;
+  /**
+   * Verification of `rsaV15Signed` with the body tampered
+   * by one byte: rejected with `DEMO_RSA_V15_TAMPERED_CODE`
+   * (`BODY_DIGEST_MISMATCH`).
+   */
+  rsaV15TamperedVerification: VerifyResult;
   lines: string[];
 }
 
@@ -2387,6 +2479,30 @@ function rsaJwkPair(): {
     demoRsaJwkPair = generateRsaPssKeyPair();
   }
   return demoRsaJwkPair;
+}
+
+/**
+ * RSA key pair for the closing RSA v1_5 segment, generated
+ * once per process and reused across `runDemo()` calls —
+ * the same generate-once shape as {@link rsaJwkPair} above,
+ * for the same reason: the demo tests call `runDemo()` many
+ * times and must not pay RSA key generation on every call.
+ * Only the signed request's `Signature-Input` and the
+ * determinism verdict are ever printed, never key bytes or
+ * signature bytes.
+ */
+let demoRsaV15Pair: {
+  publicKey: KeyObject;
+  privateKey: KeyObject;
+} | null = null;
+function rsaV15Pair(): {
+  publicKey: KeyObject;
+  privateKey: KeyObject;
+} {
+  if (demoRsaV15Pair === null) {
+    demoRsaV15Pair = generateRsaV15KeyPair();
+  }
+  return demoRsaV15Pair;
 }
 
 function formatLabelResult(prefix: string, result: VerifyResult): string {
@@ -4309,6 +4425,91 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // RSA v1_5 signing segment: the demo's RSA lines above
+  // sign with RSA-PSS (the RSA JWK segment) or only guard
+  // RSA keys, but the library's legacy-interop line —
+  // `rsa-v1_5-sha256`, RSASSA-PKCS1-v1_5 with SHA-256,
+  // RFC 9421 §3.3.2 — was never actually signed with. The
+  // segment's key pair comes from `generateRsaV15KeyPair`
+  // (generated once per process — see `rsaV15Pair`) and
+  // signs the same fixed payment request under the
+  // segment's own keyid and nonce; the same request is
+  // signed a second time with the same key and parameters,
+  // and the two `signature` headers must be byte-identical
+  // — v1_5 is deterministic (no random salt), the key
+  // difference from PSS the rsaV15 suite pins. Verification
+  // passes, and the same one-byte body tamper as the main
+  // line (amount 100 -> 101) is rejected because the covered
+  // `content-digest` no longer matches the body. Outside the
+  // printed lines the demo asserts the verified identity
+  // (label, keyid, alg, nonce), the byte-identity and the
+  // tamper code equal the hand-pinned DEMO_RSA_V15_*
+  // expectations — a mismatch throws instead of printing a
+  // misleading segment. No key or signature bytes are
+  // printed.
+  const rsaV15Signed = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_RSA_V15_KEY_ID,
+      alg: "rsa-v1_5-sha256",
+      key: rsaV15Pair().privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_RSA_V15_NONCE,
+    },
+  );
+  const rsaV15Resigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_RSA_V15_KEY_ID,
+      alg: "rsa-v1_5-sha256",
+      key: rsaV15Pair().privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_RSA_V15_NONCE,
+    },
+  );
+  const rsaV15SignaturesIdentical =
+    rsaV15Signed.headers["signature"] === rsaV15Resigned.headers["signature"];
+  const rsaV15Verification = verifyRequest(rsaV15Signed, {
+    key: rsaV15Pair().publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  const rsaV15TamperedVerification = verifyRequest(
+    { ...rsaV15Signed, body: DEMO_TAMPERED_BODY },
+    { key: rsaV15Pair().publicKey, now: DEMO_CREATED + 60 },
+  );
+  if (
+    !rsaV15SignaturesIdentical ||
+    rsaV15Resigned.headers["signature-input"] !==
+      rsaV15Signed.headers["signature-input"] ||
+    !rsaV15Verification.ok ||
+    rsaV15Verification.label !== DEMO_RSA_V15_LABEL ||
+    rsaV15Verification.keyId !== DEMO_RSA_V15_KEY_ID ||
+    rsaV15Verification.alg !== DEMO_RSA_V15_ALG ||
+    rsaV15Verification.nonce !== DEMO_RSA_V15_NONCE ||
+    rsaV15TamperedVerification.ok ||
+    rsaV15TamperedVerification.code !== DEMO_RSA_V15_TAMPERED_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: RSA v1_5 verification ` +
+        `${rsaV15Verification.ok}/${rsaV15Verification.label}/${rsaV15Verification.keyId}/` +
+        `${rsaV15Verification.alg}/${rsaV15Verification.nonce} with signatures identical ` +
+        `${rsaV15SignaturesIdentical} and tamper code ` +
+        `${rsaV15TamperedVerification.code}, instead of the pinned ` +
+        `true/${DEMO_RSA_V15_LABEL}/${DEMO_RSA_V15_KEY_ID}/${DEMO_RSA_V15_ALG}/` +
+        `${DEMO_RSA_V15_NONCE} with signatures identical true and tamper code ${DEMO_RSA_V15_TAMPERED_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -4579,6 +4780,16 @@ export async function runDemo(): Promise<DemoResult> {
     "Signature-Input value construction: signatureInputValue(label, componentIds, params) builds one label's Signature-Input member — the label= prefix plus the serialized inner list and parameters — exactly the member signRequest writes into the header when it signs",
     `Main label: signatureInputValue("${DEMO_SIG_INPUT_LABEL}", the main covered components, the main parameters) = "${signatureInputValueMain}" — byte-for-byte the main signed request's signature-input header`,
     `Second label: signatureInputValue("${DEMO_SIG_INPUT_ALT_LABEL}", ${DEMO_SIG_INPUT_ALT_COMPONENTS.map((c) => `"${c}"`).join(" ")}, parameters with expires/nonce/tag) = "${signatureInputValueAlt}" — parameters serialize in the fixed created, expires, keyid, alg, nonce, tag order`,
+    "",
+    "RSA v1_5 signing: rsa-v1_5-sha256 (RSASSA-PKCS1-v1_5, RFC 9421 §3.3.2) signs the same fixed payment request with an RSA key — the legacy-interop line the RSA-PSS lines above never showed, kept for gateways and webhook signers that predate PSS",
+    `RSA v1_5 Signature-Input: ${rsaV15Signed.headers["signature-input"]}`,
+    `RSA v1_5 determinism: signing the same request again with the same key produced byte-identical Signature bytes: ${rsaV15SignaturesIdentical} (RSASSA-PKCS1-v1_5 has no random salt, unlike RSA-PSS — the signature bytes themselves are never printed)`,
+    rsaV15Verification.ok
+      ? `RSA v1_5 verification: OK (label ${rsaV15Verification.label}, keyid="${rsaV15Verification.keyId}", alg="${rsaV15Verification.alg}", nonce="${rsaV15Verification.nonce}")`
+      : `RSA v1_5 verification: FAILED (code ${rsaV15Verification.code}: ${rsaV15Verification.reason})`,
+    rsaV15TamperedVerification.ok
+      ? "RSA v1_5 verification after tampering: OK (unexpected — tampering was not detected)"
+      : `RSA v1_5 verification after tampering: FAILED (code ${rsaV15TamperedVerification.code}: ${rsaV15TamperedVerification.reason})`,
   ];
 
   return {
@@ -4695,6 +4906,11 @@ export async function runDemo(): Promise<DemoResult> {
     getHeaderRawMissingValue,
     signatureInputValueMain,
     signatureInputValueAlt,
+    rsaV15Signed,
+    rsaV15Resigned,
+    rsaV15SignaturesIdentical,
+    rsaV15Verification,
+    rsaV15TamperedVerification,
     lines,
   };
 }

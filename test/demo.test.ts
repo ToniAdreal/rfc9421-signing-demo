@@ -18,6 +18,7 @@ import {
   generateP384KeyPair,
   generateP521KeyPair,
   generateRsaPssKeyPair,
+  generateRsaV15KeyPair,
   getHeader,
   getHeaderRaw,
   importPublicKeyJwkP256,
@@ -92,6 +93,11 @@ import {
   DEMO_RSA_JWK_MISMATCH_ERROR,
   DEMO_RSA_JWK_N_LENGTH,
   DEMO_RSA_JWK_NONCE,
+  DEMO_RSA_V15_ALG,
+  DEMO_RSA_V15_KEY_ID,
+  DEMO_RSA_V15_LABEL,
+  DEMO_RSA_V15_NONCE,
+  DEMO_RSA_V15_TAMPERED_CODE,
   DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD,
   DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION,
   DEMO_JWKS_REFRESH_FRESH_AT_SEC,
@@ -3302,13 +3308,13 @@ test("demo signatureInputValue segment builds the main member byte-for-byte and 
   assert.ok(order.every((v, i) => v !== -1 && (i === 0 || order[i - 1] < v)));
 });
 
-test("demo lines contain the signatureInputValue segment (main member, second label, closing the demo)", async () => {
+test("demo lines contain the signatureInputValue segment (main member, second label, followed by the RSA v1_5 segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Signature-Input value construction: signatureInputValue/);
   // The construction block sits after the header lookup
-  // segment and closes the demo.
+  // segment and is followed by the RSA v1_5 segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Signature-Input value construction:"),
   );
@@ -3320,9 +3326,9 @@ test("demo lines contain the signatureInputValue segment (main member, second la
     `Second label: signatureInputValue("${DEMO_SIG_INPUT_ALT_LABEL}", ${DEMO_SIG_INPUT_ALT_COMPONENTS.map((c) => `"${c}"`).join(" ")}, parameters with expires/nonce/tag) = "${DEMO_SIG_INPUT_ALT_EXPECTED}" — parameters serialize in the fixed created, expires, keyid, alg, nonce, tag order`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), expectedLines);
-  // The construction segment closes the demo: its second
-  // label line is final.
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  // The RSA v1_5 segment follows the construction segment.
+  const rsaV15Idx = lines.findIndex((l) => l.startsWith("RSA v1_5 signing:"));
+  assert.ok(headerIdx !== -1 && rsaV15Idx !== -1 && headerIdx < rsaV15Idx);
 
   // Deterministic double run: every input is a fixed
   // constant, so the segment's printed lines are identical
@@ -3334,5 +3340,132 @@ test("demo lines contain the signatureInputValue segment (main member, second la
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 3),
     lines.slice(headerIdx, headerIdx + 3),
+  );
+});
+
+test("demo RSA v1_5 segment signs deterministically, verifies, and rejects the one-byte tamper", async () => {
+  const {
+    rsaV15Signed,
+    rsaV15Resigned,
+    rsaV15SignaturesIdentical,
+    rsaV15Verification,
+    rsaV15TamperedVerification,
+  } = await runDemo();
+
+  // Expectations are the literals hand-pinned in DEMO_RSA_V15_*
+  // and cross-checked against test/rsaV15.test.ts (its
+  // round-trip case pins the same keyid/alg identity shape and
+  // its deterministic case pins the byte-identical re-signing).
+  // The test pins the literals again here so a drift in
+  // either place fails.
+  assert.equal(DEMO_RSA_V15_KEY_ID, "demo-rsa-v15-key-1");
+  assert.equal(DEMO_RSA_V15_NONCE, "demo-nonce-rsa-v15-001");
+  assert.equal(DEMO_RSA_V15_LABEL, "sig1");
+  assert.equal(DEMO_RSA_V15_ALG, "rsa-v1_5-sha256");
+  assert.equal(DEMO_RSA_V15_TAMPERED_CODE, "BODY_DIGEST_MISMATCH");
+
+  assert.equal(
+    rsaV15Signed.headers["signature-input"],
+    `sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_RSA_V15_KEY_ID}";alg="${DEMO_RSA_V15_ALG}";nonce="${DEMO_RSA_V15_NONCE}"`,
+  );
+  assert.ok(rsaV15Signed.headers["content-digest"].startsWith("sha-512=:"));
+  // 2048-bit RSA signature -> 256 raw bytes, base64-wrapped.
+  const raw = Buffer.from(
+    rsaV15Signed.headers["signature"].slice("sig1=:".length, -1),
+    "base64",
+  );
+  assert.equal(raw.length, 256);
+
+  // Determinism: the second signing with the same key and
+  // parameters is byte-identical in both headers — the
+  // RSASSA-PKCS1-v1_5 property rsaV15.test.ts pins directly.
+  assert.equal(rsaV15SignaturesIdentical, true);
+  assert.equal(
+    rsaV15Resigned.headers["signature"],
+    rsaV15Signed.headers["signature"],
+  );
+  assert.equal(
+    rsaV15Resigned.headers["signature-input"],
+    rsaV15Signed.headers["signature-input"],
+  );
+
+  assert.equal(rsaV15Verification.ok, true);
+  assert.equal(rsaV15Verification.label, DEMO_RSA_V15_LABEL);
+  assert.equal(rsaV15Verification.keyId, DEMO_RSA_V15_KEY_ID);
+  assert.equal(rsaV15Verification.alg, DEMO_RSA_V15_ALG);
+  assert.equal(rsaV15Verification.nonce, DEMO_RSA_V15_NONCE);
+
+  assert.equal(rsaV15TamperedVerification.ok, false);
+  assert.equal(rsaV15TamperedVerification.code, DEMO_RSA_V15_TAMPERED_CODE);
+
+  // Cross-check against the library called directly: a fresh
+  // v1_5 pair signing the same fixed request shape twice
+  // verifies with the same identity, the two signatures are
+  // byte-identical, and the same body tamper is rejected
+  // with the same code.
+  const { publicKey, privateKey } = generateRsaV15KeyPair();
+  const directOpts = {
+    keyId: DEMO_RSA_V15_KEY_ID,
+    alg: "rsa-v1_5-sha256" as const,
+    key: privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_RSA_V15_NONCE,
+  };
+  const directReq = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const direct = signRequest(directReq, directOpts);
+  const directAgain = signRequest(directReq, directOpts);
+  assert.equal(directAgain.headers["signature"], direct.headers["signature"]);
+  const directOk = verifyRequest(direct, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(directOk.ok, true);
+  assert.equal(directOk.keyId, DEMO_RSA_V15_KEY_ID);
+  assert.equal(directOk.alg, DEMO_RSA_V15_ALG);
+  const directTampered = verifyRequest(
+    { ...direct, body: DEMO_TAMPERED_BODY },
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+  assert.equal(directTampered.ok, false);
+  assert.equal(directTampered.code, DEMO_RSA_V15_TAMPERED_CODE);
+});
+
+test("demo lines contain the RSA v1_5 signing segment (signature-input, determinism, verification and tamper rejection, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /RSA v1_5 signing: rsa-v1_5-sha256/);
+  // The v1_5 block sits after the signature-input
+  // construction segment and closes the demo.
+  const headerIdx = lines.findIndex((l) => l.startsWith("RSA v1_5 signing:"));
+  const sigInputIdx = lines.findIndex((l) =>
+    l.startsWith("Signature-Input value construction:"),
+  );
+  assert.ok(sigInputIdx !== -1 && headerIdx !== -1 && sigInputIdx < headerIdx);
+  const expectedLines = [
+    "RSA v1_5 signing: rsa-v1_5-sha256 (RSASSA-PKCS1-v1_5, RFC 9421 §3.3.2) signs the same fixed payment request with an RSA key — the legacy-interop line the RSA-PSS lines above never showed, kept for gateways and webhook signers that predate PSS",
+    `RSA v1_5 Signature-Input: sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_RSA_V15_KEY_ID}";alg="${DEMO_RSA_V15_ALG}";nonce="${DEMO_RSA_V15_NONCE}"`,
+    "RSA v1_5 determinism: signing the same request again with the same key produced byte-identical Signature bytes: true (RSASSA-PKCS1-v1_5 has no random salt, unlike RSA-PSS — the signature bytes themselves are never printed)",
+    `RSA v1_5 verification: OK (label ${DEMO_RSA_V15_LABEL}, keyid="${DEMO_RSA_V15_KEY_ID}", alg="${DEMO_RSA_V15_ALG}", nonce="${DEMO_RSA_V15_NONCE}")`,
+    "RSA v1_5 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  // The v1_5 segment closes the demo: its tamper line is final.
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key or signature bytes, so they are pinned
+  // constants, identical between runs even though the RSA
+  // key pair itself is generated once per process.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("RSA v1_5 signing:"));
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 5),
+    lines.slice(headerIdx, headerIdx + 5),
   );
 });
