@@ -31,6 +31,7 @@ import {
   ReplayCache,
   resolveComponent,
   signRequest,
+  signatureInputValue,
   verifyRequest,
 } from "../src/index.js";
 import {
@@ -67,6 +68,13 @@ import {
   DEMO_DICT_MEMBER_VALUE,
   DEMO_SF_CANONICALIZATION,
   DEMO_SIG_PARAMS_SERIALIZATION,
+  DEMO_SIG_INPUT_ALT_COMPONENTS,
+  DEMO_SIG_INPUT_ALT_EXPECTED,
+  DEMO_SIG_INPUT_ALT_LABEL,
+  DEMO_SIG_INPUT_ALT_PARAMS,
+  DEMO_SIG_INPUT_EXPECTED,
+  DEMO_SIG_INPUT_LABEL,
+  DEMO_SIG_INPUT_PARAMS,
   DEMO_JWKS_FETCHED_AT_SEC,
   DEMO_JWKS_URL,
   DEMO_HMAC_GUARD_ACCEPTED,
@@ -3221,7 +3229,7 @@ test("demo getHeader segment shows the normalized lookup, the raw contrast, and 
   );
 });
 
-test("demo lines contain the getHeader segment (normalized value, raw contrast, single value, missing undefined, closing the demo)", async () => {
+test("demo lines contain the getHeader segment (normalized value, raw contrast, single value, missing undefined, followed by the signature-input construction segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
 
@@ -3241,9 +3249,9 @@ test("demo lines contain the getHeader segment (normalized value, raw contrast, 
     `getHeader("${DEMO_GET_HEADER_MISSING_NAME}"): undefined (no such field in the record — a missing header is undefined, never an empty string)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
-  // The header lookup segment closes the demo: its missing
-  // header line is final.
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  // The signature-input construction segment follows the
+  // header lookup segment.
+  assert.ok(lines[headerIdx + 6]?.startsWith("Signature-Input value construction:"));
 
   // Deterministic double run: every input is a fixed
   // constant, so the segment's printed lines are identical
@@ -3253,5 +3261,78 @@ test("demo lines contain the getHeader segment (normalized value, raw contrast, 
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 5),
     lines.slice(headerIdx, headerIdx + 5),
+  );
+});
+
+test("demo signatureInputValue segment builds the main member byte-for-byte and the second label in fixed parameter order", async () => {
+  const { signed, signatureInputValueMain, signatureInputValueAlt } =
+    await runDemo();
+
+  // The main call replays the main line's own inputs, so its
+  // built value equals both the hand-pinned expectation and
+  // the main signed request's actual signature-input header.
+  assert.equal(signatureInputValueMain, DEMO_SIG_INPUT_EXPECTED);
+  assert.equal(signatureInputValueMain, signed.headers["signature-input"]);
+  assert.equal(DEMO_SIG_INPUT_EXPECTED, DEMO_PARSE_RAW_INPUT);
+  // The second call carries all six parameter slots and
+  // equals its own hand-pinned expectation.
+  assert.equal(signatureInputValueAlt, DEMO_SIG_INPUT_ALT_EXPECTED);
+
+  // Direct cross-check against the library function on the
+  // same pinned inputs: the demo's fields are exactly what
+  // a direct call builds, in both cases.
+  assert.equal(
+    signatureInputValue(DEMO_SIG_INPUT_LABEL, DEMO_COVERED_COMPONENTS, DEMO_SIG_INPUT_PARAMS),
+    DEMO_SIG_INPUT_EXPECTED,
+  );
+  assert.equal(
+    signatureInputValue(
+      DEMO_SIG_INPUT_ALT_LABEL,
+      DEMO_SIG_INPUT_ALT_COMPONENTS,
+      DEMO_SIG_INPUT_ALT_PARAMS,
+    ),
+    DEMO_SIG_INPUT_ALT_EXPECTED,
+  );
+  // The alt parameters serialize in the fixed order:
+  // created before expires before keyid before alg before
+  // nonce before tag.
+  const order = ["created=", "expires=", "keyid=", "alg=", "nonce=", "tag="].map(
+    (k) => signatureInputValueAlt.indexOf(k),
+  );
+  assert.ok(order.every((v, i) => v !== -1 && (i === 0 || order[i - 1] < v)));
+});
+
+test("demo lines contain the signatureInputValue segment (main member, second label, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Signature-Input value construction: signatureInputValue/);
+  // The construction block sits after the header lookup
+  // segment and closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Signature-Input value construction:"),
+  );
+  const lookupIdx = lines.findIndex((l) => l.startsWith("Header lookup:"));
+  assert.ok(lookupIdx !== -1 && headerIdx !== -1 && lookupIdx < headerIdx);
+  const expectedLines = [
+    "Signature-Input value construction: signatureInputValue(label, componentIds, params) builds one label's Signature-Input member — the label= prefix plus the serialized inner list and parameters — exactly the member signRequest writes into the header when it signs",
+    `Main label: signatureInputValue("${DEMO_SIG_INPUT_LABEL}", the main covered components, the main parameters) = "${DEMO_SIG_INPUT_EXPECTED}" — byte-for-byte the main signed request's signature-input header`,
+    `Second label: signatureInputValue("${DEMO_SIG_INPUT_ALT_LABEL}", ${DEMO_SIG_INPUT_ALT_COMPONENTS.map((c) => `"${c}"`).join(" ")}, parameters with expires/nonce/tag) = "${DEMO_SIG_INPUT_ALT_EXPECTED}" — parameters serialize in the fixed created, expires, keyid, alg, nonce, tag order`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), expectedLines);
+  // The construction segment closes the demo: its second
+  // label line is final.
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+
+  // Deterministic double run: every input is a fixed
+  // constant, so the segment's printed lines are identical
+  // between runs.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Signature-Input value construction:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 3),
+    lines.slice(headerIdx, headerIdx + 3),
   );
 });

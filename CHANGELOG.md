@@ -12,6 +12,27 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The CLI demo (`npm run demo`) now closes with a
+  signature-input value construction segment: the main
+  line's covered components and fixed parameters are run
+  through `signatureInputValue` — the low-level builder
+  `signRequest` uses for one label's `Signature-Input`
+  member (`label=` plus the serialized inner list and
+  parameters) — and the built value is printed and
+  asserted, outside the printed lines, to equal both a
+  hand-pinned expectation and the main signed request's
+  actual `signature-input` header byte for byte. A second
+  call under a different label, over a shorter covered
+  set and with all six parameter slots set (expires,
+  nonce and tag included), is printed as well, its
+  parameters serializing in the fixed
+  created/expires/keyid/alg/nonce/tag order. Every
+  earlier demo segment consumed the finished header, so
+  how one label's member is built was invisible to demo
+  readers. `DemoResult` carries both built values, and
+  the demo tests pin the fields and the printed lines.
+  Every input is a fixed constant, so the segment's
+  printed lines are identical between runs.
+- The CLI demo (`npm run demo`) now closes with a
   normalized header lookup segment: a fixed header record
   — one field stored under a mixed-case key as a padded
   two-element array, one single string field — is read

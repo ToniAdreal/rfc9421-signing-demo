@@ -455,6 +455,21 @@
  * result equals the hand-pinned expectations below. Every
  * input is a fixed constant, so the segment is
  * byte-identical between runs.
+ * The demo closes with a signature-input value construction
+ * segment: every earlier segment consumes the finished
+ * `signature-input` header, but never shows how one label's
+ * member of that header is built. The main line's covered
+ * components and fixed parameters are run through
+ * `signatureInputValue` and the built value is printed;
+ * outside the printed lines the demo asserts it equals the
+ * hand-pinned expectation below AND the main signed
+ * request's actual `signature-input` header byte for byte.
+ * A second, differently-labelled call with a pinned
+ * parameter set carrying expires, nonce and tag is printed
+ * as well, its parameters serializing in the fixed
+ * created/expires/keyid/alg/nonce/tag order the serializer
+ * always uses. Every input is a fixed constant, so the
+ * segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -533,6 +548,7 @@ import {
   serializeDictionaryMemberValue,
   serializeSignatureParams,
   signRequest,
+  signatureInputValue,
   verifyAllLabels,
   verifyRequest,
   verifyRequestOrThrow,
@@ -1587,6 +1603,60 @@ export const DEMO_GET_HEADER_SINGLE_VALUE = "application/json";
 /** Name of a field the header-lookup segment's record does not carry. */
 export const DEMO_GET_HEADER_MISSING_NAME = "x-absent";
 
+/** Label of the closing signature-input construction segment's main call: the main line's label. */
+export const DEMO_SIG_INPUT_LABEL = "sig1";
+/**
+ * Fixed parameters of the segment's main call: exactly the
+ * main line's signing parameters (created `DEMO_CREATED`,
+ * keyid `DEMO_KEY_ID`, alg `ed25519`, nonce `DEMO_NONCE`)
+ * over `DEMO_COVERED_COMPONENTS`.
+ */
+export const DEMO_SIG_INPUT_PARAMS: SignatureParams = {
+  created: DEMO_CREATED,
+  keyid: DEMO_KEY_ID,
+  alg: "ed25519",
+  nonce: DEMO_NONCE,
+};
+/**
+ * Hand-pinned built value of the segment's main call: the
+ * label prefix plus the serialized inner list and
+ * parameters — the same literal the parsing segment pins
+ * independently as `DEMO_PARSE_RAW_INPUT` for the main
+ * signed request's header, and the `golden` shape the bench
+ * `signatureInputValue` corpus pins for its own inputs.
+ * Written out here, never derived from the function the
+ * demo is checking.
+ */
+export const DEMO_SIG_INPUT_EXPECTED =
+  'sig1=("@method" "@authority" "@path" "content-digest");created=1700000000;keyid="demo-key-1";alg="ed25519";nonce="demo-nonce-001"';
+/** Label of the segment's second call: a webhook label distinct from the main line's. */
+export const DEMO_SIG_INPUT_ALT_LABEL = "webhook";
+/** Covered components of the segment's second call. */
+export const DEMO_SIG_INPUT_ALT_COMPONENTS: string[] = ["@method", "@path"];
+/**
+ * Fixed parameters of the segment's second call: all six
+ * parameter slots set, so the printed value shows the
+ * serializer's fixed order — expires between created and
+ * keyid, tag last (the same order the bench corpus's
+ * `merchant-full` case and the demo's own `full`
+ * signature-params case pin for their inputs).
+ */
+export const DEMO_SIG_INPUT_ALT_PARAMS: SignatureParams = {
+  created: DEMO_CREATED,
+  expires: DEMO_CREATED + 300,
+  keyid: "webhook-key-1",
+  alg: "hmac-sha256",
+  nonce: "demo-nonce-webhook-001",
+  tag: "payment-webhook-v1",
+};
+/**
+ * Hand-pinned built value of the segment's second call,
+ * written out here, never derived from the function the
+ * demo is checking.
+ */
+export const DEMO_SIG_INPUT_ALT_EXPECTED =
+  'webhook=("@method" "@path");created=1700000000;expires=1700000300;keyid="webhook-key-1";alg="hmac-sha256";nonce="demo-nonce-webhook-001";tag="payment-webhook-v1"';
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -2249,6 +2319,22 @@ export interface DemoResult {
    * `getHeaderRaw`: also `undefined`.
    */
   getHeaderRawMissingValue: string | undefined;
+  /**
+   * The closing signature-input construction segment's
+   * main call: `signatureInputValue` over the main line's
+   * label, covered components and parameters (equals the
+   * hand-pinned `DEMO_SIG_INPUT_EXPECTED` and the main
+   * signed request's actual `signature-input` header).
+   */
+  signatureInputValueMain: string;
+  /**
+   * The segment's second call: `signatureInputValue` over
+   * `DEMO_SIG_INPUT_ALT_LABEL`,
+   * `DEMO_SIG_INPUT_ALT_COMPONENTS` and
+   * `DEMO_SIG_INPUT_ALT_PARAMS` (equals the hand-pinned
+   * `DEMO_SIG_INPUT_ALT_EXPECTED`).
+   */
+  signatureInputValueAlt: string;
   lines: string[];
 }
 
@@ -4182,6 +4268,47 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Signature-input construction segment: every earlier
+  // segment consumes the finished `signature-input` header,
+  // so the low-level builder `signRequest` uses for one
+  // label's member was never shown on its own.
+  // `signatureInputValue(label, componentIds, params)`
+  // renders exactly `label + "=" + serializeSignatureParams(
+  // componentIds, params)`. The main call replays the main
+  // line's own inputs, so its built value must equal both
+  // the hand-pinned DEMO_SIG_INPUT_EXPECTED and the main
+  // signed request's actual `signature-input` header byte
+  // for byte; the second call carries a different label, a
+  // shorter covered set and all six parameter slots, and
+  // must equal its own hand-pinned expectation, parameters
+  // in the serializer's fixed order. Outside the printed
+  // lines the demo asserts all three equalities. Every
+  // input is a fixed demo constant.
+  const signatureInputValueMain = signatureInputValue(
+    DEMO_SIG_INPUT_LABEL,
+    [...DEMO_COVERED_COMPONENTS],
+    { ...DEMO_SIG_INPUT_PARAMS },
+  );
+  const signatureInputValueAlt = signatureInputValue(
+    DEMO_SIG_INPUT_ALT_LABEL,
+    [...DEMO_SIG_INPUT_ALT_COMPONENTS],
+    { ...DEMO_SIG_INPUT_ALT_PARAMS },
+  );
+  if (
+    signatureInputValueMain !== DEMO_SIG_INPUT_EXPECTED ||
+    signatureInputValueMain !== signed.headers["signature-input"] ||
+    signatureInputValueAlt !== DEMO_SIG_INPUT_ALT_EXPECTED
+  ) {
+    throw new Error(
+      `demo fixture broken: signatureInputValue gave main ` +
+        `${JSON.stringify(signatureInputValueMain)} and alt ` +
+        `${JSON.stringify(signatureInputValueAlt)}, instead of the pinned ` +
+        `${JSON.stringify(DEMO_SIG_INPUT_EXPECTED)} (also the main signed ` +
+        `request's signature-input header) and ` +
+        `${JSON.stringify(DEMO_SIG_INPUT_ALT_EXPECTED)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -4448,6 +4575,10 @@ export async function runDemo(): Promise<DemoResult> {
     `getHeaderRaw("${DEMO_GET_HEADER_LOOKUP_NAME}") over the same stored values: "${getHeaderRawValue}" (every element's padding preserved — the two reads differ exactly by the per-element trimming)`,
     `getHeader("${DEMO_GET_HEADER_SINGLE_LOOKUP_NAME}") over the stored "${DEMO_GET_HEADER_SINGLE_STORED_NAME}": "${getHeaderSingleValue}" (a single string value is returned exactly as stored)`,
     `getHeader("${DEMO_GET_HEADER_MISSING_NAME}"): ${getHeaderMissingValue} (no such field in the record — a missing header is undefined, never an empty string)`,
+    "",
+    "Signature-Input value construction: signatureInputValue(label, componentIds, params) builds one label's Signature-Input member — the label= prefix plus the serialized inner list and parameters — exactly the member signRequest writes into the header when it signs",
+    `Main label: signatureInputValue("${DEMO_SIG_INPUT_LABEL}", the main covered components, the main parameters) = "${signatureInputValueMain}" — byte-for-byte the main signed request's signature-input header`,
+    `Second label: signatureInputValue("${DEMO_SIG_INPUT_ALT_LABEL}", ${DEMO_SIG_INPUT_ALT_COMPONENTS.map((c) => `"${c}"`).join(" ")}, parameters with expires/nonce/tag) = "${signatureInputValueAlt}" — parameters serialize in the fixed created, expires, keyid, alg, nonce, tag order`,
   ];
 
   return {
@@ -4562,6 +4693,8 @@ export async function runDemo(): Promise<DemoResult> {
     getHeaderSingleValue,
     getHeaderMissingValue,
     getHeaderRawMissingValue,
+    signatureInputValueMain,
+    signatureInputValueAlt,
     lines,
   };
 }
