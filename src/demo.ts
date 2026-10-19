@@ -414,6 +414,29 @@
  * shape and the round-trip semantics are asserted, so
  * the segment's printed lines are identical between
  * runs.
+ * The demo closes with a JWKS refresh and rotation segment:
+ * the restored-snapshot JWKS segment above never fetches,
+ * so it cannot show how a verifier picks up a key rotation.
+ * A `JwksKeyStore` over a counting fake JWKS fetch (zero
+ * network — the fetch is a scripted function, never the
+ * real endpoint) and an injected clock pinned to the
+ * demo's fixed instants is driven through
+ * `refreshIfStale()`: the first call loads the pre-rotation
+ * key (one fetch) and a request signed under the old keyid
+ * verifies through the store; a second call inside the TTL
+ * returns `false` and fetches nothing; once the injected
+ * clock is past the TTL and the fake endpoint serves only
+ * the rotated key, a third call returns `true` (a second
+ * fetch), the rotated keyid resolves and a request signed
+ * under it verifies, and the retired keyid is rejected
+ * with `KEY_RESOLUTION_FAILED`. Outside the printed lines
+ * the demo asserts every return value, fetch count and
+ * verified identity equal the hand-pinned expectations
+ * below. Because `refreshIfStale()` is asynchronous,
+ * `runDemo()` is `async` — the one deliberate change in
+ * its shape when this segment landed. Only keyids, counts
+ * and outcomes are printed, never key bytes, so the
+ * segment's printed lines are identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -1458,6 +1481,45 @@ export const DEMO_RSA_JWK_E_LENGTH = 4;
 export const DEMO_RSA_JWK_MISMATCH_ERROR =
   'importPublicKeyJwkRsa: invalid JWK: expected kty "RSA", got "EC"';
 
+/** Key id of the closing JWKS refresh segment's pre-rotation key. */
+export const DEMO_JWKS_REFRESH_OLD_KEY_ID = "demo-jwks-refresh-old-1";
+/** Key id of the closing JWKS refresh segment's rotated key. */
+export const DEMO_JWKS_REFRESH_NEW_KEY_ID = "demo-jwks-refresh-new-1";
+/** Nonce of the closing JWKS refresh segment's pre-rotation request. */
+export const DEMO_JWKS_REFRESH_OLD_NONCE =
+  "demo-nonce-jwks-refresh-old-001";
+/** Nonce of the closing JWKS refresh segment's rotated request. */
+export const DEMO_JWKS_REFRESH_NEW_NONCE =
+  "demo-nonce-jwks-refresh-new-001";
+/** Label every JWKS refresh segment signature carries (the library default). */
+export const DEMO_JWKS_REFRESH_LABEL = "sig1";
+/**
+ * TTL of the closing JWKS refresh segment's store: the
+ * freshness probe runs 60 seconds into this 120-second
+ * window (still fresh), and the rotation probe runs 60
+ * seconds past it (stale) — the same staleness rule
+ * `test/jwksRefreshIfStale.test.ts` pins at its own TTL.
+ */
+export const DEMO_JWKS_REFRESH_TTL_SEC = 120;
+/** Injected-clock instant of the freshness probe (fresh: 60s in, TTL 120s). */
+export const DEMO_JWKS_REFRESH_FRESH_AT_SEC = DEMO_CREATED + 60;
+/** Injected-clock instant of the rotation probe (stale: 180s in, TTL 120s). */
+export const DEMO_JWKS_REFRESH_STALE_AT_SEC =
+  DEMO_CREATED + DEMO_JWKS_REFRESH_TTL_SEC + 60;
+/** Fetch count after the segment's initial load (exactly one fetch). */
+export const DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD = 1;
+/** Fetch count after the segment's rotation refresh (exactly one more). */
+export const DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION = 2;
+/**
+ * Hand-pinned rejection code of the closing JWKS refresh
+ * segment: after rotation the retired keyid no longer
+ * resolves, so the verifier fails closed with this code
+ * before any signature check (the same code the JWKS
+ * segment above pins for its never-known keyid).
+ */
+export const DEMO_JWKS_REFRESH_RETIRED_CODE: VerifyFailureCode =
+  "KEY_RESOLUTION_FAILED";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -2016,6 +2078,74 @@ export interface DemoResult {
    * hand-pinned `DEMO_RSA_JWK_MISMATCH_ERROR`).
    */
   rsaJwkMismatchError: string;
+  /**
+   * The closing JWKS refresh segment's first
+   * `refreshIfStale()` result: `true` — a never-refreshed
+   * store is stale, so the initial load fetches.
+   */
+  jwksRefreshInitialRefreshed: boolean;
+  /**
+   * Fake-fetch count after the initial load (equals the
+   * hand-pinned `DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD`).
+   */
+  jwksRefreshFetchCallsAfterLoad: number;
+  /**
+   * The request the closing JWKS refresh segment signs
+   * under the pre-rotation keyid
+   * (`DEMO_JWKS_REFRESH_OLD_KEY_ID`, nonce
+   * `DEMO_JWKS_REFRESH_OLD_NONCE`) before rotation.
+   */
+  jwksRefreshOldSigned: SignedHttpRequest;
+  /**
+   * Verification of `jwksRefreshOldSigned` through the
+   * store's resolver before rotation (ok).
+   */
+  jwksRefreshOldVerification: VerifyResult;
+  /**
+   * The segment's second `refreshIfStale()` result, probed
+   * at `DEMO_JWKS_REFRESH_FRESH_AT_SEC` inside the TTL:
+   * `false` — a fresh snapshot is never re-fetched.
+   */
+  jwksRefreshFreshRefreshed: boolean;
+  /**
+   * Fake-fetch count after the freshness probe (unchanged:
+   * still `DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD`).
+   */
+  jwksRefreshFetchCallsAfterFresh: number;
+  /**
+   * The segment's third `refreshIfStale()` result, probed
+   * at `DEMO_JWKS_REFRESH_STALE_AT_SEC` past the TTL with
+   * the fake endpoint serving only the rotated key:
+   * `true` — the stale snapshot was re-fetched.
+   */
+  jwksRefreshStaleRefreshed: boolean;
+  /**
+   * Fake-fetch count after the rotation refresh (equals
+   * the hand-pinned
+   * `DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION`).
+   */
+  jwksRefreshFetchCallsAfterRotation: number;
+  /**
+   * The request the closing JWKS refresh segment signs
+   * under the rotated keyid (`DEMO_JWKS_REFRESH_NEW_KEY_ID`,
+   * nonce `DEMO_JWKS_REFRESH_NEW_NONCE`) after rotation.
+   */
+  jwksRefreshNewSigned: SignedHttpRequest;
+  /**
+   * Verification of `jwksRefreshNewSigned` through the
+   * store's resolver after rotation (ok — the rotated
+   * keyid resolves to the rotated key).
+   */
+  jwksRefreshNewVerification: VerifyResult;
+  /**
+   * Verification of `jwksRefreshOldSigned` through the
+   * store's resolver after rotation: rejected with
+   * `DEMO_JWKS_REFRESH_RETIRED_CODE`
+   * (`KEY_RESOLUTION_FAILED`) — the retired keyid no
+   * longer resolves, so the still-valid signature is
+   * never even checked.
+   */
+  jwksRefreshRetiredVerification: VerifyResult;
   lines: string[];
 }
 
@@ -2081,7 +2211,7 @@ function formatLabelResult(prefix: string, result: VerifyResult): string {
  * both verification results, and the exact lines `main()` prints — so
  * tests can assert on the demo itself, not just on the library.
  */
-export function runDemo(): DemoResult {
+export async function runDemo(): Promise<DemoResult> {
   const { publicKey, privateKey } = generateEd25519KeyPair();
 
   const signed = signRequest(
@@ -3728,6 +3858,161 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // JWKS refresh and rotation segment: the JWKS segment
+  // above restores a snapshot and never fetches, so it
+  // cannot show the moment a verifier picks up a key
+  // rotation. This segment drives a JwksKeyStore through
+  // refreshIfStale() with a counting fake fetch (a scripted
+  // function — zero network, the configured endpoint is
+  // never contacted) and an injected clock the segment
+  // advances by hand between the demo's fixed instants.
+  // The fake endpoint first serves only the pre-rotation
+  // key: the initial refreshIfStale() (a never-refreshed
+  // store is stale) fetches it, and a request signed under
+  // the old keyid verifies through the store's resolver.
+  // Probed again 60 seconds into the 120-second TTL, the
+  // snapshot is fresh: refreshIfStale() returns false and
+  // the fetch count does not move. The segment then flips
+  // the fake endpoint to serve only the rotated key and
+  // advances the clock past the TTL: refreshIfStale()
+  // returns true, exactly one more fetch happens, a
+  // request signed under the new keyid verifies, and the
+  // pre-rotation request — its signature still valid — is
+  // rejected with KEY_RESOLUTION_FAILED because the
+  // retired keyid no longer resolves. Both segment key
+  // pairs are fresh ed25519 pairs (generation is not
+  // printed); outside the printed lines the demo asserts
+  // every return value, fetch count and verified identity
+  // equal the hand-pinned DEMO_JWKS_REFRESH_* expectations.
+  const jwksRefreshOldPair = generateEd25519KeyPair();
+  const jwksRefreshNewPair = generateEd25519KeyPair();
+  let jwksRefreshRotated = false;
+  let jwksRefreshFetchCalls = 0;
+  let jwksRefreshNowSec = DEMO_CREATED;
+  const jwksRefreshStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      jwksRefreshFetchCalls++;
+      const pair = jwksRefreshRotated
+        ? jwksRefreshNewPair
+        : jwksRefreshOldPair;
+      const kid = jwksRefreshRotated
+        ? DEMO_JWKS_REFRESH_NEW_KEY_ID
+        : DEMO_JWKS_REFRESH_OLD_KEY_ID;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          keys: [{ ...exportPublicKeyJwk(pair.publicKey), kid }],
+        }),
+      };
+    },
+    ttlSec: DEMO_JWKS_REFRESH_TTL_SEC,
+    now: () => jwksRefreshNowSec,
+  });
+  const jwksRefreshInitialRefreshed =
+    await jwksRefreshStore.refreshIfStale();
+  const jwksRefreshFetchCallsAfterLoad = jwksRefreshFetchCalls;
+  const jwksRefreshOldSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_REFRESH_OLD_KEY_ID,
+      alg: "ed25519",
+      key: jwksRefreshOldPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_JWKS_REFRESH_OLD_NONCE,
+    },
+  );
+  const jwksRefreshOldVerification = verifyRequest(jwksRefreshOldSigned, {
+    keyResolver: jwksRefreshStore.resolve,
+    now: DEMO_CREATED + 60,
+  });
+  jwksRefreshNowSec = DEMO_JWKS_REFRESH_FRESH_AT_SEC;
+  const jwksRefreshFreshRefreshed =
+    await jwksRefreshStore.refreshIfStale();
+  const jwksRefreshFetchCallsAfterFresh = jwksRefreshFetchCalls;
+  jwksRefreshRotated = true;
+  jwksRefreshNowSec = DEMO_JWKS_REFRESH_STALE_AT_SEC;
+  const jwksRefreshStaleRefreshed =
+    await jwksRefreshStore.refreshIfStale();
+  const jwksRefreshFetchCallsAfterRotation = jwksRefreshFetchCalls;
+  const jwksRefreshNewSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_REFRESH_NEW_KEY_ID,
+      alg: "ed25519",
+      key: jwksRefreshNewPair.privateKey,
+      created: DEMO_JWKS_REFRESH_STALE_AT_SEC,
+      nonce: DEMO_JWKS_REFRESH_NEW_NONCE,
+    },
+  );
+  const jwksRefreshNewVerification = verifyRequest(jwksRefreshNewSigned, {
+    keyResolver: jwksRefreshStore.resolve,
+    now: DEMO_JWKS_REFRESH_STALE_AT_SEC + 60,
+  });
+  const jwksRefreshRetiredVerification = verifyRequest(
+    jwksRefreshOldSigned,
+    {
+      keyResolver: jwksRefreshStore.resolve,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  if (
+    jwksRefreshInitialRefreshed !== true ||
+    jwksRefreshFetchCallsAfterLoad !==
+      DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD ||
+    !jwksRefreshOldVerification.ok ||
+    jwksRefreshOldVerification.label !== DEMO_JWKS_REFRESH_LABEL ||
+    jwksRefreshOldVerification.keyId !== DEMO_JWKS_REFRESH_OLD_KEY_ID ||
+    jwksRefreshOldVerification.alg !== "ed25519" ||
+    jwksRefreshOldVerification.nonce !== DEMO_JWKS_REFRESH_OLD_NONCE ||
+    jwksRefreshFreshRefreshed !== false ||
+    jwksRefreshFetchCallsAfterFresh !==
+      DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD ||
+    jwksRefreshStaleRefreshed !== true ||
+    jwksRefreshFetchCallsAfterRotation !==
+      DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION ||
+    !jwksRefreshNewVerification.ok ||
+    jwksRefreshNewVerification.label !== DEMO_JWKS_REFRESH_LABEL ||
+    jwksRefreshNewVerification.keyId !== DEMO_JWKS_REFRESH_NEW_KEY_ID ||
+    jwksRefreshNewVerification.alg !== "ed25519" ||
+    jwksRefreshNewVerification.nonce !== DEMO_JWKS_REFRESH_NEW_NONCE ||
+    jwksRefreshRetiredVerification.ok ||
+    jwksRefreshRetiredVerification.code !==
+      DEMO_JWKS_REFRESH_RETIRED_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: JWKS refresh gave initial ` +
+        `${jwksRefreshInitialRefreshed}/${jwksRefreshFetchCallsAfterLoad} with old verification ` +
+        `${jwksRefreshOldVerification.ok}/${jwksRefreshOldVerification.ok ? jwksRefreshOldVerification.label : jwksRefreshOldVerification.code}/` +
+        `${jwksRefreshOldVerification.ok ? jwksRefreshOldVerification.keyId : "-"}/` +
+        `${jwksRefreshOldVerification.ok ? jwksRefreshOldVerification.nonce : "-"}, fresh ` +
+        `${jwksRefreshFreshRefreshed}/${jwksRefreshFetchCallsAfterFresh}, stale ` +
+        `${jwksRefreshStaleRefreshed}/${jwksRefreshFetchCallsAfterRotation} with new verification ` +
+        `${jwksRefreshNewVerification.ok}/${jwksRefreshNewVerification.ok ? jwksRefreshNewVerification.label : jwksRefreshNewVerification.code}/` +
+        `${jwksRefreshNewVerification.ok ? jwksRefreshNewVerification.keyId : "-"}/` +
+        `${jwksRefreshNewVerification.ok ? jwksRefreshNewVerification.nonce : "-"} and retired ` +
+        `${jwksRefreshRetiredVerification.ok}/${jwksRefreshRetiredVerification.ok ? "-" : jwksRefreshRetiredVerification.code}, instead of the pinned ` +
+        `initial true/${DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD} with old verification ` +
+        `true/${DEMO_JWKS_REFRESH_LABEL}/${DEMO_JWKS_REFRESH_OLD_KEY_ID}/` +
+        `${DEMO_JWKS_REFRESH_OLD_NONCE}, fresh ` +
+        `false/${DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD}, stale ` +
+        `true/${DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION} with new verification ` +
+        `true/${DEMO_JWKS_REFRESH_LABEL}/${DEMO_JWKS_REFRESH_NEW_KEY_ID}/` +
+        `${DEMO_JWKS_REFRESH_NEW_NONCE} and retired ` +
+        `false/${DEMO_JWKS_REFRESH_RETIRED_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -3974,6 +4259,20 @@ export function runDemo(): DemoResult {
       ? `RSA JWK round-trip verification: OK (label ${rsaJwkVerification.label}, keyid="${rsaJwkVerification.keyId}", alg="${rsaJwkVerification.alg}", nonce="${rsaJwkVerification.nonce}")`
       : `RSA JWK round-trip verification: FAILED (code ${rsaJwkVerification.code}: ${rsaJwkVerification.reason})`,
     `RSA JWK kty mismatch, EC JWK (P-256) fed to importPublicKeyJwkRsa: FAILED (${rsaJwkMismatchError})`,
+    "",
+    "JWKS refresh and rotation: JwksKeyStore.refreshIfStale fetches only when the snapshot is stale — a counting fake JWKS fetch (zero network) and an injected clock show the store loading the pre-rotation key, refusing to re-fetch while fresh, then swapping in the rotated key once the TTL passes",
+    `JWKS refresh initial load: refreshIfStale() returned ${jwksRefreshInitialRefreshed} (fetch count ${jwksRefreshFetchCallsAfterLoad})`,
+    jwksRefreshOldVerification.ok
+      ? `JWKS verification before rotation: OK (label ${jwksRefreshOldVerification.label}, keyid="${jwksRefreshOldVerification.keyId}", alg="${jwksRefreshOldVerification.alg}", nonce="${jwksRefreshOldVerification.nonce}")`
+      : `JWKS verification before rotation: FAILED (code ${jwksRefreshOldVerification.code}: ${jwksRefreshOldVerification.reason})`,
+    `JWKS refresh while fresh (${DEMO_JWKS_REFRESH_FRESH_AT_SEC - DEMO_CREATED}s into the ${DEMO_JWKS_REFRESH_TTL_SEC}s TTL): refreshIfStale() returned ${jwksRefreshFreshRefreshed} (fetch count still ${jwksRefreshFetchCallsAfterFresh})`,
+    `JWKS refresh after rotation (clock past the ${DEMO_JWKS_REFRESH_TTL_SEC}s TTL, endpoint now serves only the rotated key): refreshIfStale() returned ${jwksRefreshStaleRefreshed} (fetch count ${jwksRefreshFetchCallsAfterRotation})`,
+    jwksRefreshNewVerification.ok
+      ? `JWKS verification after rotation: OK (label ${jwksRefreshNewVerification.label}, keyid="${jwksRefreshNewVerification.keyId}", alg="${jwksRefreshNewVerification.alg}", nonce="${jwksRefreshNewVerification.nonce}")`
+      : `JWKS verification after rotation: FAILED (code ${jwksRefreshNewVerification.code}: ${jwksRefreshNewVerification.reason})`,
+    jwksRefreshRetiredVerification.ok
+      ? `JWKS verification of the retired keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" after rotation: OK (unexpected — the retired keyid was not rejected)`
+      : `JWKS verification of the retired keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" after rotation: FAILED (code ${jwksRefreshRetiredVerification.code}: ${jwksRefreshRetiredVerification.reason})`,
   ];
 
   return {
@@ -4071,16 +4370,27 @@ export function runDemo(): DemoResult {
     rsaJwkSigned,
     rsaJwkVerification,
     rsaJwkMismatchError,
+    jwksRefreshInitialRefreshed,
+    jwksRefreshFetchCallsAfterLoad,
+    jwksRefreshOldSigned,
+    jwksRefreshOldVerification,
+    jwksRefreshFreshRefreshed,
+    jwksRefreshFetchCallsAfterFresh,
+    jwksRefreshStaleRefreshed,
+    jwksRefreshFetchCallsAfterRotation,
+    jwksRefreshNewSigned,
+    jwksRefreshNewVerification,
+    jwksRefreshRetiredVerification,
     lines,
   };
 }
 
-function main(): void {
-  console.log(runDemo().lines.join("\n"));
+async function main(): Promise<void> {
+  console.log((await runDemo()).lines.join("\n"));
 }
 
 // Run only when executed directly (`node dist/src/demo.js`), not when
 // imported by tests.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main();
+  void main();
 }

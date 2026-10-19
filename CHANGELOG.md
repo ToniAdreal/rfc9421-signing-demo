@@ -11,6 +11,36 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a JWKS
+  refresh and rotation segment: a `JwksKeyStore` over a
+  counting fake JWKS fetch (zero network) and an injected
+  clock is driven through `refreshIfStale()` — the first
+  call loads the pre-rotation key (fetch count 1) and a
+  request signed under the old keyid verifies through the
+  store; a second call 60 seconds into the 120-second TTL
+  returns `false` and fetches nothing; past the TTL, with
+  the fake endpoint serving only the rotated key, a third
+  call returns `true` (fetch count 2), a request signed
+  under the rotated keyid verifies, and the retired
+  keyid's still-valid signature is rejected with
+  `KEY_RESOLUTION_FAILED` because its keyid no longer
+  resolves. Every earlier JWKS demo segment restored a
+  snapshot and never fetched, so the stale-refresh /
+  rotation pick-up — the moment a verifier starts
+  trusting a new key and stops trusting the retired one —
+  was invisible to demo readers. Outside the printed
+  lines the demo asserts every return value, fetch count
+  and verified identity equal the hand-pinned
+  expectations. `DemoResult` carries the three
+  return values, the fetch counts after each probe, both
+  signed requests and all three verifications, and the
+  demo tests pin the fields and the printed lines.
+  Because `refreshIfStale()` is asynchronous, `runDemo()`
+  is now `async` (returning `Promise<DemoResult>`) and
+  the demo's entry point awaits it; every demo test
+  awaits it in turn. Both segment key pairs are fresh
+  ed25519 pairs and the clock is injected, so the
+  segment's printed lines are identical between runs.
 - The CLI demo (`npm run demo`) now closes with an RSA
   JWK key distribution segment: the RSA public key is
   exported with `exportPublicKeyJwkRsa` (only the JWK's

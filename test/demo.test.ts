@@ -8,6 +8,7 @@ import {
   assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
+  exportPublicKeyJwk,
   exportPublicKeyJwkP256,
   exportPublicKeyJwkP384,
   exportPublicKeyJwkP521,
@@ -23,6 +24,7 @@ import {
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
   joinHeaderValues,
+  JwksKeyStore,
   parseSignatureField,
   parseSignatureInput,
   ReplayCache,
@@ -72,6 +74,17 @@ import {
   DEMO_RSA_JWK_MISMATCH_ERROR,
   DEMO_RSA_JWK_N_LENGTH,
   DEMO_RSA_JWK_NONCE,
+  DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD,
+  DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION,
+  DEMO_JWKS_REFRESH_FRESH_AT_SEC,
+  DEMO_JWKS_REFRESH_LABEL,
+  DEMO_JWKS_REFRESH_NEW_KEY_ID,
+  DEMO_JWKS_REFRESH_NEW_NONCE,
+  DEMO_JWKS_REFRESH_OLD_KEY_ID,
+  DEMO_JWKS_REFRESH_OLD_NONCE,
+  DEMO_JWKS_REFRESH_RETIRED_CODE,
+  DEMO_JWKS_REFRESH_STALE_AT_SEC,
+  DEMO_JWKS_REFRESH_TTL_SEC,
   DEMO_JWK_TAMPERED_CODE,
   DEMO_JOIN_COVERED_COMPONENTS,
   DEMO_JOIN_EXPECTED,
@@ -151,8 +164,8 @@ const repoRoot = path.dirname(
   path.dirname(path.dirname(fileURLToPath(import.meta.url))),
 ); // dist/test/*.test.js -> repo root
 
-test("demo signs a fixed request with content-digest and nonce, and it verifies", () => {
-  const { signed, verification } = runDemo();
+test("demo signs a fixed request with content-digest and nonce, and it verifies", async () => {
+  const { signed, verification } = await runDemo();
 
   assert.ok(signed.headers["content-digest"].startsWith("sha-512=:"));
   assert.match(
@@ -176,8 +189,8 @@ test("demo signs a fixed request with content-digest and nonce, and it verifies"
   assert.equal(verification.nonce, DEMO_NONCE);
 });
 
-test("demo tamper changes exactly one body byte and verification rejects it", () => {
-  const { tamperedBody, tamperedVerification } = runDemo();
+test("demo tamper changes exactly one body byte and verification rejects it", async () => {
+  const { tamperedBody, tamperedVerification } = await runDemo();
 
   assert.equal(tamperedBody, DEMO_TAMPERED_BODY);
   assert.equal(tamperedBody.length, DEMO_BODY.length);
@@ -191,8 +204,8 @@ test("demo tamper changes exactly one body byte and verification rejects it", ()
   assert.equal(tamperedVerification.code, "BODY_DIGEST_MISMATCH");
 });
 
-test("demo lines contain the headers, the success, and the tamper rejection", () => {
-  const { lines } = runDemo();
+test("demo lines contain the headers, the success, and the tamper rejection", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Signature-Input: sig1=/);
@@ -224,8 +237,8 @@ const EXPECTED_SIGNATURE_BASE = [
 const EXPECTED_SIGNATURE_BASE_EXPLANATION =
   'Each base line above is one covered component in order ("@method", "@authority", "@path", "content-digest"); the final "@signature-params" line binds that covered set to the signature parameters (created, keyid, alg, nonce)';
 
-test("demo signature base segment rebuilds the main line's base byte-for-byte", () => {
-  const { signed, signatureBase } = runDemo();
+test("demo signature base segment rebuilds the main line's base byte-for-byte", async () => {
+  const { signed, signatureBase } = await runDemo();
 
   // The demo's stated covered set is the signer's default set for a
   // request with a body, in order.
@@ -251,11 +264,11 @@ test("demo signature base segment rebuilds the main line's base byte-for-byte", 
   // The base carries no key or signature bytes and every input is a
   // fixed constant, so it is identical across runs even though each
   // run generates a fresh key pair.
-  assert.equal(runDemo().signatureBase, signatureBase);
+  assert.equal((await runDemo()).signatureBase, signatureBase);
 });
 
-test("demo lines print the signature base block verbatim, followed by its explanation", () => {
-  const { lines } = runDemo();
+test("demo lines print the signature base block verbatim, followed by its explanation", async () => {
+  const { lines } = await runDemo();
 
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Signature base (RFC 9421 §2.5):"),
@@ -282,8 +295,8 @@ test("demo lines print the signature base block verbatim, followed by its explan
   assert.equal(lines[headerIdx + 6], EXPECTED_SIGNATURE_BASE_EXPLANATION);
 });
 
-test("demo gateway addSignature second label verifies alongside sig1", () => {
-  const { dualSigned, dualVerification } = runDemo();
+test("demo gateway addSignature second label verifies alongside sig1", async () => {
+  const { dualSigned, dualVerification } = await runDemo();
 
   // The gateway secret is a labelled demo value at or above the
   // hmac-sha256 32-byte floor.
@@ -315,8 +328,8 @@ test("demo gateway addSignature second label verifies alongside sig1", () => {
   assert.equal(dualVerification[1].keyId, DEMO_GATEWAY_KEY_ID);
 });
 
-test("demo content-type tamper fails only the gateway label", () => {
-  const { contentTypeTamperedVerification } = runDemo();
+test("demo content-type tamper fails only the gateway label", async () => {
+  const { contentTypeTamperedVerification } = await runDemo();
 
   assert.equal(DEMO_TAMPERED_CONTENT_TYPE, "text/plain");
   assert.deepEqual(
@@ -331,8 +344,8 @@ test("demo content-type tamper fails only the gateway label", () => {
   assert.equal(contentTypeTamperedVerification[1].code, "SIGNATURE_MISMATCH");
 });
 
-test("demo lines contain the dual headers, dual verification, and tamper isolation", () => {
-  const { lines } = runDemo();
+test("demo lines contain the dual headers, dual verification, and tamper isolation", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /addSignature \(hmac-sha256\)/);
@@ -350,12 +363,12 @@ test("demo lines contain the dual headers, dual verification, and tamper isolati
   );
 });
 
-test("demo replay segment rejects the same request twice via ReplayCache", () => {
+test("demo replay segment rejects the same request twice via ReplayCache", async () => {
   const {
     replayFirstVerification,
     replaySecondVerification,
     replayOtherNonceVerification,
-  } = runDemo();
+  } = await runDemo();
 
   assert.ok(DEMO_REPLAY_CACHE_MAX_ENTRIES >= 1);
   assert.ok(DEMO_REPLAY_CACHE_TTL_SEC > 0);
@@ -374,8 +387,8 @@ test("demo replay segment rejects the same request twice via ReplayCache", () =>
   assert.equal(replayOtherNonceVerification.nonce, DEMO_OTHER_NONCE);
 });
 
-test("demo lines contain the replay segment (first ok, replay rejected, fresh nonce ok)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the replay segment (first ok, replay rejected, fresh nonce ok)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Replay protection: same request verified twice against a ReplayCache/);
@@ -393,9 +406,9 @@ test("demo lines contain the replay segment (first ok, replay rejected, fresh no
   );
 });
 
-test("demo request data is deterministic across runs (fresh key aside)", () => {
-  const a = runDemo();
-  const b = runDemo();
+test("demo request data is deterministic across runs (fresh key aside)", async () => {
+  const a = await runDemo();
+  const b = await runDemo();
 
   // Everything except the Signature lines is byte-identical: the key pair
   // is generated fresh per run, so the signature bytes themselves differ.
@@ -435,9 +448,9 @@ test("demo request data is deterministic across runs (fresh key aside)", () => {
   );
 });
 
-test("demo sha-256 segment re-signs the same request for a sha-256-only peer", () => {
+test("demo sha-256 segment re-signs the same request for a sha-256-only peer", async () => {
   const { signed, sha256Signed, sha256Verification, sha256TamperedVerification } =
-    runDemo();
+    await runDemo();
 
   // Same body, different digest algorithm: the sha-256 header has the
   // 44-char base64 wire shape and differs from the main line's sha-512.
@@ -465,8 +478,8 @@ test("demo sha-256 segment re-signs the same request for a sha-256-only peer", (
   assert.equal(sha256TamperedVerification.code, "BODY_DIGEST_MISMATCH");
 });
 
-test("demo lines contain the sha-256 segment (comparison, verification, tamper rejection)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the sha-256 segment (comparison, verification, tamper rejection)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -481,12 +494,12 @@ test("demo lines contain the sha-256 segment (comparison, verification, tamper r
   );
 });
 
-test("demo digest-alg identification segment reads the algorithm off both emitted headers and fails closed on an unrecognized value", () => {
+test("demo digest-alg identification segment reads the algorithm off both emitted headers and fails closed on an unrecognized value", async () => {
   const {
     contentDigestAlg,
     sha256ContentDigestAlg,
     unrecognizedContentDigestAlg,
-  } = runDemo();
+  } = await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_MAIN_DIGEST_ALG / DEMO_SHA256_DIGEST_ALG: the main line
@@ -506,8 +519,8 @@ test("demo digest-alg identification segment reads the algorithm off both emitte
   assert.equal(unrecognizedContentDigestAlg, undefined);
 });
 
-test("demo lines contain the digest-alg identification segment (after the sha-256 segment, before inbound normalization)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the digest-alg identification segment (after the sha-256 segment, before inbound normalization)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -546,13 +559,13 @@ test("demo lines contain the digest-alg identification segment (after the sha-25
   ]);
 });
 
-test("demo inbound segment normalizes a mock IncomingMessage and verifies it", () => {
+test("demo inbound segment normalizes a mock IncomingMessage and verifies it", async () => {
   const {
     inboundSigned,
     inboundNormalized,
     inboundVerification,
     inboundWrongSchemeVerification,
-  } = runDemo();
+  } = await runDemo();
 
   // The signer-side request is the port-carrying https URL, with
   // @scheme and the multi-value trace header covered.
@@ -593,8 +606,8 @@ test("demo inbound segment normalizes a mock IncomingMessage and verifies it", (
   assert.equal(inboundWrongSchemeVerification.code, "SIGNATURE_MISMATCH");
 });
 
-test("demo lines contain the inbound segment (normalized shape, verified, wrong scheme rejected)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the inbound segment (normalized shape, verified, wrong scheme rejected)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -616,13 +629,13 @@ test("demo lines contain the inbound segment (normalized shape, verified, wrong 
   );
 });
 
-test("demo JWKS segment verifies via a restored store and rejects an unknown keyid", () => {
+test("demo JWKS segment verifies via a restored store and rejects an unknown keyid", async () => {
   const {
     jwksSnapshot,
     jwksStoreSize,
     jwksVerification,
     jwksUnknownKeyVerification,
-  } = runDemo();
+  } = await runDemo();
 
   // The snapshot is the hand-pinned v1 shape: the demo key's public
   // JWK under DEMO_KEY_ID, fetched at the pinned instant, and it
@@ -647,8 +660,8 @@ test("demo JWKS segment verifies via a restored store and rejects an unknown key
   assert.equal(jwksUnknownKeyVerification.code, "KEY_RESOLUTION_FAILED");
 });
 
-test("demo lines contain the JWKS segment (hit verifies, unknown keyid rejected)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the JWKS segment (hit verifies, unknown keyid rejected)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -669,8 +682,8 @@ test("demo lines contain the JWKS segment (hit verifies, unknown keyid rejected)
   );
 });
 
-test("demo thumbprint segment derives the RFC 7638 thumbprint and binds it as keyid", () => {
-  const { thumbprint, thumbprintSigned, thumbprintVerification } = runDemo();
+test("demo thumbprint segment derives the RFC 7638 thumbprint and binds it as keyid", async () => {
+  const { thumbprint, thumbprintSigned, thumbprintVerification } = await runDemo();
 
   // A SHA-256 thumbprint is a 43-char base64url digest (RFC 7638).
   assert.match(thumbprint, /^[A-Za-z0-9_-]{43}$/);
@@ -695,8 +708,8 @@ test("demo thumbprint segment derives the RFC 7638 thumbprint and binds it as ke
   assert.equal(thumbprintVerification.alg, "ed25519");
 });
 
-test("demo lines contain the thumbprint segment (thumbprint printed, thumbprint-as-keyid verifies)", () => {
-  const { lines, thumbprint } = runDemo();
+test("demo lines contain the thumbprint segment (thumbprint printed, thumbprint-as-keyid verifies)", async () => {
+  const { lines, thumbprint } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -713,8 +726,8 @@ test("demo lines contain the thumbprint segment (thumbprint printed, thumbprint-
   );
 });
 
-test("demo canonicalization segment canonicalizes the fixed corpus to the hand-pinned forms", () => {
-  const { sfCanonicalization } = runDemo();
+test("demo canonicalization segment canonicalizes the fixed corpus to the hand-pinned forms", async () => {
+  const { sfCanonicalization } = await runDemo();
 
   // Expectations are the literal values pinned in
   // DEMO_SF_CANONICALIZATION (hand-derived from RFC 8941 §4, matching
@@ -743,8 +756,8 @@ test("demo canonicalization segment canonicalizes the fixed corpus to the hand-p
   );
 });
 
-test("demo lines contain the canonicalization segment (raw -> canonical pairs)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the canonicalization segment (raw -> canonical pairs)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Structured-field canonicalization \(;sf\): a verifier compares the parsed value re-serialized strictly, not the wire bytes/);
@@ -762,8 +775,8 @@ test("demo lines contain the canonicalization segment (raw -> canonical pairs)",
   assert.ok(canonIdx !== -1 && extractIdx !== -1 && canonIdx < extractIdx);
 });
 
-test("demo member-extraction segment extracts the fixed keys to the hand-pinned values", () => {
-  const { dictMemberExtraction, dictMemberMissingKeyError } = runDemo();
+test("demo member-extraction segment extracts the fixed keys to the hand-pinned values", async () => {
+  const { dictMemberExtraction, dictMemberMissingKeyError } = await runDemo();
 
   // The demo's Dictionary value is the literal pinned here and in
   // the bench corpus — the same multi-member value, pinned
@@ -803,8 +816,8 @@ test("demo member-extraction segment extracts the fixed keys to the hand-pinned 
   );
 });
 
-test("demo lines contain the member-extraction segment (key -> value pairs, missing key rejected)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the member-extraction segment (key -> value pairs, missing key rejected)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Dictionary-member extraction \(;key\): a ;key covered component contributes only the named member, re-serialized without its Dictionary key/);
@@ -848,8 +861,8 @@ test("demo lines contain the member-extraction segment (key -> value pairs, miss
   ]);
 });
 
-test("demo signature-params segment serializes the fixed corpus to the hand-pinned strings", () => {
-  const { sigParamsSerialization } = runDemo();
+test("demo signature-params segment serializes the fixed corpus to the hand-pinned strings", async () => {
+  const { sigParamsSerialization } = await runDemo();
 
   // Expectations are the literal values pinned in
   // DEMO_SIG_PARAMS_SERIALIZATION (hand-derived from the
@@ -894,8 +907,8 @@ test("demo signature-params segment serializes the fixed corpus to the hand-pinn
   );
 });
 
-test("demo lines contain the signature-params segment (name -> serialized pairs)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the signature-params segment (name -> serialized pairs)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Signature-params serialization: the covered-component inner list plus its parameters in fixed order \(created, expires, keyid, alg, nonce, tag\), strings quoted and escaped/);
@@ -935,9 +948,9 @@ test("demo lines contain the signature-params segment (name -> serialized pairs)
   ]);
 });
 
-test("demo PEM segment exports the main key pair as PEM, imports it back, and the imported keys sign and verify", () => {
+test("demo PEM segment exports the main key pair as PEM, imports it back, and the imported keys sign and verify", async () => {
   const { pemPublicHeader, pemPrivateHeader, pemSigned, pemVerification } =
-    runDemo();
+    await runDemo();
 
   // Expectations are the literal PEM type headers hand-pinned in
   // DEMO_PEM_*_HEADER (SPKI public / PKCS#8 private, per src/keys.ts)
@@ -966,8 +979,8 @@ test("demo PEM segment exports the main key pair as PEM, imports it back, and th
   assert.equal(pemVerification.alg, "ed25519");
 });
 
-test("demo lines contain the PEM segment (headers printed, round-trip verifies)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the PEM segment (headers printed, round-trip verifies)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -1008,9 +1021,9 @@ test("demo lines contain the PEM segment (headers printed, round-trip verifies)"
   ]);
 });
 
-test("demo throwing-verification segment returns the identity on success and throws a VerifyError with the pinned code on tamper", () => {
+test("demo throwing-verification segment returns the identity on success and throws a VerifyError with the pinned code on tamper", async () => {
   const { throwVerification, throwTamperedError, throwTamperedIsVerifyError } =
-    runDemo();
+    await runDemo();
 
   // The hand-pinned tamper code is the same BODY_DIGEST_MISMATCH the
   // returning verifyRequest reports for the main line's one-byte
@@ -1039,8 +1052,8 @@ test("demo throwing-verification segment returns the identity on success and thr
   assert.equal(throwTamperedError.nonce, DEMO_NONCE);
 });
 
-test("demo lines contain the throwing-verification segment (identity returned, VerifyError thrown, followed by the nonce-generation segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the throwing-verification segment (identity returned, VerifyError thrown, followed by the nonce-generation segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -1077,13 +1090,13 @@ test("demo lines contain the throwing-verification segment (identity returned, V
   ]);
 });
 
-test("demo nonce-generation segment draws pinned-shape base64url nonces and the short one round-trips through sign and verify", () => {
+test("demo nonce-generation segment draws pinned-shape base64url nonces and the short one round-trips through sign and verify", async () => {
   const {
     generatedNonce,
     generatedLongNonce,
     generatedNonceSigned,
     generatedNonceVerification,
-  } = runDemo();
+  } = await runDemo();
 
   // Expectations are the literals hand-pinned in DEMO_GENERATED_*:
   // the default draw is 16 bytes -> 22 base64url chars, the explicit
@@ -1126,8 +1139,8 @@ test("demo nonce-generation segment draws pinned-shape base64url nonces and the 
   assert.equal(generatedNonceVerification.alg, "ed25519");
 });
 
-test("demo lines contain the nonce-generation segment (shapes printed, generated nonce verifies)", () => {
-  const { lines, generatedNonce, generatedLongNonce } = runDemo();
+test("demo lines contain the nonce-generation segment (shapes printed, generated nonce verifies)", async () => {
+  const { lines, generatedNonce, generatedLongNonce } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -1167,9 +1180,9 @@ test("demo lines contain the nonce-generation segment (shapes printed, generated
   ]);
 });
 
-test("demo JWK import segment verifies the main request with the imported key and rejects a tampered x", () => {
+test("demo JWK import segment verifies the main request with the imported key and rejects a tampered x", async () => {
   const { exportedJwk, jwkImportedVerification, jwkTamperedVerification } =
-    runDemo();
+    await runDemo();
 
   // Expectations are the RFC 8037 ed25519 JWK shape hand-pinned in
   // DEMO_JWK_TAMPERED_CODE and test/jwk.test.ts: kty OKP, crv
@@ -1197,8 +1210,8 @@ test("demo JWK import segment verifies the main request with the imported key an
   assert.equal(jwkTamperedVerification.code, DEMO_JWK_TAMPERED_CODE);
 });
 
-test("demo lines contain the JWK import segment (imported key verifies, tampered x rejected, followed by the key-resolver memoization segment)", () => {
-  const { lines, exportedJwk } = runDemo();
+test("demo lines contain the JWK import segment (imported key verifies, tampered x rejected, followed by the key-resolver memoization segment)", async () => {
+  const { lines, exportedJwk } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -1227,8 +1240,8 @@ test("demo lines contain the JWK import segment (imported key verifies, tampered
   ]);
 });
 
-test("demo signature-labels segment enumerates the dual-signed request's labels in wire order", () => {
-  const { dualSigned, signatureLabels } = runDemo();
+test("demo signature-labels segment enumerates the dual-signed request's labels in wire order", async () => {
+  const { dualSigned, signatureLabels } = await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_SIGNATURE_LABELS: the main signature carries the library
@@ -1243,8 +1256,8 @@ test("demo signature-labels segment enumerates the dual-signed request's labels 
   assert.ok(dualSigned.headers["signature-input"].includes(", gateway="));
 });
 
-test("demo lines contain the signature-labels segment (right after dual verification, before content-type tampering)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the signature-labels segment (right after dual verification, before content-type tampering)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.ok(
@@ -1368,14 +1381,14 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /assertRsaModulusLength for ed25519 public key: FAILED \(assertRsaModulusLength demo: expected an RSA key, got an asymmetric ed25519 key\)/);
 });
 
-test("demo key-resolver memoization segment resolves each keyid once (repeat is a cache hit, second keyid advances the count)", () => {
+test("demo key-resolver memoization segment resolves each keyid once (repeat is a cache hit, second keyid advances the count)", async () => {
   const {
     memoizedFirstVerification,
     memoizedRepeatVerification,
     memoizedSecondKeyVerification,
     memoizedResolverCallsAfterRepeat,
     memoizedResolverCallsAfterSecondKey,
-  } = runDemo();
+  } = await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_MEMOIZED_CALLS_AFTER_REPEAT /
@@ -1406,13 +1419,13 @@ test("demo key-resolver memoization segment resolves each keyid once (repeat is 
 
   // Deterministic double run: the counts are pinned constants,
   // not values read off a wall clock or a random keystore.
-  const again = runDemo();
+  const again = await runDemo();
   assert.equal(again.memoizedResolverCallsAfterRepeat, 1);
   assert.equal(again.memoizedResolverCallsAfterSecondKey, 2);
 });
 
-test("demo lines contain the key-resolver memoization segment (counts printed, followed by the HMAC guard segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the key-resolver memoization segment (counts printed, followed by the HMAC guard segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -1444,8 +1457,8 @@ test("demo lines contain the key-resolver memoization segment (counts printed, f
   ]);
 });
 
-test("demo HMAC secret-length guard segment accepts floor lengths and rejects one byte below (per algorithm)", () => {
-  const { hmacGuardAccepted, hmacGuardRejections } = runDemo();
+test("demo HMAC secret-length guard segment accepts floor lengths and rejects one byte below (per algorithm)", async () => {
+  const { hmacGuardAccepted, hmacGuardRejections } = await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_HMAC_GUARD_ACCEPTED / DEMO_HMAC_GUARD_REJECTED /
@@ -1498,8 +1511,8 @@ test("demo HMAC secret-length guard segment accepts floor lengths and rejects on
   });
 });
 
-test("demo lines contain the HMAC secret-length guard segment (accepted and rejected lines, followed by the RSA guard segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the HMAC secret-length guard segment (accepted and rejected lines, followed by the RSA guard segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -1529,7 +1542,7 @@ test("demo lines contain the HMAC secret-length guard segment (accepted and reje
 
   // Deterministic double run: the guard segment's lines are
   // pinned constants, identical between runs.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("HMAC secret-length guard:"),
   );
@@ -1539,8 +1552,8 @@ test("demo lines contain the HMAC secret-length guard segment (accepted and reje
   );
 });
 
-test("demo RSA modulus-length guard segment accepts the floor key and rejects weak and non-RSA keys", () => {
-  const { rsaGuardAccepted, rsaGuardRejections } = runDemo();
+test("demo RSA modulus-length guard segment accepts the floor key and rejects weak and non-RSA keys", async () => {
+  const { rsaGuardAccepted, rsaGuardRejections } = await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_RSA_GUARD_ACCEPTED / DEMO_RSA_GUARD_REJECTED /
@@ -1597,8 +1610,8 @@ test("demo RSA modulus-length guard segment accepts the floor key and rejects we
   );
 });
 
-test("demo lines contain the RSA modulus-length guard segment (accepted and rejected lines, followed by the ECDSA P-256 segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the RSA modulus-length guard segment (accepted and rejected lines, followed by the ECDSA P-256 segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -1627,7 +1640,7 @@ test("demo lines contain the RSA modulus-length guard segment (accepted and reje
 
   // Deterministic double run: the guard segment's lines are
   // pinned constants, identical between runs.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("RSA modulus-length guard:"),
   );
@@ -1637,9 +1650,9 @@ test("demo lines contain the RSA modulus-length guard segment (accepted and reje
   );
 });
 
-test("demo ECDSA P-256 segment signs the fixed request, verifies, and rejects the one-byte tamper", () => {
+test("demo ECDSA P-256 segment signs the fixed request, verifies, and rejects the one-byte tamper", async () => {
   const { p256Signed, p256Verification, p256TamperedVerification } =
-    runDemo();
+    await runDemo();
 
   // Expectations are the literals hand-pinned in DEMO_P256_*
   // and cross-checked against test/ecdsaP256.test.ts (its
@@ -1710,8 +1723,8 @@ test("demo ECDSA P-256 segment signs the fixed request, verifies, and rejects th
   assert.equal(directTampered.code, DEMO_P256_TAMPERED_CODE);
 });
 
-test("demo lines contain the ECDSA P-256 signing segment (signature-input, verification and tamper rejection, followed by the Content-Digest guard segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the ECDSA P-256 signing segment (signature-input, verification and tamper rejection, followed by the Content-Digest guard segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /ECDSA P-256 signing: ecdsa-p256-sha256 signs/);
@@ -1740,7 +1753,7 @@ test("demo lines contain the ECDSA P-256 signing segment (signature-input, verif
   // carry no key or signature bytes, so they are pinned
   // constants, identical between runs even though the
   // P-256 key pair itself is fresh.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("ECDSA P-256 signing:"),
   );
@@ -1750,8 +1763,8 @@ test("demo lines contain the ECDSA P-256 signing segment (signature-input, verif
   );
 });
 
-test("demo Content-Digest algorithm guard segment accepts the two emittable algorithms and rejects the fixed corpus", () => {
-  const { digestGuardAccepted, digestGuardRejections } = runDemo();
+test("demo Content-Digest algorithm guard segment accepts the two emittable algorithms and rejects the fixed corpus", async () => {
+  const { digestGuardAccepted, digestGuardRejections } = await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_DIGEST_GUARD_ACCEPTED / DEMO_DIGEST_GUARD_REJECTED /
@@ -1806,8 +1819,8 @@ test("demo Content-Digest algorithm guard segment accepts the two emittable algo
   });
 });
 
-test("demo lines contain the Content-Digest algorithm guard segment (accepted and rejected lines, followed by the ReplayCache snapshot segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the Content-Digest algorithm guard segment (accepted and rejected lines, followed by the ReplayCache snapshot segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(
@@ -1843,7 +1856,7 @@ test("demo lines contain the Content-Digest algorithm guard segment (accepted an
   ]);
   // Deterministic double run: the guard segment's lines are
   // pinned constants, identical between runs.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Content-Digest algorithm guard:"),
   );
@@ -1853,7 +1866,7 @@ test("demo lines contain the Content-Digest algorithm guard segment (accepted an
   );
 });
 
-test("demo ReplayCache snapshot segment exports the seen nonce and the restored cache still rejects it", () => {
+test("demo ReplayCache snapshot segment exports the seen nonce and the restored cache still rejects it", async () => {
   const {
     replaySnapshotSigned,
     replaySnapshotFirstVerification,
@@ -1862,7 +1875,7 @@ test("demo ReplayCache snapshot segment exports the seen nonce and the restored 
     replaySnapshotFreshVerification,
     replaySnapshotRestoredSize,
     replaySnapshotOriginalSize,
-  } = runDemo();
+  } = await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_REPLAY_SNAPSHOT_* and cross-checked against
@@ -1934,8 +1947,8 @@ test("demo ReplayCache snapshot segment exports the seen nonce and the restored 
   assert.equal(restored.check(DEMO_REPLAY_SNAPSHOT_FRESH_NONCE), false);
 });
 
-test("demo lines contain the ReplayCache snapshot segment (export, restored replay rejection and detached original, followed by the ECDSA P-384 segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the ReplayCache snapshot segment (export, restored replay rejection and detached original, followed by the ECDSA P-384 segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /ReplayCache snapshot persistence: exportSnapshot carries/);
@@ -1964,7 +1977,7 @@ test("demo lines contain the ReplayCache snapshot segment (export, restored repl
   // Deterministic double run: the segment's printed lines
   // carry no key or signature bytes, so they are pinned
   // constants, identical between runs.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("ReplayCache snapshot persistence:"),
   );
@@ -1974,9 +1987,9 @@ test("demo lines contain the ReplayCache snapshot segment (export, restored repl
   );
 });
 
-test("demo ECDSA P-384 segment signs the fixed request, verifies, and rejects the one-byte tamper", () => {
+test("demo ECDSA P-384 segment signs the fixed request, verifies, and rejects the one-byte tamper", async () => {
   const { p384Signed, p384Verification, p384TamperedVerification } =
-    runDemo();
+    await runDemo();
 
   // Expectations are the literals hand-pinned in DEMO_P384_*
   // and cross-checked against test/ecdsaP384.test.ts (its
@@ -2048,8 +2061,8 @@ test("demo ECDSA P-384 segment signs the fixed request, verifies, and rejects th
   assert.equal(directTampered.code, DEMO_P384_TAMPERED_CODE);
 });
 
-test("demo lines contain the ECDSA P-384 signing segment (signature-input, verification and tamper rejection, followed by the Signature-Input parsing segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the ECDSA P-384 signing segment (signature-input, verification and tamper rejection, followed by the Signature-Input parsing segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /ECDSA P-384 signing: ecdsa-p384-sha384 signs/);
@@ -2078,7 +2091,7 @@ test("demo lines contain the ECDSA P-384 signing segment (signature-input, verif
   // carry no key or signature bytes, so they are pinned
   // constants, identical between runs even though the
   // P-384 key pair itself is fresh.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("ECDSA P-384 signing:"),
   );
@@ -2088,9 +2101,9 @@ test("demo lines contain the ECDSA P-384 signing segment (signature-input, verif
   );
 });
 
-test("demo Signature-Input parsing segment parses the main signature and rejects the truncated copy", () => {
+test("demo Signature-Input parsing segment parses the main signature and rejects the truncated copy", async () => {
   const { signed, signatureInputRaw, parsedSignatureInput, parseTamperedError } =
-    runDemo();
+    await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_PARSE_* and cross-checked against the bench parser
@@ -2156,8 +2169,8 @@ test("demo Signature-Input parsing segment parses the main signature and rejects
   );
 });
 
-test("demo lines contain the Signature-Input parsing segment (raw preview, parsed fields and tamper rejection, followed by the ECDSA P-521 segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the Signature-Input parsing segment (raw preview, parsed fields and tamper rejection, followed by the ECDSA P-521 segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Signature-Input parsing: parseSignatureInput exposes/);
@@ -2186,7 +2199,7 @@ test("demo lines contain the Signature-Input parsing segment (raw preview, parse
   // Deterministic double run: the segment's printed lines
   // carry no key or signature bytes, so they are pinned
   // constants, identical between runs.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Signature-Input parsing:"),
   );
@@ -2196,9 +2209,9 @@ test("demo lines contain the Signature-Input parsing segment (raw preview, parse
   );
 });
 
-test("demo ECDSA P-521 segment signs the fixed request, verifies, and rejects the one-byte tamper", () => {
+test("demo ECDSA P-521 segment signs the fixed request, verifies, and rejects the one-byte tamper", async () => {
   const { p521Signed, p521Verification, p521TamperedVerification } =
-    runDemo();
+    await runDemo();
 
   // Expectations are the literals hand-pinned in DEMO_P521_*
   // and cross-checked against test/ecdsaP521.test.ts (its
@@ -2270,8 +2283,8 @@ test("demo ECDSA P-521 segment signs the fixed request, verifies, and rejects th
   assert.equal(directTampered.code, DEMO_P521_TAMPERED_CODE);
 });
 
-test("demo lines contain the ECDSA P-521 signing segment (signature-input, verification and tamper rejection, followed by the component-resolution segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the ECDSA P-521 signing segment (signature-input, verification and tamper rejection, followed by the component-resolution segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /ECDSA P-521 signing: ecdsa-p521-sha512 signs/);
@@ -2300,7 +2313,7 @@ test("demo lines contain the ECDSA P-521 signing segment (signature-input, verif
   // carry no key or signature bytes, so they are pinned
   // constants, identical between runs even though the
   // P-521 key pair itself is fresh.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("ECDSA P-521 signing:"),
   );
@@ -2310,9 +2323,9 @@ test("demo lines contain the ECDSA P-521 signing segment (signature-input, verif
   );
 });
 
-test("demo component-resolution segment resolves each covered component and rejects the illegal component", () => {
+test("demo component-resolution segment resolves each covered component and rejects the illegal component", async () => {
   const { resolvedComponents, resolveIllegalComponentError, signed } =
-    runDemo();
+    await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_RESOLVE_* and cross-checked against the
@@ -2393,8 +2406,8 @@ test("demo component-resolution segment resolves each covered component and reje
   }
 });
 
-test("demo lines contain the component-resolution segment (per-component values and illegal-component rejection, followed by the multi-value header combination segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the component-resolution segment (per-component values and illegal-component rejection, followed by the multi-value header combination segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Component resolution: resolveComponent turns/);
@@ -2424,7 +2437,7 @@ test("demo lines contain the component-resolution segment (per-component values 
 
   // Deterministic double run: the segment's printed lines
   // are pinned constants, identical between runs.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Component resolution:"),
   );
@@ -2434,13 +2447,13 @@ test("demo lines contain the component-resolution segment (per-component values 
   );
 });
 
-test("demo multi-value header combination segment joins the repeated field and rejects the wrong join", () => {
+test("demo multi-value header combination segment joins the repeated field and rejects the wrong join", async () => {
   const {
     joinedHeaderValue,
     joinSigned,
     joinVerification,
     joinWrongVerification,
-  } = runDemo();
+  } = await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_JOIN_* and cross-checked against the multi-value
@@ -2522,8 +2535,8 @@ test("demo multi-value header combination segment joins the repeated field and r
   assert.equal(wrong.code, DEMO_JOIN_WRONG_CODE);
 });
 
-test("demo lines contain the multi-value header combination segment (joined value, verification and wrong-join rejection, followed by the Signature field parsing segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the multi-value header combination segment (joined value, verification and wrong-join rejection, followed by the Signature field parsing segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Multi-value header combination: joinHeaderValues combines/);
@@ -2555,7 +2568,7 @@ test("demo lines contain the multi-value header combination segment (joined valu
   // Deterministic double run: the segment's printed lines
   // carry no key or signature bytes, so they are pinned
   // constants, identical between runs.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Multi-value header combination:"),
   );
@@ -2565,13 +2578,13 @@ test("demo lines contain the multi-value header combination segment (joined valu
   );
 });
 
-test("demo Signature field parsing segment extracts the signer's bytes and rejects the unknown label", () => {
+test("demo Signature field parsing segment extracts the signer's bytes and rejects the unknown label", async () => {
   const {
     signed,
     signatureFieldBytes,
     signatureFieldHexPrefix,
     signatureFieldUnknownError,
-  } = runDemo();
+  } = await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_SIGFIELD_* and cross-checked against
@@ -2629,9 +2642,9 @@ test("demo Signature field parsing segment extracts the signer's bytes and rejec
   );
 });
 
-test("demo lines contain the Signature field parsing segment (byte length and hex prefix, unknown-label rejection, followed by the EC JWK segment)", () => {
+test("demo lines contain the Signature field parsing segment (byte length and hex prefix, unknown-label rejection, followed by the EC JWK segment)", async () => {
   const { lines, signatureFieldBytes, signatureFieldHexPrefix } =
-    runDemo();
+    await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Signature field parsing: parseSignatureField extracts/);
@@ -2662,7 +2675,7 @@ test("demo lines contain the Signature field parsing segment (byte length and he
   // constants, and the prefix line keeps its pinned shape
   // — the prefix itself differs between runs because the
   // main key pair is fresh, so only its shape is pinned.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Signature field parsing:"),
   );
@@ -2676,9 +2689,9 @@ test("demo lines contain the Signature field parsing segment (byte length and he
   );
 });
 
-test("demo EC JWK segment exports each curve's JWK shape and verifies through the imported keys", () => {
+test("demo EC JWK segment exports each curve's JWK shape and verifies through the imported keys", async () => {
   const { ecJwkExports, ecJwkSigned, ecJwkVerifications, ecJwkMismatchError } =
-    runDemo();
+    await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_EC_JWK_* and cross-checked against src/keys.ts
@@ -2769,8 +2782,8 @@ test("demo EC JWK segment exports each curve's JWK shape and verifies through th
   );
 });
 
-test("demo lines contain the EC JWK segment (three curve shapes and round-trip verifications, crv mismatch rejection, followed by the RSA JWK segment)", () => {
-  const { lines } = runDemo();
+test("demo lines contain the EC JWK segment (three curve shapes and round-trip verifications, crv mismatch rejection, followed by the RSA JWK segment)", async () => {
+  const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /EC JWK key distribution: exportPublicKeyJwkP256/);
@@ -2808,7 +2821,7 @@ test("demo lines contain the EC JWK segment (three curve shapes and round-trip v
   // carry no key bytes, so they are pinned constants,
   // identical between runs even though the key pairs are
   // fresh.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("EC JWK key distribution:"),
   );
@@ -2818,9 +2831,9 @@ test("demo lines contain the EC JWK segment (three curve shapes and round-trip v
   );
 });
 
-test("demo RSA JWK segment exports the RSA JWK shape and verifies through the imported key", () => {
+test("demo RSA JWK segment exports the RSA JWK shape and verifies through the imported key", async () => {
   const { rsaJwkExport, rsaJwkSigned, rsaJwkVerification, rsaJwkMismatchError, ecJwkExports } =
-    runDemo();
+    await runDemo();
 
   // Expectations are the literals hand-pinned in
   // DEMO_RSA_JWK_* and cross-checked against src/keys.ts
@@ -2904,13 +2917,13 @@ test("demo RSA JWK segment exports the RSA JWK shape and verifies through the im
   );
 });
 
-test("demo lines contain the RSA JWK segment (shape, round-trip verification, kty mismatch rejection, closing the demo)", () => {
-  const { lines, rsaJwkExport } = runDemo();
+test("demo lines contain the RSA JWK segment (shape, round-trip verification, kty mismatch rejection, followed by the JWKS refresh segment)", async () => {
+  const { lines, rsaJwkExport } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /RSA JWK key distribution: exportPublicKeyJwkRsa/);
   // The RSA JWK block sits after the EC JWK segment and
-  // closes the demo.
+  // before the JWKS refresh segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("RSA JWK key distribution:"),
   );
@@ -2925,21 +2938,210 @@ test("demo lines contain the RSA JWK segment (shape, round-trip verification, kt
     `RSA JWK kty mismatch, EC JWK (P-256) fed to importPublicKeyJwkRsa: FAILED (${DEMO_RSA_JWK_MISMATCH_ERROR})`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), expectedLines);
-  // The RSA JWK segment closes the demo: its kty-mismatch
-  // rejection line is final, and no printed line carries
-  // the full modulus.
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  // The JWKS refresh segment follows the RSA JWK segment,
+  // and no printed line carries the full modulus.
+  assert.ok(
+    lines[headerIdx + 5]?.startsWith("JWKS refresh and rotation:"),
+  );
   assert.ok(!out.includes(rsaJwkExport.n));
 
   // Deterministic double run: the segment's printed lines
   // carry no key bytes, so they are pinned constants,
   // identical between runs.
-  const again = runDemo();
+  const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("RSA JWK key distribution:"),
   );
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),
     lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo JWKS refresh segment loads the old key, skips the fresh fetch, rotates past the TTL, and retires the old keyid", async () => {
+  const {
+    jwksRefreshInitialRefreshed,
+    jwksRefreshFetchCallsAfterLoad,
+    jwksRefreshOldSigned,
+    jwksRefreshOldVerification,
+    jwksRefreshFreshRefreshed,
+    jwksRefreshFetchCallsAfterFresh,
+    jwksRefreshStaleRefreshed,
+    jwksRefreshFetchCallsAfterRotation,
+    jwksRefreshNewSigned,
+    jwksRefreshNewVerification,
+    jwksRefreshRetiredVerification,
+  } = await runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_JWKS_REFRESH_* (the same return-value, fetch-count
+  // and TTL-boundary shapes test/jwksRefreshIfStale.test.ts
+  // pins for its own store) — the test pins them again here
+  // so a drift in either place fails.
+  assert.equal(DEMO_JWKS_REFRESH_OLD_KEY_ID, "demo-jwks-refresh-old-1");
+  assert.equal(DEMO_JWKS_REFRESH_NEW_KEY_ID, "demo-jwks-refresh-new-1");
+  assert.equal(
+    DEMO_JWKS_REFRESH_OLD_NONCE,
+    "demo-nonce-jwks-refresh-old-001",
+  );
+  assert.equal(
+    DEMO_JWKS_REFRESH_NEW_NONCE,
+    "demo-nonce-jwks-refresh-new-001",
+  );
+  assert.equal(DEMO_JWKS_REFRESH_LABEL, "sig1");
+  assert.equal(DEMO_JWKS_REFRESH_TTL_SEC, 120);
+  assert.equal(DEMO_JWKS_REFRESH_FRESH_AT_SEC, DEMO_CREATED + 60);
+  assert.equal(DEMO_JWKS_REFRESH_STALE_AT_SEC, DEMO_CREATED + 180);
+  assert.equal(DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD, 1);
+  assert.equal(DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION, 2);
+  assert.equal(DEMO_JWKS_REFRESH_RETIRED_CODE, "KEY_RESOLUTION_FAILED");
+
+  // Initial load: a never-refreshed store is stale, so the
+  // first refreshIfStale() fetches exactly once and returns
+  // true; the pre-rotation request then verifies through
+  // the store under the old keyid.
+  assert.equal(jwksRefreshInitialRefreshed, true);
+  assert.equal(
+    jwksRefreshFetchCallsAfterLoad,
+    DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD,
+  );
+  assert.ok(
+    jwksRefreshOldSigned.headers["signature-input"].includes(
+      `keyid="${DEMO_JWKS_REFRESH_OLD_KEY_ID}"`,
+    ),
+  );
+  assert.ok(
+    jwksRefreshOldSigned.headers["signature-input"].includes(
+      `nonce="${DEMO_JWKS_REFRESH_OLD_NONCE}"`,
+    ),
+  );
+  assert.equal(jwksRefreshOldVerification.ok, true);
+  if (jwksRefreshOldVerification.ok) {
+    assert.equal(jwksRefreshOldVerification.label, DEMO_JWKS_REFRESH_LABEL);
+    assert.equal(jwksRefreshOldVerification.keyId, DEMO_JWKS_REFRESH_OLD_KEY_ID);
+    assert.equal(jwksRefreshOldVerification.alg, "ed25519");
+    assert.equal(jwksRefreshOldVerification.nonce, DEMO_JWKS_REFRESH_OLD_NONCE);
+  }
+
+  // Freshness probe: inside the TTL the second call
+  // returns false and the fetch count does not move.
+  assert.equal(jwksRefreshFreshRefreshed, false);
+  assert.equal(
+    jwksRefreshFetchCallsAfterFresh,
+    DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD,
+  );
+
+  // Rotation: past the TTL, with the endpoint serving only
+  // the rotated key, the third call returns true after
+  // exactly one more fetch; the rotated request verifies
+  // under the new keyid, and the retired keyid fails
+  // closed at key resolution.
+  assert.equal(jwksRefreshStaleRefreshed, true);
+  assert.equal(
+    jwksRefreshFetchCallsAfterRotation,
+    DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION,
+  );
+  assert.ok(
+    jwksRefreshNewSigned.headers["signature-input"].includes(
+      `keyid="${DEMO_JWKS_REFRESH_NEW_KEY_ID}"`,
+    ),
+  );
+  assert.ok(
+    jwksRefreshNewSigned.headers["signature-input"].includes(
+      `nonce="${DEMO_JWKS_REFRESH_NEW_NONCE}"`,
+    ),
+  );
+  assert.equal(jwksRefreshNewVerification.ok, true);
+  if (jwksRefreshNewVerification.ok) {
+    assert.equal(jwksRefreshNewVerification.label, DEMO_JWKS_REFRESH_LABEL);
+    assert.equal(jwksRefreshNewVerification.keyId, DEMO_JWKS_REFRESH_NEW_KEY_ID);
+    assert.equal(jwksRefreshNewVerification.alg, "ed25519");
+    assert.equal(jwksRefreshNewVerification.nonce, DEMO_JWKS_REFRESH_NEW_NONCE);
+  }
+  assert.equal(jwksRefreshRetiredVerification.ok, false);
+  assert.equal(
+    jwksRefreshRetiredVerification.code,
+    DEMO_JWKS_REFRESH_RETIRED_CODE,
+  );
+
+  // Cross-check against the library called directly: an
+  // independent store driven by its own counting fake fetch
+  // and injected clock reproduces the segment's exact
+  // return-value / fetch-count sequence, and after rotation
+  // resolves only the new keyid.
+  const directOldPair = generateEd25519KeyPair();
+  const directNewPair = generateEd25519KeyPair();
+  let directRotated = false;
+  let directCalls = 0;
+  let directNowSec = DEMO_CREATED;
+  const directStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      directCalls++;
+      const pair = directRotated ? directNewPair : directOldPair;
+      const kid = directRotated
+        ? DEMO_JWKS_REFRESH_NEW_KEY_ID
+        : DEMO_JWKS_REFRESH_OLD_KEY_ID;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          keys: [{ ...exportPublicKeyJwk(pair.publicKey), kid }],
+        }),
+      };
+    },
+    ttlSec: DEMO_JWKS_REFRESH_TTL_SEC,
+    now: () => directNowSec,
+  });
+  assert.equal(await directStore.refreshIfStale(), jwksRefreshInitialRefreshed);
+  assert.equal(directCalls, jwksRefreshFetchCallsAfterLoad);
+  directNowSec = DEMO_JWKS_REFRESH_FRESH_AT_SEC;
+  assert.equal(await directStore.refreshIfStale(), jwksRefreshFreshRefreshed);
+  assert.equal(directCalls, jwksRefreshFetchCallsAfterFresh);
+  directRotated = true;
+  directNowSec = DEMO_JWKS_REFRESH_STALE_AT_SEC;
+  assert.equal(await directStore.refreshIfStale(), jwksRefreshStaleRefreshed);
+  assert.equal(directCalls, jwksRefreshFetchCallsAfterRotation);
+  assert.ok(directStore.resolve(DEMO_JWKS_REFRESH_NEW_KEY_ID) !== undefined);
+  assert.equal(directStore.resolve(DEMO_JWKS_REFRESH_OLD_KEY_ID), undefined);
+});
+
+test("demo lines contain the JWKS refresh segment (initial load, fresh skip, rotation, retired keyid rejection, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /JWKS refresh and rotation: JwksKeyStore\.refreshIfStale/);
+  // The JWKS refresh block sits after the RSA JWK segment
+  // and closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS refresh and rotation:"),
+  );
+  const rsaJwkIdx = lines.findIndex((l) =>
+    l.startsWith("RSA JWK key distribution:"),
+  );
+  assert.ok(rsaJwkIdx !== -1 && headerIdx !== -1 && rsaJwkIdx < headerIdx);
+  const expectedLines = [
+    "JWKS refresh and rotation: JwksKeyStore.refreshIfStale fetches only when the snapshot is stale — a counting fake JWKS fetch (zero network) and an injected clock show the store loading the pre-rotation key, refusing to re-fetch while fresh, then swapping in the rotated key once the TTL passes",
+    `JWKS refresh initial load: refreshIfStale() returned true (fetch count ${DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD})`,
+    `JWKS verification before rotation: OK (label ${DEMO_JWKS_REFRESH_LABEL}, keyid="${DEMO_JWKS_REFRESH_OLD_KEY_ID}", alg="ed25519", nonce="${DEMO_JWKS_REFRESH_OLD_NONCE}")`,
+    `JWKS refresh while fresh (${DEMO_JWKS_REFRESH_FRESH_AT_SEC - DEMO_CREATED}s into the ${DEMO_JWKS_REFRESH_TTL_SEC}s TTL): refreshIfStale() returned false (fetch count still ${DEMO_JWKS_REFRESH_CALLS_AFTER_LOAD})`,
+    `JWKS refresh after rotation (clock past the ${DEMO_JWKS_REFRESH_TTL_SEC}s TTL, endpoint now serves only the rotated key): refreshIfStale() returned true (fetch count ${DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION})`,
+    `JWKS verification after rotation: OK (label ${DEMO_JWKS_REFRESH_LABEL}, keyid="${DEMO_JWKS_REFRESH_NEW_KEY_ID}", alg="ed25519", nonce="${DEMO_JWKS_REFRESH_NEW_NONCE}")`,
+    `JWKS verification of the retired keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" after rotation: FAILED (code ${DEMO_JWKS_REFRESH_RETIRED_CODE}: keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" could not be resolved to a key)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 7), expectedLines);
+  // The JWKS refresh segment closes the demo: its retired
+  // keyid rejection line is final.
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key bytes, so they are pinned constants,
+  // identical between runs.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("JWKS refresh and rotation:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 7),
+    lines.slice(headerIdx, headerIdx + 7),
   );
 });
