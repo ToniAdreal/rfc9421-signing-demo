@@ -15,6 +15,7 @@ import {
   generateRsaPssKeyPair,
   getHeaderRaw,
   joinHeaderValues,
+  parseSignatureField,
   parseSignatureInput,
   ReplayCache,
   resolveComponent,
@@ -113,6 +114,11 @@ import {
   DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE,
   DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE,
   DEMO_SHA256_DIGEST_ALG,
+  DEMO_SIGFIELD_BYTES,
+  DEMO_SIGFIELD_LABEL,
+  DEMO_SIGFIELD_PREFIX_BYTES,
+  DEMO_SIGFIELD_UNKNOWN_ERROR,
+  DEMO_SIGFIELD_UNKNOWN_LABEL,
   DEMO_TAMPERED_BODY,
   DEMO_TAMPERED_CONTENT_TYPE,
   DEMO_THUMBPRINT_NONCE,
@@ -390,7 +396,11 @@ test("demo request data is deterministic across runs (fresh key aside)", () => {
         // them vary like a signature; only their shapes are pinned.
         !l.startsWith("generateNonce(): ") &&
         !l.startsWith("generateNonce(32): ") &&
-        !l.startsWith("Verification with the generated nonce: "),
+        !l.startsWith("Verification with the generated nonce: ") &&
+        // The Signature field parsing segment's hex prefix quotes
+        // the fresh signature's bytes, so it varies like a
+        // signature; only its shape is pinned.
+        !l.startsWith("Parsed Signature for label "),
     );
   assert.deepEqual(withoutSignature(a.lines), withoutSignature(b.lines));
   assert.equal(a.signed.headers["signature-input"], b.signed.headers["signature-input"]);
@@ -2493,13 +2503,14 @@ test("demo multi-value header combination segment joins the repeated field and r
   assert.equal(wrong.code, DEMO_JOIN_WRONG_CODE);
 });
 
-test("demo lines contain the multi-value header combination segment (joined value, verification and wrong-join rejection, closing the demo)", () => {
+test("demo lines contain the multi-value header combination segment (joined value, verification and wrong-join rejection, followed by the Signature field parsing segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Multi-value header combination: joinHeaderValues combines/);
   // The combination block sits after the
-  // component-resolution segment and closes the demo.
+  // component-resolution segment and is followed by the
+  // Signature field parsing segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Multi-value header combination:"),
   );
@@ -2515,12 +2526,12 @@ test("demo lines contain the multi-value header combination segment (joined valu
     `Multi-value verification: OK (label ${DEMO_JOIN_LABEL}, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${DEMO_JOIN_NONCE}")`,
     `Multi-value verification with the wrong join "${DEMO_JOIN_WRONG_VALUE}" (space after the comma dropped): FAILED (code SIGNATURE_MISMATCH: signature mismatch)`,
   ]);
-  // The combination segment closes the demo: its
-  // wrong-join rejection line is final.
-  assert.equal(
-    lines[lines.length - 1],
-    `Multi-value verification with the wrong join "${DEMO_JOIN_WRONG_VALUE}" (space after the comma dropped): FAILED (code SIGNATURE_MISMATCH: signature mismatch)`,
+  // The Signature field parsing segment follows the
+  // combination segment.
+  const sigFieldIdx = lines.findIndex((l) =>
+    l.startsWith("Signature field parsing:"),
   );
+  assert.ok(headerIdx !== -1 && sigFieldIdx !== -1 && headerIdx < sigFieldIdx);
 
   // Deterministic double run: the segment's printed lines
   // carry no key or signature bytes, so they are pinned
@@ -2532,5 +2543,116 @@ test("demo lines contain the multi-value header combination segment (joined valu
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),
     lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo Signature field parsing segment extracts the signer's bytes and rejects the unknown label", () => {
+  const {
+    signed,
+    signatureFieldBytes,
+    signatureFieldHexPrefix,
+    signatureFieldUnknownError,
+  } = runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_SIGFIELD_* and cross-checked against
+  // src/components.ts (which builds the pinned
+  // not-present message) and the ed25519 signature length
+  // the golden and round-trip suites pin (64 bytes,
+  // RFC 9421 §3.3.2). The test pins the literals again
+  // here so a drift in either place fails.
+  assert.equal(DEMO_SIGFIELD_LABEL, "sig1");
+  assert.equal(DEMO_SIGFIELD_BYTES, 64);
+  assert.equal(DEMO_SIGFIELD_PREFIX_BYTES, 8);
+  assert.equal(DEMO_SIGFIELD_UNKNOWN_LABEL, "sig-unknown");
+  assert.equal(
+    DEMO_SIGFIELD_UNKNOWN_ERROR,
+    'signature "sig-unknown" not present in Signature field',
+  );
+
+  // The extracted bytes are, byte for byte, the bytes the
+  // signer emitted: decoded independently here from the
+  // main signed request's own Signature header member,
+  // without the parser under test.
+  const wire = signed.headers["signature"];
+  assert.match(wire, /^sig1=:[A-Za-z0-9+/=]+:$/);
+  const emitted = Buffer.from(wire.slice("sig1=:".length, -1), "base64");
+  assert.equal(emitted.length, DEMO_SIGFIELD_BYTES);
+  assert.ok(Buffer.isBuffer(signatureFieldBytes));
+  assert.equal(signatureFieldBytes.length, DEMO_SIGFIELD_BYTES);
+  assert.ok(signatureFieldBytes.equals(emitted));
+
+  // The printed prefix is exactly the first
+  // DEMO_SIGFIELD_PREFIX_BYTES bytes in hex — and only a
+  // prefix: it never carries the full signature.
+  assert.equal(
+    signatureFieldHexPrefix,
+    emitted.subarray(0, DEMO_SIGFIELD_PREFIX_BYTES).toString("hex"),
+  );
+  assert.equal(
+    signatureFieldHexPrefix.length,
+    DEMO_SIGFIELD_PREFIX_BYTES * 2,
+  );
+  assert.match(signatureFieldHexPrefix, /^[0-9a-f]+$/);
+
+  assert.equal(signatureFieldUnknownError, DEMO_SIGFIELD_UNKNOWN_ERROR);
+
+  // Cross-check against the library called directly: the
+  // same parse over the demo's signed request gives the
+  // same bytes, and the unknown label throws the same
+  // pinned message.
+  const direct = parseSignatureField(wire, DEMO_SIGFIELD_LABEL);
+  assert.ok(direct.equals(signatureFieldBytes));
+  assert.throws(
+    () => parseSignatureField(wire, DEMO_SIGFIELD_UNKNOWN_LABEL),
+    (e: unknown) =>
+      e instanceof Error && e.message === DEMO_SIGFIELD_UNKNOWN_ERROR,
+  );
+});
+
+test("demo lines contain the Signature field parsing segment (byte length and hex prefix, unknown-label rejection, closing the demo)", () => {
+  const { lines, signatureFieldBytes, signatureFieldHexPrefix } =
+    runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Signature field parsing: parseSignatureField extracts/);
+  // The parsing block sits after the multi-value header
+  // combination segment and closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Signature field parsing:"),
+  );
+  const joinIdx = lines.findIndex((l) =>
+    l.startsWith("Multi-value header combination:"),
+  );
+  assert.ok(joinIdx !== -1 && headerIdx !== -1 && joinIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), [
+    "Signature field parsing: parseSignatureField extracts the raw signature bytes for one label from the Signature field — the bytes a verifier feeds to the cryptographic check, decoded from their base64 byte-string wrapper",
+    `Parsed Signature for label "${DEMO_SIGFIELD_LABEL}": ${DEMO_SIGFIELD_BYTES} bytes, hex prefix ${signatureFieldHexPrefix}… (only the prefix is printed — never the full signature)`,
+    `Parsed Signature for unknown label "${DEMO_SIGFIELD_UNKNOWN_LABEL}": FAILED (${DEMO_SIGFIELD_UNKNOWN_ERROR})`,
+  ]);
+  // The parsing segment closes the demo: its
+  // unknown-label rejection line is final, and no printed
+  // line carries the full signature in hex.
+  assert.equal(
+    lines[lines.length - 1],
+    `Parsed Signature for unknown label "${DEMO_SIGFIELD_UNKNOWN_LABEL}": FAILED (${DEMO_SIGFIELD_UNKNOWN_ERROR})`,
+  );
+  assert.ok(!out.includes(signatureFieldBytes.toString("hex")));
+
+  // Double run: the header and rejection lines are pinned
+  // constants, and the prefix line keeps its pinned shape
+  // — the prefix itself differs between runs because the
+  // main key pair is fresh, so only its shape is pinned.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Signature field parsing:"),
+  );
+  assert.equal(again.lines[againIdx], lines[headerIdx]);
+  assert.equal(again.lines[againIdx + 2], lines[headerIdx + 2]);
+  assert.match(
+    again.lines[againIdx + 1],
+    new RegExp(
+      `^Parsed Signature for label "${DEMO_SIGFIELD_LABEL}": ${DEMO_SIGFIELD_BYTES} bytes, hex prefix [0-9a-f]{${DEMO_SIGFIELD_PREFIX_BYTES * 2}}… \\(only the prefix is printed — never the full signature\\)$`,
+    ),
   );
 });

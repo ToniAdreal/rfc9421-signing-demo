@@ -12,6 +12,33 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The CLI demo (`npm run demo`) now closes with a
+  Signature field parsing segment: the main signed
+  request's `signature` value is parsed with
+  `parseSignatureField` for the main label, and the
+  extracted bytes' length (64 bytes, the ed25519 length)
+  and a short hexadecimal prefix are printed — never the
+  full signature. The same field is then parsed for a
+  hand-pinned unknown label, which is printed rejected
+  with the parser's exact `not present in Signature
+  field` error. Every earlier segment showed the
+  Signature-Input parse layer or consumed the signature
+  bytes only inside verification, so how a verifier gets
+  the raw bytes it feeds to the cryptographic check was
+  invisible to demo readers. Outside the printed lines
+  the demo asserts the extracted bytes equal, byte for
+  byte, the bytes the signer emitted (decoded
+  independently from the header's base64 member), that
+  their length equals the pinned ed25519 length, and
+  that the unknown-label rejection equals the pinned
+  message (the same message shape the parser suites pin
+  for their own absent labels). `DemoResult` carries the
+  extracted bytes, their hex prefix and the rejection
+  message, and the demo tests pin the fields and the
+  printed lines. The main key pair is fresh on every
+  run, so the printed prefix differs between runs while
+  its shape and the rejection line are identical; every
+  other input is a fixed demo constant.
+- The CLI demo (`npm run demo`) now closes with a
   multi-value header combination segment: a fixed request
   carrying one field twice (a padded two-element array) is
   combined with `joinHeaderValues` and the combination is

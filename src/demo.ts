@@ -346,6 +346,25 @@
  * `test/multiValueHeaderWhitespace.test.ts` pins for its
  * own padded fixture). Every input is a fixed demo
  * constant, so the segment is byte-identical between runs.
+ * The demo closes with a Signature field parsing segment:
+ * the Signature-Input parsing segment above shows how a
+ * receiver reads the parameters, but not how it gets the
+ * signature bytes themselves. The main signed request's
+ * `signature` value is parsed with `parseSignatureField`
+ * for the main label: the extracted bytes' length and
+ * hexadecimal prefix are printed (never the full
+ * signature). Outside the printed lines the demo asserts
+ * the extracted bytes equal, byte for byte, the bytes the
+ * signer emitted — decoded independently from the header's
+ * base64 member — and that their length equals the pinned
+ * ed25519 signature length. The same field is then parsed
+ * for a hand-pinned unknown label: the parser throws the
+ * pinned `not present in Signature field` error — the
+ * fail-closed shape a receiver sees on a label it did not
+ * negotiate — and that rejection is printed. The main key
+ * pair is fresh on every run, so the printed prefix differs
+ * between runs while its shape (the pinned byte length and
+ * prefix length) and the rejection line are identical.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -407,6 +426,7 @@ import {
   joinHeaderValues,
   listSignatureLabels,
   memoizeKeyResolver,
+  parseSignatureField,
   parseSignatureInput,
   ReplayCache,
   resolveComponent,
@@ -1237,6 +1257,42 @@ export const DEMO_JOIN_COVERED_COMPONENTS: string[] = [
 export const DEMO_JOIN_WRONG_CODE: VerifyFailureCode =
   "SIGNATURE_MISMATCH";
 
+/** Label of the closing Signature field parsing segment. */
+export const DEMO_SIGFIELD_LABEL = "sig1";
+/**
+ * Hand-pinned byte length of the closing segment's
+ * extracted signature: the main line is ed25519, whose
+ * signatures are always 64 bytes (RFC 9421 §3.3.2) — the
+ * same length the golden and round-trip suites pin for
+ * their ed25519 signatures. Written out here, never derived
+ * from the parse the demo is checking.
+ */
+export const DEMO_SIGFIELD_BYTES = 64;
+/**
+ * Bytes of the extracted signature the closing segment
+ * prints as a hexadecimal prefix: enough to eyeball that
+ * the extracted bytes are the signer's, without printing
+ * the full signature.
+ */
+export const DEMO_SIGFIELD_PREFIX_BYTES = 8;
+/**
+ * Unknown label of the closing segment: the main signed
+ * request carries only `DEMO_SIGFIELD_LABEL`, so this label
+ * is not present in its Signature field.
+ */
+export const DEMO_SIGFIELD_UNKNOWN_LABEL = "sig-unknown";
+/**
+ * Hand-pinned rejection message of the closing segment:
+ * the exact string `parseSignatureField` throws for
+ * `DEMO_SIGFIELD_UNKNOWN_LABEL` — the message
+ * `src/components.ts` builds for an absent label (the same
+ * message shape the parser suites pin for their own absent
+ * labels). Written out here, never derived from the parser
+ * under test.
+ */
+export const DEMO_SIGFIELD_UNKNOWN_ERROR =
+  'signature "sig-unknown" not present in Signature field';
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1721,6 +1777,26 @@ export interface DemoResult {
    * `DEMO_JOIN_WRONG_CODE` (`SIGNATURE_MISMATCH`).
    */
   joinWrongVerification: VerifyResult;
+  /**
+   * The closing Signature field parsing segment's extracted
+   * bytes: `parseSignatureField` over the main signed
+   * request's `signature` value for `DEMO_SIGFIELD_LABEL`
+   * (byte-for-byte equal to the bytes the signer emitted,
+   * `DEMO_SIGFIELD_BYTES` long).
+   */
+  signatureFieldBytes: Buffer;
+  /**
+   * Hexadecimal prefix of `signatureFieldBytes`: its first
+   * `DEMO_SIGFIELD_PREFIX_BYTES` bytes rendered as hex (the
+   * only part of the signature the segment prints).
+   */
+  signatureFieldHexPrefix: string;
+  /**
+   * Error message thrown when parsing the same field for
+   * `DEMO_SIGFIELD_UNKNOWN_LABEL` (equals the hand-pinned
+   * `DEMO_SIGFIELD_UNKNOWN_ERROR`).
+   */
+  signatureFieldUnknownError: string;
   lines: string[];
 }
 
@@ -3145,6 +3221,70 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // Signature field parsing segment: the Signature-Input
+  // parsing segment above shows how a receiver reads the
+  // parameters, but the signature bytes themselves were
+  // only ever consumed inside `verifyRequest`. Here the
+  // main signed request's `signature` value is parsed with
+  // `parseSignatureField` for the main label — the
+  // byte-string member lookup a verifier performs before
+  // the cryptographic check. Outside the printed lines the
+  // demo asserts the extracted bytes equal, byte for byte,
+  // the bytes the signer emitted: the expectation is
+  // decoded independently here, by slicing the header's
+  // single `label=:base64:` member and base64-decoding it
+  // without the parser under test, and the extracted length
+  // must equal the pinned ed25519 length. The same field
+  // is parsed for a hand-pinned unknown label as well: the
+  // parser throws the pinned not-present error — the
+  // fail-closed shape a receiver sees on a label it did
+  // not negotiate. Only the extracted length and a short
+  // hexadecimal prefix are printed, never the full
+  // signature; the main key pair is fresh on every run, so
+  // the prefix differs between runs while its shape and
+  // the rejection are stable.
+  const signatureFieldValue = signed.headers["signature"];
+  const signatureFieldBytes = parseSignatureField(
+    signatureFieldValue,
+    DEMO_SIGFIELD_LABEL,
+  );
+  const signatureFieldHexPrefix = signatureFieldBytes
+    .subarray(0, DEMO_SIGFIELD_PREFIX_BYTES)
+    .toString("hex");
+  const signerEmittedPrefix = `${DEMO_SIGFIELD_LABEL}=:`;
+  const signerEmittedBytes =
+    signatureFieldValue.startsWith(signerEmittedPrefix) &&
+    signatureFieldValue.endsWith(":")
+      ? Buffer.from(
+          signatureFieldValue.slice(signerEmittedPrefix.length, -1),
+          "base64",
+        )
+      : Buffer.alloc(0);
+  let signatureFieldUnknownError = "";
+  try {
+    parseSignatureField(signatureFieldValue, DEMO_SIGFIELD_UNKNOWN_LABEL);
+  } catch (e) {
+    signatureFieldUnknownError = e instanceof Error ? e.message : String(e);
+  }
+  if (
+    signatureFieldBytes.length !== DEMO_SIGFIELD_BYTES ||
+    !signatureFieldBytes.equals(signerEmittedBytes) ||
+    signatureFieldHexPrefix !==
+      signerEmittedBytes
+        .subarray(0, DEMO_SIGFIELD_PREFIX_BYTES)
+        .toString("hex") ||
+    signatureFieldUnknownError !== DEMO_SIGFIELD_UNKNOWN_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: Signature field parsing gave ` +
+        `${signatureFieldBytes.length} bytes with hex prefix ` +
+        `${JSON.stringify(signatureFieldHexPrefix)} and unknown-label error ` +
+        `${JSON.stringify(signatureFieldUnknownError)}, instead of the pinned ` +
+        `${DEMO_SIGFIELD_BYTES} bytes byte-equal to the signer's emitted bytes ` +
+        `with unknown-label error ${JSON.stringify(DEMO_SIGFIELD_UNKNOWN_ERROR)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -3367,6 +3507,10 @@ export function runDemo(): DemoResult {
     joinWrongVerification.ok
       ? `Multi-value verification with the wrong join "${DEMO_JOIN_WRONG_VALUE}" (space after the comma dropped): OK (unexpected — the wrong combination was not detected)`
       : `Multi-value verification with the wrong join "${DEMO_JOIN_WRONG_VALUE}" (space after the comma dropped): FAILED (code ${joinWrongVerification.code}: ${joinWrongVerification.reason})`,
+    "",
+    "Signature field parsing: parseSignatureField extracts the raw signature bytes for one label from the Signature field — the bytes a verifier feeds to the cryptographic check, decoded from their base64 byte-string wrapper",
+    `Parsed Signature for label "${DEMO_SIGFIELD_LABEL}": ${signatureFieldBytes.length} bytes, hex prefix ${signatureFieldHexPrefix}… (only the prefix is printed — never the full signature)`,
+    `Parsed Signature for unknown label "${DEMO_SIGFIELD_UNKNOWN_LABEL}": FAILED (${signatureFieldUnknownError})`,
   ];
 
   return {
@@ -3453,6 +3597,9 @@ export function runDemo(): DemoResult {
     joinSigned,
     joinVerification,
     joinWrongVerification,
+    signatureFieldBytes,
+    signatureFieldHexPrefix,
+    signatureFieldUnknownError,
     lines,
   };
 }
