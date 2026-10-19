@@ -109,6 +109,15 @@ import {
   DEMO_JWKS_REFRESH_RETIRED_CODE,
   DEMO_JWKS_REFRESH_STALE_AT_SEC,
   DEMO_JWKS_REFRESH_TTL_SEC,
+  DEMO_JWKS_SNAPSHOT_ALG,
+  DEMO_JWKS_SNAPSHOT_EXPORT_ERROR,
+  DEMO_JWKS_SNAPSHOT_FETCH_CALLS,
+  DEMO_JWKS_SNAPSHOT_KEY_COUNT,
+  DEMO_JWKS_SNAPSHOT_KEY_ID,
+  DEMO_JWKS_SNAPSHOT_LABEL,
+  DEMO_JWKS_SNAPSHOT_NONCE,
+  DEMO_JWKS_SNAPSHOT_POISON_D,
+  DEMO_JWKS_SNAPSHOT_POISON_ERROR,
   DEMO_JWK_TAMPERED_CODE,
   DEMO_JOIN_COVERED_COMPONENTS,
   DEMO_JOIN_EXPECTED,
@@ -3435,7 +3444,7 @@ test("demo RSA v1_5 segment signs deterministically, verifies, and rejects the o
   assert.equal(directTampered.code, DEMO_RSA_V15_TAMPERED_CODE);
 });
 
-test("demo lines contain the RSA v1_5 signing segment (signature-input, determinism, verification and tamper rejection, closing the demo)", async () => {
+test("demo lines contain the RSA v1_5 signing segment (signature-input, determinism, verification and tamper rejection, followed by the JWKS snapshot persistence segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
 
@@ -3455,8 +3464,11 @@ test("demo lines contain the RSA v1_5 signing segment (signature-input, determin
     "RSA v1_5 verification after tampering: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)",
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
-  // The v1_5 segment closes the demo: its tamper line is final.
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  // The JWKS snapshot persistence segment follows the v1_5 segment.
+  const snapshotIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS snapshot persistence:"),
+  );
+  assert.ok(headerIdx !== -1 && snapshotIdx !== -1 && headerIdx < snapshotIdx);
 
   // Deterministic double run: the segment's printed lines
   // carry no key or signature bytes, so they are pinned
@@ -3467,5 +3479,235 @@ test("demo lines contain the RSA v1_5 signing segment (signature-input, determin
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 5),
     lines.slice(headerIdx, headerIdx + 5),
+  );
+});
+
+test("demo JWKS snapshot segment exports the refreshed store, cold-starts offline, rejects the poisoned copy, and refuses the unrefreshed export", async () => {
+  const {
+    jwksSnapshotPersistExport,
+    jwksSnapshotPersistFetchCallsAfterRefresh,
+    jwksSnapshotPersistFetchCallsAfterRestore,
+    jwksSnapshotPersistRestoredSize,
+    jwksSnapshotPersistRestoredFetchedAtSec,
+    jwksSnapshotPersistSigned,
+    jwksSnapshotPersistVerification,
+    jwksSnapshotPersistPoisonError,
+    jwksSnapshotPersistUnrefreshedError,
+  } = await runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_JWKS_SNAPSHOT_* and cross-checked against
+  // test/jwksSnapshot.test.ts (its round-trip case pins the
+  // export shape and offline restore, its "d" case pins the
+  // fail-closed rejection, and its export-before-refresh
+  // case pins the refusal). The test pins the literals
+  // again here so a drift in either place fails.
+  assert.equal(DEMO_JWKS_SNAPSHOT_KEY_ID, "demo-jwks-snapshot-1");
+  assert.equal(DEMO_JWKS_SNAPSHOT_NONCE, "demo-nonce-jwks-snapshot-001");
+  assert.equal(DEMO_JWKS_SNAPSHOT_LABEL, "sig1");
+  assert.equal(DEMO_JWKS_SNAPSHOT_ALG, "ed25519");
+  assert.equal(DEMO_JWKS_SNAPSHOT_FETCH_CALLS, 1);
+  assert.equal(DEMO_JWKS_SNAPSHOT_KEY_COUNT, 1);
+  assert.equal(
+    DEMO_JWKS_SNAPSHOT_POISON_D,
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  );
+  assert.equal(
+    DEMO_JWKS_SNAPSHOT_POISON_ERROR,
+    'JwksKeyStore: invalid snapshot: keys[0] for kid "demo-jwks-snapshot-1": importPublicKeyJwk: invalid JWK: private key material ("d") is not accepted; this helper imports public keys only (keep private keys in PEM on the signer side)',
+  );
+  assert.equal(
+    DEMO_JWKS_SNAPSHOT_EXPORT_ERROR,
+    "JwksKeyStore: cannot export a snapshot before a successful refresh() (no keys have been fetched yet)",
+  );
+
+  // The export itself: v1 envelope, the original fetch
+  // time (the injected clock never moves), exactly one
+  // public key under the pinned kid — and no "d".
+  assert.equal(jwksSnapshotPersistExport.v, 1);
+  assert.equal(jwksSnapshotPersistExport.fetchedAtSec, DEMO_CREATED);
+  assert.equal(
+    jwksSnapshotPersistExport.keys.length,
+    DEMO_JWKS_SNAPSHOT_KEY_COUNT,
+  );
+  assert.equal(
+    jwksSnapshotPersistExport.keys[0]?.kid,
+    DEMO_JWKS_SNAPSHOT_KEY_ID,
+  );
+  assert.equal(jwksSnapshotPersistExport.keys[0]?.kty, "OKP");
+  assert.equal("d" in (jwksSnapshotPersistExport.keys[0] ?? {}), false);
+
+  // One fetch for the refresh, none for the cold start;
+  // the restored store holds the key and still counts its
+  // freshness from the original fetch.
+  assert.equal(
+    jwksSnapshotPersistFetchCallsAfterRefresh,
+    DEMO_JWKS_SNAPSHOT_FETCH_CALLS,
+  );
+  assert.equal(
+    jwksSnapshotPersistFetchCallsAfterRestore,
+    DEMO_JWKS_SNAPSHOT_FETCH_CALLS,
+  );
+  assert.equal(
+    jwksSnapshotPersistRestoredSize,
+    DEMO_JWKS_SNAPSHOT_KEY_COUNT,
+  );
+  assert.equal(jwksSnapshotPersistRestoredFetchedAtSec, DEMO_CREATED);
+
+  assert.equal(
+    jwksSnapshotPersistSigned.headers["signature-input"],
+    `sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_JWKS_SNAPSHOT_KEY_ID}";alg="${DEMO_JWKS_SNAPSHOT_ALG}";nonce="${DEMO_JWKS_SNAPSHOT_NONCE}"`,
+  );
+  // Verification runs after the poisoned restore attempt,
+  // so its success also proves the rejection was atomic.
+  assert.equal(jwksSnapshotPersistVerification.ok, true);
+  assert.equal(jwksSnapshotPersistVerification.label, DEMO_JWKS_SNAPSHOT_LABEL);
+  assert.equal(
+    jwksSnapshotPersistVerification.keyId,
+    DEMO_JWKS_SNAPSHOT_KEY_ID,
+  );
+  assert.equal(jwksSnapshotPersistVerification.alg, DEMO_JWKS_SNAPSHOT_ALG);
+  assert.equal(
+    jwksSnapshotPersistVerification.nonce,
+    DEMO_JWKS_SNAPSHOT_NONCE,
+  );
+  assert.equal(jwksSnapshotPersistPoisonError, DEMO_JWKS_SNAPSHOT_POISON_ERROR);
+  assert.equal(
+    jwksSnapshotPersistUnrefreshedError,
+    DEMO_JWKS_SNAPSHOT_EXPORT_ERROR,
+  );
+
+  // Cross-check against the library called directly: a
+  // fresh pair behind a counting stub fetch refreshes
+  // once, exports the same envelope shape, restores from
+  // the JSON form into a store whose fetch always throws,
+  // verifies, rejects the same poisoned copy with the same
+  // message (size unchanged), and a never-refreshed store
+  // refuses to export with the same message.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  let directCalls = 0;
+  const directFetch = async () => {
+    directCalls++;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        keys: [
+          { ...exportPublicKeyJwk(publicKey), kid: DEMO_JWKS_SNAPSHOT_KEY_ID },
+        ],
+      }),
+    };
+  };
+  const directStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: directFetch,
+    now: () => DEMO_CREATED,
+  });
+  await directStore.refresh();
+  assert.equal(directCalls, jwksSnapshotPersistFetchCallsAfterRefresh);
+  const directExport = directStore.exportSnapshot();
+  assert.equal(directExport.v, jwksSnapshotPersistExport.v);
+  assert.equal(directExport.fetchedAtSec, jwksSnapshotPersistExport.fetchedAtSec);
+  assert.equal(directExport.keys.length, jwksSnapshotPersistExport.keys.length);
+  const directRestored = JwksKeyStore.restore(
+    JSON.parse(JSON.stringify(directExport)),
+    DEMO_JWKS_URL,
+    {
+      fetchImpl: async () => {
+        throw new Error("fetch must not be called by snapshot restore");
+      },
+      now: () => DEMO_CREATED,
+    },
+  );
+  assert.equal(directRestored.size, jwksSnapshotPersistRestoredSize);
+  assert.equal(
+    directRestored.lastRefreshedAt,
+    jwksSnapshotPersistRestoredFetchedAtSec,
+  );
+  const directSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_SNAPSHOT_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_JWKS_SNAPSHOT_NONCE,
+    },
+  );
+  const directOk = verifyRequest(directSigned, {
+    keyResolver: directRestored.resolve,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(directOk.ok, true);
+  assert.equal(directOk.keyId, DEMO_JWKS_SNAPSHOT_KEY_ID);
+  assert.equal(directOk.alg, DEMO_JWKS_SNAPSHOT_ALG);
+  const directPoisoned = JSON.parse(JSON.stringify(directExport)) as {
+    keys: Array<Record<string, unknown>>;
+  };
+  directPoisoned.keys[0] = {
+    ...directPoisoned.keys[0]!,
+    d: DEMO_JWKS_SNAPSHOT_POISON_D,
+  };
+  let directPoisonError = "";
+  try {
+    directRestored.restoreSnapshot(directPoisoned);
+  } catch (err) {
+    directPoisonError = err instanceof Error ? err.message : String(err);
+  }
+  assert.equal(directPoisonError, jwksSnapshotPersistPoisonError);
+  assert.equal(directRestored.size, DEMO_JWKS_SNAPSHOT_KEY_COUNT);
+  const directNever = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: directFetch,
+    now: () => DEMO_CREATED,
+  });
+  let directExportError = "";
+  try {
+    directNever.exportSnapshot();
+  } catch (err) {
+    directExportError = err instanceof Error ? err.message : String(err);
+  }
+  assert.equal(directExportError, jwksSnapshotPersistUnrefreshedError);
+  assert.equal(directCalls, jwksSnapshotPersistFetchCallsAfterRestore);
+});
+
+test("demo lines contain the JWKS snapshot persistence segment (export shape, offline cold start, poisoned-copy rejection, restored verification, unrefreshed refusal, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /JWKS snapshot persistence: JwksKeyStore\.exportSnapshot/);
+  // The snapshot block sits after the RSA v1_5 segment
+  // and closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS snapshot persistence:"),
+  );
+  const rsaV15Idx = lines.findIndex((l) => l.startsWith("RSA v1_5 signing:"));
+  assert.ok(rsaV15Idx !== -1 && headerIdx !== -1 && rsaV15Idx < headerIdx);
+  const expectedLines = [
+    "JWKS snapshot persistence: JwksKeyStore.exportSnapshot persists a refreshed store so the next process cold-starts offline — the snapshot crosses a JSON text round-trip and JwksKeyStore.restore() loads it with zero network, exactly the restart path a gateway takes when its JWKS endpoint is down",
+    `JWKS snapshot export after one refresh (fetch count ${DEMO_JWKS_SNAPSHOT_FETCH_CALLS}): exportSnapshot() returned v=1, fetchedAtSec=${DEMO_CREATED}, ${DEMO_JWKS_SNAPSHOT_KEY_COUNT} key (only the version, the original fetch time and the key count are printed — never JWK material)`,
+    `JWKS snapshot cold start: JwksKeyStore.restore() built a store holding ${DEMO_JWKS_SNAPSHOT_KEY_COUNT} key with fetch count still ${DEMO_JWKS_SNAPSHOT_FETCH_CALLS} (zero network — restoring never fetches) and lastRefreshedAt=${DEMO_CREATED} (the original fetch time — restoring never renews freshness)`,
+    `JWKS snapshot with private "d" material mixed into its key: FAILED (${DEMO_JWKS_SNAPSHOT_POISON_ERROR})`,
+    `JWKS verification through the restored store after the rejected restore: OK (label ${DEMO_JWKS_SNAPSHOT_LABEL}, keyid="${DEMO_JWKS_SNAPSHOT_KEY_ID}", alg="${DEMO_JWKS_SNAPSHOT_ALG}", nonce="${DEMO_JWKS_SNAPSHOT_NONCE}")`,
+    `JWKS snapshot export before any refresh: FAILED (${DEMO_JWKS_SNAPSHOT_EXPORT_ERROR})`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), expectedLines);
+  // The snapshot segment closes the demo: its refusal line is final.
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key material, so they are pinned constants,
+  // identical between runs even though the segment key
+  // pair itself is fresh per run.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("JWKS snapshot persistence:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 6),
+    lines.slice(headerIdx, headerIdx + 6),
   );
 });

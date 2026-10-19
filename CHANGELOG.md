@@ -11,6 +11,36 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a JWKS
+  snapshot persistence segment: a `JwksKeyStore` is
+  refreshed once through a counting fake fetch (zero
+  network) under an injected clock, its snapshot is
+  exported with `exportSnapshot()` (only the version,
+  the original `fetchedAtSec` and the key count are
+  printed — never JWK material), the snapshot crosses a
+  JSON text round-trip, and `JwksKeyStore.restore()`
+  cold-starts a new store from it with the fetch count
+  unchanged, its freshness still counting from the
+  original fetch. A detached copy of the snapshot with
+  private `"d"` material mixed into its key is fed to
+  the restored store's `restoreSnapshot()` and printed
+  rejected with the full fail-closed message; a request
+  signed under the snapshotted keyid is verified through
+  the restored store only after that rejection, so the
+  passing verification proves the failed restore left
+  the good snapshot untouched. A never-refreshed store's
+  `exportSnapshot()` is printed refused outright.
+  Earlier JWKS demo segments restored a hand-built
+  snapshot or fetched live, so the persisted cold-start
+  path — and both of its refusal surfaces — was
+  invisible to demo readers. `DemoResult` carries the
+  exported snapshot, both fetch counts, the restored
+  store's size and freshness timestamp, the signed
+  request, its verification and both error messages,
+  and the demo tests pin the fields and the printed
+  lines. Every clock is injected and no key material is
+  printed, so the segment's printed lines are identical
+  between runs.
 - The CLI demo (`npm run demo`) now closes with an RSA
   v1_5 signing segment: the same fixed payment request
   is signed under `rsa-v1_5-sha256` (RSASSA-PKCS1-v1_5,

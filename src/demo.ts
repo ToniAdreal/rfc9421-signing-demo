@@ -497,6 +497,33 @@
  * the printed determinism verdict — never the signature
  * bytes themselves — is shown, so the segment's printed
  * lines are identical between runs.
+ * The demo closes with a JWKS snapshot persistence segment:
+ * a `JwksKeyStore` is loaded through a counting fake fetch
+ * (zero network) under an injected clock pinned to
+ * `DEMO_CREATED`, its snapshot is exported with
+ * `exportSnapshot()` — only the version, the original
+ * `fetchedAtSec` and the key count are printed, never JWK
+ * material — the snapshot crosses a JSON text round-trip,
+ * and `JwksKeyStore.restore()` cold-starts a new store
+ * from it with no further fetch. A detached copy of the
+ * snapshot with private `"d"` material mixed into its key
+ * is then fed to the restored store's `restoreSnapshot()`
+ * and printed rejected with its pinned fail-closed
+ * message; only after that rejection is a request signed
+ * under the snapshotted keyid and verified through the
+ * restored store, so the passing verification itself
+ * proves the failed restore left the good snapshot
+ * untouched. A never-refreshed store's `exportSnapshot()`
+ * is printed refused outright — there are no fetched keys
+ * to persist. Outside the printed lines the demo asserts
+ * the export shape, both fetch counts, the restored
+ * store's size and original freshness timestamp, the
+ * verified identity and both rejection messages equal
+ * the hand-pinned expectations below (the same shapes
+ * `test/jwksSnapshot.test.ts` pins). The segment key pair
+ * is a fresh ed25519 pair (generation is not printed) and
+ * every clock is injected, so the segment's printed lines
+ * are identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -1716,6 +1743,63 @@ export const DEMO_RSA_V15_ALG = "rsa-v1_5-sha256";
 export const DEMO_RSA_V15_TAMPERED_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
 
+/** Key id of the closing JWKS snapshot segment's snapshotted key. */
+export const DEMO_JWKS_SNAPSHOT_KEY_ID = "demo-jwks-snapshot-1";
+/** Nonce of the closing JWKS snapshot segment's signed request. */
+export const DEMO_JWKS_SNAPSHOT_NONCE = "demo-nonce-jwks-snapshot-001";
+/** Label every JWKS snapshot segment signature carries (the library default). */
+export const DEMO_JWKS_SNAPSHOT_LABEL = "sig1";
+/** Algorithm of the closing JWKS snapshot segment's signature. */
+export const DEMO_JWKS_SNAPSHOT_ALG = "ed25519";
+/**
+ * Fetch count of the closing JWKS snapshot segment: the
+ * source store's `refresh()` fetches exactly once, and the
+ * cold start (`JwksKeyStore.restore`) plus both rejection
+ * probes fetch zero times — the count after the restore
+ * still equals this pin, which is what proves the restored
+ * store performed no network access.
+ */
+export const DEMO_JWKS_SNAPSHOT_FETCH_CALLS = 1;
+/** Key count of the segment's exported snapshot (exactly one key). */
+export const DEMO_JWKS_SNAPSHOT_KEY_COUNT = 1;
+/**
+ * Dummy private `"d"` value mixed into the detached copy
+ * of the segment's snapshot: the exact bytes are
+ * irrelevant — the JWK importer refuses on the *presence*
+ * of `"d"` before any value check (the same dummy shape
+ * `test/jwksSnapshot.test.ts` uses for its poisoned
+ * entry) — but the value is pinned so the segment is
+ * deterministic.
+ */
+export const DEMO_JWKS_SNAPSHOT_POISON_D =
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+/**
+ * Hand-pinned rejection of the closing JWKS snapshot
+ * segment's poisoned snapshot: `restoreSnapshot` validates
+ * strictly and wraps the importer's refusal with the
+ * entry's index and kid (the same full message shape
+ * `test/jwksSnapshot.test.ts` pins with its
+ * /private key material/ match). Written out here, never
+ * derived from the restore the demo is checking.
+ */
+export const DEMO_JWKS_SNAPSHOT_POISON_ERROR =
+  'JwksKeyStore: invalid snapshot: keys[0] for kid "demo-jwks-snapshot-1": ' +
+  'importPublicKeyJwk: invalid JWK: private key material ("d") is not ' +
+  "accepted; this helper imports public keys only (keep private keys " +
+  "in PEM on the signer side)";
+/**
+ * Hand-pinned refusal of `exportSnapshot()` on a
+ * never-refreshed store: there is no meaningful
+ * `fetchedAtSec` for keys that were never fetched, so the
+ * store throws instead of exporting an empty placeholder
+ * (the same message `test/jwksSnapshot.test.ts` pins with
+ * its /before a successful refresh/ match). Written out
+ * here, never derived from the call the demo is checking.
+ */
+export const DEMO_JWKS_SNAPSHOT_EXPORT_ERROR =
+  "JwksKeyStore: cannot export a snapshot before a successful refresh() " +
+  "(no keys have been fetched yet)";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -2427,6 +2511,66 @@ export interface DemoResult {
    * (`BODY_DIGEST_MISMATCH`).
    */
   rsaV15TamperedVerification: VerifyResult;
+  /**
+   * The closing JWKS snapshot segment's exported snapshot:
+   * `exportSnapshot()` of the refreshed source store (v 1,
+   * `fetchedAtSec` equal to `DEMO_CREATED`, exactly
+   * `DEMO_JWKS_SNAPSHOT_KEY_COUNT` key carrying
+   * `DEMO_JWKS_SNAPSHOT_KEY_ID` and no `"d"` material).
+   */
+  jwksSnapshotPersistExport: JwksKeyStoreSnapshot;
+  /**
+   * Fake-fetch count after the source store's `refresh()`
+   * (equals the hand-pinned `DEMO_JWKS_SNAPSHOT_FETCH_CALLS`).
+   */
+  jwksSnapshotPersistFetchCallsAfterRefresh: number;
+  /**
+   * Fake-fetch count after the `JwksKeyStore.restore()`
+   * cold start (unchanged: still
+   * `DEMO_JWKS_SNAPSHOT_FETCH_CALLS` — restoring never
+   * fetches).
+   */
+  jwksSnapshotPersistFetchCallsAfterRestore: number;
+  /**
+   * The restored store's size, read after the poisoned
+   * restore attempt (equals
+   * `DEMO_JWKS_SNAPSHOT_KEY_COUNT` — the failed restore
+   * left the good snapshot untouched).
+   */
+  jwksSnapshotPersistRestoredSize: number;
+  /**
+   * The restored store's `lastRefreshedAt`: the snapshot's
+   * original `fetchedAtSec` (`DEMO_CREATED`), never the
+   * restore instant — restoring does not renew freshness.
+   */
+  jwksSnapshotPersistRestoredFetchedAtSec: number | null;
+  /**
+   * The request the closing JWKS snapshot segment signs
+   * under the snapshotted keyid
+   * (`DEMO_JWKS_SNAPSHOT_KEY_ID`, nonce
+   * `DEMO_JWKS_SNAPSHOT_NONCE`).
+   */
+  jwksSnapshotPersistSigned: SignedHttpRequest;
+  /**
+   * Verification of `jwksSnapshotPersistSigned` through
+   * the restored store's resolver, run after the poisoned
+   * restore attempt (ok — the rejection left the restored
+   * snapshot fully usable).
+   */
+  jwksSnapshotPersistVerification: VerifyResult;
+  /**
+   * Error message thrown when the restored store's
+   * `restoreSnapshot()` is fed the detached snapshot copy
+   * carrying private `"d"` material (equals the
+   * hand-pinned `DEMO_JWKS_SNAPSHOT_POISON_ERROR`).
+   */
+  jwksSnapshotPersistPoisonError: string;
+  /**
+   * Error message thrown when a never-refreshed store's
+   * `exportSnapshot()` is called (equals the hand-pinned
+   * `DEMO_JWKS_SNAPSHOT_EXPORT_ERROR`).
+   */
+  jwksSnapshotPersistUnrefreshedError: string;
   lines: string[];
 }
 
@@ -4510,6 +4654,184 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+
+  // JWKS snapshot persistence segment: the JWKS segment
+  // above restores a hand-built snapshot and the refresh
+  // segment above fetches live, but neither shows the
+  // cold-start path an operator actually persists: refresh
+  // once, export the snapshot, and let the next process
+  // start from the exported bytes while the JWKS endpoint
+  // is down. This segment drives a JwksKeyStore through
+  // refresh() with a counting fake fetch (a scripted
+  // function — zero network, the configured endpoint is
+  // never contacted) and an injected clock pinned to
+  // DEMO_CREATED, exports the snapshot with
+  // exportSnapshot() (only its version, original
+  // fetchedAtSec and key count are printed — never JWK
+  // material), round-trips it through JSON text exactly
+  // as a persisted file would carry it, and cold-starts a
+  // new store with JwksKeyStore.restore() over the same
+  // counting fetch: the fetch count does not move, so the
+  // restored store provably performed no network access,
+  // and its freshness still counts from the original
+  // fetch. A detached copy of the snapshot with private
+  // "d" material mixed into its only key is then fed to
+  // the restored store's restoreSnapshot() and rejected
+  // fail-closed; only after that rejection does the
+  // segment sign and verify through the restored store,
+  // so the passing verification itself proves the failed
+  // restore left the good snapshot untouched. Finally a
+  // never-refreshed store's exportSnapshot() is refused
+  // outright — there are no fetched keys to persist. The
+  // segment key pair is a fresh ed25519 pair (generation
+  // is not printed); outside the printed lines the demo
+  // asserts every value above equals the hand-pinned
+  // DEMO_JWKS_SNAPSHOT_* expectations.
+  const jwksSnapshotPersistPair = generateEd25519KeyPair();
+  let jwksSnapshotPersistFetchCalls = 0;
+  const jwksSnapshotPersistFetchImpl = async () => {
+    jwksSnapshotPersistFetchCalls++;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        keys: [
+          {
+            ...exportPublicKeyJwk(jwksSnapshotPersistPair.publicKey),
+            kid: DEMO_JWKS_SNAPSHOT_KEY_ID,
+          },
+        ],
+      }),
+    };
+  };
+  const jwksSnapshotPersistStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: jwksSnapshotPersistFetchImpl,
+    now: () => DEMO_CREATED,
+  });
+  await jwksSnapshotPersistStore.refresh();
+  const jwksSnapshotPersistFetchCallsAfterRefresh =
+    jwksSnapshotPersistFetchCalls;
+  const jwksSnapshotPersistExport =
+    jwksSnapshotPersistStore.exportSnapshot();
+  const jwksSnapshotPersistWire: unknown = JSON.parse(
+    JSON.stringify(jwksSnapshotPersistExport),
+  );
+  const jwksSnapshotPersistRestored = JwksKeyStore.restore(
+    jwksSnapshotPersistWire,
+    DEMO_JWKS_URL,
+    {
+      fetchImpl: jwksSnapshotPersistFetchImpl,
+      now: () => DEMO_CREATED,
+    },
+  );
+  const jwksSnapshotPersistFetchCallsAfterRestore =
+    jwksSnapshotPersistFetchCalls;
+  const jwksSnapshotPersistSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_SNAPSHOT_KEY_ID,
+      alg: "ed25519",
+      key: jwksSnapshotPersistPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_JWKS_SNAPSHOT_NONCE,
+    },
+  );
+  const jwksSnapshotPersistPoisoned = JSON.parse(
+    JSON.stringify(jwksSnapshotPersistExport),
+  ) as { keys: Array<Record<string, unknown>> };
+  jwksSnapshotPersistPoisoned.keys[0] = {
+    ...jwksSnapshotPersistPoisoned.keys[0]!,
+    d: DEMO_JWKS_SNAPSHOT_POISON_D,
+  };
+  let jwksSnapshotPersistPoisonError = "";
+  try {
+    jwksSnapshotPersistRestored.restoreSnapshot(
+      jwksSnapshotPersistPoisoned,
+    );
+  } catch (err) {
+    jwksSnapshotPersistPoisonError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const jwksSnapshotPersistVerification = verifyRequest(
+    jwksSnapshotPersistSigned,
+    {
+      keyResolver: jwksSnapshotPersistRestored.resolve,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const jwksSnapshotPersistRestoredSize =
+    jwksSnapshotPersistRestored.size;
+  const jwksSnapshotPersistRestoredFetchedAtSec =
+    jwksSnapshotPersistRestored.lastRefreshedAt;
+  const jwksSnapshotPersistUnrefreshedStore = new JwksKeyStore(
+    DEMO_JWKS_URL,
+    {
+      fetchImpl: jwksSnapshotPersistFetchImpl,
+      now: () => DEMO_CREATED,
+    },
+  );
+  let jwksSnapshotPersistUnrefreshedError = "";
+  try {
+    jwksSnapshotPersistUnrefreshedStore.exportSnapshot();
+  } catch (err) {
+    jwksSnapshotPersistUnrefreshedError =
+      err instanceof Error ? err.message : String(err);
+  }
+  if (
+    jwksSnapshotPersistExport.v !== 1 ||
+    jwksSnapshotPersistExport.fetchedAtSec !== DEMO_CREATED ||
+    jwksSnapshotPersistExport.keys.length !==
+      DEMO_JWKS_SNAPSHOT_KEY_COUNT ||
+    jwksSnapshotPersistExport.keys[0]?.kid !==
+      DEMO_JWKS_SNAPSHOT_KEY_ID ||
+    "d" in (jwksSnapshotPersistExport.keys[0] ?? {}) ||
+    jwksSnapshotPersistFetchCallsAfterRefresh !==
+      DEMO_JWKS_SNAPSHOT_FETCH_CALLS ||
+    jwksSnapshotPersistFetchCallsAfterRestore !==
+      DEMO_JWKS_SNAPSHOT_FETCH_CALLS ||
+    jwksSnapshotPersistRestoredSize !==
+      DEMO_JWKS_SNAPSHOT_KEY_COUNT ||
+    jwksSnapshotPersistRestoredFetchedAtSec !== DEMO_CREATED ||
+    jwksSnapshotPersistPoisonError !==
+      DEMO_JWKS_SNAPSHOT_POISON_ERROR ||
+    !jwksSnapshotPersistVerification.ok ||
+    jwksSnapshotPersistVerification.label !==
+      DEMO_JWKS_SNAPSHOT_LABEL ||
+    jwksSnapshotPersistVerification.keyId !==
+      DEMO_JWKS_SNAPSHOT_KEY_ID ||
+    jwksSnapshotPersistVerification.alg !==
+      DEMO_JWKS_SNAPSHOT_ALG ||
+    jwksSnapshotPersistVerification.nonce !==
+      DEMO_JWKS_SNAPSHOT_NONCE ||
+    jwksSnapshotPersistUnrefreshedError !==
+      DEMO_JWKS_SNAPSHOT_EXPORT_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: JWKS snapshot persistence gave export ` +
+        `v${jwksSnapshotPersistExport.v}/fetchedAtSec=${jwksSnapshotPersistExport.fetchedAtSec}/` +
+        `${jwksSnapshotPersistExport.keys.length} keys with fetch counts ` +
+        `${jwksSnapshotPersistFetchCallsAfterRefresh}/${jwksSnapshotPersistFetchCallsAfterRestore}, restored ` +
+        `${jwksSnapshotPersistRestoredSize}/${jwksSnapshotPersistRestoredFetchedAtSec}, poison error ` +
+        `${JSON.stringify(jwksSnapshotPersistPoisonError)}, verification ` +
+        `${jwksSnapshotPersistVerification.ok}/${jwksSnapshotPersistVerification.ok ? jwksSnapshotPersistVerification.label : jwksSnapshotPersistVerification.code}/` +
+        `${jwksSnapshotPersistVerification.ok ? jwksSnapshotPersistVerification.keyId : "-"}/` +
+        `${jwksSnapshotPersistVerification.ok ? jwksSnapshotPersistVerification.nonce : "-"} and unrefreshed error ` +
+        `${JSON.stringify(jwksSnapshotPersistUnrefreshedError)}, instead of the pinned ` +
+        `v1/fetchedAtSec=${DEMO_CREATED}/${DEMO_JWKS_SNAPSHOT_KEY_COUNT} keys with fetch counts ` +
+        `${DEMO_JWKS_SNAPSHOT_FETCH_CALLS}/${DEMO_JWKS_SNAPSHOT_FETCH_CALLS}, restored ` +
+        `${DEMO_JWKS_SNAPSHOT_KEY_COUNT}/${DEMO_CREATED}, poison error ` +
+        `${JSON.stringify(DEMO_JWKS_SNAPSHOT_POISON_ERROR)}, verification ` +
+        `true/${DEMO_JWKS_SNAPSHOT_LABEL}/${DEMO_JWKS_SNAPSHOT_KEY_ID}/` +
+        `${DEMO_JWKS_SNAPSHOT_NONCE} and unrefreshed error ` +
+        `${JSON.stringify(DEMO_JWKS_SNAPSHOT_EXPORT_ERROR)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -4790,6 +5112,15 @@ export async function runDemo(): Promise<DemoResult> {
     rsaV15TamperedVerification.ok
       ? "RSA v1_5 verification after tampering: OK (unexpected — tampering was not detected)"
       : `RSA v1_5 verification after tampering: FAILED (code ${rsaV15TamperedVerification.code}: ${rsaV15TamperedVerification.reason})`,
+    "",
+    "JWKS snapshot persistence: JwksKeyStore.exportSnapshot persists a refreshed store so the next process cold-starts offline — the snapshot crosses a JSON text round-trip and JwksKeyStore.restore() loads it with zero network, exactly the restart path a gateway takes when its JWKS endpoint is down",
+    `JWKS snapshot export after one refresh (fetch count ${jwksSnapshotPersistFetchCallsAfterRefresh}): exportSnapshot() returned v=${jwksSnapshotPersistExport.v}, fetchedAtSec=${jwksSnapshotPersistExport.fetchedAtSec}, ${jwksSnapshotPersistExport.keys.length} key (only the version, the original fetch time and the key count are printed — never JWK material)`,
+    `JWKS snapshot cold start: JwksKeyStore.restore() built a store holding ${jwksSnapshotPersistRestoredSize} key with fetch count still ${jwksSnapshotPersistFetchCallsAfterRestore} (zero network — restoring never fetches) and lastRefreshedAt=${jwksSnapshotPersistRestoredFetchedAtSec} (the original fetch time — restoring never renews freshness)`,
+    `JWKS snapshot with private "d" material mixed into its key: FAILED (${jwksSnapshotPersistPoisonError})`,
+    jwksSnapshotPersistVerification.ok
+      ? `JWKS verification through the restored store after the rejected restore: OK (label ${jwksSnapshotPersistVerification.label}, keyid="${jwksSnapshotPersistVerification.keyId}", alg="${jwksSnapshotPersistVerification.alg}", nonce="${jwksSnapshotPersistVerification.nonce}")`
+      : `JWKS verification through the restored store after the rejected restore: FAILED (code ${jwksSnapshotPersistVerification.code}: ${jwksSnapshotPersistVerification.reason})`,
+    `JWKS snapshot export before any refresh: FAILED (${jwksSnapshotPersistUnrefreshedError})`,
   ];
 
   return {
@@ -4911,6 +5242,15 @@ export async function runDemo(): Promise<DemoResult> {
     rsaV15SignaturesIdentical,
     rsaV15Verification,
     rsaV15TamperedVerification,
+    jwksSnapshotPersistExport,
+    jwksSnapshotPersistFetchCallsAfterRefresh,
+    jwksSnapshotPersistFetchCallsAfterRestore,
+    jwksSnapshotPersistRestoredSize,
+    jwksSnapshotPersistRestoredFetchedAtSec,
+    jwksSnapshotPersistSigned,
+    jwksSnapshotPersistVerification,
+    jwksSnapshotPersistPoisonError,
+    jwksSnapshotPersistUnrefreshedError,
     lines,
   };
 }
