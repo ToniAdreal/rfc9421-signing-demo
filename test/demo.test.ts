@@ -11,6 +11,7 @@ import {
   exportPublicKeyJwkP256,
   exportPublicKeyJwkP384,
   exportPublicKeyJwkP521,
+  exportPublicKeyJwkRsa,
   generateEd25519KeyPair,
   generateP256KeyPair,
   generateP384KeyPair,
@@ -20,6 +21,7 @@ import {
   importPublicKeyJwkP256,
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
+  importPublicKeyJwkRsa,
   joinHeaderValues,
   parseSignatureField,
   parseSignatureInput,
@@ -62,6 +64,14 @@ import {
   DEMO_RSA_GUARD_CONTEXT,
   DEMO_RSA_GUARD_ERRORS,
   DEMO_RSA_GUARD_REJECTED,
+  DEMO_RSA_JWK_ALG,
+  DEMO_RSA_JWK_E,
+  DEMO_RSA_JWK_E_LENGTH,
+  DEMO_RSA_JWK_KEY_ID,
+  DEMO_RSA_JWK_LABEL,
+  DEMO_RSA_JWK_MISMATCH_ERROR,
+  DEMO_RSA_JWK_N_LENGTH,
+  DEMO_RSA_JWK_NONCE,
   DEMO_JWK_TAMPERED_CODE,
   DEMO_JOIN_COVERED_COMPONENTS,
   DEMO_JOIN_EXPECTED,
@@ -2759,13 +2769,14 @@ test("demo EC JWK segment exports each curve's JWK shape and verifies through th
   );
 });
 
-test("demo lines contain the EC JWK segment (three curve shapes and round-trip verifications, crv mismatch rejection, closing the demo)", () => {
+test("demo lines contain the EC JWK segment (three curve shapes and round-trip verifications, crv mismatch rejection, followed by the RSA JWK segment)", () => {
   const { lines } = runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /EC JWK key distribution: exportPublicKeyJwkP256/);
   // The EC JWK block sits after the Signature field
-  // parsing segment and closes the demo.
+  // parsing segment and is followed by the RSA JWK
+  // key distribution segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("EC JWK key distribution:"),
   );
@@ -2784,9 +2795,14 @@ test("demo lines contain the EC JWK segment (three curve shapes and round-trip v
     `EC JWK crv mismatch, P-256 JWK fed to importPublicKeyJwkP384: FAILED (${DEMO_EC_JWK_MISMATCH_ERROR})`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 8), expectedLines);
-  // The EC JWK segment closes the demo: its crv-mismatch
-  // rejection line is final.
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  // The RSA JWK segment follows the EC JWK segment: a
+  // blank line, then its header.
+  const rsaJwkIdx = lines.findIndex((l) =>
+    l.startsWith("RSA JWK key distribution:"),
+  );
+  assert.ok(headerIdx !== -1 && rsaJwkIdx !== -1 && headerIdx < rsaJwkIdx);
+  assert.equal(lines[headerIdx + 8], "");
+  assert.equal(rsaJwkIdx, headerIdx + 9);
 
   // Deterministic double run: the segment's printed lines
   // carry no key bytes, so they are pinned constants,
@@ -2799,5 +2815,131 @@ test("demo lines contain the EC JWK segment (three curve shapes and round-trip v
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 8),
     lines.slice(headerIdx, headerIdx + 8),
+  );
+});
+
+test("demo RSA JWK segment exports the RSA JWK shape and verifies through the imported key", () => {
+  const { rsaJwkExport, rsaJwkSigned, rsaJwkVerification, rsaJwkMismatchError, ecJwkExports } =
+    runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_RSA_JWK_* and cross-checked against src/keys.ts
+  // (which builds the pinned kty-mismatch message) and the
+  // shapes test/rsaJwk.test.ts pins (a 2048-bit modulus
+  // encodes to 342 base64url chars; the exponent is the
+  // standard 65537, "AQAB"). The test pins the literals
+  // again here so a drift in either place fails.
+  assert.equal(DEMO_RSA_JWK_KEY_ID, "demo-rsa-jwk-1");
+  assert.equal(DEMO_RSA_JWK_NONCE, "demo-nonce-rsa-jwk-001");
+  assert.equal(DEMO_RSA_JWK_LABEL, "sig1");
+  assert.equal(DEMO_RSA_JWK_ALG, "rsa-pss-sha512");
+  assert.equal(DEMO_RSA_JWK_N_LENGTH, 342);
+  assert.equal(DEMO_RSA_JWK_E, "AQAB");
+  assert.equal(DEMO_RSA_JWK_E_LENGTH, 4);
+  assert.equal(
+    DEMO_RSA_JWK_MISMATCH_ERROR,
+    'importPublicKeyJwkRsa: invalid JWK: expected kty "RSA", got "EC"',
+  );
+
+  // The exported JWK is exactly the RFC 7518 RSA shape:
+  // kty/e/n and nothing else — in particular no private
+  // material.
+  assert.deepEqual(Object.keys(rsaJwkExport).sort(), ["e", "kty", "n"]);
+  assert.equal(rsaJwkExport.kty, "RSA");
+  assert.equal(rsaJwkExport.n.length, DEMO_RSA_JWK_N_LENGTH);
+  assert.match(rsaJwkExport.n, /^[A-Za-z0-9_-]+$/);
+  assert.equal(rsaJwkExport.e, DEMO_RSA_JWK_E);
+  assert.equal(rsaJwkExport.e.length, DEMO_RSA_JWK_E_LENGTH);
+  assert.ok(!("d" in rsaJwkExport), "public JWK must not carry private material");
+
+  // The segment's request carries the pinned identity,
+  // and verification through the imported key passes with
+  // that identity.
+  assert.equal(rsaJwkSigned.body, DEMO_BODY);
+  assert.ok(
+    rsaJwkSigned.headers["signature-input"].includes(
+      `keyid="${DEMO_RSA_JWK_KEY_ID}"`,
+    ),
+  );
+  assert.ok(
+    rsaJwkSigned.headers["signature-input"].includes(
+      `nonce="${DEMO_RSA_JWK_NONCE}"`,
+    ),
+  );
+  assert.equal(rsaJwkVerification.ok, true);
+  if (rsaJwkVerification.ok) {
+    assert.equal(rsaJwkVerification.label, DEMO_RSA_JWK_LABEL);
+    assert.equal(rsaJwkVerification.keyId, DEMO_RSA_JWK_KEY_ID);
+    assert.equal(rsaJwkVerification.alg, DEMO_RSA_JWK_ALG);
+    assert.equal(rsaJwkVerification.nonce, DEMO_RSA_JWK_NONCE);
+  }
+
+  // Cross-check against the library called directly: the
+  // demo's exported JWK, imported through a JSON wire
+  // round-trip, verifies the demo's signed request.
+  const imported = importPublicKeyJwkRsa(
+    JSON.parse(JSON.stringify(rsaJwkExport)) as unknown,
+  );
+  const direct = verifyRequest(rsaJwkSigned, {
+    key: imported,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(direct.ok, true);
+
+  // And a fresh RSA pair exports the same pinned shape
+  // through the same exporter.
+  const fresh = exportPublicKeyJwkRsa(generateRsaPssKeyPair().publicKey);
+  assert.equal(fresh.kty, "RSA");
+  assert.equal(fresh.n.length, DEMO_RSA_JWK_N_LENGTH);
+  assert.equal(fresh.e, DEMO_RSA_JWK_E);
+
+  // The wrong-type rejection is the pinned message, and
+  // the library called directly throws it for the EC
+  // segment's P-256 JWK as well.
+  assert.equal(rsaJwkMismatchError, DEMO_RSA_JWK_MISMATCH_ERROR);
+  assert.throws(
+    () => importPublicKeyJwkRsa(ecJwkExports[0]),
+    (e: unknown) =>
+      e instanceof Error && e.message === DEMO_RSA_JWK_MISMATCH_ERROR,
+  );
+});
+
+test("demo lines contain the RSA JWK segment (shape, round-trip verification, kty mismatch rejection, closing the demo)", () => {
+  const { lines, rsaJwkExport } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /RSA JWK key distribution: exportPublicKeyJwkRsa/);
+  // The RSA JWK block sits after the EC JWK segment and
+  // closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("RSA JWK key distribution:"),
+  );
+  const ecJwkIdx = lines.findIndex((l) =>
+    l.startsWith("EC JWK key distribution:"),
+  );
+  assert.ok(ecJwkIdx !== -1 && headerIdx !== -1 && ecJwkIdx < headerIdx);
+  const expectedLines = [
+    "RSA JWK key distribution: exportPublicKeyJwkRsa ships the RSA public key as a JWK (kty \"RSA\", n/e), a JSON wire round-trip carries it, and importPublicKeyJwkRsa reads it back — the RSA member shape JWKS documents carry most often",
+    `RSA JWK: kty="RSA", n is ${DEMO_RSA_JWK_N_LENGTH} base64url chars, e is ${DEMO_RSA_JWK_E_LENGTH} base64url chars ("${DEMO_RSA_JWK_E}") (the key itself is generated once per process; only its shape is printed — never the full modulus)`,
+    `RSA JWK round-trip verification: OK (label ${DEMO_RSA_JWK_LABEL}, keyid="${DEMO_RSA_JWK_KEY_ID}", alg="${DEMO_RSA_JWK_ALG}", nonce="${DEMO_RSA_JWK_NONCE}")`,
+    `RSA JWK kty mismatch, EC JWK (P-256) fed to importPublicKeyJwkRsa: FAILED (${DEMO_RSA_JWK_MISMATCH_ERROR})`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), expectedLines);
+  // The RSA JWK segment closes the demo: its kty-mismatch
+  // rejection line is final, and no printed line carries
+  // the full modulus.
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  assert.ok(!out.includes(rsaJwkExport.n));
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key bytes, so they are pinned constants,
+  // identical between runs.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("RSA JWK key distribution:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
   );
 });

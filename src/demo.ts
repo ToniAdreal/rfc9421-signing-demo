@@ -389,6 +389,31 @@
  * JWK shapes and the round-trip semantics are asserted,
  * so the segment's printed lines are identical between
  * runs.
+ * The demo closes with an RSA JWK key distribution segment:
+ * the JWK segments above cover the ed25519 (`kty: "OKP"`)
+ * and EC (`kty: "EC"`) forms, but the RSA form
+ * (`kty: "RSA"` + `n`/`e`) — the member shape JWKS
+ * documents carry most often — was never shown on its
+ * own. The segment's RSA key pair (generated once per
+ * process, like the RSA guard segment's keys, so repeated
+ * `runDemo()` calls do not repay RSA key generation) is
+ * exported with `exportPublicKeyJwkRsa`: only the JWK's
+ * `kty` and the `n`/`e` lengths are printed, never the
+ * full modulus. The JWK is read back through a JSON wire
+ * round-trip with `importPublicKeyJwkRsa` and completes
+ * an `rsa-pss-sha512` sign -> verify round-trip, printed
+ * passing. Outside the printed lines the demo asserts
+ * the JWK's shape (kty, the 342-character `n` length of
+ * a 2048-bit modulus, the `AQAB` exponent) and the
+ * verified identity equal the hand-pinned expectations
+ * below. The EC segment's P-256 JWK fed to the RSA
+ * importer is printed rejected with the importer's
+ * pinned kty-mismatch error — the per-shape helpers are
+ * deliberately separate so a key can never be silently
+ * re-interpreted under the wrong key type. Only the JWK
+ * shape and the round-trip semantics are asserted, so
+ * the segment's printed lines are identical between
+ * runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -435,6 +460,7 @@ import {
   exportPublicKeyJwkP256,
   exportPublicKeyJwkP384,
   exportPublicKeyJwkP521,
+  exportPublicKeyJwkRsa,
   exportPublicKeyPem,
   fromNodeRequest,
   generateEd25519KeyPair,
@@ -450,6 +476,7 @@ import {
   importPublicKeyJwkP256,
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
+  importPublicKeyJwkRsa,
   isVerifyError,
   jwkThumbprint,
   JwksKeyStore,
@@ -472,6 +499,7 @@ import {
   type P256PublicJwk,
   type P384PublicJwk,
   type P521PublicJwk,
+  type RsaPublicJwk,
   type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
   type ParsedSignatureInput,
@@ -1383,6 +1411,53 @@ export const DEMO_EC_JWK_LABEL = "sig1";
 export const DEMO_EC_JWK_MISMATCH_ERROR =
   'importPublicKeyJwkP384: invalid JWK: expected crv "P-384", got "P-256"';
 
+/** Key id of the closing RSA JWK segment's signed request. */
+export const DEMO_RSA_JWK_KEY_ID = "demo-rsa-jwk-1";
+/** Nonce of the closing RSA JWK segment's signed request. */
+export const DEMO_RSA_JWK_NONCE = "demo-nonce-rsa-jwk-001";
+/** Label the RSA JWK segment signature carries (the library default). */
+export const DEMO_RSA_JWK_LABEL = "sig1";
+/**
+ * Hand-pinned signing algorithm of the closing RSA JWK
+ * segment: the segment signs under `rsa-pss-sha512` — the
+ * RSA algorithm the library's RSA JWK suite
+ * (`test/rsaJwk.test.ts`) round-trips — with the segment's
+ * RSA key pair. The same exported JWK would also serve
+ * `rsa-v1_5-sha256`: a JWK carries no `alg`, so the
+ * distinction lives only in each signature's `alg`
+ * parameter (see `src/keys.ts`).
+ */
+export const DEMO_RSA_JWK_ALG = "rsa-pss-sha512";
+/**
+ * Hand-pinned base64url length of the closing segment's
+ * exported `n` (modulus): a 2048-bit modulus is 256 bytes,
+ * which base64url-encodes without padding to 342
+ * characters — the same shape `test/rsaJwk.test.ts` pins
+ * for its exported JWKs. Written out here, never derived
+ * from the exporter under test.
+ */
+export const DEMO_RSA_JWK_N_LENGTH = 342;
+/**
+ * Hand-pinned public exponent of the closing segment's
+ * exported JWK: node:crypto mints RSA keys with the
+ * standard exponent 65537, whose base64url form is
+ * `AQAB` (4 characters) — the same value
+ * `test/rsaJwk.test.ts` pins for its exported JWKs.
+ */
+export const DEMO_RSA_JWK_E = "AQAB";
+export const DEMO_RSA_JWK_E_LENGTH = 4;
+/**
+ * Hand-pinned rejection message of the closing RSA JWK
+ * segment: the exact string `importPublicKeyJwkRsa`
+ * throws when the EC segment's P-256 JWK (`kty: "EC"`) is
+ * fed to it — the message `src/keys.ts` builds for a kty
+ * mismatch (the same message shape `test/rsaJwk.test.ts`
+ * pins for its cross-shape rejections). Written out here,
+ * never derived from the importer under test.
+ */
+export const DEMO_RSA_JWK_MISMATCH_ERROR =
+  'importPublicKeyJwkRsa: invalid JWK: expected kty "RSA", got "EC"';
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1916,6 +1991,31 @@ export interface DemoResult {
    * `DEMO_EC_JWK_MISMATCH_ERROR`).
    */
   ecJwkMismatchError: string;
+  /**
+   * The closing RSA JWK segment's exported JWK (`kty "RSA"`
+   * with a 342-character base64url `n` and `e` "AQAB"; the
+   * key itself is generated once per process).
+   */
+  rsaJwkExport: RsaPublicJwk;
+  /**
+   * The request signed in the closing RSA JWK segment with
+   * the segment's RSA private key under `rsa-pss-sha512`
+   * (keyid `DEMO_RSA_JWK_KEY_ID`, nonce
+   * `DEMO_RSA_JWK_NONCE`).
+   */
+  rsaJwkSigned: SignedHttpRequest;
+  /**
+   * Verification of `rsaJwkSigned` with the public key
+   * imported back from `rsaJwkExport` after a JSON wire
+   * round-trip (ok — the RSA JWK round-trip holds).
+   */
+  rsaJwkVerification: VerifyResult;
+  /**
+   * Error message thrown when the EC segment's P-256 JWK
+   * is fed to `importPublicKeyJwkRsa` (equals the
+   * hand-pinned `DEMO_RSA_JWK_MISMATCH_ERROR`).
+   */
+  rsaJwkMismatchError: string;
   lines: string[];
 }
 
@@ -1945,6 +2045,29 @@ function rsaGuardKeys(): {
     };
   }
   return demoRsaGuardKeys;
+}
+
+/**
+ * RSA key pair for the closing RSA JWK segment, generated
+ * once per process and reused across `runDemo()` calls —
+ * the same generate-once shape as {@link rsaGuardKeys}
+ * above, for the same reason: the demo tests call
+ * `runDemo()` many times and must not pay RSA key
+ * generation on every call. Only the exported JWK's shape
+ * is ever printed, never the key bytes.
+ */
+let demoRsaJwkPair: {
+  publicKey: KeyObject;
+  privateKey: KeyObject;
+} | null = null;
+function rsaJwkPair(): {
+  publicKey: KeyObject;
+  privateKey: KeyObject;
+} {
+  if (demoRsaJwkPair === null) {
+    demoRsaJwkPair = generateRsaPssKeyPair();
+  }
+  return demoRsaJwkPair;
 }
 
 function formatLabelResult(prefix: string, result: VerifyResult): string {
@@ -3518,6 +3641,93 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // RSA JWK key distribution segment: the JWK segments
+  // above cover the ed25519 (OKP) and EC forms, but JWKS
+  // documents most often carry RSA members (`kty: "RSA"`
+  // + `n`/`e`). The segment's RSA public key (the pair is
+  // generated once per process — see `rsaJwkPair`) is
+  // exported with `exportPublicKeyJwkRsa`, carried
+  // through a JSON stringify/parse round-trip exactly as
+  // it would cross the wire, and read back with
+  // `importPublicKeyJwkRsa`; the segment's request is
+  // then signed with the pair's private key under
+  // `rsa-pss-sha512` and verified with the imported
+  // public key. Outside the printed lines the demo
+  // asserts the exported JWK's shape (kty, the pinned
+  // 342-character `n` length of a 2048-bit modulus, the
+  // `AQAB` exponent) and the verified identity (label,
+  // keyid, alg, nonce) equal the hand-pinned
+  // DEMO_RSA_JWK_* expectations. The EC segment's P-256
+  // JWK is also fed to the RSA importer: it throws the
+  // pinned kty-mismatch error — the per-shape helpers
+  // are deliberately separate so a key can never be
+  // silently re-interpreted under the wrong key type.
+  // Only the JWK's kty and `n`/`e` lengths are printed,
+  // never the full modulus, so the printed lines are
+  // identical between runs.
+  const rsaJwkExported = exportPublicKeyJwkRsa(rsaJwkPair().publicKey);
+  const rsaJwkReceived = JSON.parse(
+    JSON.stringify(rsaJwkExported),
+  ) as unknown;
+  const rsaJwkImported = importPublicKeyJwkRsa(rsaJwkReceived);
+  const rsaJwkSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_RSA_JWK_KEY_ID,
+      alg: DEMO_RSA_JWK_ALG,
+      key: rsaJwkPair().privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_RSA_JWK_NONCE,
+    },
+  );
+  const rsaJwkVerification = verifyRequest(rsaJwkSigned, {
+    key: rsaJwkImported,
+    now: DEMO_CREATED + 60,
+  });
+  if (
+    rsaJwkExported.kty !== "RSA" ||
+    rsaJwkExported.n.length !== DEMO_RSA_JWK_N_LENGTH ||
+    rsaJwkExported.e !== DEMO_RSA_JWK_E ||
+    rsaJwkExported.e.length !== DEMO_RSA_JWK_E_LENGTH ||
+    !rsaJwkVerification.ok ||
+    rsaJwkVerification.label !== DEMO_RSA_JWK_LABEL ||
+    rsaJwkVerification.keyId !== DEMO_RSA_JWK_KEY_ID ||
+    rsaJwkVerification.alg !== DEMO_RSA_JWK_ALG ||
+    rsaJwkVerification.nonce !== DEMO_RSA_JWK_NONCE
+  ) {
+    throw new Error(
+      `demo fixture broken: RSA JWK gave ` +
+        `kty=${JSON.stringify(rsaJwkExported.kty)} ` +
+        `n=${rsaJwkExported.n.length} e=${JSON.stringify(rsaJwkExported.e)} ` +
+        `with verification ` +
+        `${rsaJwkVerification.ok}/${rsaJwkVerification.label}/` +
+        `${rsaJwkVerification.keyId}/${rsaJwkVerification.alg}/` +
+        `${rsaJwkVerification.nonce}, instead of the pinned ` +
+        `kty="RSA" n=${DEMO_RSA_JWK_N_LENGTH} e="${DEMO_RSA_JWK_E}" ` +
+        `with verification ` +
+        `true/${DEMO_RSA_JWK_LABEL}/${DEMO_RSA_JWK_KEY_ID}/` +
+        `${DEMO_RSA_JWK_ALG}/${DEMO_RSA_JWK_NONCE}`,
+    );
+  }
+  let rsaJwkMismatchError = "";
+  try {
+    importPublicKeyJwkRsa(ecJwkExports[0]);
+  } catch (e) {
+    rsaJwkMismatchError = e instanceof Error ? e.message : String(e);
+  }
+  if (rsaJwkMismatchError !== DEMO_RSA_JWK_MISMATCH_ERROR) {
+    throw new Error(
+      `demo fixture broken: RSA JWK kty mismatch gave error ` +
+        `${JSON.stringify(rsaJwkMismatchError)}, instead of the pinned ` +
+        `${JSON.stringify(DEMO_RSA_JWK_MISMATCH_ERROR)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -3757,6 +3967,13 @@ export function runDemo(): DemoResult {
       ];
     }),
     `EC JWK crv mismatch, P-256 JWK fed to importPublicKeyJwkP384: FAILED (${ecJwkMismatchError})`,
+    "",
+    "RSA JWK key distribution: exportPublicKeyJwkRsa ships the RSA public key as a JWK (kty \"RSA\", n/e), a JSON wire round-trip carries it, and importPublicKeyJwkRsa reads it back — the RSA member shape JWKS documents carry most often",
+    `RSA JWK: kty="${rsaJwkExported.kty}", n is ${rsaJwkExported.n.length} base64url chars, e is ${rsaJwkExported.e.length} base64url chars ("${rsaJwkExported.e}") (the key itself is generated once per process; only its shape is printed — never the full modulus)`,
+    rsaJwkVerification.ok
+      ? `RSA JWK round-trip verification: OK (label ${rsaJwkVerification.label}, keyid="${rsaJwkVerification.keyId}", alg="${rsaJwkVerification.alg}", nonce="${rsaJwkVerification.nonce}")`
+      : `RSA JWK round-trip verification: FAILED (code ${rsaJwkVerification.code}: ${rsaJwkVerification.reason})`,
+    `RSA JWK kty mismatch, EC JWK (P-256) fed to importPublicKeyJwkRsa: FAILED (${rsaJwkMismatchError})`,
   ];
 
   return {
@@ -3850,6 +4067,10 @@ export function runDemo(): DemoResult {
     ecJwkSigned,
     ecJwkVerifications,
     ecJwkMismatchError,
+    rsaJwkExport: rsaJwkExported,
+    rsaJwkSigned,
+    rsaJwkVerification,
+    rsaJwkMismatchError,
     lines,
   };
 }

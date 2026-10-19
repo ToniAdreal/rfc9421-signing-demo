@@ -11,6 +11,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with an RSA
+  JWK key distribution segment: the RSA public key is
+  exported with `exportPublicKeyJwkRsa` (only the JWK's
+  `kty` and the `n`/`e` lengths are printed — never the
+  full modulus), read back through a JSON wire
+  round-trip with `importPublicKeyJwkRsa`, and
+  completes an `rsa-pss-sha512` sign -> verify
+  round-trip, printed passing. Every earlier JWK
+  segment covered only the ed25519 (`kty: "OKP"`) and
+  EC (`kty: "EC"`) forms, so the RSA form
+  (`kty: "RSA"` + `n`/`e`) — the member shape JWKS
+  documents carry most often — was invisible to demo
+  readers on its own. The EC segment's P-256 JWK fed
+  to the RSA importer is printed rejected with the
+  importer's exact kty-mismatch error. Outside the
+  printed lines the demo asserts the JWK's shape
+  (kty, the 342-character `n` length of a 2048-bit
+  modulus and the `AQAB` exponent) and the verified
+  identity equal the hand-pinned expectations.
+  `DemoResult` carries the exported JWK, the signed
+  request, the verification and the mismatch message,
+  and the demo tests pin the fields and the printed
+  lines. The RSA key pair is generated once per
+  process (like the RSA guard segment's keys); only
+  the JWK shape and the round-trip semantics are
+  asserted, so the segment's printed lines are
+  identical between runs.
 - The CLI demo (`npm run demo`) now closes with an EC
   JWK key distribution segment: one fresh key pair is
   generated per NIST curve (P-256, P-384, P-521), each
