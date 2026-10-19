@@ -365,6 +365,30 @@
  * pair is fresh on every run, so the printed prefix differs
  * between runs while its shape (the pinned byte length and
  * prefix length) and the rejection line are identical.
+ * The demo closes with an EC JWK key distribution segment:
+ * the JWK import segment above covers only the ed25519
+ * (`kty: "OKP"`) form, but the EC form (`kty: "EC"` + `crv`
+ * + `x`/`y` coordinates) is the key shape gateways and
+ * webhook verifiers distribute most often. One fresh key
+ * pair is generated per NIST curve (P-256, P-384, P-521 —
+ * generation itself is not printed), each public key is
+ * exported with its curve's `exportPublicKeyJwkP*` helper
+ * and only the JWK's `kty`/`crv` and `x` length are
+ * printed, and each JWK is read back through a JSON wire
+ * round-trip with the matching `importPublicKeyJwkP*`
+ * helper and completes a sign -> verify round-trip under
+ * its curve's RFC 9421 algorithm, printed passing.
+ * Outside the printed lines the demo asserts every JWK's
+ * shape (kty, crv and both coordinate lengths) and every
+ * verified identity equal the hand-pinned expectations
+ * below. A P-256 JWK fed to the P-384 importer is printed
+ * rejected with the importer's pinned crv-mismatch error
+ * — the curves' helpers are deliberately separate so a
+ * key can never be silently re-interpreted on the wrong
+ * curve. The key pairs are fresh on every run; only the
+ * JWK shapes and the round-trip semantics are asserted,
+ * so the segment's printed lines are identical between
+ * runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -408,6 +432,9 @@ import {
   contentDigestAlgOf,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
+  exportPublicKeyJwkP256,
+  exportPublicKeyJwkP384,
+  exportPublicKeyJwkP521,
   exportPublicKeyPem,
   fromNodeRequest,
   generateEd25519KeyPair,
@@ -420,6 +447,9 @@ import {
   importPrivateKey,
   importPublicKey,
   importPublicKeyJwk,
+  importPublicKeyJwkP256,
+  importPublicKeyJwkP384,
+  importPublicKeyJwkP521,
   isVerifyError,
   jwkThumbprint,
   JwksKeyStore,
@@ -439,6 +469,9 @@ import {
   verifyRequestOrThrow,
   type ContentDigestAlg,
   type Ed25519PublicJwk,
+  type P256PublicJwk,
+  type P384PublicJwk,
+  type P521PublicJwk,
   type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
   type ParsedSignatureInput,
@@ -1293,6 +1326,63 @@ export const DEMO_SIGFIELD_UNKNOWN_LABEL = "sig-unknown";
 export const DEMO_SIGFIELD_UNKNOWN_ERROR =
   'signature "sig-unknown" not present in Signature field';
 
+/**
+ * Hand-pinned expectations of the closing EC JWK segment, one
+ * entry per NIST curve in P-256 / P-384 / P-521 order: the
+ * JWK `crv`, the curve's RFC 9421 signing algorithm, the
+ * segment's own keyid and nonce for that curve, and the
+ * base64url lengths of the JWK `x` / `y` coordinates
+ * (32-byte coordinates encode to 43 chars, 48-byte to 64,
+ * 66-byte to 88 — the same shapes the per-curve JWK suites
+ * and the bench round-trip corpus pin). Written out here,
+ * never derived from the exporters under test.
+ */
+export const DEMO_EC_JWK_CURVES: ReadonlyArray<{
+  crv: "P-256" | "P-384" | "P-521";
+  alg: "ecdsa-p256-sha256" | "ecdsa-p384-sha384" | "ecdsa-p521-sha512";
+  keyId: string;
+  nonce: string;
+  xLength: number;
+  yLength: number;
+}> = [
+  {
+    crv: "P-256",
+    alg: "ecdsa-p256-sha256",
+    keyId: "demo-ec-jwk-p256",
+    nonce: "demo-nonce-ec-jwk-p256-001",
+    xLength: 43,
+    yLength: 43,
+  },
+  {
+    crv: "P-384",
+    alg: "ecdsa-p384-sha384",
+    keyId: "demo-ec-jwk-p384",
+    nonce: "demo-nonce-ec-jwk-p384-001",
+    xLength: 64,
+    yLength: 64,
+  },
+  {
+    crv: "P-521",
+    alg: "ecdsa-p521-sha512",
+    keyId: "demo-ec-jwk-p521",
+    nonce: "demo-nonce-ec-jwk-p521-001",
+    xLength: 88,
+    yLength: 88,
+  },
+];
+/** Label every EC JWK segment signature carries (the library default). */
+export const DEMO_EC_JWK_LABEL = "sig1";
+/**
+ * Hand-pinned rejection message of the closing EC JWK
+ * segment: the exact string `importPublicKeyJwkP384` throws
+ * when the segment's P-256 JWK is fed to it — the message
+ * `src/keys.ts` builds for a crv mismatch (the same message
+ * shape the per-curve JWK suites pin). Written out here,
+ * never derived from the importer under test.
+ */
+export const DEMO_EC_JWK_MISMATCH_ERROR =
+  'importPublicKeyJwkP384: invalid JWK: expected crv "P-384", got "P-256"';
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -1797,6 +1887,35 @@ export interface DemoResult {
    * `DEMO_SIGFIELD_UNKNOWN_ERROR`).
    */
   signatureFieldUnknownError: string;
+  /**
+   * The closing EC JWK segment's exported JWKs, one per
+   * NIST curve in `DEMO_EC_JWK_CURVES` order (each
+   * `kty "EC"` with its pinned crv and coordinate lengths;
+   * the keys themselves are fresh per run).
+   */
+  ecJwkExports: ReadonlyArray<
+    P256PublicJwk | P384PublicJwk | P521PublicJwk
+  >;
+  /**
+   * The requests signed in the closing EC JWK segment, one
+   * per curve with that curve's fresh private key (keyid,
+   * alg and nonce equal the pinned `DEMO_EC_JWK_CURVES`
+   * entry).
+   */
+  ecJwkSigned: SignedHttpRequest[];
+  /**
+   * Verification of each `ecJwkSigned` request with the
+   * public key imported back from the matching exported
+   * JWK after a JSON wire round-trip (all ok — the EC JWK
+   * round-trip holds per curve).
+   */
+  ecJwkVerifications: VerifyResult[];
+  /**
+   * Error message thrown when the segment's P-256 JWK is
+   * fed to `importPublicKeyJwkP384` (equals the hand-pinned
+   * `DEMO_EC_JWK_MISMATCH_ERROR`).
+   */
+  ecJwkMismatchError: string;
   lines: string[];
 }
 
@@ -3285,6 +3404,120 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // EC JWK key distribution segment: the JWK import segment
+  // above covers only the ed25519 (OKP) form, but gateways
+  // and webhook verifiers distribute EC keys as JWKs
+  // (`kty: "EC"` + `crv` + `x`/`y`). One fresh key pair is
+  // generated per NIST curve (generation is not printed),
+  // each public key is exported with its curve's
+  // `exportPublicKeyJwkP*` helper, carried through a JSON
+  // stringify/parse round-trip exactly as it would cross
+  // the wire, and read back with the matching
+  // `importPublicKeyJwkP*` helper; the segment's request
+  // for that curve is then signed with the fresh private
+  // key and verified with the imported public key.
+  // Outside the printed lines the demo asserts every
+  // exported JWK's shape (kty, crv, both coordinate
+  // lengths) and every verified identity (label, keyid,
+  // alg, nonce) equal the hand-pinned DEMO_EC_JWK_CURVES
+  // expectations. The segment's P-256 JWK is also fed to
+  // the P-384 importer: it throws the pinned crv-mismatch
+  // error — the per-curve helpers are deliberately
+  // separate so a key can never be silently re-interpreted
+  // on the wrong curve. Only kty/crv and the `x` length
+  // are printed per curve, never key bytes, so the printed
+  // lines are identical between runs even though the key
+  // pairs themselves are fresh.
+  const ecJwkSpecs = [
+    {
+      expected: DEMO_EC_JWK_CURVES[0]!,
+      generate: generateP256KeyPair,
+      exportJwk: exportPublicKeyJwkP256,
+      importJwk: importPublicKeyJwkP256,
+    },
+    {
+      expected: DEMO_EC_JWK_CURVES[1]!,
+      generate: generateP384KeyPair,
+      exportJwk: exportPublicKeyJwkP384,
+      importJwk: importPublicKeyJwkP384,
+    },
+    {
+      expected: DEMO_EC_JWK_CURVES[2]!,
+      generate: generateP521KeyPair,
+      exportJwk: exportPublicKeyJwkP521,
+      importJwk: importPublicKeyJwkP521,
+    },
+  ] as const;
+  const ecJwkExports: Array<
+    P256PublicJwk | P384PublicJwk | P521PublicJwk
+  > = [];
+  const ecJwkSigned: SignedHttpRequest[] = [];
+  const ecJwkVerifications: VerifyResult[] = [];
+  for (const spec of ecJwkSpecs) {
+    const pair = spec.generate();
+    const exported = spec.exportJwk(pair.publicKey);
+    const received = JSON.parse(JSON.stringify(exported)) as unknown;
+    const imported = spec.importJwk(received);
+    const curveSigned = signRequest(
+      {
+        method: "POST",
+        url: "https://api.example.com/v1/payments",
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        keyId: spec.expected.keyId,
+        alg: spec.expected.alg,
+        key: pair.privateKey,
+        created: DEMO_CREATED,
+        nonce: spec.expected.nonce,
+      },
+    );
+    const curveVerification = verifyRequest(curveSigned, {
+      key: imported,
+      now: DEMO_CREATED + 60,
+    });
+    if (
+      exported.kty !== "EC" ||
+      exported.crv !== spec.expected.crv ||
+      exported.x.length !== spec.expected.xLength ||
+      exported.y.length !== spec.expected.yLength ||
+      !curveVerification.ok ||
+      curveVerification.label !== DEMO_EC_JWK_LABEL ||
+      curveVerification.keyId !== spec.expected.keyId ||
+      curveVerification.alg !== spec.expected.alg ||
+      curveVerification.nonce !== spec.expected.nonce
+    ) {
+      throw new Error(
+        `demo fixture broken: EC JWK ${spec.expected.crv} gave ` +
+          `kty=${JSON.stringify(exported.kty)} crv=${JSON.stringify(exported.crv)} ` +
+          `x=${exported.x.length} y=${exported.y.length} with verification ` +
+          `${curveVerification.ok}/${curveVerification.label}/${curveVerification.keyId}/` +
+          `${curveVerification.alg}/${curveVerification.nonce}, instead of the pinned ` +
+          `kty="EC" crv="${spec.expected.crv}" x=${spec.expected.xLength} ` +
+          `y=${spec.expected.yLength} with verification ` +
+          `true/${DEMO_EC_JWK_LABEL}/${spec.expected.keyId}/${spec.expected.alg}/` +
+          `${spec.expected.nonce}`,
+      );
+    }
+    ecJwkExports.push(exported);
+    ecJwkSigned.push(curveSigned);
+    ecJwkVerifications.push(curveVerification);
+  }
+  let ecJwkMismatchError = "";
+  try {
+    importPublicKeyJwkP384(ecJwkExports[0]);
+  } catch (e) {
+    ecJwkMismatchError = e instanceof Error ? e.message : String(e);
+  }
+  if (ecJwkMismatchError !== DEMO_EC_JWK_MISMATCH_ERROR) {
+    throw new Error(
+      `demo fixture broken: EC JWK crv mismatch gave error ` +
+        `${JSON.stringify(ecJwkMismatchError)}, instead of the pinned ` +
+        `${JSON.stringify(DEMO_EC_JWK_MISMATCH_ERROR)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -3511,6 +3744,19 @@ export function runDemo(): DemoResult {
     "Signature field parsing: parseSignatureField extracts the raw signature bytes for one label from the Signature field — the bytes a verifier feeds to the cryptographic check, decoded from their base64 byte-string wrapper",
     `Parsed Signature for label "${DEMO_SIGFIELD_LABEL}": ${signatureFieldBytes.length} bytes, hex prefix ${signatureFieldHexPrefix}… (only the prefix is printed — never the full signature)`,
     `Parsed Signature for unknown label "${DEMO_SIGFIELD_UNKNOWN_LABEL}": FAILED (${signatureFieldUnknownError})`,
+    "",
+    "EC JWK key distribution: exportPublicKeyJwkP256 / exportPublicKeyJwkP384 / exportPublicKeyJwkP521 ship each EC public key as a JWK (kty \"EC\", crv, x/y coordinates), a JSON wire round-trip carries it, and the matching importPublicKeyJwkP* reads it back — the EC key form gateways and webhook verifiers distribute most often",
+    ...ecJwkExports.flatMap((jwk, i) => {
+      const expected = DEMO_EC_JWK_CURVES[i]!;
+      const v = ecJwkVerifications[i]!;
+      return [
+        `EC JWK ${jwk.crv}: kty="${jwk.kty}", crv="${jwk.crv}", x is ${jwk.x.length} base64url chars, y is ${jwk.y.length} base64url chars (the keys themselves are fresh per run; only their shapes are printed)`,
+        v.ok
+          ? `EC JWK ${expected.crv} round-trip verification: OK (label ${v.label}, keyid="${v.keyId}", alg="${v.alg}", nonce="${v.nonce}")`
+          : `EC JWK ${expected.crv} round-trip verification: FAILED (code ${v.code}: ${v.reason})`,
+      ];
+    }),
+    `EC JWK crv mismatch, P-256 JWK fed to importPublicKeyJwkP384: FAILED (${ecJwkMismatchError})`,
   ];
 
   return {
@@ -3600,6 +3846,10 @@ export function runDemo(): DemoResult {
     signatureFieldBytes,
     signatureFieldHexPrefix,
     signatureFieldUnknownError,
+    ecJwkExports,
+    ecJwkSigned,
+    ecJwkVerifications,
+    ecJwkMismatchError,
     lines,
   };
 }

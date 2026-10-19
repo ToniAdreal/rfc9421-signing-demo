@@ -11,6 +11,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with an EC
+  JWK key distribution segment: one fresh key pair is
+  generated per NIST curve (P-256, P-384, P-521), each
+  public key is exported with its curve's
+  `exportPublicKeyJwkP*` helper (only the JWK's
+  `kty`/`crv` and `x` length are printed), read back
+  through a JSON wire round-trip with the matching
+  `importPublicKeyJwkP*` helper, and completes a
+  sign -> verify round-trip under its curve's RFC 9421
+  algorithm, printed passing. Every earlier JWK segment
+  covered only the ed25519 (`kty: "OKP"`) form, so the
+  EC form (`kty: "EC"` + `crv` + `x`/`y`) — the key
+  shape gateways and webhook verifiers distribute most
+  often — was invisible to demo readers. A P-256 JWK
+  fed to the P-384 importer is printed rejected with
+  the importer's exact crv-mismatch error. Outside the
+  printed lines the demo asserts every JWK's shape
+  (kty, crv and both coordinate lengths: 43 / 64 / 88
+  base64url chars) and every verified identity equal
+  the hand-pinned expectations. `DemoResult` carries
+  the exported JWKs, the signed requests, the
+  verifications and the mismatch message, and the demo
+  tests pin the fields and the printed lines. The key
+  pairs are fresh on every run; only the JWK shapes
+  and the round-trip semantics are asserted, so the
+  segment's printed lines are identical between runs.
 - The CLI demo (`npm run demo`) now closes with a
   Signature field parsing segment: the main signed
   request's `signature` value is parsed with

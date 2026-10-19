@@ -8,12 +8,18 @@ import {
   assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
+  exportPublicKeyJwkP256,
+  exportPublicKeyJwkP384,
+  exportPublicKeyJwkP521,
   generateEd25519KeyPair,
   generateP256KeyPair,
   generateP384KeyPair,
   generateP521KeyPair,
   generateRsaPssKeyPair,
   getHeaderRaw,
+  importPublicKeyJwkP256,
+  importPublicKeyJwkP384,
+  importPublicKeyJwkP521,
   joinHeaderValues,
   parseSignatureField,
   parseSignatureInput,
@@ -119,6 +125,9 @@ import {
   DEMO_SIGFIELD_PREFIX_BYTES,
   DEMO_SIGFIELD_UNKNOWN_ERROR,
   DEMO_SIGFIELD_UNKNOWN_LABEL,
+  DEMO_EC_JWK_CURVES,
+  DEMO_EC_JWK_LABEL,
+  DEMO_EC_JWK_MISMATCH_ERROR,
   DEMO_TAMPERED_BODY,
   DEMO_TAMPERED_CONTENT_TYPE,
   DEMO_THUMBPRINT_NONCE,
@@ -2610,14 +2619,15 @@ test("demo Signature field parsing segment extracts the signer's bytes and rejec
   );
 });
 
-test("demo lines contain the Signature field parsing segment (byte length and hex prefix, unknown-label rejection, closing the demo)", () => {
+test("demo lines contain the Signature field parsing segment (byte length and hex prefix, unknown-label rejection, followed by the EC JWK segment)", () => {
   const { lines, signatureFieldBytes, signatureFieldHexPrefix } =
     runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /Signature field parsing: parseSignatureField extracts/);
   // The parsing block sits after the multi-value header
-  // combination segment and closes the demo.
+  // combination segment and is followed by the EC JWK
+  // key distribution segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Signature field parsing:"),
   );
@@ -2630,13 +2640,12 @@ test("demo lines contain the Signature field parsing segment (byte length and he
     `Parsed Signature for label "${DEMO_SIGFIELD_LABEL}": ${DEMO_SIGFIELD_BYTES} bytes, hex prefix ${signatureFieldHexPrefix}… (only the prefix is printed — never the full signature)`,
     `Parsed Signature for unknown label "${DEMO_SIGFIELD_UNKNOWN_LABEL}": FAILED (${DEMO_SIGFIELD_UNKNOWN_ERROR})`,
   ]);
-  // The parsing segment closes the demo: its
-  // unknown-label rejection line is final, and no printed
-  // line carries the full signature in hex.
-  assert.equal(
-    lines[lines.length - 1],
-    `Parsed Signature for unknown label "${DEMO_SIGFIELD_UNKNOWN_LABEL}": FAILED (${DEMO_SIGFIELD_UNKNOWN_ERROR})`,
+  // The EC JWK segment follows the parsing segment, and
+  // no printed line carries the full signature in hex.
+  const ecJwkIdx = lines.findIndex((l) =>
+    l.startsWith("EC JWK key distribution:"),
   );
+  assert.ok(headerIdx !== -1 && ecJwkIdx !== -1 && headerIdx < ecJwkIdx);
   assert.ok(!out.includes(signatureFieldBytes.toString("hex")));
 
   // Double run: the header and rejection lines are pinned
@@ -2654,5 +2663,141 @@ test("demo lines contain the Signature field parsing segment (byte length and he
     new RegExp(
       `^Parsed Signature for label "${DEMO_SIGFIELD_LABEL}": ${DEMO_SIGFIELD_BYTES} bytes, hex prefix [0-9a-f]{${DEMO_SIGFIELD_PREFIX_BYTES * 2}}… \\(only the prefix is printed — never the full signature\\)$`,
     ),
+  );
+});
+
+test("demo EC JWK segment exports each curve's JWK shape and verifies through the imported keys", () => {
+  const { ecJwkExports, ecJwkSigned, ecJwkVerifications, ecJwkMismatchError } =
+    runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_EC_JWK_* and cross-checked against src/keys.ts
+  // (which builds the pinned crv-mismatch message) and the
+  // coordinate lengths the per-curve JWK suites pin
+  // (32-byte -> 43 chars, 48-byte -> 64, 66-byte -> 88).
+  // The test pins the literals again here so a drift in
+  // either place fails.
+  assert.deepEqual(
+    DEMO_EC_JWK_CURVES.map((c) => [c.crv, c.alg, c.xLength, c.yLength]),
+    [
+      ["P-256", "ecdsa-p256-sha256", 43, 43],
+      ["P-384", "ecdsa-p384-sha384", 64, 64],
+      ["P-521", "ecdsa-p521-sha512", 88, 88],
+    ],
+  );
+  assert.equal(DEMO_EC_JWK_LABEL, "sig1");
+  assert.equal(
+    DEMO_EC_JWK_MISMATCH_ERROR,
+    'importPublicKeyJwkP384: invalid JWK: expected crv "P-384", got "P-256"',
+  );
+
+  assert.equal(ecJwkExports.length, 3);
+  assert.equal(ecJwkSigned.length, 3);
+  assert.equal(ecJwkVerifications.length, 3);
+  const importers = [
+    importPublicKeyJwkP256,
+    importPublicKeyJwkP384,
+    importPublicKeyJwkP521,
+  ];
+  const exporters = [
+    exportPublicKeyJwkP256,
+    exportPublicKeyJwkP384,
+    exportPublicKeyJwkP521,
+  ];
+  const generators = [
+    generateP256KeyPair,
+    generateP384KeyPair,
+    generateP521KeyPair,
+  ];
+  for (const [i, expected] of DEMO_EC_JWK_CURVES.entries()) {
+    const jwk = ecJwkExports[i]!;
+    assert.deepEqual(Object.keys(jwk).sort(), ["crv", "kty", "x", "y"]);
+    assert.equal(jwk.kty, "EC");
+    assert.equal(jwk.crv, expected.crv);
+    assert.equal(jwk.x.length, expected.xLength);
+    assert.equal(jwk.y.length, expected.yLength);
+    assert.match(jwk.x, /^[A-Za-z0-9_-]+$/);
+    assert.match(jwk.y, /^[A-Za-z0-9_-]+$/);
+    assert.ok(!("d" in jwk), "public JWK must not carry private material");
+
+    const v = ecJwkVerifications[i]!;
+    assert.equal(v.ok, true);
+    if (v.ok) {
+      assert.equal(v.label, DEMO_EC_JWK_LABEL);
+      assert.equal(v.keyId, expected.keyId);
+      assert.equal(v.alg, expected.alg);
+      assert.equal(v.nonce, expected.nonce);
+    }
+
+    // Cross-check against the library called directly: the
+    // demo's exported JWK, imported through a JSON wire
+    // round-trip, verifies the demo's signed request for
+    // that curve.
+    const imported = importers[i]!(
+      JSON.parse(JSON.stringify(jwk)) as unknown,
+    );
+    const direct = verifyRequest(ecJwkSigned[i]!, {
+      key: imported,
+      now: DEMO_CREATED + 60,
+    });
+    assert.equal(direct.ok, true);
+
+    // And a fresh pair on the same curve exports the same
+    // pinned shape through the same exporter.
+    const fresh = exporters[i]!(generators[i]!().publicKey);
+    assert.equal(fresh.kty, "EC");
+    assert.equal(fresh.crv, expected.crv);
+    assert.equal(fresh.x.length, expected.xLength);
+    assert.equal(fresh.y.length, expected.yLength);
+  }
+
+  assert.equal(ecJwkMismatchError, DEMO_EC_JWK_MISMATCH_ERROR);
+  assert.throws(
+    () => importPublicKeyJwkP384(ecJwkExports[0]),
+    (e: unknown) =>
+      e instanceof Error && e.message === DEMO_EC_JWK_MISMATCH_ERROR,
+  );
+});
+
+test("demo lines contain the EC JWK segment (three curve shapes and round-trip verifications, crv mismatch rejection, closing the demo)", () => {
+  const { lines } = runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /EC JWK key distribution: exportPublicKeyJwkP256/);
+  // The EC JWK block sits after the Signature field
+  // parsing segment and closes the demo.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("EC JWK key distribution:"),
+  );
+  const sigFieldIdx = lines.findIndex((l) =>
+    l.startsWith("Signature field parsing:"),
+  );
+  assert.ok(
+    sigFieldIdx !== -1 && headerIdx !== -1 && sigFieldIdx < headerIdx,
+  );
+  const expectedLines = [
+    "EC JWK key distribution: exportPublicKeyJwkP256 / exportPublicKeyJwkP384 / exportPublicKeyJwkP521 ship each EC public key as a JWK (kty \"EC\", crv, x/y coordinates), a JSON wire round-trip carries it, and the matching importPublicKeyJwkP* reads it back — the EC key form gateways and webhook verifiers distribute most often",
+    ...DEMO_EC_JWK_CURVES.flatMap((c) => [
+      `EC JWK ${c.crv}: kty="EC", crv="${c.crv}", x is ${c.xLength} base64url chars, y is ${c.yLength} base64url chars (the keys themselves are fresh per run; only their shapes are printed)`,
+      `EC JWK ${c.crv} round-trip verification: OK (label ${DEMO_EC_JWK_LABEL}, keyid="${c.keyId}", alg="${c.alg}", nonce="${c.nonce}")`,
+    ]),
+    `EC JWK crv mismatch, P-256 JWK fed to importPublicKeyJwkP384: FAILED (${DEMO_EC_JWK_MISMATCH_ERROR})`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 8), expectedLines);
+  // The EC JWK segment closes the demo: its crv-mismatch
+  // rejection line is final.
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+
+  // Deterministic double run: the segment's printed lines
+  // carry no key bytes, so they are pinned constants,
+  // identical between runs even though the key pairs are
+  // fresh.
+  const again = runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("EC JWK key distribution:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 8),
+    lines.slice(headerIdx, headerIdx + 8),
   );
 });
