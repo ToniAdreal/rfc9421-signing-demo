@@ -11,6 +11,31 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  normalized header lookup segment: a fixed header record
+  — one field stored under a mixed-case key as a padded
+  two-element array, one single string field — is read
+  with `getHeader`, the normalized lookup the verifier
+  itself uses (the lookup name's case need not match the
+  stored key, a multi-value field comes back trimmed and
+  joined with ", ", a single string value comes back
+  exactly as stored, and a missing field comes back
+  `undefined`), and the same record is read with
+  `getHeaderRaw` so the two results print side by side:
+  the raw read preserves every element's padding, which
+  is exactly the difference that makes the two reads easy
+  to confuse and exactly why only the raw read may feed a
+  `;bs` component. Every earlier demo segment read
+  headers only through a full sign/verify path (the
+  parsing segments used `getHeaderRaw` alone), so the
+  normalized lookup — and its contrast with the raw read
+  — was invisible to demo readers. Outside the printed
+  lines the demo asserts every lookup result equals the
+  hand-pinned expectations. `DemoResult` carries the
+  fixture record and all five lookup results, and the
+  demo tests pin the fields and the printed lines. Every
+  input is a fixed constant, so the segment's printed
+  lines are identical between runs.
 - The CLI demo (`npm run demo`) now closes with a JWKS
   refresh and rotation segment: a `JwksKeyStore` over a
   counting fake JWKS fetch (zero network) and an injected

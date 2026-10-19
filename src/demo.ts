@@ -437,6 +437,24 @@
  * its shape when this segment landed. Only keyids, counts
  * and outcomes are printed, never key bytes, so the
  * segment's printed lines are identical between runs.
+ * The demo closes with a normalized header lookup segment:
+ * a fixed header record — one field stored under a
+ * mixed-case key as a padded two-element array, one single
+ * string field — is read with `getHeader`, the normalized
+ * lookup the verifier itself uses: the lookup name's case
+ * does not need to match the stored key, a multi-value
+ * field comes back trimmed and joined with ", " (via
+ * `joinHeaderValues`), a single string value comes back
+ * exactly as stored, and a missing field comes back
+ * `undefined`. The same record is read with `getHeaderRaw`
+ * and the two results are printed side by side: the raw
+ * read preserves every element's padding — exactly the
+ * difference that makes the two reads easy to confuse, and
+ * exactly why only the raw read may feed a `;bs` component.
+ * Outside the printed lines the demo asserts every lookup
+ * result equals the hand-pinned expectations below. Every
+ * input is a fixed constant, so the segment is
+ * byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -492,6 +510,7 @@ import {
   generateP384KeyPair,
   generateP521KeyPair,
   generateRsaPssKeyPair,
+  getHeader,
   getHeaderRaw,
   importPrivateKey,
   importPublicKey,
@@ -1520,6 +1539,54 @@ export const DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION = 2;
 export const DEMO_JWKS_REFRESH_RETIRED_CODE: VerifyFailureCode =
   "KEY_RESOLUTION_FAILED";
 
+/**
+ * Stored key of the closing header-lookup segment's
+ * multi-value field: mixed case on purpose — the segment
+ * looks it up under `DEMO_GET_HEADER_LOOKUP_NAME`, whose
+ * case differs, because `getHeader` matches stored keys
+ * case-insensitively.
+ */
+export const DEMO_GET_HEADER_STORED_NAME = "X-Trace-Hops";
+/** Lookup name of the same field, in lower case. */
+export const DEMO_GET_HEADER_LOOKUP_NAME = "x-trace-hops";
+/**
+ * Fixed values of the header-lookup segment's multi-value
+ * field, padding included on purpose: each element carries
+ * surrounding whitespace the normalized read discards and
+ * the raw read preserves — the visible difference between
+ * the two reads.
+ */
+export const DEMO_GET_HEADER_VALUES: string[] = ["  edge-1 ", " edge-2  "];
+/**
+ * Hand-pinned normalized result of the multi-value lookup:
+ * every element trimmed, the elements joined with ", " —
+ * the RFC 9421 §2.5 combination `getHeader` performs via
+ * `joinHeaderValues`. Written out here, never derived from
+ * the helper under test.
+ */
+export const DEMO_GET_HEADER_EXPECTED = "edge-1, edge-2";
+/**
+ * Hand-pinned raw result of the same lookup under
+ * `getHeaderRaw`: the elements joined with ", " but NOT
+ * trimmed, so the first element's trailing space and the
+ * second element's leading space both survive around the
+ * separator. Written out here, never derived from the
+ * helper under test.
+ */
+export const DEMO_GET_HEADER_RAW_EXPECTED = "  edge-1 ,  edge-2  ";
+/** Stored key of the header-lookup segment's single string field. */
+export const DEMO_GET_HEADER_SINGLE_STORED_NAME = "Content-Type";
+/** Lookup name of the single field, in upper case. */
+export const DEMO_GET_HEADER_SINGLE_LOOKUP_NAME = "CONTENT-TYPE";
+/**
+ * Fixed value of the single string field: a plain string
+ * is returned exactly as stored by both reads (only array
+ * values go through the trimming combination).
+ */
+export const DEMO_GET_HEADER_SINGLE_VALUE = "application/json";
+/** Name of a field the header-lookup segment's record does not carry. */
+export const DEMO_GET_HEADER_MISSING_NAME = "x-absent";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -2146,6 +2213,42 @@ export interface DemoResult {
    * never even checked.
    */
   jwksRefreshRetiredVerification: VerifyResult;
+  /**
+   * The closing header-lookup segment's fixture record:
+   * the multi-value field under its mixed-case stored key
+   * (`DEMO_GET_HEADER_STORED_NAME`, values
+   * `DEMO_GET_HEADER_VALUES`) plus the single string field
+   * (`DEMO_GET_HEADER_SINGLE_STORED_NAME`).
+   */
+  getHeaderHeaders: Record<string, string | string[]>;
+  /**
+   * The segment's normalized multi-value lookup:
+   * `getHeader` under `DEMO_GET_HEADER_LOOKUP_NAME` (equals
+   * the hand-pinned `DEMO_GET_HEADER_EXPECTED`).
+   */
+  getHeaderValue: string | undefined;
+  /**
+   * The segment's raw multi-value lookup: `getHeaderRaw`
+   * under the same name (equals the hand-pinned
+   * `DEMO_GET_HEADER_RAW_EXPECTED` — padding preserved).
+   */
+  getHeaderRawValue: string | undefined;
+  /**
+   * The segment's single-value lookup: `getHeader` under
+   * `DEMO_GET_HEADER_SINGLE_LOOKUP_NAME` (equals
+   * `DEMO_GET_HEADER_SINGLE_VALUE`, returned as stored).
+   */
+  getHeaderSingleValue: string | undefined;
+  /**
+   * The segment's missing-field lookup under `getHeader`:
+   * `undefined` — a missing header has no value.
+   */
+  getHeaderMissingValue: string | undefined;
+  /**
+   * The segment's missing-field lookup under
+   * `getHeaderRaw`: also `undefined`.
+   */
+  getHeaderRawMissingValue: string | undefined;
   lines: string[];
 }
 
@@ -4013,6 +4116,72 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Header lookup segment: every earlier segment read
+  // headers through a full sign/verify path, so the lookup
+  // primitive those paths share was never shown on its own.
+  // The segment's fixed record carries one field under a
+  // mixed-case key as a padded two-element array and one
+  // single string field. `getHeader` — the normalized read
+  // the verifier itself uses — finds the multi-value field
+  // under a differently-cased lookup name and returns its
+  // canonical value (each element trimmed, joined with
+  // ", " via `joinHeaderValues`); `getHeaderRaw` over the
+  // same record returns the field exactly as stored, every
+  // element's padding preserved — the raw read a `;bs`
+  // component binds, and the difference between the two
+  // reads is a classic signature-interop pitfall. A single
+  // string value comes back exactly as stored from the
+  // normalized read (only array values go through the
+  // trimming combination), and a field the record does not
+  // carry comes back `undefined` from both reads. Outside
+  // the printed lines the demo asserts every result equals
+  // the hand-pinned DEMO_GET_HEADER_* expectations. Every
+  // input is a fixed demo constant.
+  const getHeaderHeaders: Record<string, string | string[]> = {
+    [DEMO_GET_HEADER_STORED_NAME]: [...DEMO_GET_HEADER_VALUES],
+    [DEMO_GET_HEADER_SINGLE_STORED_NAME]: DEMO_GET_HEADER_SINGLE_VALUE,
+  };
+  const getHeaderValue = getHeader(
+    getHeaderHeaders,
+    DEMO_GET_HEADER_LOOKUP_NAME,
+  );
+  const getHeaderRawValue = getHeaderRaw(
+    getHeaderHeaders,
+    DEMO_GET_HEADER_LOOKUP_NAME,
+  );
+  const getHeaderSingleValue = getHeader(
+    getHeaderHeaders,
+    DEMO_GET_HEADER_SINGLE_LOOKUP_NAME,
+  );
+  const getHeaderMissingValue = getHeader(
+    getHeaderHeaders,
+    DEMO_GET_HEADER_MISSING_NAME,
+  );
+  const getHeaderRawMissingValue = getHeaderRaw(
+    getHeaderHeaders,
+    DEMO_GET_HEADER_MISSING_NAME,
+  );
+  if (
+    getHeaderValue !== DEMO_GET_HEADER_EXPECTED ||
+    getHeaderRawValue !== DEMO_GET_HEADER_RAW_EXPECTED ||
+    getHeaderSingleValue !== DEMO_GET_HEADER_SINGLE_VALUE ||
+    getHeaderMissingValue !== undefined ||
+    getHeaderRawMissingValue !== undefined
+  ) {
+    throw new Error(
+      `demo fixture broken: header lookup gave normalized ` +
+        `${JSON.stringify(getHeaderValue)}, raw ` +
+        `${JSON.stringify(getHeaderRawValue)}, single ` +
+        `${JSON.stringify(getHeaderSingleValue)} and missing ` +
+        `${JSON.stringify(getHeaderMissingValue)}/` +
+        `${JSON.stringify(getHeaderRawMissingValue)}, instead of the pinned ` +
+        `${JSON.stringify(DEMO_GET_HEADER_EXPECTED)}, raw ` +
+        `${JSON.stringify(DEMO_GET_HEADER_RAW_EXPECTED)}, single ` +
+        `${JSON.stringify(DEMO_GET_HEADER_SINGLE_VALUE)} and missing ` +
+        `undefined/undefined`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -4273,6 +4442,12 @@ export async function runDemo(): Promise<DemoResult> {
     jwksRefreshRetiredVerification.ok
       ? `JWKS verification of the retired keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" after rotation: OK (unexpected — the retired keyid was not rejected)`
       : `JWKS verification of the retired keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" after rotation: FAILED (code ${jwksRefreshRetiredVerification.code}: ${jwksRefreshRetiredVerification.reason})`,
+    "",
+    "Header lookup: getHeader is the normalized read the verifier itself uses — the lookup name's case need not match the stored key, multi-value fields come back trimmed and joined with \", \" (RFC 9421 §2.5), and a missing field comes back undefined — while getHeaderRaw returns the field exactly as stored, the raw read a ;bs component binds",
+    `getHeader("${DEMO_GET_HEADER_LOOKUP_NAME}") over the stored "${DEMO_GET_HEADER_STORED_NAME}" values ${JSON.stringify(DEMO_GET_HEADER_VALUES)}: "${getHeaderValue}"`,
+    `getHeaderRaw("${DEMO_GET_HEADER_LOOKUP_NAME}") over the same stored values: "${getHeaderRawValue}" (every element's padding preserved — the two reads differ exactly by the per-element trimming)`,
+    `getHeader("${DEMO_GET_HEADER_SINGLE_LOOKUP_NAME}") over the stored "${DEMO_GET_HEADER_SINGLE_STORED_NAME}": "${getHeaderSingleValue}" (a single string value is returned exactly as stored)`,
+    `getHeader("${DEMO_GET_HEADER_MISSING_NAME}"): ${getHeaderMissingValue} (no such field in the record — a missing header is undefined, never an empty string)`,
   ];
 
   return {
@@ -4381,6 +4556,12 @@ export async function runDemo(): Promise<DemoResult> {
     jwksRefreshNewSigned,
     jwksRefreshNewVerification,
     jwksRefreshRetiredVerification,
+    getHeaderHeaders,
+    getHeaderValue,
+    getHeaderRawValue,
+    getHeaderSingleValue,
+    getHeaderMissingValue,
+    getHeaderRawMissingValue,
     lines,
   };
 }

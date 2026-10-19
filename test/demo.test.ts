@@ -18,6 +18,7 @@ import {
   generateP384KeyPair,
   generateP521KeyPair,
   generateRsaPssKeyPair,
+  getHeader,
   getHeaderRaw,
   importPublicKeyJwkP256,
   importPublicKeyJwkP384,
@@ -52,6 +53,15 @@ import {
   DEMO_GENERATED_LONG_NONCE_LENGTH,
   DEMO_GENERATED_NONCE_BYTES,
   DEMO_GENERATED_NONCE_LENGTH,
+  DEMO_GET_HEADER_EXPECTED,
+  DEMO_GET_HEADER_LOOKUP_NAME,
+  DEMO_GET_HEADER_MISSING_NAME,
+  DEMO_GET_HEADER_RAW_EXPECTED,
+  DEMO_GET_HEADER_SINGLE_LOOKUP_NAME,
+  DEMO_GET_HEADER_SINGLE_STORED_NAME,
+  DEMO_GET_HEADER_SINGLE_VALUE,
+  DEMO_GET_HEADER_STORED_NAME,
+  DEMO_GET_HEADER_VALUES,
   DEMO_DICT_MEMBER_EXTRACTION,
   DEMO_DICT_MEMBER_MISSING_KEY,
   DEMO_DICT_MEMBER_VALUE,
@@ -3105,13 +3115,13 @@ test("demo JWKS refresh segment loads the old key, skips the fresh fetch, rotate
   assert.equal(directStore.resolve(DEMO_JWKS_REFRESH_OLD_KEY_ID), undefined);
 });
 
-test("demo lines contain the JWKS refresh segment (initial load, fresh skip, rotation, retired keyid rejection, closing the demo)", async () => {
+test("demo lines contain the JWKS refresh segment (initial load, fresh skip, rotation, retired keyid rejection, followed by the header lookup segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /JWKS refresh and rotation: JwksKeyStore\.refreshIfStale/);
   // The JWKS refresh block sits after the RSA JWK segment
-  // and closes the demo.
+  // and before the header lookup segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("JWKS refresh and rotation:"),
   );
@@ -3129,9 +3139,9 @@ test("demo lines contain the JWKS refresh segment (initial load, fresh skip, rot
     `JWKS verification of the retired keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" after rotation: FAILED (code ${DEMO_JWKS_REFRESH_RETIRED_CODE}: keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" could not be resolved to a key)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 7), expectedLines);
-  // The JWKS refresh segment closes the demo: its retired
-  // keyid rejection line is final.
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  // The header lookup segment follows the JWKS refresh
+  // segment.
+  assert.ok(lines[headerIdx + 8]?.startsWith("Header lookup:"));
 
   // Deterministic double run: the segment's printed lines
   // carry no key bytes, so they are pinned constants,
@@ -3143,5 +3153,105 @@ test("demo lines contain the JWKS refresh segment (initial load, fresh skip, rot
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 7),
     lines.slice(headerIdx, headerIdx + 7),
+  );
+});
+
+test("demo getHeader segment shows the normalized lookup, the raw contrast, and undefined for a missing header", async () => {
+  const {
+    getHeaderHeaders,
+    getHeaderValue,
+    getHeaderRawValue,
+    getHeaderSingleValue,
+    getHeaderMissingValue,
+    getHeaderRawMissingValue,
+  } = await runDemo();
+
+  // The fixture record is exactly the hand-pinned one: the
+  // multi-value field under its mixed-case stored key plus
+  // the single string field.
+  assert.deepEqual(getHeaderHeaders, {
+    [DEMO_GET_HEADER_STORED_NAME]: DEMO_GET_HEADER_VALUES,
+    [DEMO_GET_HEADER_SINGLE_STORED_NAME]: DEMO_GET_HEADER_SINGLE_VALUE,
+  });
+
+  // The normalized read trims and joins; the raw read
+  // preserves every element's padding, so the two results
+  // differ exactly by the per-element trimming.
+  assert.equal(getHeaderValue, DEMO_GET_HEADER_EXPECTED);
+  assert.equal(getHeaderRawValue, DEMO_GET_HEADER_RAW_EXPECTED);
+  assert.notEqual(getHeaderValue, getHeaderRawValue);
+  // A single string value is returned exactly as stored,
+  // and a missing field is undefined from both reads.
+  assert.equal(getHeaderSingleValue, DEMO_GET_HEADER_SINGLE_VALUE);
+  assert.equal(getHeaderMissingValue, undefined);
+  assert.equal(getHeaderRawMissingValue, undefined);
+
+  // Direct cross-check against the library functions on
+  // the same fixture: the lookup name's case is irrelevant
+  // (lower-case and stored-case names read identically),
+  // and the raw read of the single field agrees with the
+  // normalized one because there is nothing to trim.
+  assert.equal(
+    getHeader(getHeaderHeaders, DEMO_GET_HEADER_LOOKUP_NAME),
+    DEMO_GET_HEADER_EXPECTED,
+  );
+  assert.equal(
+    getHeader(getHeaderHeaders, DEMO_GET_HEADER_STORED_NAME),
+    DEMO_GET_HEADER_EXPECTED,
+  );
+  assert.equal(
+    getHeaderRaw(getHeaderHeaders, DEMO_GET_HEADER_LOOKUP_NAME),
+    DEMO_GET_HEADER_RAW_EXPECTED,
+  );
+  assert.equal(
+    getHeader(getHeaderHeaders, DEMO_GET_HEADER_SINGLE_LOOKUP_NAME),
+    DEMO_GET_HEADER_SINGLE_VALUE,
+  );
+  assert.equal(
+    getHeaderRaw(getHeaderHeaders, DEMO_GET_HEADER_SINGLE_LOOKUP_NAME),
+    DEMO_GET_HEADER_SINGLE_VALUE,
+  );
+  assert.equal(
+    getHeader(getHeaderHeaders, DEMO_GET_HEADER_MISSING_NAME),
+    undefined,
+  );
+  assert.equal(
+    getHeaderRaw(getHeaderHeaders, DEMO_GET_HEADER_MISSING_NAME),
+    undefined,
+  );
+});
+
+test("demo lines contain the getHeader segment (normalized value, raw contrast, single value, missing undefined, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Header lookup: getHeader is the normalized read/);
+  // The header lookup block sits after the JWKS refresh
+  // segment and closes the demo.
+  const headerIdx = lines.findIndex((l) => l.startsWith("Header lookup:"));
+  const refreshIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS refresh and rotation:"),
+  );
+  assert.ok(refreshIdx !== -1 && headerIdx !== -1 && refreshIdx < headerIdx);
+  const expectedLines = [
+    "Header lookup: getHeader is the normalized read the verifier itself uses — the lookup name's case need not match the stored key, multi-value fields come back trimmed and joined with \", \" (RFC 9421 §2.5), and a missing field comes back undefined — while getHeaderRaw returns the field exactly as stored, the raw read a ;bs component binds",
+    `getHeader("${DEMO_GET_HEADER_LOOKUP_NAME}") over the stored "${DEMO_GET_HEADER_STORED_NAME}" values ${JSON.stringify(DEMO_GET_HEADER_VALUES)}: "${DEMO_GET_HEADER_EXPECTED}"`,
+    `getHeaderRaw("${DEMO_GET_HEADER_LOOKUP_NAME}") over the same stored values: "${DEMO_GET_HEADER_RAW_EXPECTED}" (every element's padding preserved — the two reads differ exactly by the per-element trimming)`,
+    `getHeader("${DEMO_GET_HEADER_SINGLE_LOOKUP_NAME}") over the stored "${DEMO_GET_HEADER_SINGLE_STORED_NAME}": "${DEMO_GET_HEADER_SINGLE_VALUE}" (a single string value is returned exactly as stored)`,
+    `getHeader("${DEMO_GET_HEADER_MISSING_NAME}"): undefined (no such field in the record — a missing header is undefined, never an empty string)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  // The header lookup segment closes the demo: its missing
+  // header line is final.
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+
+  // Deterministic double run: every input is a fixed
+  // constant, so the segment's printed lines are identical
+  // between runs.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Header lookup:"));
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 5),
+    lines.slice(headerIdx, headerIdx + 5),
   );
 });
