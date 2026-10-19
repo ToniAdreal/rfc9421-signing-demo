@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `JwksKeyStore.exportSnapshot` — the snapshot export a
+  gateway runs to persist its key store before a restart
+  (each key re-exported through the JWK exporter for its
+  type and assembled into the `{ v: 1, fetchedAtSec, keys }`
+  envelope) — over an offline-restored store holding the
+  three supported key shapes (ed25519, P-256 and RSA, one
+  freshly generated key pair per shape, generated once
+  outside timing) under hand-pinned kids at a pinned
+  `fetchedAtSec`. Every measured pass re-pins the whole
+  exported envelope: version, fetch time, exactly the
+  three pinned kids in restore order, the per-shape `kty`
+  dispatch (the EC entry naming P-256), and public-only
+  JWK material with no `"d"` member; a never-refreshed
+  store's export refusal is asserted outside timing with
+  the pinned full message. The README Benchmarks table
+  was refreshed wholesale from one real run and now
+  carries the `export` row. The bench performs zero
+  network I/O and no wall-clock assertions.
 - The CLI demo (`npm run demo`) now closes with a JWKS
   snapshot persistence segment: a `JwksKeyStore` is
   refreshed once through a counting fake fetch (zero

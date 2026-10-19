@@ -10,7 +10,15 @@
  * hmac-sha256 dual labels via verifyAllLabels) and the key-resolution
  * hot path a gateway verifier hits on every request: `JwksKeyStore.resolve`
  * (Map hit on an offline-restored snapshot, zero network) and
- * `memoizeKeyResolver` cache hits / misses, plus the key-management
+ * `memoizeKeyResolver` cache hits / misses, plus the snapshot-export
+ * path a gateway runs to persist its key store for a cold start:
+ * `JwksKeyStore.exportSnapshot` over an offline-restored store holding
+ * the three supported key shapes (ed25519 / P-256 / RSA, pinned kids
+ * and a pinned `fetchedAtSec` — see JWKS_EXPORT_* below), self-checked
+ * on every measured pass against the hand-pinned envelope (version,
+ * fetch time, kid order, per-shape `kty`, public-only JWK fields with
+ * no `"d"`), with a never-refreshed store's export refusal asserted
+ * outside timing, plus the key-management
  * derivation a JWKS publisher runs for every key at publish/rotation
  * time: `jwkThumbprint` (RFC 7638) over a fixed three-shape fixture
  * (ed25519 / P-256 / RSA public JWKs, one derivation per shape per
@@ -419,6 +427,141 @@ function offlineJwksStore(): JwksKeyStore {
       now: () => 1_700_000_000,
     },
   );
+}
+
+/**
+ * Pinned shape of the `JwksKeyStore.exportSnapshot` benchmark store:
+ * the three key shapes the store supports (ed25519 / P-256 / RSA),
+ * one freshly generated key pair per shape (generated once, outside
+ * timing), restored offline under these kids at this fetch time.
+ * The exported envelope must reproduce these literals exactly on
+ * every pass — never values derived from `exportSnapshot` itself.
+ */
+const JWKS_EXPORT_FETCHED_AT_SEC = 1_700_000_000;
+const JWKS_EXPORT_KIDS = [
+  "bench-export-ed25519",
+  "bench-export-p256",
+  "bench-export-rsa",
+] as const;
+const JWKS_EXPORT_KTYS = ["OKP", "EC", "RSA"] as const;
+
+/**
+ * Build the three-shape JwksKeyStore for the export benchmark,
+ * entirely offline like {@link offlineJwksStore}: restored from a
+ * hand-built snapshot, with a fetch implementation that throws if
+ * it is ever called — the export benchmark performs zero network I/O.
+ */
+function offlineJwksExportStore(): JwksKeyStore {
+  const ed25519 = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const rsa = generateRsaPssKeyPair();
+  const snapshot = {
+    v: 1 as const,
+    fetchedAtSec: JWKS_EXPORT_FETCHED_AT_SEC,
+    keys: [
+      { ...exportPublicKeyJwk(ed25519.publicKey), kid: JWKS_EXPORT_KIDS[0] },
+      { ...exportPublicKeyJwkP256(p256.publicKey), kid: JWKS_EXPORT_KIDS[1] },
+      { ...exportPublicKeyJwkRsa(rsa.publicKey), kid: JWKS_EXPORT_KIDS[2] },
+    ],
+  };
+  return JwksKeyStore.restore(
+    snapshot,
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: async () => {
+        throw new Error("benchmark must not fetch (offline store)");
+      },
+      now: () => JWKS_EXPORT_FETCHED_AT_SEC,
+    },
+  );
+}
+
+/**
+ * Pin one exported snapshot against the hand-written envelope
+ * expectation: version 1, the pinned fetch time, exactly the three
+ * pinned kids in restore order, the per-shape `kty` dispatch
+ * (OKP / EC / RSA, the EC entry naming P-256), and public-only JWK
+ * material — no entry may carry a private `"d"` member.
+ */
+function assertJwksExportSnapshot(
+  snapshot: ReturnType<JwksKeyStore["exportSnapshot"]>,
+): void {
+  if (snapshot.v !== 1)
+    throw new Error(
+      `benchmark self-check failed: exportSnapshot v ${String(snapshot.v)} (expected 1)`,
+    );
+  if (snapshot.fetchedAtSec !== JWKS_EXPORT_FETCHED_AT_SEC)
+    throw new Error(
+      `benchmark self-check failed: exportSnapshot fetchedAtSec ${snapshot.fetchedAtSec} ` +
+        `(expected ${JWKS_EXPORT_FETCHED_AT_SEC})`,
+    );
+  if (snapshot.keys.length !== JWKS_EXPORT_KIDS.length)
+    throw new Error(
+      `benchmark self-check failed: exportSnapshot exported ${snapshot.keys.length} keys ` +
+        `(expected ${JWKS_EXPORT_KIDS.length})`,
+    );
+  for (let i = 0; i < JWKS_EXPORT_KIDS.length; i++) {
+    const key = snapshot.keys[i]!;
+    if (key.kid !== JWKS_EXPORT_KIDS[i])
+      throw new Error(
+        `benchmark self-check failed: exportSnapshot keys[${i}].kid ${JSON.stringify(key.kid)} ` +
+          `(expected ${JSON.stringify(JWKS_EXPORT_KIDS[i])})`,
+      );
+    if (key.kty !== JWKS_EXPORT_KTYS[i])
+      throw new Error(
+        `benchmark self-check failed: exportSnapshot keys[${i}].kty ${JSON.stringify(key.kty)} ` +
+          `(expected ${JSON.stringify(JWKS_EXPORT_KTYS[i])})`,
+      );
+    if ("d" in key)
+      throw new Error(
+        `benchmark self-check failed: exportSnapshot keys[${i}] carries private "d" material`,
+      );
+  }
+  const ecCrv = (snapshot.keys[1] as { crv?: unknown }).crv;
+  if (ecCrv !== "P-256")
+    throw new Error(
+      `benchmark self-check failed: exportSnapshot EC crv ${JSON.stringify(ecCrv)} (expected "P-256")`,
+    );
+}
+
+/**
+ * `JwksKeyStore.exportSnapshot` steady state: every measured call
+ * re-exports the three-shape store and re-pins the whole envelope
+ * (see {@link assertJwksExportSnapshot}) — the per-key JWK export
+ * dispatch plus envelope assembly a gateway pays when it persists
+ * its key store before a restart. Outside timing, the same pin runs
+ * once exhaustively, and a never-refreshed store's export must be
+ * refused with the pinned full message (there is no meaningful
+ * `fetchedAtSec` for keys that were never fetched).
+ */
+function benchmarkJwksExportSnapshot(store: JwksKeyStore): number {
+  assertJwksExportSnapshot(store.exportSnapshot());
+  const fresh = new JwksKeyStore(
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: async () => {
+        throw new Error("benchmark must not fetch (offline store)");
+      },
+      now: () => JWKS_EXPORT_FETCHED_AT_SEC,
+    },
+  );
+  let refusal: string | undefined;
+  try {
+    fresh.exportSnapshot();
+  } catch (err) {
+    refusal = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    refusal !==
+    "JwksKeyStore: cannot export a snapshot before a successful refresh() " +
+      "(no keys have been fetched yet)"
+  )
+    throw new Error(
+      `benchmark self-check failed: unrefreshed exportSnapshot refusal ${JSON.stringify(refusal)}`,
+    );
+  return measure(() => {
+    assertJwksExportSnapshot(store.exportSnapshot());
+  }, ITERATIONS);
 }
 
 /** Steady-state `JwksKeyStore.resolve` hit: a Map lookup by keyid. */
@@ -3169,6 +3312,11 @@ results.push({
   alg: "memoizeKeyResolver (miss)",
   op: "resolve",
   ops: benchmarkMemoizeMiss(benchStore),
+});
+results.push({
+  alg: "JwksKeyStore.exportSnapshot (3 keys)",
+  op: "export",
+  ops: benchmarkJwksExportSnapshot(offlineJwksExportStore()),
 });
 results.push({
   alg: "jwkThumbprint (3 JWK shapes)",
