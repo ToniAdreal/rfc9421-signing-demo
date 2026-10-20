@@ -12,6 +12,23 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `resolveComponent` — the per-component resolution every
+  sign and verify pays once per covered component — which
+  the existing `buildSignatureBase` row only ever timed
+  bundled with the `@signature-params` serialization.
+  The fixture is a fixed eighteen-case corpus over one
+  pinned request (query string, status, trailers and an
+  associated request attached): ten derived components,
+  two plain header fields and six parameterized forms
+  (`;bs`, `;sf`, `;key="…"`, `;tr`, and `;req` on both a
+  derived component and a header field). Every measured
+  pass re-pins each case's resolved value against the
+  hand-written expectation, and the unsupported-parameter
+  rejection is asserted outside timing. The README
+  Benchmarks table was refreshed wholesale from one real
+  run and now carries the `resolve` row. The bench
+  performs zero network I/O and no wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `ReplayCache.stats()` — the observability snapshot a
   verifier's monitoring polls on every tick (live entries
   counted against the injected clock, plus the detached

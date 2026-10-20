@@ -250,7 +250,22 @@
  * on every measured pass against hand-pinned pass/throw
  * outcomes, so the fail-fast configuration check is visible
  * apart from the digest hashing and sign/verify rows that
- * bundle it.
+ * bundle it, plus the per-component resolution every sign
+ * and verify pays once per covered component:
+ * `resolveComponent` over a fixed eighteen-case corpus
+ * (see RESOLVE_* below) spanning derived components
+ * (`@method` / `@scheme` / `@authority` / `@path` /
+ * `@query` / `@request-target` / `@target-uri` /
+ * `@query-param;name="…"` / `@created` / `@status`), plain
+ * header fields, and the parameterized forms (`;bs` /
+ * `;sf` / `;key="…"` / `;tr` / `;req` on both a derived
+ * component and a header field), self-checked on every
+ * measured pass against hand-pinned expected values, with
+ * the unsupported-parameter rejection asserted outside
+ * timing, so the cost of turning one covered component
+ * into its signature-base value is visible apart from the
+ * `buildSignatureBase` row that bundles it with the
+ * `@signature-params` serialization.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -304,6 +319,7 @@ import {
   parseSignatureField,
   parseSignatureInput,
   ReplayCache,
+  resolveComponent,
   secretKey,
   serializeDictionaryMemberValue,
   serializeSignatureParams,
@@ -3750,6 +3766,185 @@ function benchmarkAssertContentDigestAlg(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed request for the `resolveComponent` path: the shared
+ * bench fixture's method / URL shape extended with a query
+ * string, a status, trailers and an associated request, so
+ * every component form has a value to resolve against. The
+ * `content-digest` header carries the pinned sha-512 wire
+ * value of the fixture body (the same literal BASE_REQUEST
+ * carries); the `x-charge-ref` value keeps the trailing
+ * space the `;bs` test suite pins (plain normalization
+ * would erase it, the raw-bytes form must not); the
+ * `example-dict` value carries the sloppy spacing the `;sf`
+ * test suite pins; the `x-dict` value is the dictionary the
+ * `;key` test suite pins; the `x-checksum` trailer differs
+ * from the same-named header on purpose (the `;tr` test
+ * suite's shape), so a resolver reading the wrong source
+ * fails the self-check.
+ */
+const RESOLVE_REQUEST: RequestLike = {
+  method: fixture.method,
+  url: "https://api.example.com/v1/payments?amount=100&currency=USD",
+  headers: {
+    "content-type": "application/json",
+    "content-digest":
+      "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+    "x-charge-ref": "ch_42, settled ",
+    "example-dict": "a=1,  b=2;x=1;  y=2, c=(a   b  c)",
+    "x-dict": "a=1, b=2;x=1;y=2, c=(a b c), d",
+    "x-checksum": "header-value",
+  },
+  trailers: { "x-checksum": "trailer-value" },
+  status: 200,
+  body: fixture.body,
+  request: {
+    method: "GET",
+    url: "https://api.example.com/v1/charge?order=42",
+    headers: { "x-charge-id": "ch_42" },
+  },
+};
+
+/**
+ * Fixed corpus for the `resolveComponent` path — eighteen
+ * cases written out here, each paired with the exact value
+ * the resolver must return for RESOLVE_REQUEST under
+ * BASE_PARAMS (created pinned at 1700000000). Composition:
+ * - ten derived components: `@method` (uppercased),
+ *   `@scheme`, `@authority` (lowercased host), `@path`,
+ *   `@query` (leading "?" included), `@request-target`
+ *   (path + query, origin form), `@target-uri` (the full
+ *   URL), `@query-param;name="amount"` (the one named
+ *   parameter's re-encoded value), `@created` (from the
+ *   signature parameters) and `@status` (from the fixture's
+ *   status);
+ * - two plain header fields: `content-type` and
+ *   `content-digest` (the demo segment's pinned digest —
+ *   the same four-component shape the CLI demo resolves,
+ *   widened here with the forms the demo does not cover);
+ * - six parameterized forms: `x-charge-ref;bs` (the raw
+ *   value, trailing space included, as a `:base64:` byte
+ *   sequence — the base64 is written out literally here),
+ *   `example-dict;sf` (the strict re-serialization of the
+ *   sloppy dictionary), `x-dict;key="b"` (only the selected
+ *   member's serialization, key not included),
+ *   `x-checksum;tr` (resolved from the trailers, not the
+ *   same-named header), `@method;req` and `x-charge-id;req`
+ *   (both resolved against the associated request).
+ * Every expectation is hand-pinned here from the resolver's
+ * contract, cross-checked against the values the demo
+ * segment and the bs / sf / key / tr / req / query-param
+ * test suites pin independently — never derived from
+ * `resolveComponent` at bench time.
+ */
+const RESOLVE_CORPUS: ReadonlyArray<{
+  component: string;
+  expected: string;
+}> = [
+  { component: "@method", expected: "POST" },
+  { component: "@scheme", expected: "https" },
+  { component: "@authority", expected: "api.example.com" },
+  { component: "@path", expected: "/v1/payments" },
+  { component: "@query", expected: "?amount=100&currency=USD" },
+  {
+    component: "@request-target",
+    expected: "/v1/payments?amount=100&currency=USD",
+  },
+  {
+    component: "@target-uri",
+    expected: "https://api.example.com/v1/payments?amount=100&currency=USD",
+  },
+  { component: '@query-param;name="amount"', expected: "100" },
+  { component: "@created", expected: "1700000000" },
+  { component: "@status", expected: "200" },
+  { component: "content-type", expected: "application/json" },
+  {
+    component: "content-digest",
+    expected:
+      "sha-512=:4HIUuHJ8vINiO2AATKEX/LXYfOo9YkjeZ6IyUzYyAPzc5smC+Bn0HzWXfHusb5AvA1kU6qBMf4sGMhFm6OGI0w==:",
+  },
+  { component: "x-charge-ref;bs", expected: ":Y2hfNDIsIHNldHRsZWQg:" },
+  { component: "example-dict;sf", expected: "a=1, b=2;x=1;y=2, c=(a b c)" },
+  { component: 'x-dict;key="b"', expected: "2;x=1;y=2" },
+  { component: "x-checksum;tr", expected: "trailer-value" },
+  { component: "@method;req", expected: "GET" },
+  { component: "x-charge-id;req", expected: "ch_42" },
+];
+
+/**
+ * Illegal component id for the `resolveComponent` path: a
+ * real field component carrying the unsupported `;zz`
+ * parameter — the same shape the CLI demo's resolution
+ * segment pins. The resolver must reject it before any
+ * value is produced; an unsupported parameter is never
+ * silently ignored.
+ */
+const RESOLVE_ILLEGAL_COMPONENT = "content-digest;zz";
+/**
+ * Hand-pinned rejection message for RESOLVE_ILLEGAL_COMPONENT
+ * — the exact string `resolveComponent` throws for an
+ * unsupported component parameter (the same literal the
+ * demo pins as DEMO_RESOLVE_ILLEGAL_ERROR). Written out
+ * here, never derived from the resolver under test.
+ */
+const RESOLVE_ILLEGAL_ERROR =
+  'unsupported component parameter ";zz" on component "content-digest": only ";req", ";bs", ";sf", ";key", ";tr" and ";name" are supported';
+
+function assertResolveCorpus(label: string): void {
+  for (const entry of RESOLVE_CORPUS) {
+    const actual = resolveComponent(entry.component, RESOLVE_REQUEST, BASE_PARAMS);
+    if (actual !== entry.expected)
+      throw new Error(
+        `benchmark self-check failed (${label}): resolveComponent(${JSON.stringify(entry.component)}) gave ${JSON.stringify(actual)} ` +
+          `(expected ${JSON.stringify(entry.expected)})`,
+      );
+  }
+}
+
+/**
+ * Exhaustive outside-timing assertion for the
+ * `resolveComponent` fixture: the illegal component id is
+ * rejected with exactly the hand-pinned
+ * RESOLVE_ILLEGAL_ERROR. Kept outside timing — the measured
+ * steady state is successful resolutions only, so no
+ * exception construction is folded into the number.
+ */
+function assertResolveIllegal(): void {
+  let message: string | null = null;
+  try {
+    resolveComponent(RESOLVE_ILLEGAL_COMPONENT, RESOLVE_REQUEST, BASE_PARAMS);
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  if (message !== RESOLVE_ILLEGAL_ERROR)
+    throw new Error(
+      `benchmark self-check failed (outside timing): resolveComponent(${JSON.stringify(RESOLVE_ILLEGAL_COMPONENT)}) gave ${JSON.stringify(message)} ` +
+        `(expected throw ${JSON.stringify(RESOLVE_ILLEGAL_ERROR)})`,
+    );
+}
+
+/**
+ * `resolveComponent` steady state: one measured call is one
+ * pass over the whole fixed corpus (18 resolutions per op)
+ * — the per-component step every sign and verify pays once
+ * per covered component, isolated here so its cost is
+ * visible apart from the `buildSignatureBase` row that
+ * bundles it with the `@signature-params` serialization
+ * and apart from the end-to-end rows that bundle it with
+ * cryptography. Self-checks: the whole corpus plus the
+ * illegal-component rejection are asserted exhaustively
+ * outside timing first, and the measured loop re-pins every
+ * case's value on every pass. Zero network, zero
+ * randomness, no wall-clock assertions.
+ */
+function benchmarkResolveComponent(): number {
+  assertResolveCorpus("outside timing");
+  assertResolveIllegal();
+  return measure(() => {
+    assertResolveCorpus("measured pass");
+  }, ITERATIONS);
+}
+
 function fmt(ops: number): string {
   const s = ops >= 1000 ? ops.toLocaleString("en-US", { maximumFractionDigits: 0 }) : ops.toFixed(1);
   const perOpUs = (1e6 / ops).toFixed(2);
@@ -3989,6 +4184,11 @@ results.push({
   alg: "assertContentDigestAlg (10 cases)",
   op: "guard",
   ops: benchmarkAssertContentDigestAlg(),
+});
+results.push({
+  alg: "resolveComponent (18 cases)",
+  op: "resolve",
+  ops: benchmarkResolveComponent(),
 });
 
 console.log("alg                                    op      throughput");
