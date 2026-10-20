@@ -524,6 +524,30 @@
  * is a fresh ed25519 pair (generation is not printed) and
  * every clock is injected, so the segment's printed lines
  * are identical between runs.
+ * The demo closes with a JWKS observability segment:
+ * a `JwksKeyStore` over a counting fake fetch (zero
+ * network) and an injected clock is read through its
+ * observability surface — `lastRefreshedAt` (`null`
+ * before any refresh, the pinned fetch instant after),
+ * `isStale()` (`true` before any refresh, `false` inside
+ * the TTL, `true` again at exactly the TTL boundary —
+ * the `>=` rule), and `stats()` (`{refreshes,
+ * refreshFailures, hits, misses}`). At the boundary a
+ * request signed under the pinned keyid still verifies
+ * through the stale snapshot (staleness is advisory,
+ * never a cutoff), a direct resolve of the pinned keyid
+ * is a hit and a direct resolve of an unknown keyid is
+ * a miss, and the final `stats()` is printed with every
+ * field pinned: the boundary verification contributes
+ * the first hit, the two direct resolves the second hit
+ * and the one miss. Outside the printed lines the demo
+ * asserts every observability value equals the
+ * hand-pinned expectations below (the same boundary and
+ * counting rules `test/jwks.test.ts` and
+ * `test/jwksStats.test.ts` pin). The segment key pair is
+ * a fresh ed25519 pair (generation is not printed) and
+ * every clock is injected, so the segment's printed
+ * lines are identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -615,6 +639,7 @@ import {
   type RsaPublicJwk,
   type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
+  type JwksKeyStoreStats,
   type ParsedSignatureInput,
   type ReplayCacheSnapshot,
   type RequestLike,
@@ -1800,6 +1825,54 @@ export const DEMO_JWKS_SNAPSHOT_EXPORT_ERROR =
   "JwksKeyStore: cannot export a snapshot before a successful refresh() " +
   "(no keys have been fetched yet)";
 
+/** Key id of the closing JWKS observability segment's pinned key. */
+export const DEMO_JWKS_OBSERVABILITY_KEY_ID =
+  "demo-jwks-observability-1";
+/** Unknown key id the closing JWKS observability segment resolves (a miss). */
+export const DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID =
+  "demo-jwks-observability-unknown-1";
+/** Nonce of the closing JWKS observability segment's signed request. */
+export const DEMO_JWKS_OBSERVABILITY_NONCE =
+  "demo-nonce-jwks-observability-001";
+/** Label every JWKS observability segment signature carries (the library default). */
+export const DEMO_JWKS_OBSERVABILITY_LABEL = "sig1";
+/** Algorithm of the closing JWKS observability segment's signature. */
+export const DEMO_JWKS_OBSERVABILITY_ALG = "ed25519";
+/**
+ * TTL of the closing JWKS observability segment's store:
+ * the freshness read runs at the fetch instant (fresh),
+ * and the boundary read runs at exactly this many seconds
+ * after it (stale under the `>=` rule — the same boundary
+ * `test/jwks.test.ts` pins at its own 120-second TTL).
+ */
+export const DEMO_JWKS_OBSERVABILITY_TTL_SEC = 120;
+/**
+ * Injected-clock instant of the boundary read: exactly
+ * `DEMO_JWKS_OBSERVABILITY_TTL_SEC` after the refresh at
+ * `DEMO_CREATED`, so `isStale()` must report `true`.
+ */
+export const DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC =
+  DEMO_CREATED + DEMO_JWKS_OBSERVABILITY_TTL_SEC;
+/** Fetch count of the closing JWKS observability segment (exactly one refresh). */
+export const DEMO_JWKS_OBSERVABILITY_FETCH_CALLS = 1;
+/**
+ * Hand-pinned `stats()` of the closing JWKS observability
+ * segment after its whole sequence: one successful refresh
+ * (refreshes 1, refreshFailures 0), then three `resolve()`
+ * calls — the boundary verification's hit, the direct
+ * pinned-keyid hit, and the direct unknown-keyid miss
+ * (hits 2, misses 1) — the same counting rules
+ * `test/jwksStats.test.ts` pins (hits + misses equals the
+ * total number of `resolve()` calls). Written out here,
+ * never derived from the store the demo is checking.
+ */
+export const DEMO_JWKS_OBSERVABILITY_STATS: JwksKeyStoreStats = {
+  refreshes: 1,
+  refreshFailures: 0,
+  hits: 2,
+  misses: 1,
+};
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -2571,6 +2644,71 @@ export interface DemoResult {
    * `DEMO_JWKS_SNAPSHOT_EXPORT_ERROR`).
    */
   jwksSnapshotPersistUnrefreshedError: string;
+  /**
+   * The closing JWKS observability segment's
+   * `lastRefreshedAt` before any refresh: `null` — no
+   * refresh has succeeded yet.
+   */
+  jwksObservabilityLastRefreshedBefore: number | null;
+  /**
+   * The segment's `isStale()` before any refresh: `true`
+   * — a never-refreshed store is stale.
+   */
+  jwksObservabilityStaleBefore: boolean;
+  /**
+   * Fake-fetch count after the segment's single
+   * `refresh()` (equals the hand-pinned
+   * `DEMO_JWKS_OBSERVABILITY_FETCH_CALLS`).
+   */
+  jwksObservabilityFetchCalls: number;
+  /**
+   * The segment's `lastRefreshedAt` after the refresh:
+   * the pinned fetch instant `DEMO_CREATED`.
+   */
+  jwksObservabilityLastRefreshedAfter: number | null;
+  /**
+   * The segment's `isStale()` at the fetch instant:
+   * `false` — inside the TTL.
+   */
+  jwksObservabilityStaleAfterRefresh: boolean;
+  /**
+   * The segment's `isStale()` at exactly
+   * `DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC`: `true`
+   * under the `>=` TTL boundary rule.
+   */
+  jwksObservabilityStaleAtBoundary: boolean;
+  /**
+   * The request the closing JWKS observability segment
+   * signs under the pinned keyid
+   * (`DEMO_JWKS_OBSERVABILITY_KEY_ID`, nonce
+   * `DEMO_JWKS_OBSERVABILITY_NONCE`).
+   */
+  jwksObservabilitySigned: SignedHttpRequest;
+  /**
+   * Verification of `jwksObservabilitySigned` through
+   * the store at the TTL boundary (ok — a stale snapshot
+   * still serves; this verification is the first counted
+   * `resolve()` hit).
+   */
+  jwksObservabilityVerification: VerifyResult;
+  /**
+   * Whether the segment's direct `resolve()` of the
+   * pinned keyid at the boundary returned a key (`true`
+   * — the second counted hit).
+   */
+  jwksObservabilityHitResolved: boolean;
+  /**
+   * Whether the segment's direct `resolve()` of the
+   * unknown keyid at the boundary returned a key
+   * (`false` — it returned `undefined`, the one counted
+   * miss).
+   */
+  jwksObservabilityUnknownResolved: boolean;
+  /**
+   * The segment's final `stats()` (equals the
+   * hand-pinned `DEMO_JWKS_OBSERVABILITY_STATS`).
+   */
+  jwksObservabilityStats: JwksKeyStoreStats;
   lines: string[];
 }
 
@@ -4832,6 +4970,141 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+
+  // JWKS observability segment: the refresh, snapshot and
+  // rotation segments above each read one slice of a
+  // JwksKeyStore's state, but none shows the observability
+  // surface an operator watches together: lastRefreshedAt,
+  // isStale() and stats(). This segment drives a
+  // JwksKeyStore through refresh() with a counting fake
+  // fetch (a scripted function — zero network) and an
+  // injected clock, reading that surface at three pinned
+  // instants: before any refresh (lastRefreshedAt null,
+  // isStale() true), at the fetch instant DEMO_CREATED
+  // (lastRefreshedAt pinned there, isStale() false inside
+  // the TTL), and at exactly the TTL boundary (isStale()
+  // true under the >= rule). At the boundary a request
+  // signed under the pinned keyid still verifies through
+  // the stale snapshot — staleness is advisory, never a
+  // cutoff — and two direct resolves follow: the pinned
+  // keyid (a hit) and an unknown keyid (a miss). The final
+  // stats() therefore counts one refresh, the verification
+  // hit, the direct hit and the direct miss. The segment
+  // key pair is a fresh ed25519 pair (generation is not
+  // printed); outside the printed lines the demo asserts
+  // every value above equals the hand-pinned
+  // DEMO_JWKS_OBSERVABILITY_* expectations.
+  const jwksObservabilityPair = generateEd25519KeyPair();
+  let jwksObservabilityFetchCalls = 0;
+  let jwksObservabilityNowSec = DEMO_CREATED;
+  const jwksObservabilityStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      jwksObservabilityFetchCalls++;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          keys: [
+            {
+              ...exportPublicKeyJwk(jwksObservabilityPair.publicKey),
+              kid: DEMO_JWKS_OBSERVABILITY_KEY_ID,
+            },
+          ],
+        }),
+      };
+    },
+    ttlSec: DEMO_JWKS_OBSERVABILITY_TTL_SEC,
+    now: () => jwksObservabilityNowSec,
+  });
+  const jwksObservabilityLastRefreshedBefore =
+    jwksObservabilityStore.lastRefreshedAt;
+  const jwksObservabilityStaleBefore = jwksObservabilityStore.isStale();
+  await jwksObservabilityStore.refresh();
+  const jwksObservabilityFetchCallsAfterRefresh =
+    jwksObservabilityFetchCalls;
+  const jwksObservabilityLastRefreshedAfter =
+    jwksObservabilityStore.lastRefreshedAt;
+  const jwksObservabilityStaleAfterRefresh =
+    jwksObservabilityStore.isStale();
+  jwksObservabilityNowSec = DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC;
+  const jwksObservabilityStaleAtBoundary =
+    jwksObservabilityStore.isStale();
+  const jwksObservabilitySigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_OBSERVABILITY_KEY_ID,
+      alg: "ed25519",
+      key: jwksObservabilityPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_JWKS_OBSERVABILITY_NONCE,
+    },
+  );
+  const jwksObservabilityVerification = verifyRequest(
+    jwksObservabilitySigned,
+    {
+      keyResolver: jwksObservabilityStore.resolve,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const jwksObservabilityHitResolved =
+    jwksObservabilityStore.resolve(DEMO_JWKS_OBSERVABILITY_KEY_ID) !==
+    undefined;
+  const jwksObservabilityUnknownResolved =
+    jwksObservabilityStore.resolve(
+      DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID,
+    ) !== undefined;
+  const jwksObservabilityStats = jwksObservabilityStore.stats();
+  if (
+    jwksObservabilityLastRefreshedBefore !== null ||
+    jwksObservabilityStaleBefore !== true ||
+    jwksObservabilityFetchCallsAfterRefresh !==
+      DEMO_JWKS_OBSERVABILITY_FETCH_CALLS ||
+    jwksObservabilityLastRefreshedAfter !== DEMO_CREATED ||
+    jwksObservabilityStaleAfterRefresh !== false ||
+    jwksObservabilityStaleAtBoundary !== true ||
+    !jwksObservabilityVerification.ok ||
+    jwksObservabilityVerification.label !==
+      DEMO_JWKS_OBSERVABILITY_LABEL ||
+    jwksObservabilityVerification.keyId !==
+      DEMO_JWKS_OBSERVABILITY_KEY_ID ||
+    jwksObservabilityVerification.alg !==
+      DEMO_JWKS_OBSERVABILITY_ALG ||
+    jwksObservabilityVerification.nonce !==
+      DEMO_JWKS_OBSERVABILITY_NONCE ||
+    jwksObservabilityHitResolved !== true ||
+    jwksObservabilityUnknownResolved !== false ||
+    jwksObservabilityStats.refreshes !==
+      DEMO_JWKS_OBSERVABILITY_STATS.refreshes ||
+    jwksObservabilityStats.refreshFailures !==
+      DEMO_JWKS_OBSERVABILITY_STATS.refreshFailures ||
+    jwksObservabilityStats.hits !== DEMO_JWKS_OBSERVABILITY_STATS.hits ||
+    jwksObservabilityStats.misses !==
+      DEMO_JWKS_OBSERVABILITY_STATS.misses
+  ) {
+    throw new Error(
+      `demo fixture broken: JWKS observability gave before ` +
+        `${jwksObservabilityLastRefreshedBefore}/${jwksObservabilityStaleBefore}, after refresh ` +
+        `${jwksObservabilityLastRefreshedAfter}/${jwksObservabilityStaleAfterRefresh} with fetch count ` +
+        `${jwksObservabilityFetchCallsAfterRefresh}, boundary stale ` +
+        `${jwksObservabilityStaleAtBoundary}, verification ` +
+        `${jwksObservabilityVerification.ok}/${jwksObservabilityVerification.ok ? jwksObservabilityVerification.label : jwksObservabilityVerification.code}/` +
+        `${jwksObservabilityVerification.ok ? jwksObservabilityVerification.keyId : "-"}/` +
+        `${jwksObservabilityVerification.ok ? jwksObservabilityVerification.nonce : "-"}, resolves ` +
+        `${jwksObservabilityHitResolved}/${jwksObservabilityUnknownResolved} and stats ` +
+        `${JSON.stringify(jwksObservabilityStats)}, instead of the pinned ` +
+        `null/true, ${DEMO_CREATED}/false with fetch count ` +
+        `${DEMO_JWKS_OBSERVABILITY_FETCH_CALLS}, boundary stale true, verification ` +
+        `true/${DEMO_JWKS_OBSERVABILITY_LABEL}/${DEMO_JWKS_OBSERVABILITY_KEY_ID}/` +
+        `${DEMO_JWKS_OBSERVABILITY_NONCE}, resolves true/false and stats ` +
+        `${JSON.stringify(DEMO_JWKS_OBSERVABILITY_STATS)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -5121,6 +5394,16 @@ export async function runDemo(): Promise<DemoResult> {
       ? `JWKS verification through the restored store after the rejected restore: OK (label ${jwksSnapshotPersistVerification.label}, keyid="${jwksSnapshotPersistVerification.keyId}", alg="${jwksSnapshotPersistVerification.alg}", nonce="${jwksSnapshotPersistVerification.nonce}")`
       : `JWKS verification through the restored store after the rejected restore: FAILED (code ${jwksSnapshotPersistVerification.code}: ${jwksSnapshotPersistVerification.reason})`,
     `JWKS snapshot export before any refresh: FAILED (${jwksSnapshotPersistUnrefreshedError})`,
+    "",
+    "JWKS observability: JwksKeyStore exposes lastRefreshedAt, isStale() and stats() — the health view a gateway operator watches to decide whether its key cache is fresh, stale-but-serving, or missing keys",
+    `JWKS observability before any refresh: lastRefreshedAt=${jwksObservabilityLastRefreshedBefore} (no refresh has succeeded yet), isStale()=${jwksObservabilityStaleBefore} (a never-refreshed store is stale)`,
+    `JWKS observability after the first refresh at ${DEMO_CREATED}: lastRefreshedAt=${jwksObservabilityLastRefreshedAfter}, isStale()=${jwksObservabilityStaleAfterRefresh} (inside the ${DEMO_JWKS_OBSERVABILITY_TTL_SEC}s TTL), fetch count ${jwksObservabilityFetchCallsAfterRefresh}`,
+    `JWKS observability at the TTL boundary (${DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC} — exactly ${DEMO_JWKS_OBSERVABILITY_TTL_SEC}s after the refresh, the >= boundary): isStale()=${jwksObservabilityStaleAtBoundary} (staleness is advisory only — the stale snapshot still serves)`,
+    jwksObservabilityVerification.ok
+      ? `JWKS verification at the TTL boundary through the stale snapshot: OK (label ${jwksObservabilityVerification.label}, keyid="${jwksObservabilityVerification.keyId}", alg="${jwksObservabilityVerification.alg}", nonce="${jwksObservabilityVerification.nonce}")`
+      : `JWKS verification at the TTL boundary through the stale snapshot: FAILED (code ${jwksObservabilityVerification.code}: ${jwksObservabilityVerification.reason})`,
+    `JWKS observability resolves at the boundary: resolve("${DEMO_JWKS_OBSERVABILITY_KEY_ID}") returned a key (hit), resolve("${DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID}") returned undefined (miss)`,
+    `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${jwksObservabilityStats.refreshes}, refreshFailures: ${jwksObservabilityStats.refreshFailures}, hits: ${jwksObservabilityStats.hits}, misses: ${jwksObservabilityStats.misses} } (hits + misses equals the total resolve() calls)`,
   ];
 
   return {
@@ -5251,6 +5534,17 @@ export async function runDemo(): Promise<DemoResult> {
     jwksSnapshotPersistVerification,
     jwksSnapshotPersistPoisonError,
     jwksSnapshotPersistUnrefreshedError,
+    jwksObservabilityLastRefreshedBefore,
+    jwksObservabilityStaleBefore,
+    jwksObservabilityFetchCalls: jwksObservabilityFetchCallsAfterRefresh,
+    jwksObservabilityLastRefreshedAfter,
+    jwksObservabilityStaleAfterRefresh,
+    jwksObservabilityStaleAtBoundary,
+    jwksObservabilitySigned,
+    jwksObservabilityVerification,
+    jwksObservabilityHitResolved,
+    jwksObservabilityUnknownResolved,
+    jwksObservabilityStats,
     lines,
   };
 }

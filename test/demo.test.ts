@@ -118,6 +118,15 @@ import {
   DEMO_JWKS_SNAPSHOT_NONCE,
   DEMO_JWKS_SNAPSHOT_POISON_D,
   DEMO_JWKS_SNAPSHOT_POISON_ERROR,
+  DEMO_JWKS_OBSERVABILITY_ALG,
+  DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC,
+  DEMO_JWKS_OBSERVABILITY_FETCH_CALLS,
+  DEMO_JWKS_OBSERVABILITY_KEY_ID,
+  DEMO_JWKS_OBSERVABILITY_LABEL,
+  DEMO_JWKS_OBSERVABILITY_NONCE,
+  DEMO_JWKS_OBSERVABILITY_STATS,
+  DEMO_JWKS_OBSERVABILITY_TTL_SEC,
+  DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID,
   DEMO_JWK_TAMPERED_CODE,
   DEMO_JOIN_COVERED_COMPONENTS,
   DEMO_JOIN_EXPECTED,
@@ -3674,7 +3683,7 @@ test("demo JWKS snapshot segment exports the refreshed store, cold-starts offlin
   assert.equal(directCalls, jwksSnapshotPersistFetchCallsAfterRestore);
 });
 
-test("demo lines contain the JWKS snapshot persistence segment (export shape, offline cold start, poisoned-copy rejection, restored verification, unrefreshed refusal, closing the demo)", async () => {
+test("demo lines contain the JWKS snapshot persistence segment (export shape, offline cold start, poisoned-copy rejection, restored verification, unrefreshed refusal, followed by the JWKS observability segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
 
@@ -3695,8 +3704,11 @@ test("demo lines contain the JWKS snapshot persistence segment (export shape, of
     `JWKS snapshot export before any refresh: FAILED (${DEMO_JWKS_SNAPSHOT_EXPORT_ERROR})`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), expectedLines);
-  // The snapshot segment closes the demo: its refusal line is final.
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  // The JWKS observability segment follows the snapshot segment.
+  const observabilityIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS observability:"),
+  );
+  assert.ok(headerIdx !== -1 && observabilityIdx !== -1 && headerIdx < observabilityIdx);
 
   // Deterministic double run: the segment's printed lines
   // carry no key material, so they are pinned constants,
@@ -3710,4 +3722,93 @@ test("demo lines contain the JWKS snapshot persistence segment (export shape, of
     again.lines.slice(againIdx, againIdx + 6),
     lines.slice(headerIdx, headerIdx + 6),
   );
+});
+
+test("demo JWKS observability segment shows lastRefreshedAt, isStale() at the TTL boundary, and stats() after the verification and resolves", async () => {
+  const {
+    jwksObservabilityLastRefreshedBefore,
+    jwksObservabilityStaleBefore,
+    jwksObservabilityFetchCalls,
+    jwksObservabilityLastRefreshedAfter,
+    jwksObservabilityStaleAfterRefresh,
+    jwksObservabilityStaleAtBoundary,
+    jwksObservabilitySigned,
+    jwksObservabilityVerification,
+    jwksObservabilityHitResolved,
+    jwksObservabilityUnknownResolved,
+    jwksObservabilityStats,
+  } = await runDemo();
+  assert.equal(DEMO_JWKS_OBSERVABILITY_KEY_ID, "demo-jwks-observability-1");
+  assert.equal(DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID, "demo-jwks-observability-unknown-1");
+  assert.equal(DEMO_JWKS_OBSERVABILITY_NONCE, "demo-nonce-jwks-observability-001");
+  assert.equal(DEMO_JWKS_OBSERVABILITY_LABEL, "sig1");
+  assert.equal(DEMO_JWKS_OBSERVABILITY_ALG, "ed25519");
+  assert.equal(DEMO_JWKS_OBSERVABILITY_TTL_SEC, 120);
+  assert.equal(DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC, DEMO_CREATED + DEMO_JWKS_OBSERVABILITY_TTL_SEC);
+  assert.equal(DEMO_JWKS_OBSERVABILITY_FETCH_CALLS, 1);
+  assert.deepEqual(DEMO_JWKS_OBSERVABILITY_STATS, { refreshes: 1, refreshFailures: 0, hits: 2, misses: 1 });
+  assert.equal(jwksObservabilityLastRefreshedBefore, null);
+  assert.equal(jwksObservabilityStaleBefore, true);
+  assert.equal(jwksObservabilityFetchCalls, DEMO_JWKS_OBSERVABILITY_FETCH_CALLS);
+  assert.equal(jwksObservabilityLastRefreshedAfter, DEMO_CREATED);
+  assert.equal(jwksObservabilityStaleAfterRefresh, false);
+  assert.equal(jwksObservabilityStaleAtBoundary, true);
+  assert.equal(jwksObservabilitySigned.headers["signature-input"], `sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_JWKS_OBSERVABILITY_KEY_ID}";alg="${DEMO_JWKS_OBSERVABILITY_ALG}";nonce="${DEMO_JWKS_OBSERVABILITY_NONCE}"`);
+  assert.equal(jwksObservabilityVerification.ok, true);
+  assert.equal(jwksObservabilityVerification.label, DEMO_JWKS_OBSERVABILITY_LABEL);
+  assert.equal(jwksObservabilityVerification.keyId, DEMO_JWKS_OBSERVABILITY_KEY_ID);
+  assert.equal(jwksObservabilityVerification.alg, DEMO_JWKS_OBSERVABILITY_ALG);
+  assert.equal(jwksObservabilityVerification.nonce, DEMO_JWKS_OBSERVABILITY_NONCE);
+  assert.equal(jwksObservabilityHitResolved, true);
+  assert.equal(jwksObservabilityUnknownResolved, false);
+  assert.deepEqual(jwksObservabilityStats, DEMO_JWKS_OBSERVABILITY_STATS);
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  let directCalls = 0;
+  let directNow = DEMO_CREATED;
+  const directStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      directCalls++;
+      return { ok: true, status: 200, json: async () => ({ keys: [{ ...exportPublicKeyJwk(publicKey), kid: DEMO_JWKS_OBSERVABILITY_KEY_ID }] }) };
+    },
+    ttlSec: DEMO_JWKS_OBSERVABILITY_TTL_SEC,
+    now: () => directNow,
+  });
+  assert.equal(directStore.lastRefreshedAt, jwksObservabilityLastRefreshedBefore);
+  assert.equal(directStore.isStale(), jwksObservabilityStaleBefore);
+  await directStore.refresh();
+  assert.equal(directCalls, jwksObservabilityFetchCalls);
+  assert.equal(directStore.lastRefreshedAt, jwksObservabilityLastRefreshedAfter);
+  assert.equal(directStore.isStale(), jwksObservabilityStaleAfterRefresh);
+  directNow = DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC;
+  assert.equal(directStore.isStale(), jwksObservabilityStaleAtBoundary);
+  const directSigned = signRequest({ method: "POST", url: "https://api.example.com/v1/payments", headers: { "content-type": "application/json" }, body: DEMO_BODY }, { keyId: DEMO_JWKS_OBSERVABILITY_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_JWKS_OBSERVABILITY_NONCE });
+  const directOk = verifyRequest(directSigned, { keyResolver: directStore.resolve, now: DEMO_CREATED + 60 });
+  assert.equal(directOk.ok, true);
+  assert.equal(directOk.keyId, DEMO_JWKS_OBSERVABILITY_KEY_ID);
+  assert.equal(directStore.resolve(DEMO_JWKS_OBSERVABILITY_KEY_ID) !== undefined, jwksObservabilityHitResolved);
+  assert.equal(directStore.resolve(DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID) !== undefined, jwksObservabilityUnknownResolved);
+  assert.deepEqual(directStore.stats(), jwksObservabilityStats);
+});
+
+test("demo lines contain the JWKS observability segment (before/after reads, TTL-boundary stale verification, resolves, stats, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /JWKS observability: JwksKeyStore exposes lastRefreshedAt/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("JWKS observability:"));
+  const snapshotIdx = lines.findIndex((l) => l.startsWith("JWKS snapshot persistence:"));
+  assert.ok(snapshotIdx !== -1 && headerIdx !== -1 && snapshotIdx < headerIdx);
+  const expectedLines = [
+    "JWKS observability: JwksKeyStore exposes lastRefreshedAt, isStale() and stats() — the health view a gateway operator watches to decide whether its key cache is fresh, stale-but-serving, or missing keys",
+    "JWKS observability before any refresh: lastRefreshedAt=null (no refresh has succeeded yet), isStale()=true (a never-refreshed store is stale)",
+    `JWKS observability after the first refresh at ${DEMO_CREATED}: lastRefreshedAt=${DEMO_CREATED}, isStale()=false (inside the ${DEMO_JWKS_OBSERVABILITY_TTL_SEC}s TTL), fetch count ${DEMO_JWKS_OBSERVABILITY_FETCH_CALLS}`,
+    `JWKS observability at the TTL boundary (${DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC} — exactly ${DEMO_JWKS_OBSERVABILITY_TTL_SEC}s after the refresh, the >= boundary): isStale()=true (staleness is advisory only — the stale snapshot still serves)`,
+    `JWKS verification at the TTL boundary through the stale snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_OBSERVABILITY_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_OBSERVABILITY_NONCE}")`,
+    `JWKS observability resolves at the boundary: resolve("${DEMO_JWKS_OBSERVABILITY_KEY_ID}") returned a key (hit), resolve("${DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID}") returned undefined (miss)`,
+    `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshFailures}, hits: ${DEMO_JWKS_OBSERVABILITY_STATS.hits}, misses: ${DEMO_JWKS_OBSERVABILITY_STATS.misses} } (hits + misses equals the total resolve() calls)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 7), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS observability:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 7), lines.slice(headerIdx, headerIdx + 7));
 });

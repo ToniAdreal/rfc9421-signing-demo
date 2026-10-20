@@ -11,6 +11,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a JWKS
+  observability segment: a `JwksKeyStore` is driven
+  through one `refresh()` over a counting fake fetch
+  (zero network) under an injected clock, and its
+  observability surface is printed at three pinned
+  instants — before any refresh (`lastRefreshedAt`
+  `null`, `isStale()` `true`), at the fetch instant
+  (`lastRefreshedAt` pinned, `isStale()` `false` inside
+  the 120-second TTL), and at exactly the TTL boundary
+  (`isStale()` `true` under the `>=` rule). At the
+  boundary a request signed under the pinned keyid
+  still verifies through the stale snapshot, a direct
+  resolve of the pinned keyid is a hit and a direct
+  resolve of an unknown keyid is a miss, and the final
+  `stats()` is printed with every field pinned
+  (`{ refreshes: 1, refreshFailures: 0, hits: 2,
+  misses: 1 }` — the boundary verification contributes
+  the first hit). Earlier JWKS demo segments each read
+  one slice of store state, so the combined health view
+  an operator watches was invisible to demo readers.
+  `DemoResult` carries the before/after/boundary reads,
+  the fetch count, the signed request and its
+  verification, both resolve outcomes and the final
+  stats, and the demo tests pin the fields and the
+  printed lines. Every clock is injected and no key
+  material is printed.
 - The benchmark (`npm run bench`) now also measures
   `JwksKeyStore.exportSnapshot` — the snapshot export a
   gateway runs to persist its key store before a restart
