@@ -26,7 +26,16 @@
  * measured pass (the call must report a refresh, the fetch count
  * must advance by exactly one, and the pinned kid must resolve
  * afterwards), with the not-stale no-fetch case asserted outside
- * timing, plus the key-management
+ * timing, plus the concurrent refresh path a gateway hits at cold
+ * start / rotation time: `JwksKeyStore.refresh` single-flight
+ * merging over eight concurrent calls on a stale store (a counting
+ * fake fetch serves one pinned JWKS document, resolving on a
+ * microtask tick — zero network), self-checked on every measured
+ * batch (the fetch count and `stats().refreshes` must each advance
+ * by exactly one per batch of eight, and the pinned kid must
+ * resolve afterwards), with a shared-failure batch (all eight
+ * waiters receive the same rejection from exactly one fetch) and
+ * the failure-not-cached retry asserted outside timing, plus the key-management
  * derivation a JWKS publisher runs for every key at publish/rotation
  * time: `jwkThumbprint` (RFC 7638) over a fixed three-shape fixture
  * (ed25519 / P-256 / RSA public JWKs, one derivation per shape per
@@ -710,6 +719,160 @@ async function benchmarkJwksRefreshIfStale(): Promise<number> {
   if (store.stats().refreshes !== fetchCalls)
     throw new Error(
       `benchmark self-check failed: stats().refreshes ${store.stats().refreshes} (expected ${fetchCalls})`,
+    );
+  return ops;
+}
+
+/**
+ * Pinned shape of the `JwksKeyStore.refresh` single-flight benchmark
+ * store: one ed25519 key (generated once, outside timing) published
+ * under this kid by the counting fake fetch, a 120-second TTL, an
+ * injected clock starting at this instant, and this many concurrent
+ * `refresh()` callers per measured batch.
+ */
+const JWKS_SINGLE_FLIGHT_T0_SEC = 1_700_000_000;
+const JWKS_SINGLE_FLIGHT_TTL_SEC = 120;
+const JWKS_SINGLE_FLIGHT_KID = "bench-single-flight-key";
+const JWKS_SINGLE_FLIGHT_CONCURRENCY = 8;
+
+/**
+ * `JwksKeyStore.refresh` single-flight merging: the concurrent
+ * direction the serial `refreshIfStale` row never pays — when a
+ * gateway cold-starts or a rotation lands, many waiters call
+ * `refresh()` at once and must share one fetch instead of
+ * stampeding the JWKS endpoint. The store is primed once outside
+ * timing, then its injected clock is advanced exactly to the TTL
+ * boundary so the snapshot is stale when the measured batches
+ * start. The counting fake fetch serves one pinned JWKS document
+ * and resolves on a microtask tick (zero network, zero wall
+ * clock). Every measured batch launches the pinned eight
+ * concurrent `refresh()` calls and awaits them all, self-checking
+ * that the fetch count advanced by exactly one, that
+ * `stats().refreshes` advanced by exactly one, and that the
+ * pinned kid resolves afterwards. Outside timing, a separate
+ * failing store pins the shared-failure half of the contract:
+ * one batch of eight waiters all receive the same rejection
+ * object from exactly one fetch (counted once in
+ * `stats().refreshFailures`), and the next `refresh()` after the
+ * failure fetches again and succeeds — a failure is never cached.
+ */
+async function benchmarkJwksConcurrentRefresh(): Promise<number> {
+  const { publicKey } = generateEd25519KeyPair();
+  const doc = {
+    keys: [
+      { ...exportPublicKeyJwk(publicKey), kid: JWKS_SINGLE_FLIGHT_KID },
+    ],
+  };
+  let fetchCalls = 0;
+  const fetchImpl: JwksFetchImpl = async () => {
+    fetchCalls++;
+    await Promise.resolve(); // microtask tick, not a timer
+    return { ok: true, status: 200, json: async () => doc };
+  };
+  let t = JWKS_SINGLE_FLIGHT_T0_SEC;
+  const store = new JwksKeyStore(
+    "https://gateway.example.com/.well-known/jwks.json",
+    { fetchImpl, ttlSec: JWKS_SINGLE_FLIGHT_TTL_SEC, now: () => t },
+  );
+  // Prime: the first refresh fetches the pinned document once.
+  await store.refresh();
+  if (fetchCalls !== 1)
+    throw new Error(
+      "benchmark self-check failed: priming refresh did not fetch exactly once",
+    );
+  if (store.resolve(JWKS_SINGLE_FLIGHT_KID) === undefined)
+    throw new Error(
+      "benchmark self-check failed: primed store does not resolve the pinned kid",
+    );
+  // Stale construction: exactly at the >= TTL boundary.
+  t += JWKS_SINGLE_FLIGHT_TTL_SEC;
+  if (!store.isStale())
+    throw new Error(
+      "benchmark self-check failed: store is not stale at the TTL boundary",
+    );
+  // Outside timing: a shared failure reaches every waiter once.
+  let failCalls = 0;
+  let failFetch = true;
+  const failFetchImpl: JwksFetchImpl = async () => {
+    failCalls++;
+    await Promise.resolve(); // microtask tick, not a timer
+    if (failFetch) return { ok: false, status: 500, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => doc };
+  };
+  const failStore = new JwksKeyStore(
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: failFetchImpl,
+      ttlSec: JWKS_SINGLE_FLIGHT_TTL_SEC,
+      now: () => t,
+    },
+  );
+  const settled = await Promise.allSettled(
+    Array.from({ length: JWKS_SINGLE_FLIGHT_CONCURRENCY }, () =>
+      failStore.refresh(),
+    ),
+  );
+  if (failCalls !== 1)
+    throw new Error(
+      `benchmark self-check failed: failing batch made ${failCalls} fetches (expected 1)`,
+    );
+  const firstReason: unknown =
+    settled[0]?.status === "rejected" ? settled[0].reason : undefined;
+  if (
+    !(firstReason instanceof Error) ||
+    settled.some(
+      (outcome) => outcome.status !== "rejected" || outcome.reason !== firstReason,
+    )
+  )
+    throw new Error(
+      "benchmark self-check failed: failing batch did not give every waiter the same rejection",
+    );
+  if (
+    failStore.stats().refreshFailures !== 1 ||
+    failStore.stats().refreshes !== 0
+  )
+    throw new Error(
+      "benchmark self-check failed: failing batch was not counted exactly once",
+    );
+  // A settled failure is never cached: the next refresh fetches again.
+  failFetch = false;
+  await failStore.refresh();
+  if (failCalls !== 1 + 1 || failStore.stats().refreshes !== 1)
+    throw new Error(
+      "benchmark self-check failed: refresh after a shared failure did not fetch again and succeed",
+    );
+  if (failStore.resolve(JWKS_SINGLE_FLIGHT_KID) === undefined)
+    throw new Error(
+      "benchmark self-check failed: retried store does not resolve the pinned kid",
+    );
+  const ops = await measureAsync(async () => {
+    const beforeFetches = fetchCalls;
+    const beforeRefreshes = store.stats().refreshes;
+    await Promise.all(
+      Array.from({ length: JWKS_SINGLE_FLIGHT_CONCURRENCY }, () =>
+        store.refresh(),
+      ),
+    );
+    if (fetchCalls !== beforeFetches + 1)
+      throw new Error(
+        `benchmark self-check failed: concurrent batch made ${fetchCalls - beforeFetches} fetches (expected 1)`,
+      );
+    if (store.stats().refreshes !== beforeRefreshes + 1)
+      throw new Error(
+        `benchmark self-check failed: concurrent batch counted ${store.stats().refreshes - beforeRefreshes} refreshes (expected 1)`,
+      );
+    if (store.resolve(JWKS_SINGLE_FLIGHT_KID) === undefined)
+      throw new Error(
+        "benchmark self-check failed: concurrent batch does not resolve the pinned kid",
+      );
+  }, ITERATIONS);
+  if (fetchCalls !== 1 + WARMUP + ITERATIONS)
+    throw new Error(
+      `benchmark self-check failed: single-flight path made ${fetchCalls} fetches (expected ${1 + WARMUP + ITERATIONS})`,
+    );
+  if (store.stats().refreshes !== fetchCalls || store.stats().refreshFailures !== 0)
+    throw new Error(
+      `benchmark self-check failed: stats() ${JSON.stringify(store.stats())} (expected refreshes ${fetchCalls}, refreshFailures 0)`,
     );
   return ops;
 }
@@ -4003,6 +4166,11 @@ results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",
   op: "refresh",
   ops: await benchmarkJwksRefreshIfStale(),
+});
+results.push({
+  alg: "JwksKeyStore.refresh (8-way single-flight)",
+  op: "refresh",
+  ops: await benchmarkJwksConcurrentRefresh(),
 });
 results.push({
   alg: "jwkThumbprint (3 JWK shapes)",

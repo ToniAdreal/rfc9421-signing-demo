@@ -12,6 +12,26 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `JwksKeyStore.refresh` single-flight merging — the
+  concurrent refresh path a gateway hits at cold start /
+  rotation time, which the existing serial
+  `refreshIfStale` row never timed. The fixture is a
+  one-key store (ed25519, generated once outside timing)
+  primed once and made stale by advancing its injected
+  clock exactly to the 120-second TTL boundary; a counting
+  fake fetch serves one pinned JWKS document and resolves
+  on a microtask tick. Every measured batch launches
+  eight concurrent `refresh()` calls and re-pins that the
+  fetch count and `stats().refreshes` each advanced by
+  exactly one and that the pinned kid resolves; a
+  shared-failure batch (all eight waiters receiving the
+  same rejection from exactly one fetch) and the
+  failure-not-cached retry are asserted outside timing.
+  The README Benchmarks table was refreshed wholesale
+  from one real run and now carries the second `refresh`
+  row. The bench performs zero network I/O and no
+  wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `resolveComponent` — the per-component resolution every
   sign and verify pays once per covered component — which
   the existing `buildSignatureBase` row only ever timed
