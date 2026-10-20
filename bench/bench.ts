@@ -28,7 +28,14 @@
  * hot path a verifier with `requireNonce` hits on every request:
  * `ReplayCache.check` hits against a cache prefilled with 1,000 nonces
  * under a deterministic fake clock (zero network, zero wall clock for
- * the cache itself), plus the malformed-input rejection path:
+ * the cache itself), plus the snapshot-export path a single-process
+ * verifier runs to carry its tracked nonces across a restart:
+ * `ReplayCache.exportSnapshot` over a fixed-clock cache holding three
+ * live nonces and one already-expired nonce (see REPLAY_EXPORT_*
+ * below), self-checked on every measured pass against the hand-pinned
+ * live entries (version, live-entry count, first/last entries item by
+ * item, expired nonce absent), with the detached-copy and empty-cache
+ * exports asserted outside timing, plus the malformed-input rejection path:
  * `verifyRequest` over a fixed-seed corpus of malformed
  * signature-input / signature values (the parser rejection traffic a
  * verification gateway faces), self-checked to always return
@@ -761,6 +768,117 @@ function benchmarkReplayCacheHit(): number {
         `size=${REPLAY_PREFILL + 1}, evictions=0)`,
     );
   return ops;
+}
+
+/** Fixed export instant for the ReplayCache export fixture (no wall clock). */
+const REPLAY_EXPORT_NOW = 1_700_000_000;
+/** TTL of the ReplayCache export fixture, in seconds. */
+const REPLAY_EXPORT_TTL_SEC = 3600;
+/** Nonce recorded 7,200s before the export instant: expired at export. */
+const REPLAY_EXPORT_EXPIRED_NONCE = "bench-export-expired";
+/**
+ * Hand-pinned live entries of the export fixture at
+ * REPLAY_EXPORT_NOW, in LRU (insertion) order — written literally,
+ * never derived from `exportSnapshot` itself.
+ */
+const REPLAY_EXPORT_EXPECTED: Array<[string, number]> = [
+  ["bench-export-first", REPLAY_EXPORT_NOW - 30],
+  ["bench-export-second", REPLAY_EXPORT_NOW - 20],
+  ["bench-export-last", REPLAY_EXPORT_NOW - 10],
+];
+
+/**
+ * Build the fixed ReplayCache export fixture: an injectable clock is
+ * walked through the pinned recording instants (the expired nonce
+ * first, then the three live nonces at their pinned `seenAt` values)
+ * and frozen at REPLAY_EXPORT_NOW, so the cache's map holds four
+ * entries of which exactly one is already expired at export time.
+ * Every recording must report not-a-replay.
+ */
+function replayExportFixture(): ReplayCache {
+  let clock = REPLAY_EXPORT_NOW - 7200;
+  const cache = new ReplayCache({
+    maxEntries: 10_000,
+    ttlSec: REPLAY_EXPORT_TTL_SEC,
+    now: () => clock,
+  });
+  if (cache.check(REPLAY_EXPORT_EXPIRED_NONCE) !== false)
+    throw new Error(
+      "benchmark self-check failed: expired-fixture nonce reported as replay",
+    );
+  for (const [nonce, seenAt] of REPLAY_EXPORT_EXPECTED) {
+    clock = seenAt;
+    if (cache.check(nonce) !== false)
+      throw new Error(
+        `benchmark self-check failed: fixture nonce ${nonce} reported as replay`,
+      );
+  }
+  clock = REPLAY_EXPORT_NOW;
+  return cache;
+}
+
+/**
+ * Pin one exported snapshot against the hand-written expectation:
+ * version 1, exactly the live-entry count (the expired entry is
+ * filtered out), every entry item by item (nonce and `seenAt`, first
+ * and last included), and the expired nonce absent.
+ */
+function assertReplayExportSnapshot(
+  snapshot: ReturnType<ReplayCache["exportSnapshot"]>,
+): void {
+  if (snapshot.v !== 1)
+    throw new Error(
+      `benchmark self-check failed: replay exportSnapshot v ${String(snapshot.v)} (expected 1)`,
+    );
+  if (snapshot.entries.length !== REPLAY_EXPORT_EXPECTED.length)
+    throw new Error(
+      `benchmark self-check failed: replay exportSnapshot exported ${snapshot.entries.length} entries ` +
+        `(expected ${REPLAY_EXPORT_EXPECTED.length} live)`,
+    );
+  for (let i = 0; i < REPLAY_EXPORT_EXPECTED.length; i++) {
+    const entry = snapshot.entries[i]!;
+    const [nonce, seenAt] = REPLAY_EXPORT_EXPECTED[i]!;
+    if (entry[0] !== nonce || entry[1] !== seenAt)
+      throw new Error(
+        `benchmark self-check failed: replay exportSnapshot entries[${i}] ${JSON.stringify(entry)} ` +
+          `(expected ${JSON.stringify([nonce, seenAt])})`,
+      );
+  }
+  if (snapshot.entries.some(([nonce]) => nonce === REPLAY_EXPORT_EXPIRED_NONCE))
+    throw new Error(
+      "benchmark self-check failed: replay exportSnapshot carries the expired nonce",
+    );
+}
+
+/**
+ * `ReplayCache.exportSnapshot` steady state: every measured call
+ * re-exports the fixed-clock fixture and re-pins the whole snapshot
+ * (see {@link assertReplayExportSnapshot}) — the live-entry filter
+ * plus detached `{ v: 1, entries }` assembly a verifier pays when it
+ * persists its replay cache before a restart. Outside timing, the
+ * detached-copy semantics are asserted (mutating an exported
+ * snapshot — entry nonce, `seenAt`, an injected entry, the version —
+ * leaves a re-export unchanged) and an empty cache must export
+ * `{ v: 1, entries: [] }`.
+ */
+function benchmarkReplayCacheExportSnapshot(): number {
+  const cache = replayExportFixture();
+  assertReplayExportSnapshot(cache.exportSnapshot());
+  const detached = cache.exportSnapshot();
+  detached.entries[0]![0] = "bench-export-forged";
+  detached.entries[0]![1] = 0;
+  detached.entries.push(["bench-export-injected", REPLAY_EXPORT_NOW]);
+  (detached as { v: number }).v = 99;
+  assertReplayExportSnapshot(cache.exportSnapshot());
+  const empty = new ReplayCache({ now: () => REPLAY_EXPORT_NOW }).exportSnapshot();
+  if (empty.v !== 1 || empty.entries.length !== 0)
+    throw new Error(
+      `benchmark self-check failed: empty replay exportSnapshot ${JSON.stringify(empty)} ` +
+        `(expected { v: 1, entries: [] })`,
+    );
+  return measure(() => {
+    assertReplayExportSnapshot(cache.exportSnapshot());
+  }, ITERATIONS);
 }
 
 /** Fixed seed for the malformed corpus (same seed as test/parserFuzz). */
@@ -3327,6 +3445,11 @@ results.push({
   alg: "ReplayCache.check (hit, 1k)",
   op: "check",
   ops: benchmarkReplayCacheHit(),
+});
+results.push({
+  alg: "ReplayCache.exportSnapshot (3 live)",
+  op: "export",
+  ops: benchmarkReplayCacheExportSnapshot(),
 });
 const malformed = benchmarkMalformedReject();
 results.push({

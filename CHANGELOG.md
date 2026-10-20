@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `ReplayCache.exportSnapshot` — the snapshot export a
+  single-process verifier runs to persist its tracked
+  nonces before a restart (live entries filtered against
+  the injected clock and assembled into the detached
+  `{ v: 1, entries }` envelope) — over a fixed-clock cache
+  whose map holds four recorded nonces: one already
+  expired under the TTL and three live nonces at pinned
+  `seenAt` values. Every measured pass re-pins the whole
+  exported snapshot: version 1, exactly the live-entry
+  count, every entry item by item (nonce and `seenAt`,
+  first and last included), and the expired nonce absent;
+  the detached-copy semantics and the empty-cache export
+  (`{ v: 1, entries: [] }`) are asserted outside timing.
+  The README Benchmarks table was refreshed wholesale
+  from one real run and now carries the `export` row.
+  The bench performs zero network I/O and no wall-clock
+  assertions.
 - The CLI demo (`npm run demo`) now closes with a
   ReplayCache observability segment: a small
   `ReplayCache` (capacity 3, 100-second TTL) under an
