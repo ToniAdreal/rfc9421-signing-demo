@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `ReplayCache.stats()` — the observability snapshot a
+  verifier's monitoring polls on every tick (live entries
+  counted against the injected clock, plus the detached
+  hits / misses / evictions counters) — which the existing
+  `check` and `exportSnapshot` rows never timed (the check
+  row reads `stats()` only once, as a post-run self-check).
+  The fixture is a fixed-clock cache (capacity 6, TTL 100
+  seconds) whose construction is pinned end to end: one
+  entry LRU-evicted during construction and one entry
+  exactly at its TTL boundary at the stats instant
+  (expired but still in the map), with five live entries.
+  Every measured pass re-pins the snapshot against the
+  hand-written expectation `{ size: 5, hits: 1, misses: 7,
+  evictions: 1 }`, where `size` counts only the live
+  entries; the detached-copy semantics and the empty-cache
+  all-zero reading are asserted outside timing. The README
+  Benchmarks table was refreshed wholesale from one real
+  run and now carries the `stats` row. The bench performs
+  zero network I/O and no wall-clock assertions.
 - The benchmark (`npm run bench`) now also measures the
   ed25519 JWK round trip — the generic `exportPublicKeyJwk` →
   JSON stringify/parse → `importPublicKeyJwk` path for the

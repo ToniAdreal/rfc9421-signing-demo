@@ -43,7 +43,16 @@
  * below), self-checked on every measured pass against the hand-pinned
  * live entries (version, live-entry count, first/last entries item by
  * item, expired nonce absent), with the detached-copy and empty-cache
- * exports asserted outside timing, plus the malformed-input rejection path:
+ * exports asserted outside timing, plus the observability snapshot
+ * path a verifier's monitoring polls on every tick:
+ * `ReplayCache.stats()` over a fixed-clock cache whose map holds
+ * six recorded nonces — one LRU-evicted during construction, one
+ * exactly at its TTL boundary at the stats instant (expired but
+ * still in the map) and five live (see REPLAY_STATS_* below) —
+ * self-checked on every measured pass against the hand-pinned
+ * `{ size, hits, misses, evictions }` snapshot (size counts only
+ * the live entries), with the detached-copy and empty-cache
+ * readings asserted outside timing, plus the malformed-input rejection path:
  * `verifyRequest` over a fixed-seed corpus of malformed
  * signature-input / signature values (the parser rejection traffic a
  * verification gateway faces), self-checked to always return
@@ -996,6 +1005,144 @@ function benchmarkReplayCacheExportSnapshot(): number {
     );
   return measure(() => {
     assertReplayExportSnapshot(cache.exportSnapshot());
+  }, ITERATIONS);
+}
+
+/** Base instant of the ReplayCache stats fixture (no wall clock). */
+const REPLAY_STATS_BASE = 1_700_100_000;
+/** TTL of the ReplayCache stats fixture, in seconds. */
+const REPLAY_STATS_TTL_SEC = 100;
+/** Capacity of the ReplayCache stats fixture. */
+const REPLAY_STATS_MAX_ENTRIES = 6;
+/** Stats instant: exactly one TTL after the base instant. */
+const REPLAY_STATS_NOW = REPLAY_STATS_BASE + REPLAY_STATS_TTL_SEC;
+/**
+ * Hand-pinned stats of the fixture at REPLAY_STATS_NOW — written
+ * literally from the construction script in
+ * {@link replayStatsFixture} and cross-checked against the
+ * replayStats tests, never derived from `stats()` itself:
+ * size counts only the five live entries (the boundary-expired
+ * entry still sits in the map), with one hit, seven misses and
+ * one LRU eviction accumulated during construction.
+ */
+const REPLAY_STATS_EXPECTED = { size: 5, hits: 1, misses: 7, evictions: 1 };
+/** Live nonces of the stats fixture, recorded 10s before the stats instant. */
+const REPLAY_STATS_LIVE_NONCES = [
+  "bench-stats-live-00",
+  "bench-stats-live-01",
+  "bench-stats-live-02",
+  "bench-stats-live-03",
+];
+
+/**
+ * Build the fixed ReplayCache stats fixture: an injectable clock
+ * advances only during construction.
+ *
+ * - At REPLAY_STATS_BASE, `bench-stats-evicted` and
+ *   `bench-stats-expired` are recorded (2 misses).
+ * - At BASE + 90s, the four live nonces are recorded (4 more
+ *   misses; the map is now full at 6), the first live nonce is
+ *   checked again (1 hit, refreshing its LRU recency so
+ *   `bench-stats-evicted` stays at the head of the map), and
+ *   `bench-stats-new` is recorded (1 more miss): making room
+ *   LRU-evicts `bench-stats-evicted` — nothing is expired yet
+ *   at that instant — (1 eviction).
+ * - The clock then advances to REPLAY_STATS_NOW (BASE + TTL)
+ *   and stays fixed there: `bench-stats-expired` is now exactly
+ *   one TTL old (age >= TTL — the boundary rule the replayStats
+ *   tests pin), so it is expired but still sits in the map (no
+ *   check has run since, so nothing pruned it), and the five
+ *   later nonces are 10 seconds old and live.
+ *
+ * Every recording must report not-a-replay and the repeat must
+ * report a replay.
+ */
+function replayStatsFixture(): ReplayCache {
+  let clock = REPLAY_STATS_BASE;
+  const cache = new ReplayCache({
+    maxEntries: REPLAY_STATS_MAX_ENTRIES,
+    ttlSec: REPLAY_STATS_TTL_SEC,
+    now: () => clock,
+  });
+  for (const nonce of ["bench-stats-evicted", "bench-stats-expired"]) {
+    if (cache.check(nonce) !== false)
+      throw new Error(
+        `benchmark self-check failed: stats-fixture nonce ${nonce} reported as replay`,
+      );
+  }
+  clock = REPLAY_STATS_BASE + REPLAY_STATS_TTL_SEC - 10;
+  for (const nonce of REPLAY_STATS_LIVE_NONCES) {
+    if (cache.check(nonce) !== false)
+      throw new Error(
+        `benchmark self-check failed: stats-fixture nonce ${nonce} reported as replay`,
+      );
+  }
+  if (cache.check(REPLAY_STATS_LIVE_NONCES[0]!) !== true)
+    throw new Error(
+      "benchmark self-check failed: stats-fixture repeat of first live nonce not a replay",
+    );
+  if (cache.check("bench-stats-new") !== false)
+    throw new Error(
+      "benchmark self-check failed: stats-fixture nonce bench-stats-new reported as replay",
+    );
+  clock = REPLAY_STATS_NOW;
+  return cache;
+}
+
+/**
+ * Pin one stats reading of the fixture against the hand-written
+ * expectation, item by item, with the `size` getter agreeing.
+ */
+function assertReplayStats(cache: ReplayCache): void {
+  const stats = cache.stats();
+  if (
+    stats.size !== REPLAY_STATS_EXPECTED.size ||
+    stats.hits !== REPLAY_STATS_EXPECTED.hits ||
+    stats.misses !== REPLAY_STATS_EXPECTED.misses ||
+    stats.evictions !== REPLAY_STATS_EXPECTED.evictions ||
+    cache.size !== REPLAY_STATS_EXPECTED.size
+  )
+    throw new Error(
+      `benchmark self-check failed: replay stats ${JSON.stringify(stats)} ` +
+        `(expected ${JSON.stringify(REPLAY_STATS_EXPECTED)}, ` +
+        `size getter ${cache.size})`,
+    );
+}
+
+/**
+ * `ReplayCache.stats` steady state: every measured call re-reads
+ * the observability snapshot of the fixed-clock fixture and
+ * re-pins it (see {@link assertReplayStats}) — the live-entry
+ * scan against the injected clock plus the detached counter copy
+ * a verifier's monitoring pays on every polling tick. `stats()`
+ * is a pure read, so the timed loop reuses this one fixture.
+ * Outside timing, the detached-copy semantics are asserted
+ * (mutating a returned snapshot — every field rewritten to 999 —
+ * leaves a re-read unchanged) and an empty cache must report
+ * all-zero stats.
+ */
+function benchmarkReplayCacheStats(): number {
+  const cache = replayStatsFixture();
+  assertReplayStats(cache);
+  const detached = cache.stats();
+  detached.size = 999;
+  detached.hits = 999;
+  detached.misses = 999;
+  detached.evictions = 999;
+  assertReplayStats(cache);
+  const empty = new ReplayCache({ now: () => REPLAY_STATS_NOW }).stats();
+  if (
+    empty.size !== 0 ||
+    empty.hits !== 0 ||
+    empty.misses !== 0 ||
+    empty.evictions !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: empty replay stats ${JSON.stringify(empty)} ` +
+        `(expected { size: 0, hits: 0, misses: 0, evictions: 0 })`,
+    );
+  return measure(() => {
+    assertReplayStats(cache);
   }, ITERATIONS);
 }
 
@@ -3676,6 +3823,11 @@ results.push({
   alg: "ReplayCache.exportSnapshot (3 live)",
   op: "export",
   ops: benchmarkReplayCacheExportSnapshot(),
+});
+results.push({
+  alg: "ReplayCache.stats (5 live)",
+  op: "stats",
+  ops: benchmarkReplayCacheStats(),
 });
 const malformed = benchmarkMalformedReject();
 results.push({
