@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  ReplayCache clear segment: a fresh `ReplayCache` under
+  the demo's fixed clock records one pinned nonce (a
+  miss) and reports its repeat as a replay (a hit), then
+  `clear()` is called and the emptied state is printed —
+  `size` 0 and `stats()` all zero — after which the same
+  nonce checks in as fresh again and the counters
+  re-accumulate from zero. Earlier replay demo segments
+  showed the cache recording, snapshotting and reporting
+  its counters, but never the explicit reset a gateway
+  runs at key rotation or for test isolation instead of
+  waiting for TTL expiry. `DemoResult` carries the three
+  check outcomes, the pre-clear stats, the post-clear
+  size and stats, and the post-recheck stats, and the
+  demo tests pin the fields and the printed lines. The
+  clock is injected; the segment performs zero network
+  I/O.
 - The benchmark (`npm run bench`) now also measures
   `ReplayCache.exportSnapshot` — the snapshot export a
   single-process verifier runs to persist its tracked

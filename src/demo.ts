@@ -565,6 +565,19 @@
  * counting rules `test/replayStats.test.ts` pins). Every
  * clock is injected, so the segment's printed lines are
  * identical between runs.
+ * The demo then closes with a ReplayCache clear segment: a
+ * fresh `ReplayCache` under the demo's fixed clock records
+ * one pinned nonce and reports its repeat as a replay,
+ * then `clear()` is called and the segment prints the
+ * emptied state — `size` 0 and `stats()` all zero — after
+ * which the same nonce checks in as fresh again and the
+ * counters re-accumulate from zero. Outside the printed
+ * lines the demo asserts every outcome and reading equals
+ * the hand-pinned expectations below (the same clear
+ * semantics `test/replay.test.ts` and
+ * `test/replayStats.test.ts` pin for their own clear
+ * cases). The clock never moves, so the segment's printed
+ * lines are identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -1976,6 +1989,62 @@ export const DEMO_REPLAY_STATS_FINAL: ReplayCacheStats = {
   evictions: 2,
 };
 
+/** Nonce of the closing ReplayCache clear segment. */
+export const DEMO_REPLAY_CLEAR_NONCE = "demo-nonce-replay-clear-001";
+/**
+ * Hand-pinned `check()` outcomes of the closing clear
+ * segment, in call order: the first check records the
+ * nonce (a miss, `false`), the repeat reports it as a
+ * replay (`true`), and the post-clear check of the same
+ * nonce records it again as fresh (`false`). Written out
+ * here, never derived from the cache the demo is checking.
+ */
+export const DEMO_REPLAY_CLEAR_CHECKS: ReadonlyArray<boolean> = [
+  false,
+  true,
+  false,
+];
+/**
+ * Hand-pinned `stats()` of the closing clear segment
+ * before `clear()`: one recorded nonce and one replay
+ * hit. The same counting rules `test/replayStats.test.ts`
+ * pins. Written out here, never derived from the cache
+ * the demo is checking.
+ */
+export const DEMO_REPLAY_CLEAR_STATS_BEFORE: ReplayCacheStats = {
+  size: 1,
+  hits: 1,
+  misses: 1,
+  evictions: 0,
+};
+/**
+ * Hand-pinned cache size after `clear()`: every tracked
+ * nonce is dropped, so the size is zero.
+ */
+export const DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR = 0;
+/**
+ * Hand-pinned `stats()` of the closing clear segment
+ * right after `clear()`: the tracked nonces are gone and
+ * every observability counter is back at zero.
+ */
+export const DEMO_REPLAY_CLEAR_STATS_AFTER_CLEAR: ReplayCacheStats = {
+  size: 0,
+  hits: 0,
+  misses: 0,
+  evictions: 0,
+};
+/**
+ * Hand-pinned `stats()` of the closing clear segment
+ * after the same nonce is checked once more: the counters
+ * re-accumulate from zero — one fresh record, no hits.
+ */
+export const DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK: ReplayCacheStats = {
+  size: 1,
+  hits: 0,
+  misses: 1,
+  evictions: 0,
+};
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -2831,6 +2900,46 @@ export interface DemoResult {
    * never reached the cache).
    */
   replayStatsAfterDetachedMutation: ReplayCacheStats;
+  /**
+   * The closing ReplayCache clear segment's first
+   * `check()` outcome: `false` — the pinned nonce was
+   * recorded (a miss).
+   */
+  replayClearFirstCheck: boolean;
+  /**
+   * The segment's repeat `check()` outcome: `true` —
+   * the same nonce was already seen (a replay).
+   */
+  replayClearReplayCheck: boolean;
+  /**
+   * The segment's `stats()` before `clear()` (equals
+   * the hand-pinned `DEMO_REPLAY_CLEAR_STATS_BEFORE`).
+   */
+  replayClearStatsBefore: ReplayCacheStats;
+  /**
+   * The segment's cache `size` right after `clear()`
+   * (equals `DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR`: 0).
+   */
+  replayClearSizeAfterClear: number;
+  /**
+   * The segment's `stats()` right after `clear()`
+   * (equals the hand-pinned
+   * `DEMO_REPLAY_CLEAR_STATS_AFTER_CLEAR` — all zero).
+   */
+  replayClearStatsAfterClear: ReplayCacheStats;
+  /**
+   * The segment's post-clear `check()` of the same
+   * nonce: `false` — it is fresh again and recorded
+   * anew.
+   */
+  replayClearRecheck: boolean;
+  /**
+   * The segment's `stats()` after the post-clear
+   * recheck (equals the hand-pinned
+   * `DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK` — the
+   * counters re-accumulated from zero).
+   */
+  replayClearStatsAfterRecheck: ReplayCacheStats;
   lines: string[];
 }
 
@@ -5308,6 +5417,66 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // ReplayCache clear segment: the observability segment
+  // above shows stats() accumulating, but never the
+  // explicit reset a gateway runs at key rotation or for
+  // test isolation: clear(). This segment drives a fresh
+  // cache under the demo's fixed clock: the pinned nonce
+  // is recorded (a miss), its repeat is reported as a
+  // replay (a hit), clear() then drops every tracked
+  // nonce and zeroes the counters, and the same nonce
+  // checks in as fresh again with the counters
+  // re-accumulating from zero. Outside the printed lines
+  // the demo asserts every outcome equals the hand-pinned
+  // DEMO_REPLAY_CLEAR_* expectations (the same clear
+  // semantics test/replay.test.ts and
+  // test/replayStats.test.ts pin).
+  const replayClearCache = new ReplayCache({ now: () => DEMO_CREATED });
+  const replayClearFirstCheck = replayClearCache.check(
+    DEMO_REPLAY_CLEAR_NONCE,
+  );
+  const replayClearReplayCheck = replayClearCache.check(
+    DEMO_REPLAY_CLEAR_NONCE,
+  );
+  const replayClearStatsBefore = replayClearCache.stats();
+  replayClearCache.clear();
+  const replayClearSizeAfterClear = replayClearCache.size;
+  const replayClearStatsAfterClear = replayClearCache.stats();
+  const replayClearRecheck = replayClearCache.check(DEMO_REPLAY_CLEAR_NONCE);
+  const replayClearStatsAfterRecheck = replayClearCache.stats();
+  if (
+    replayClearFirstCheck !== DEMO_REPLAY_CLEAR_CHECKS[0] ||
+    replayClearReplayCheck !== DEMO_REPLAY_CLEAR_CHECKS[1] ||
+    !replayStatsMatches(
+      replayClearStatsBefore,
+      DEMO_REPLAY_CLEAR_STATS_BEFORE,
+    ) ||
+    replayClearSizeAfterClear !== DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR ||
+    !replayStatsMatches(
+      replayClearStatsAfterClear,
+      DEMO_REPLAY_CLEAR_STATS_AFTER_CLEAR,
+    ) ||
+    replayClearRecheck !== DEMO_REPLAY_CLEAR_CHECKS[2] ||
+    !replayStatsMatches(
+      replayClearStatsAfterRecheck,
+      DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK,
+    )
+  ) {
+    throw new Error(
+      `demo fixture broken: ReplayCache clear gave checks ` +
+        `${replayClearFirstCheck}/${replayClearReplayCheck}/${replayClearRecheck}, before ` +
+        `${JSON.stringify(replayClearStatsBefore)}, size after clear ` +
+        `${replayClearSizeAfterClear}, stats after clear ` +
+        `${JSON.stringify(replayClearStatsAfterClear)} and after recheck ` +
+        `${JSON.stringify(replayClearStatsAfterRecheck)}, instead of the pinned checks ` +
+        `${JSON.stringify(DEMO_REPLAY_CLEAR_CHECKS)}, before ` +
+        `${JSON.stringify(DEMO_REPLAY_CLEAR_STATS_BEFORE)}, size after clear ` +
+        `${DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR}, stats after clear ` +
+        `${JSON.stringify(DEMO_REPLAY_CLEAR_STATS_AFTER_CLEAR)} and after recheck ` +
+        `${JSON.stringify(DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -5617,6 +5786,12 @@ export async function runDemo(): Promise<DemoResult> {
     `ReplayCache observability after check("${DEMO_REPLAY_STATS_NONCES[3]}"): returned ${replayStatsChecks[4]} (a fresh nonce, recorded — inserting it evicted "${DEMO_REPLAY_STATS_NONCES[1]}", the least recently seen entry), stats() = ${formatReplayStats(replayStatsSteps[5]!)}`,
     `ReplayCache observability after the clock advanced to ${DEMO_REPLAY_STATS_EXPIRED_AT_SEC} (150s in, past the ${DEMO_REPLAY_STATS_TTL_SEC}s TTL) and check("${DEMO_REPLAY_STATS_NONCES[4]}"): returned ${replayStatsChecks[5]} (a fresh nonce, recorded — inserting it reclaimed one expired entry; the other expired entries no longer count toward size), stats() = ${formatReplayStats(replayStatsSteps[6]!)}`,
     `ReplayCache observability detached snapshot: overwriting a returned stats() object with 999s left the cache unchanged, stats() still = ${formatReplayStats(replayStatsAfterDetachedMutation)} (stats() hands out a copy, never a view)`,
+    "",
+    "ReplayCache clear: ReplayCache.clear() drops every tracked nonce and zeroes the observability counters — the explicit reset a gateway runs at key rotation or for test isolation, instead of waiting for entries to expire under the TTL",
+    `ReplayCache clear first check("${DEMO_REPLAY_CLEAR_NONCE}") on a fresh cache (injected clock pinned at ${DEMO_CREATED}): returned ${replayClearFirstCheck} (a fresh nonce, recorded — a miss)`,
+    `ReplayCache clear repeat check("${DEMO_REPLAY_CLEAR_NONCE}"): returned ${replayClearReplayCheck} (the nonce was already seen — a replay), stats() = ${formatReplayStats(replayClearStatsBefore)}`,
+    `ReplayCache clear after clear(): size = ${replayClearSizeAfterClear}, stats() = ${formatReplayStats(replayClearStatsAfterClear)} (every tracked nonce dropped, every counter back at zero)`,
+    `ReplayCache clear check("${DEMO_REPLAY_CLEAR_NONCE}") after clear(): returned ${replayClearRecheck} (the same nonce is fresh again — recorded anew), stats() = ${formatReplayStats(replayClearStatsAfterRecheck)} (the counters re-accumulate from zero)`,
   ];
 
   return {
@@ -5761,6 +5936,13 @@ export async function runDemo(): Promise<DemoResult> {
     replayStatsChecks,
     replayStatsSteps,
     replayStatsAfterDetachedMutation,
+    replayClearFirstCheck,
+    replayClearReplayCheck,
+    replayClearStatsBefore,
+    replayClearSizeAfterClear,
+    replayClearStatsAfterClear,
+    replayClearRecheck,
+    replayClearStatsAfterRecheck,
     lines,
   };
 }

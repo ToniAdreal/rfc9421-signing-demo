@@ -178,6 +178,12 @@ import {
   DEMO_SIGNATURE_LABELS,
   DEMO_REPLAY_CACHE_MAX_ENTRIES,
   DEMO_REPLAY_CACHE_TTL_SEC,
+  DEMO_REPLAY_CLEAR_CHECKS,
+  DEMO_REPLAY_CLEAR_NONCE,
+  DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR,
+  DEMO_REPLAY_CLEAR_STATS_AFTER_CLEAR,
+  DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK,
+  DEMO_REPLAY_CLEAR_STATS_BEFORE,
   DEMO_REPLAY_SNAPSHOT_CODE,
   DEMO_REPLAY_SNAPSHOT_ENTRIES,
   DEMO_REPLAY_SNAPSHOT_FRESH_NONCE,
@@ -3887,7 +3893,7 @@ test("demo ReplayCache observability segment drives a pinned miss/hit/LRU/expiry
   assert.deepEqual(direct.stats(), replayStatsAfterDetachedMutation);
 });
 
-test("demo lines contain the ReplayCache observability segment (fresh read, miss/hit/fill/LRU/expiry steps, detached snapshot, closing the demo)", async () => {
+test("demo lines contain the ReplayCache observability segment (fresh read, miss/hit/fill/LRU/expiry steps, detached snapshot, followed by the ReplayCache clear segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /ReplayCache observability: ReplayCache\.stats\(\) exposes/);
@@ -3910,8 +3916,87 @@ test("demo lines contain the ReplayCache observability segment (fresh read, miss
     `ReplayCache observability detached snapshot: overwriting a returned stats() object with 999s left the cache unchanged, stats() still = ${fmt(DEMO_REPLAY_STATS_FINAL)} (stats() hands out a copy, never a view)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 9), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  // The ReplayCache clear segment follows the observability segment.
+  const clearIdx = lines.findIndex((l) => l.startsWith("ReplayCache clear:"));
+  assert.ok(headerIdx !== -1 && clearIdx !== -1 && headerIdx < clearIdx);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("ReplayCache observability:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 9), lines.slice(headerIdx, headerIdx + 9));
+});
+
+test("demo ReplayCache clear segment records, replays, clears to zero, and re-records the same nonce", async () => {
+  const {
+    replayClearFirstCheck,
+    replayClearReplayCheck,
+    replayClearStatsBefore,
+    replayClearSizeAfterClear,
+    replayClearStatsAfterClear,
+    replayClearRecheck,
+    replayClearStatsAfterRecheck,
+  } = await runDemo();
+  assert.equal(DEMO_REPLAY_CLEAR_NONCE, "demo-nonce-replay-clear-001");
+  assert.deepEqual(DEMO_REPLAY_CLEAR_CHECKS, [false, true, false]);
+  assert.deepEqual(DEMO_REPLAY_CLEAR_STATS_BEFORE, { size: 1, hits: 1, misses: 1, evictions: 0 });
+  assert.equal(DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR, 0);
+  assert.deepEqual(DEMO_REPLAY_CLEAR_STATS_AFTER_CLEAR, { size: 0, hits: 0, misses: 0, evictions: 0 });
+  assert.deepEqual(DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK, { size: 1, hits: 0, misses: 1, evictions: 0 });
+  assert.equal(replayClearFirstCheck, DEMO_REPLAY_CLEAR_CHECKS[0]);
+  assert.equal(replayClearReplayCheck, DEMO_REPLAY_CLEAR_CHECKS[1]);
+  assert.deepEqual(replayClearStatsBefore, DEMO_REPLAY_CLEAR_STATS_BEFORE);
+  assert.equal(replayClearSizeAfterClear, DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR);
+  assert.deepEqual(replayClearStatsAfterClear, DEMO_REPLAY_CLEAR_STATS_AFTER_CLEAR);
+  assert.equal(replayClearRecheck, DEMO_REPLAY_CLEAR_CHECKS[2]);
+  assert.deepEqual(replayClearStatsAfterRecheck, DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK);
+  // Cross-check against a directly driven cache (the same
+  // clear semantics test/replay.test.ts and
+  // test/replayStats.test.ts pin).
+  const direct = new ReplayCache({ now: () => DEMO_CREATED });
+  assert.equal(direct.check(DEMO_REPLAY_CLEAR_NONCE), replayClearFirstCheck);
+  assert.equal(direct.check(DEMO_REPLAY_CLEAR_NONCE), replayClearReplayCheck);
+  assert.deepEqual(direct.stats(), replayClearStatsBefore);
+  direct.clear();
+  assert.equal(direct.size, replayClearSizeAfterClear);
+  assert.deepEqual(direct.stats(), replayClearStatsAfterClear);
+  assert.equal(direct.check(DEMO_REPLAY_CLEAR_NONCE), replayClearRecheck);
+  assert.deepEqual(direct.stats(), replayClearStatsAfterRecheck);
+  // The same clear semantics end-to-end through verifyRequest
+  // (the shape test/replay.test.ts pins for its clear case):
+  // a verified nonce replays, clear() drops it, and the same
+  // request verifies again.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const directCache = new ReplayCache({ now: () => DEMO_CREATED + 60 });
+  const directSigned = signRequest(
+    { method: "POST", url: "https://api.example.com/v1/payments", headers: { "content-type": "application/json" }, body: DEMO_BODY },
+    { keyId: DEMO_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_REPLAY_CLEAR_NONCE },
+  );
+  const directOpts = { key: publicKey, now: DEMO_CREATED + 60, replayCache: directCache };
+  assert.equal(verifyRequest(directSigned, directOpts).ok, true);
+  assert.equal(verifyRequest(directSigned, directOpts).code, "NONCE_REPLAY");
+  directCache.clear();
+  assert.equal(directCache.size, replayClearSizeAfterClear);
+  assert.equal(verifyRequest(directSigned, directOpts).ok, true);
+});
+
+test("demo lines contain the ReplayCache clear segment (record, replay, cleared zero state, fresh re-record, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /ReplayCache clear: ReplayCache\.clear\(\) drops every tracked nonce/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("ReplayCache clear:"));
+  const statsIdx = lines.findIndex((l) => l.startsWith("ReplayCache observability:"));
+  assert.ok(statsIdx !== -1 && headerIdx !== -1 && statsIdx < headerIdx);
+  const fmt = (st: { size: number; hits: number; misses: number; evictions: number }) =>
+    `{ size: ${st.size}, hits: ${st.hits}, misses: ${st.misses}, evictions: ${st.evictions} }`;
+  const [c0, c1, c2] = DEMO_REPLAY_CLEAR_CHECKS;
+  const expectedLines = [
+    "ReplayCache clear: ReplayCache.clear() drops every tracked nonce and zeroes the observability counters — the explicit reset a gateway runs at key rotation or for test isolation, instead of waiting for entries to expire under the TTL",
+    `ReplayCache clear first check("${DEMO_REPLAY_CLEAR_NONCE}") on a fresh cache (injected clock pinned at ${DEMO_CREATED}): returned ${c0} (a fresh nonce, recorded — a miss)`,
+    `ReplayCache clear repeat check("${DEMO_REPLAY_CLEAR_NONCE}"): returned ${c1} (the nonce was already seen — a replay), stats() = ${fmt(DEMO_REPLAY_CLEAR_STATS_BEFORE)}`,
+    `ReplayCache clear after clear(): size = ${DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR}, stats() = ${fmt(DEMO_REPLAY_CLEAR_STATS_AFTER_CLEAR)} (every tracked nonce dropped, every counter back at zero)`,
+    `ReplayCache clear check("${DEMO_REPLAY_CLEAR_NONCE}") after clear(): returned ${c2} (the same nonce is fresh again — recorded anew), stats() = ${fmt(DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK)} (the counters re-accumulate from zero)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("ReplayCache clear:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
 });
