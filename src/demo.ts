@@ -548,6 +548,23 @@
  * a fresh ed25519 pair (generation is not printed) and
  * every clock is injected, so the segment's printed
  * lines are identical between runs.
+ * The demo closes with a ReplayCache observability segment:
+ * a small `ReplayCache` (capacity 3, TTL 100s) under an
+ * injected clock is driven through a pinned script — two
+ * fresh nonces (misses), a repeat of the first (a hit),
+ * a third fresh nonce filling the cache, a fourth forcing
+ * an LRU eviction, and, after the clock advances past the
+ * TTL, a fifth whose insertion reclaims one expired entry
+ * — and `stats()` (`{ size, hits, misses, evictions }`)
+ * is printed after every step. A returned snapshot is then
+ * overwritten with 999s outside the printed lines and the
+ * cache is asserted unchanged: `stats()` hands out a
+ * detached copy, never a view. Outside the printed lines
+ * the demo asserts every check outcome and every step's
+ * stats equal the hand-pinned expectations below (the same
+ * counting rules `test/replayStats.test.ts` pins). Every
+ * clock is injected, so the segment's printed lines are
+ * identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -642,6 +659,7 @@ import {
   type JwksKeyStoreStats,
   type ParsedSignatureInput,
   type ReplayCacheSnapshot,
+  type ReplayCacheStats,
   type RequestLike,
   type SignatureParams,
   type SignedHttpRequest,
@@ -1873,6 +1891,91 @@ export const DEMO_JWKS_OBSERVABILITY_STATS: JwksKeyStoreStats = {
   misses: 1,
 };
 
+/**
+ * Fixed nonces of the closing ReplayCache observability
+ * segment, in first-check order: the segment checks the
+ * first nonce twice (a miss, then a hit), so five distinct
+ * nonces produce six `check()` calls.
+ */
+export const DEMO_REPLAY_STATS_NONCES: ReadonlyArray<string> = [
+  "demo-nonce-replay-stats-001",
+  "demo-nonce-replay-stats-002",
+  "demo-nonce-replay-stats-003",
+  "demo-nonce-replay-stats-004",
+  "demo-nonce-replay-stats-005",
+];
+/**
+ * Capacity of the closing ReplayCache observability
+ * segment's cache: three entries, so the third fresh nonce
+ * fills it and the fourth must evict.
+ */
+export const DEMO_REPLAY_STATS_MAX_ENTRIES = 3;
+/**
+ * TTL of the closing segment's cache (seconds): every entry
+ * is recorded at `DEMO_CREATED`, and the segment's final
+ * check runs at `DEMO_REPLAY_STATS_EXPIRED_AT_SEC`, past
+ * this TTL, so the stored entries have all expired by then.
+ */
+export const DEMO_REPLAY_STATS_TTL_SEC = 100;
+/**
+ * Injected-clock instant of the closing segment's final
+ * check: 150 seconds after `DEMO_CREATED` — past the
+ * 100-second TTL, so inserting the fifth nonce reclaims
+ * exactly one expired entry (prune stops as soon as a slot
+ * is free — the lazy reclamation `test/replayStats.test.ts`
+ * pins for its own expired case).
+ */
+export const DEMO_REPLAY_STATS_EXPIRED_AT_SEC = DEMO_CREATED + 150;
+/**
+ * Hand-pinned `check()` outcomes of the closing segment, in
+ * call order (001, 002, 001 again, 003, 004, 005): `false`
+ * records a fresh nonce (a miss), `true` reports the repeat
+ * as a replay (a hit). Written out here, never derived from
+ * the cache the demo is checking.
+ */
+export const DEMO_REPLAY_STATS_CHECKS: ReadonlyArray<boolean> = [
+  false,
+  false,
+  true,
+  false,
+  false,
+  false,
+];
+/**
+ * Hand-pinned `stats()` after every step of the closing
+ * segment, starting with the fresh cache: misses count the
+ * recorded fresh nonces, the repeat adds the one hit, the
+ * fourth nonce's insertion evicts the least recently seen
+ * entry (002 — the repeat refreshed 001's recency), and the
+ * post-expiry insertion reclaims one expired entry as a
+ * second eviction while `size` drops to the one live entry
+ * (the other expired entries still sit in the map but no
+ * longer count as live). The same counting rules
+ * `test/replayStats.test.ts` pins. Written out here, never
+ * derived from the cache the demo is checking.
+ */
+export const DEMO_REPLAY_STATS_STEPS: ReadonlyArray<ReplayCacheStats> = [
+  { size: 0, hits: 0, misses: 0, evictions: 0 },
+  { size: 1, hits: 0, misses: 1, evictions: 0 },
+  { size: 2, hits: 0, misses: 2, evictions: 0 },
+  { size: 2, hits: 1, misses: 2, evictions: 0 },
+  { size: 3, hits: 1, misses: 3, evictions: 0 },
+  { size: 3, hits: 1, misses: 4, evictions: 1 },
+  { size: 1, hits: 1, misses: 5, evictions: 2 },
+];
+/**
+ * Hand-pinned final `stats()` of the closing segment: the
+ * last entry of `DEMO_REPLAY_STATS_STEPS`, repeated as a
+ * single value so the detached-snapshot probe can pin the
+ * post-mutation reading against it directly.
+ */
+export const DEMO_REPLAY_STATS_FINAL: ReplayCacheStats = {
+  size: 1,
+  hits: 1,
+  misses: 5,
+  evictions: 2,
+};
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -2709,6 +2812,25 @@ export interface DemoResult {
    * hand-pinned `DEMO_JWKS_OBSERVABILITY_STATS`).
    */
   jwksObservabilityStats: JwksKeyStoreStats;
+  /**
+   * The closing ReplayCache observability segment's six
+   * `check()` outcomes, in call order (equals the
+   * hand-pinned `DEMO_REPLAY_STATS_CHECKS`).
+   */
+  replayStatsChecks: boolean[];
+  /**
+   * The segment's `stats()` after every step, starting
+   * with the fresh cache (equals the hand-pinned
+   * `DEMO_REPLAY_STATS_STEPS`).
+   */
+  replayStatsSteps: ReplayCacheStats[];
+  /**
+   * The segment's `stats()` re-read after a returned
+   * snapshot was overwritten with 999s (equals the
+   * hand-pinned `DEMO_REPLAY_STATS_FINAL` — the mutation
+   * never reached the cache).
+   */
+  replayStatsAfterDetachedMutation: ReplayCacheStats;
   lines: string[];
 }
 
@@ -5105,6 +5227,87 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // ReplayCache observability segment: the replay and
+  // snapshot segments above each use a ReplayCache, but
+  // neither shows the observability surface an operator
+  // watches: stats() ({ size, hits, misses, evictions }).
+  // This segment drives a small cache (capacity 3, TTL
+  // 100s) under an injected clock through a pinned script:
+  // two fresh nonces (misses), a repeat of the first (a
+  // hit — the repeat also refreshes its LRU recency), a
+  // third fresh nonce filling the cache, a fourth whose
+  // insertion evicts the least recently seen entry (the
+  // second nonce), and — after the clock advances 150s,
+  // past the TTL — a fifth whose insertion reclaims
+  // exactly one expired entry (prune stops once a slot is
+  // free). stats() is read after every step; a returned
+  // snapshot is then overwritten with 999s and the cache
+  // re-read, proving the snapshot is detached. Outside
+  // the printed lines the demo asserts every outcome
+  // equals the hand-pinned DEMO_REPLAY_STATS_* expectations.
+  let replayStatsNowSec = DEMO_CREATED;
+  const replayStatsCache = new ReplayCache({
+    maxEntries: DEMO_REPLAY_STATS_MAX_ENTRIES,
+    ttlSec: DEMO_REPLAY_STATS_TTL_SEC,
+    now: () => replayStatsNowSec,
+  });
+  const formatReplayStats = (s: ReplayCacheStats): string =>
+    `{ size: ${s.size}, hits: ${s.hits}, misses: ${s.misses}, evictions: ${s.evictions} }`;
+  const replayStatsSteps: ReplayCacheStats[] = [replayStatsCache.stats()];
+  const replayStatsChecks: boolean[] = [];
+  const replayStatsScript: ReadonlyArray<string> = [
+    DEMO_REPLAY_STATS_NONCES[0]!,
+    DEMO_REPLAY_STATS_NONCES[1]!,
+    DEMO_REPLAY_STATS_NONCES[0]!,
+    DEMO_REPLAY_STATS_NONCES[2]!,
+    DEMO_REPLAY_STATS_NONCES[3]!,
+  ];
+  for (const nonce of replayStatsScript) {
+    replayStatsChecks.push(replayStatsCache.check(nonce));
+    replayStatsSteps.push(replayStatsCache.stats());
+  }
+  replayStatsNowSec = DEMO_REPLAY_STATS_EXPIRED_AT_SEC;
+  replayStatsChecks.push(
+    replayStatsCache.check(DEMO_REPLAY_STATS_NONCES[4]!),
+  );
+  replayStatsSteps.push(replayStatsCache.stats());
+  const replayStatsDetached = replayStatsCache.stats();
+  replayStatsDetached.size = 999;
+  replayStatsDetached.hits = 999;
+  replayStatsDetached.misses = 999;
+  replayStatsDetached.evictions = 999;
+  const replayStatsAfterDetachedMutation = replayStatsCache.stats();
+  const replayStatsMatches = (
+    a: ReplayCacheStats,
+    b: ReplayCacheStats,
+  ): boolean =>
+    a.size === b.size &&
+    a.hits === b.hits &&
+    a.misses === b.misses &&
+    a.evictions === b.evictions;
+  if (
+    replayStatsChecks.length !== DEMO_REPLAY_STATS_CHECKS.length ||
+    replayStatsChecks.some((c, i) => c !== DEMO_REPLAY_STATS_CHECKS[i]) ||
+    replayStatsSteps.length !== DEMO_REPLAY_STATS_STEPS.length ||
+    replayStatsSteps.some(
+      (s, i) => !replayStatsMatches(s, DEMO_REPLAY_STATS_STEPS[i]!),
+    ) ||
+    !replayStatsMatches(
+      replayStatsAfterDetachedMutation,
+      DEMO_REPLAY_STATS_FINAL,
+    )
+  ) {
+    throw new Error(
+      `demo fixture broken: ReplayCache observability gave checks ` +
+        `${JSON.stringify(replayStatsChecks)} and steps ` +
+        `${JSON.stringify(replayStatsSteps)} with post-mutation stats ` +
+        `${JSON.stringify(replayStatsAfterDetachedMutation)}, instead of the pinned checks ` +
+        `${JSON.stringify(DEMO_REPLAY_STATS_CHECKS)}, steps ` +
+        `${JSON.stringify(DEMO_REPLAY_STATS_STEPS)} and final ` +
+        `${JSON.stringify(DEMO_REPLAY_STATS_FINAL)}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -5404,6 +5607,16 @@ export async function runDemo(): Promise<DemoResult> {
       : `JWKS verification at the TTL boundary through the stale snapshot: FAILED (code ${jwksObservabilityVerification.code}: ${jwksObservabilityVerification.reason})`,
     `JWKS observability resolves at the boundary: resolve("${DEMO_JWKS_OBSERVABILITY_KEY_ID}") returned a key (hit), resolve("${DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID}") returned undefined (miss)`,
     `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${jwksObservabilityStats.refreshes}, refreshFailures: ${jwksObservabilityStats.refreshFailures}, hits: ${jwksObservabilityStats.hits}, misses: ${jwksObservabilityStats.misses} } (hits + misses equals the total resolve() calls)`,
+    "",
+    "ReplayCache observability: ReplayCache.stats() exposes { size, hits, misses, evictions } — the health view a gateway operator watches to judge whether its replay cache is absorbing replays, filling up, or churning entries",
+    `ReplayCache observability on a fresh cache (capacity ${DEMO_REPLAY_STATS_MAX_ENTRIES}, TTL ${DEMO_REPLAY_STATS_TTL_SEC}s, injected clock pinned at ${DEMO_CREATED}): stats() = ${formatReplayStats(replayStatsSteps[0]!)} (nothing seen yet)`,
+    `ReplayCache observability after check("${DEMO_REPLAY_STATS_NONCES[0]}"): returned ${replayStatsChecks[0]} (a fresh nonce, recorded — a miss), stats() = ${formatReplayStats(replayStatsSteps[1]!)}`,
+    `ReplayCache observability after check("${DEMO_REPLAY_STATS_NONCES[1]}"): returned ${replayStatsChecks[1]} (a fresh nonce, recorded — a miss), stats() = ${formatReplayStats(replayStatsSteps[2]!)}`,
+    `ReplayCache observability after check("${DEMO_REPLAY_STATS_NONCES[0]}") again: returned ${replayStatsChecks[2]} (the nonce was already seen — a replay hit, and the hit refreshes its LRU recency), stats() = ${formatReplayStats(replayStatsSteps[3]!)}`,
+    `ReplayCache observability after check("${DEMO_REPLAY_STATS_NONCES[2]}"): returned ${replayStatsChecks[3]} (a fresh nonce, recorded — the cache is now full), stats() = ${formatReplayStats(replayStatsSteps[4]!)}`,
+    `ReplayCache observability after check("${DEMO_REPLAY_STATS_NONCES[3]}"): returned ${replayStatsChecks[4]} (a fresh nonce, recorded — inserting it evicted "${DEMO_REPLAY_STATS_NONCES[1]}", the least recently seen entry), stats() = ${formatReplayStats(replayStatsSteps[5]!)}`,
+    `ReplayCache observability after the clock advanced to ${DEMO_REPLAY_STATS_EXPIRED_AT_SEC} (150s in, past the ${DEMO_REPLAY_STATS_TTL_SEC}s TTL) and check("${DEMO_REPLAY_STATS_NONCES[4]}"): returned ${replayStatsChecks[5]} (a fresh nonce, recorded — inserting it reclaimed one expired entry; the other expired entries no longer count toward size), stats() = ${formatReplayStats(replayStatsSteps[6]!)}`,
+    `ReplayCache observability detached snapshot: overwriting a returned stats() object with 999s left the cache unchanged, stats() still = ${formatReplayStats(replayStatsAfterDetachedMutation)} (stats() hands out a copy, never a view)`,
   ];
 
   return {
@@ -5545,6 +5758,9 @@ export async function runDemo(): Promise<DemoResult> {
     jwksObservabilityHitResolved,
     jwksObservabilityUnknownResolved,
     jwksObservabilityStats,
+    replayStatsChecks,
+    replayStatsSteps,
+    replayStatsAfterDetachedMutation,
     lines,
   };
 }

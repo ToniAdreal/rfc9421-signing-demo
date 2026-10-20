@@ -184,6 +184,13 @@ import {
   DEMO_REPLAY_SNAPSHOT_NONCE,
   DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE,
   DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE,
+  DEMO_REPLAY_STATS_CHECKS,
+  DEMO_REPLAY_STATS_EXPIRED_AT_SEC,
+  DEMO_REPLAY_STATS_FINAL,
+  DEMO_REPLAY_STATS_MAX_ENTRIES,
+  DEMO_REPLAY_STATS_NONCES,
+  DEMO_REPLAY_STATS_STEPS,
+  DEMO_REPLAY_STATS_TTL_SEC,
   DEMO_SHA256_DIGEST_ALG,
   DEMO_SIGFIELD_BYTES,
   DEMO_SIGFIELD_LABEL,
@@ -3790,7 +3797,7 @@ test("demo JWKS observability segment shows lastRefreshedAt, isStale() at the TT
   assert.deepEqual(directStore.stats(), jwksObservabilityStats);
 });
 
-test("demo lines contain the JWKS observability segment (before/after reads, TTL-boundary stale verification, resolves, stats, closing the demo)", async () => {
+test("demo lines contain the JWKS observability segment (before/after reads, TTL-boundary stale verification, resolves, stats, followed by the ReplayCache observability segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /JWKS observability: JwksKeyStore exposes lastRefreshedAt/);
@@ -3807,8 +3814,104 @@ test("demo lines contain the JWKS observability segment (before/after reads, TTL
     `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshFailures}, hits: ${DEMO_JWKS_OBSERVABILITY_STATS.hits}, misses: ${DEMO_JWKS_OBSERVABILITY_STATS.misses} } (hits + misses equals the total resolve() calls)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 7), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  // The ReplayCache observability segment follows the JWKS observability segment.
+  const replayStatsIdx = lines.findIndex((l) =>
+    l.startsWith("ReplayCache observability:"),
+  );
+  assert.ok(headerIdx !== -1 && replayStatsIdx !== -1 && headerIdx < replayStatsIdx);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS observability:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 7), lines.slice(headerIdx, headerIdx + 7));
+});
+
+test("demo ReplayCache observability segment drives a pinned miss/hit/LRU/expiry script and pins stats() at every step", async () => {
+  const {
+    replayStatsChecks,
+    replayStatsSteps,
+    replayStatsAfterDetachedMutation,
+  } = await runDemo();
+  assert.deepEqual(DEMO_REPLAY_STATS_NONCES, [
+    "demo-nonce-replay-stats-001",
+    "demo-nonce-replay-stats-002",
+    "demo-nonce-replay-stats-003",
+    "demo-nonce-replay-stats-004",
+    "demo-nonce-replay-stats-005",
+  ]);
+  assert.equal(DEMO_REPLAY_STATS_MAX_ENTRIES, 3);
+  assert.equal(DEMO_REPLAY_STATS_TTL_SEC, 100);
+  assert.equal(DEMO_REPLAY_STATS_EXPIRED_AT_SEC, DEMO_CREATED + 150);
+  assert.deepEqual(DEMO_REPLAY_STATS_CHECKS, [false, false, true, false, false, false]);
+  assert.deepEqual(DEMO_REPLAY_STATS_STEPS, [
+    { size: 0, hits: 0, misses: 0, evictions: 0 },
+    { size: 1, hits: 0, misses: 1, evictions: 0 },
+    { size: 2, hits: 0, misses: 2, evictions: 0 },
+    { size: 2, hits: 1, misses: 2, evictions: 0 },
+    { size: 3, hits: 1, misses: 3, evictions: 0 },
+    { size: 3, hits: 1, misses: 4, evictions: 1 },
+    { size: 1, hits: 1, misses: 5, evictions: 2 },
+  ]);
+  assert.deepEqual(DEMO_REPLAY_STATS_FINAL, { size: 1, hits: 1, misses: 5, evictions: 2 });
+  assert.deepEqual(replayStatsChecks, DEMO_REPLAY_STATS_CHECKS);
+  assert.deepEqual(replayStatsSteps, DEMO_REPLAY_STATS_STEPS);
+  assert.deepEqual(replayStatsAfterDetachedMutation, DEMO_REPLAY_STATS_FINAL);
+  // Cross-check against a directly driven cache (the same
+  // counting rules test/replayStats.test.ts pins).
+  let directNow = DEMO_CREATED;
+  const direct = new ReplayCache({
+    maxEntries: DEMO_REPLAY_STATS_MAX_ENTRIES,
+    ttlSec: DEMO_REPLAY_STATS_TTL_SEC,
+    now: () => directNow,
+  });
+  const directSteps = [direct.stats()];
+  const directChecks: boolean[] = [];
+  for (const nonce of [
+    DEMO_REPLAY_STATS_NONCES[0]!,
+    DEMO_REPLAY_STATS_NONCES[1]!,
+    DEMO_REPLAY_STATS_NONCES[0]!,
+    DEMO_REPLAY_STATS_NONCES[2]!,
+    DEMO_REPLAY_STATS_NONCES[3]!,
+  ]) {
+    directChecks.push(direct.check(nonce));
+    directSteps.push(direct.stats());
+  }
+  directNow = DEMO_REPLAY_STATS_EXPIRED_AT_SEC;
+  directChecks.push(direct.check(DEMO_REPLAY_STATS_NONCES[4]!));
+  directSteps.push(direct.stats());
+  assert.deepEqual(directChecks, replayStatsChecks);
+  assert.deepEqual(directSteps, replayStatsSteps);
+  const detached = direct.stats();
+  detached.size = 999;
+  detached.hits = 999;
+  detached.misses = 999;
+  detached.evictions = 999;
+  assert.deepEqual(direct.stats(), replayStatsAfterDetachedMutation);
+});
+
+test("demo lines contain the ReplayCache observability segment (fresh read, miss/hit/fill/LRU/expiry steps, detached snapshot, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /ReplayCache observability: ReplayCache\.stats\(\) exposes/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("ReplayCache observability:"));
+  const jwksObsIdx = lines.findIndex((l) => l.startsWith("JWKS observability:"));
+  assert.ok(jwksObsIdx !== -1 && headerIdx !== -1 && jwksObsIdx < headerIdx);
+  const fmt = (s: { size: number; hits: number; misses: number; evictions: number }) =>
+    `{ size: ${s.size}, hits: ${s.hits}, misses: ${s.misses}, evictions: ${s.evictions} }`;
+  const [n0, n1, n2, n3, n4] = DEMO_REPLAY_STATS_NONCES;
+  const [c0, c1, c2, c3, c4, c5] = DEMO_REPLAY_STATS_CHECKS;
+  const expectedLines = [
+    "ReplayCache observability: ReplayCache.stats() exposes { size, hits, misses, evictions } — the health view a gateway operator watches to judge whether its replay cache is absorbing replays, filling up, or churning entries",
+    `ReplayCache observability on a fresh cache (capacity ${DEMO_REPLAY_STATS_MAX_ENTRIES}, TTL ${DEMO_REPLAY_STATS_TTL_SEC}s, injected clock pinned at ${DEMO_CREATED}): stats() = ${fmt(DEMO_REPLAY_STATS_STEPS[0]!)} (nothing seen yet)`,
+    `ReplayCache observability after check("${n0}"): returned ${c0} (a fresh nonce, recorded — a miss), stats() = ${fmt(DEMO_REPLAY_STATS_STEPS[1]!)}`,
+    `ReplayCache observability after check("${n1}"): returned ${c1} (a fresh nonce, recorded — a miss), stats() = ${fmt(DEMO_REPLAY_STATS_STEPS[2]!)}`,
+    `ReplayCache observability after check("${n0}") again: returned ${c2} (the nonce was already seen — a replay hit, and the hit refreshes its LRU recency), stats() = ${fmt(DEMO_REPLAY_STATS_STEPS[3]!)}`,
+    `ReplayCache observability after check("${n2}"): returned ${c3} (a fresh nonce, recorded — the cache is now full), stats() = ${fmt(DEMO_REPLAY_STATS_STEPS[4]!)}`,
+    `ReplayCache observability after check("${n3}"): returned ${c4} (a fresh nonce, recorded — inserting it evicted "${n1}", the least recently seen entry), stats() = ${fmt(DEMO_REPLAY_STATS_STEPS[5]!)}`,
+    `ReplayCache observability after the clock advanced to ${DEMO_REPLAY_STATS_EXPIRED_AT_SEC} (150s in, past the ${DEMO_REPLAY_STATS_TTL_SEC}s TTL) and check("${n4}"): returned ${c5} (a fresh nonce, recorded — inserting it reclaimed one expired entry; the other expired entries no longer count toward size), stats() = ${fmt(DEMO_REPLAY_STATS_STEPS[6]!)}`,
+    `ReplayCache observability detached snapshot: overwriting a returned stats() object with 999s left the cache unchanged, stats() still = ${fmt(DEMO_REPLAY_STATS_FINAL)} (stats() hands out a copy, never a view)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 9), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("ReplayCache observability:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 9), lines.slice(headerIdx, headerIdx + 9));
 });

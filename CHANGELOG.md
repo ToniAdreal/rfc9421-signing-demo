@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  ReplayCache observability segment: a small
+  `ReplayCache` (capacity 3, 100-second TTL) under an
+  injected clock is driven through a pinned script — two
+  fresh nonces (misses), a repeat of the first (a hit),
+  a third fresh nonce filling the cache, a fourth whose
+  insertion evicts the least recently seen entry, and,
+  after the clock advances past the TTL, a fifth whose
+  insertion reclaims one expired entry — and `stats()`
+  (`{ size, hits, misses, evictions }`) is printed after
+  every step with each reading hand-pinned. A returned
+  snapshot overwritten with 999s is shown to leave the
+  cache unchanged: `stats()` hands out a detached copy,
+  never a view. Earlier replay demo segments used a
+  cache without ever presenting its observability
+  counters, the health view a gateway operator watches.
+  `DemoResult` carries the six check outcomes, the
+  per-step stats and the post-mutation stats, and the
+  demo tests pin the fields and the printed lines.
+  Every clock is injected; the segment performs zero
+  network I/O.
 - The CLI demo (`npm run demo`) now closes with a JWKS
   observability segment: a `JwksKeyStore` is driven
   through one `refresh()` over a counting fake fetch
