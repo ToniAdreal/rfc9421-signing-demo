@@ -12,6 +12,25 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `ReplayCache.fromSnapshot` — the snapshot-restore path a
+  single-process verifier runs at startup to rebuild its
+  replay cache from the persisted snapshot, which the
+  existing `exportSnapshot` row never timed (it measures
+  only the serialize direction). The fixture is a pinned
+  envelope exported outside timing from a fixed-clock
+  source cache holding four live nonces under a
+  3,600-second TTL. Every measured pass restores the
+  envelope, re-pins the rebuilt cache's `size` and zeroed
+  `stats()` counters, and re-checks every restored nonce —
+  each must still report a replay. The expired-at-restore
+  drop (a clock advanced past the oldest entry's TTL drops
+  exactly that entry) and the corrupt-envelope rejections
+  (unsupported version, malformed entry) are asserted
+  outside timing. The README Benchmarks table was
+  refreshed wholesale from one real run and now carries
+  the `restore` row. The bench performs zero network I/O
+  and no wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `JwksKeyStore.refresh` single-flight merging — the
   concurrent refresh path a gateway hits at cold start /
   rotation time, which the existing serial

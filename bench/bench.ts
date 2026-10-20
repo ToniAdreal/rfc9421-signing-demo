@@ -61,7 +61,17 @@
  * self-checked on every measured pass against the hand-pinned
  * `{ size, hits, misses, evictions }` snapshot (size counts only
  * the live entries), with the detached-copy and empty-cache
- * readings asserted outside timing, plus the malformed-input rejection path:
+ * readings asserted outside timing, plus the snapshot-restore
+ * path a single-process verifier runs at startup to rebuild its
+ * replay cache from the persisted snapshot:
+ * `ReplayCache.fromSnapshot` over a pinned envelope exported from
+ * a fixed-clock source cache holding four live nonces (see
+ * REPLAY_RESTORE_* below), self-checked on every measured pass
+ * against the hand-pinned expectations (the restored cache's
+ * `size` and zeroed `stats()` counters, and every restored nonce
+ * still reporting a replay on `check`), with the expired-at-
+ * restore drop and the corrupt-envelope rejections (wrong
+ * version, malformed entry) asserted outside timing, plus the malformed-input rejection path:
  * `verifyRequest` over a fixed-seed corpus of malformed
  * signature-input / signature values (the parser rejection traffic a
  * verification gateway faces), self-checked to always return
@@ -1322,6 +1332,196 @@ function benchmarkReplayCacheStats(): number {
     );
   return measure(() => {
     assertReplayStats(cache);
+  }, ITERATIONS);
+}
+
+/** Export instant of the ReplayCache restore fixture (no wall clock). */
+const REPLAY_RESTORE_NOW = 1_700_200_000;
+/** TTL of the ReplayCache restore fixture, in seconds. */
+const REPLAY_RESTORE_TTL_SEC = 3600;
+/**
+ * Restore instant used only by the outside-timing expiry check:
+ * 200 seconds after the export instant, so the oldest fixture
+ * entry (3,500 seconds old at export) is 3,700 seconds old there
+ * — past the TTL — while the three later entries are still live.
+ */
+const REPLAY_RESTORE_EXPIRED_AT = REPLAY_RESTORE_NOW + 200;
+/**
+ * Hand-pinned live entries of the restore fixture at
+ * REPLAY_RESTORE_NOW, in LRU (insertion) order — written
+ * literally, never derived from `exportSnapshot` itself.
+ */
+const REPLAY_RESTORE_EXPECTED: Array<[string, number]> = [
+  ["bench-restore-oldest", REPLAY_RESTORE_NOW - 3500],
+  ["bench-restore-first", REPLAY_RESTORE_NOW - 30],
+  ["bench-restore-second", REPLAY_RESTORE_NOW - 20],
+  ["bench-restore-last", REPLAY_RESTORE_NOW - 10],
+];
+/**
+ * Hand-pinned observability reading of a freshly restored fixture
+ * cache: all four entries live, and the counters start at zero —
+ * a snapshot carries no counters and load-time work is not an
+ * eviction (the same rule the replaySnapshot tests pin).
+ */
+const REPLAY_RESTORE_STATS = { size: 4, hits: 0, misses: 0, evictions: 0 };
+
+/**
+ * Build the pinned snapshot for the restore benchmark: an
+ * injectable clock is walked through the pinned recording
+ * instants and frozen at REPLAY_RESTORE_NOW, the source cache
+ * records the four fixture nonces, and its `exportSnapshot()`
+ * envelope is the measured input. Every recording must report
+ * not-a-replay.
+ */
+function replayRestoreFixtureSnapshot(): ReturnType<ReplayCache["exportSnapshot"]> {
+  let clock = REPLAY_RESTORE_EXPECTED[0]![1];
+  const source = new ReplayCache({
+    maxEntries: 10_000,
+    ttlSec: REPLAY_RESTORE_TTL_SEC,
+    now: () => clock,
+  });
+  for (const [nonce, seenAt] of REPLAY_RESTORE_EXPECTED) {
+    clock = seenAt;
+    if (source.check(nonce) !== false)
+      throw new Error(
+        `benchmark self-check failed: restore-fixture nonce ${nonce} reported as replay`,
+      );
+  }
+  clock = REPLAY_RESTORE_NOW;
+  const snapshot = source.exportSnapshot();
+  assertReplayRestoreSnapshot(snapshot);
+  return snapshot;
+}
+
+/**
+ * Pin one fixture snapshot against the hand-written expectation:
+ * version 1 and every entry item by item (nonce and `seenAt`,
+ * first and last included).
+ */
+function assertReplayRestoreSnapshot(
+  snapshot: ReturnType<ReplayCache["exportSnapshot"]>,
+): void {
+  if (snapshot.v !== 1)
+    throw new Error(
+      `benchmark self-check failed: replay restore snapshot v ${String(snapshot.v)} (expected 1)`,
+    );
+  if (snapshot.entries.length !== REPLAY_RESTORE_EXPECTED.length)
+    throw new Error(
+      `benchmark self-check failed: replay restore snapshot carries ${snapshot.entries.length} entries ` +
+        `(expected ${REPLAY_RESTORE_EXPECTED.length})`,
+    );
+  for (let i = 0; i < REPLAY_RESTORE_EXPECTED.length; i++) {
+    const entry = snapshot.entries[i]!;
+    const [nonce, seenAt] = REPLAY_RESTORE_EXPECTED[i]!;
+    if (entry[0] !== nonce || entry[1] !== seenAt)
+      throw new Error(
+        `benchmark self-check failed: replay restore snapshot entries[${i}] ${JSON.stringify(entry)} ` +
+          `(expected ${JSON.stringify([nonce, seenAt])})`,
+      );
+  }
+}
+
+/**
+ * Pin one freshly restored fixture cache: the `size` getter and
+ * the whole `stats()` reading must equal the hand-written
+ * expectation (four live entries, counters still at zero — no
+ * `check` has run on the restored cache yet).
+ */
+function assertReplayRestored(cache: ReplayCache): void {
+  const stats = cache.stats();
+  if (
+    cache.size !== REPLAY_RESTORE_STATS.size ||
+    stats.size !== REPLAY_RESTORE_STATS.size ||
+    stats.hits !== REPLAY_RESTORE_STATS.hits ||
+    stats.misses !== REPLAY_RESTORE_STATS.misses ||
+    stats.evictions !== REPLAY_RESTORE_STATS.evictions
+  )
+    throw new Error(
+      `benchmark self-check failed: restored replay stats ${JSON.stringify(stats)} ` +
+        `(expected ${JSON.stringify(REPLAY_RESTORE_STATS)}, size getter ${cache.size})`,
+    );
+}
+
+/** Assert that `fn` throws an `Error` whose message matches `pattern`. */
+function assertBenchThrows(fn: () => unknown, pattern: RegExp, label: string): void {
+  let matched = false;
+  try {
+    fn();
+  } catch (err) {
+    matched = err instanceof Error && pattern.test(err.message);
+  }
+  if (!matched)
+    throw new Error(`benchmark self-check failed: ${label} did not throw ${String(pattern)}`);
+}
+
+/**
+ * `ReplayCache.fromSnapshot` steady state: every measured call
+ * restores the pinned snapshot under a clock frozen at the
+ * export instant and re-pins the rebuilt cache (see
+ * {@link assertReplayRestored}), then checks every restored
+ * nonce — each must still report a replay, so the restart does
+ * not reopen the replay window — and the hit counter must
+ * advance by exactly the entry count. Outside timing, a restore
+ * under a clock advanced past the oldest entry's TTL drops
+ * exactly that entry (its nonce records as fresh again while a
+ * surviving nonce still replays), and corrupt envelopes — an
+ * unsupported version and a malformed entry — throw the pinned
+ * configuration errors instead of silently disabling replay
+ * protection.
+ */
+function benchmarkReplayCacheFromSnapshot(): number {
+  const snapshot = replayRestoreFixtureSnapshot();
+  const opts = { ttlSec: REPLAY_RESTORE_TTL_SEC, now: () => REPLAY_RESTORE_NOW };
+  const pre = ReplayCache.fromSnapshot(snapshot, opts);
+  assertReplayRestored(pre);
+  for (const [nonce] of REPLAY_RESTORE_EXPECTED) {
+    if (pre.check(nonce) !== true)
+      throw new Error(
+        `benchmark self-check failed: restored nonce ${nonce} not a replay`,
+      );
+  }
+  const expired = ReplayCache.fromSnapshot(snapshot, {
+    ttlSec: REPLAY_RESTORE_TTL_SEC,
+    now: () => REPLAY_RESTORE_EXPIRED_AT,
+  });
+  if (expired.size !== REPLAY_RESTORE_EXPECTED.length - 1)
+    throw new Error(
+      `benchmark self-check failed: expired-at-restore size ${expired.size} ` +
+        `(expected ${REPLAY_RESTORE_EXPECTED.length - 1})`,
+    );
+  if (expired.check(REPLAY_RESTORE_EXPECTED[0]![0]) !== false)
+    throw new Error(
+      "benchmark self-check failed: nonce expired at restore reported as replay",
+    );
+  if (expired.check(REPLAY_RESTORE_EXPECTED[1]![0]) !== true)
+    throw new Error(
+      "benchmark self-check failed: surviving nonce after expiry drop not a replay",
+    );
+  assertBenchThrows(
+    () => ReplayCache.fromSnapshot({ v: 2, entries: [] }, opts),
+    /invalid snapshot: unsupported snapshot version 2/,
+    "wrong-version snapshot",
+  );
+  assertBenchThrows(
+    () => ReplayCache.fromSnapshot({ v: 1, entries: ["bench-restore-first"] }, opts),
+    /invalid snapshot: entries\[0\] must be a \[nonce, seenAt\] pair/,
+    "malformed-entry snapshot",
+  );
+  return measure(() => {
+    const restored = ReplayCache.fromSnapshot(snapshot, opts);
+    assertReplayRestored(restored);
+    for (const [nonce] of REPLAY_RESTORE_EXPECTED) {
+      if (restored.check(nonce) !== true)
+        throw new Error(
+          `benchmark self-check failed: restored nonce ${nonce} not a replay`,
+        );
+    }
+    const stats = restored.stats();
+    if (stats.hits !== REPLAY_RESTORE_EXPECTED.length || stats.misses !== 0)
+      throw new Error(
+        `benchmark self-check failed: restored replay counters ${JSON.stringify(stats)} ` +
+          `(expected hits=${REPLAY_RESTORE_EXPECTED.length}, misses=0)`,
+      );
   }, ITERATIONS);
 }
 
@@ -4191,6 +4391,11 @@ results.push({
   alg: "ReplayCache.stats (5 live)",
   op: "stats",
   ops: benchmarkReplayCacheStats(),
+});
+results.push({
+  alg: "ReplayCache.fromSnapshot (4 live)",
+  op: "restore",
+  ops: benchmarkReplayCacheFromSnapshot(),
 });
 const malformed = benchmarkMalformedReject();
 results.push({
