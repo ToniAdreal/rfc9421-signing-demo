@@ -186,6 +186,21 @@ import {
   DEMO_MAX_AGE_TOO_OLD_AT_SEC,
   DEMO_MAX_AGE_TOO_OLD_CODE,
   DEMO_MAX_AGE_WITHIN_AT_SEC,
+  DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC,
+  DEMO_CLOCK_DEFAULT_GRACE_SEC,
+  DEMO_CLOCK_DEFAULT_SKEW_SEC,
+  DEMO_CLOCK_EXPIRED_AT_SEC,
+  DEMO_CLOCK_EXPIRED_CODE,
+  DEMO_CLOCK_EXPIRED_GRACE_SEC,
+  DEMO_CLOCK_EXPIRED_NARROW_GRACE_SEC,
+  DEMO_CLOCK_EXPIRES,
+  DEMO_CLOCK_FUTURE_CREATED,
+  DEMO_CLOCK_NEAR_FUTURE_CREATED,
+  DEMO_CLOCK_SKEW_CODE,
+  DEMO_CLOCK_SKEW_NARROW_SEC,
+  DEMO_CLOCK_SKEW_SEC,
+  DEMO_CLOCK_TOLERANCE_COVERED_COMPONENTS,
+  DEMO_CLOCK_TOLERANCE_KEY_ID,
   DEMO_REPLAY_CLEAR_CHECKS,
   DEMO_REPLAY_CLEAR_NONCE,
   DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR,
@@ -4050,7 +4065,7 @@ test("demo max-age segment caps a dated signature at maxSignatureAgeSec (within/
   assert.equal(directOld.code, "SIGNATURE_TOO_OLD");
 });
 
-test("demo lines contain the max-age segment (within, past-cap rejection, boundary, undated bypass, closing the demo)", async () => {
+test("demo lines contain the max-age segment (within, past-cap rejection, boundary, undated bypass, followed by the clock-tolerance segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Maximum signature age: verifyRequest's opt-in maxSignatureAgeSec caps/);
@@ -4065,8 +4080,76 @@ test("demo lines contain the max-age segment (within, past-cap rejection, bounda
     `Maximum signature age without created: a hand-built signature carrying no created (expires=${DEMO_MAX_AGE_NO_CREATED_EXPIRES} only) verified at ${DEMO_MAX_AGE_TOO_OLD_AT_SEC} under the same cap: OK (no created bypasses the age check entirely — pair with requireCreated to mandate one)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(lines[headerIdx + 6].startsWith("Clock tolerance:"));
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Maximum signature age:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
+});
+
+test("demo clock-tolerance segment shows skew/grace contrasts (wide ok, narrow rejected, defaults pinned)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_CLOCK_SKEW_SEC, 180);
+  assert.equal(DEMO_CLOCK_SKEW_NARROW_SEC, 90);
+  assert.equal(DEMO_CLOCK_DEFAULT_SKEW_SEC, 60);
+  assert.equal(DEMO_CLOCK_EXPIRED_GRACE_SEC, 60);
+  assert.equal(DEMO_CLOCK_EXPIRED_NARROW_GRACE_SEC, 20);
+  assert.equal(DEMO_CLOCK_DEFAULT_GRACE_SEC, 0);
+  assert.equal(DEMO_CLOCK_TOLERANCE_KEY_ID, "demo-clock-tolerance-key-1");
+  assert.deepEqual(DEMO_CLOCK_TOLERANCE_COVERED_COMPONENTS, ["@method", "@authority", "@path"]);
+  assert.equal(DEMO_CLOCK_FUTURE_CREATED, DEMO_CREATED + 120);
+  assert.equal(DEMO_CLOCK_NEAR_FUTURE_CREATED, DEMO_CREATED + 30);
+  assert.equal(DEMO_CLOCK_EXPIRES, DEMO_CREATED + 100);
+  assert.equal(DEMO_CLOCK_EXPIRED_AT_SEC, DEMO_CREATED + 130);
+  assert.equal(DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC, DEMO_CREATED + 101);
+  assert.equal(DEMO_CLOCK_SKEW_CODE, "CREATED_IN_FUTURE");
+  assert.equal(DEMO_CLOCK_EXPIRED_CODE, "EXPIRED");
+  assert.equal(r.clockToleranceSkewWithinVerification.ok, true);
+  assert.equal(r.clockToleranceSkewBeyondVerification.ok, false);
+  assert.equal(r.clockToleranceSkewBeyondVerification.code, DEMO_CLOCK_SKEW_CODE);
+  assert.equal(r.clockToleranceSkewDefaultWithinVerification.ok, true);
+  assert.equal(r.clockToleranceSkewDefaultBeyondVerification.ok, false);
+  assert.equal(r.clockToleranceSkewDefaultBeyondVerification.code, DEMO_CLOCK_SKEW_CODE);
+  assert.equal(r.clockToleranceExpiredWithinGraceVerification.ok, true);
+  assert.equal(r.clockToleranceExpiredBeyondGraceVerification.ok, false);
+  assert.equal(r.clockToleranceExpiredBeyondGraceVerification.code, DEMO_CLOCK_EXPIRED_CODE);
+  assert.equal(r.clockToleranceExpiredDefaultVerification.ok, false);
+  assert.equal(r.clockToleranceExpiredDefaultVerification.code, DEMO_CLOCK_EXPIRED_CODE);
+  assert.match(r.clockToleranceFutureSigned.headers["signature-input"], /created=1700000120/);
+  assert.match(r.clockToleranceNearFutureSigned.headers["signature-input"], /created=1700000030/);
+  assert.match(r.clockToleranceExpiredSigned.headers["signature-input"], /expires=1700000100/);
+  // Independent re-verification with a fresh key pair (same semantics test/freshness.test.ts pins)
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const direct = signRequest(
+    { method: "POST", url: "https://api.example.com/v1/payments", headers: {} },
+    { keyId: DEMO_CLOCK_TOLERANCE_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CLOCK_FUTURE_CREATED, coveredComponents: [...DEMO_CLOCK_TOLERANCE_COVERED_COMPONENTS] },
+  );
+  assert.equal(verifyRequest(direct, { key: publicKey, now: DEMO_CREATED, clockSkewToleranceSec: DEMO_CLOCK_SKEW_SEC }).ok, true);
+  const directBeyond = verifyRequest(direct, { key: publicKey, now: DEMO_CREATED, clockSkewToleranceSec: DEMO_CLOCK_SKEW_NARROW_SEC });
+  assert.equal(directBeyond.ok, false);
+  assert.equal(directBeyond.code, "CREATED_IN_FUTURE");
+});
+
+test("demo lines contain the clock-tolerance segment (skew within/beyond/default, grace within/beyond/default, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Clock tolerance: verifyRequest's clockSkewToleranceSec tolerates/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Clock tolerance:"));
+  const maxAgeIdx = lines.findIndex((l) => l.startsWith("Maximum signature age:"));
+  assert.ok(maxAgeIdx !== -1 && headerIdx !== -1 && maxAgeIdx < headerIdx);
+  const expectedLines = [
+    "Clock tolerance: verifyRequest's clockSkewToleranceSec tolerates a signer clock running ahead and expiredToleranceSec grants a grace window past expires — both default to strict-ish values (skew 60s, grace 0) when no option is passed",
+    `Clock skew within tolerance: signature created at ${DEMO_CLOCK_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_FUTURE_CREATED - DEMO_CREATED}s, clockSkewToleranceSec=${DEMO_CLOCK_SKEW_SEC}): OK (label sig1, keyid="${DEMO_CLOCK_TOLERANCE_KEY_ID}", alg="ed25519")`,
+    `Clock skew beyond tolerance: signature created at ${DEMO_CLOCK_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_FUTURE_CREATED - DEMO_CREATED}s, clockSkewToleranceSec=${DEMO_CLOCK_SKEW_NARROW_SEC}): FAILED (code CREATED_IN_FUTURE: signature created in the future (clock skew))`,
+    `Clock skew default within: signature created at ${DEMO_CLOCK_NEAR_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_NEAR_FUTURE_CREATED - DEMO_CREATED}s, no clockSkewToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_SKEW_SEC}s): OK (label sig1, keyid="${DEMO_CLOCK_TOLERANCE_KEY_ID}", alg="ed25519")`,
+    `Clock skew default beyond: signature created at ${DEMO_CLOCK_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_FUTURE_CREATED - DEMO_CREATED}s, no clockSkewToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_SKEW_SEC}s): FAILED (code CREATED_IN_FUTURE: signature created in the future (clock skew))`,
+    `Expired within grace: signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_EXPIRED_AT_SEC} (${DEMO_CLOCK_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, expiredToleranceSec=${DEMO_CLOCK_EXPIRED_GRACE_SEC}): OK (label sig1, keyid="${DEMO_CLOCK_TOLERANCE_KEY_ID}", alg="ed25519")`,
+    `Expired beyond grace: signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_EXPIRED_AT_SEC} (${DEMO_CLOCK_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, expiredToleranceSec=${DEMO_CLOCK_EXPIRED_NARROW_GRACE_SEC}): FAILED (code EXPIRED: signature expired)`,
+    `Expired default (no grace): signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC} (${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, no expiredToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_GRACE_SEC}): FAILED (code EXPIRED: signature expired)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 8), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Clock tolerance:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 8), lines.slice(headerIdx, headerIdx + 8));
 });

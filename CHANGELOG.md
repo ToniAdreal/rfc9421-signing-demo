@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a clock
+  tolerance segment: a signature created 120 seconds in
+  the future verifies under a wide
+  `clockSkewToleranceSec` (180 seconds) and is rejected
+  with `CREATED_IN_FUTURE` under a narrow one (90), while
+  the no-option defaults are pinned by a 30-second-future
+  signature verifying and the 120-second-future one
+  failing (default skew 60); a signature 30 seconds past
+  its `expires` verifies under a wide
+  `expiredToleranceSec` grace (60 seconds) and is
+  rejected with `EXPIRED` under a narrow grace (20),
+  while a signature just 1 second past `expires` fails
+  with no option passed (default grace 0 — strict).
+  `DemoResult` gains the segment's three signed requests
+  and seven verification results, the demo tests gain two
+  cases pinning the segment end-to-end (736 tests in
+  total), and every clock in the segment is injected —
+  no network, no wall clock, no randomness in the
+  printed lines.
 - The CLI demo (`npm run demo`) now closes with a maximum
   signature age segment: one ed25519 signature pinned at
   the demo's fixed `created` instant with no `expires` is

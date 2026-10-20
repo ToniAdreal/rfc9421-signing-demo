@@ -595,6 +595,24 @@
  * `test/signatureMaxAge.test.ts` pins). Every clock is
  * injected and the segment's key pair is fresh per run, so
  * the printed lines are identical between runs.
+ * The demo then closes with a clock tolerance segment:
+ * two freshness tolerances are shown as contrasts — a
+ * signature created 120 seconds in the future verifies
+ * under a wide `clockSkewToleranceSec` (180) and is
+ * rejected with `CREATED_IN_FUTURE` under a narrow one
+ * (90), while the defaults with no option passed are
+ * pinned by a 30-second-future signature verifying and
+ * the 120-second-future one failing (default skew 60);
+ * a signature expired 30 seconds ago verifies under a
+ * wide `expiredToleranceSec` grace (60) and is rejected
+ * with `EXPIRED` under a narrow grace (20), while a
+ * signature expired just 1 second ago fails with no
+ * option passed (default grace 0). Outside the printed
+ * lines the demo asserts every outcome and code equals
+ * the hand-pinned expectations below (the same tolerance
+ * semantics `test/freshness.test.ts` pins). Every clock
+ * is injected and the segment's key pair is fresh per
+ * run, so the printed lines are identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2115,6 +2133,45 @@ export const DEMO_MAX_AGE_TOO_OLD_CODE: VerifyFailureCode =
  */
 export const DEMO_MAX_AGE_NO_CREATED_EXPIRES = DEMO_CREATED + 3600;
 
+/** Key id of the closing clock-tolerance segment's signatures. */
+export const DEMO_CLOCK_TOLERANCE_KEY_ID = "demo-clock-tolerance-key-1";
+/**
+ * Covered components of all clock-tolerance segment
+ * signatures — the derived trio, so the signatures differ
+ * only in their timestamps and verify options.
+ */
+export const DEMO_CLOCK_TOLERANCE_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+];
+/** Wide clock-skew tolerance of the segment, in seconds: a 120s future `created` verifies under it. */
+export const DEMO_CLOCK_SKEW_SEC = 180;
+/** Narrow clock-skew tolerance of the segment, in seconds: the same 120s future `created` is rejected under it. */
+export const DEMO_CLOCK_SKEW_NARROW_SEC = 90;
+/** Default clock-skew tolerance pinned by the segment (no option passed): 60 seconds. */
+export const DEMO_CLOCK_DEFAULT_SKEW_SEC = 60;
+/** Wide expired grace of the segment, in seconds: a signature 30s past `expires` verifies under it. */
+export const DEMO_CLOCK_EXPIRED_GRACE_SEC = 60;
+/** Narrow expired grace of the segment, in seconds: the same 30s-past signature is rejected under it. */
+export const DEMO_CLOCK_EXPIRED_NARROW_GRACE_SEC = 20;
+/** Default expired grace pinned by the segment (no option passed): 0 seconds — expiry is strict. */
+export const DEMO_CLOCK_DEFAULT_GRACE_SEC = 0;
+/** `created` of the segment's future signature: 120 seconds ahead of `DEMO_CREATED`. */
+export const DEMO_CLOCK_FUTURE_CREATED = DEMO_CREATED + 120;
+/** `created` of the segment's near-future signature: 30 seconds ahead, inside the default 60s skew. */
+export const DEMO_CLOCK_NEAR_FUTURE_CREATED = DEMO_CREATED + 30;
+/** `expires` of the segment's expired signature: 100 seconds after `DEMO_CREATED`. */
+export const DEMO_CLOCK_EXPIRES = DEMO_CREATED + 100;
+/** Verify instant for the expired signature: 30 seconds past its `expires`. */
+export const DEMO_CLOCK_EXPIRED_AT_SEC = DEMO_CREATED + 130;
+/** Verify instant for the default-grace check: 1 second past `expires`, already too late with grace 0. */
+export const DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC = DEMO_CREATED + 101;
+/** Hand-pinned failure code of the beyond-skew verifications: `CREATED_IN_FUTURE`. */
+export const DEMO_CLOCK_SKEW_CODE: VerifyFailureCode = "CREATED_IN_FUTURE";
+/** Hand-pinned failure code of the beyond-grace verifications: `EXPIRED`. */
+export const DEMO_CLOCK_EXPIRED_CODE: VerifyFailureCode = "EXPIRED";
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -3047,6 +3104,26 @@ export interface DemoResult {
    * ok — no `created` bypasses the age check entirely.
    */
   maxAgeNoCreatedVerification: VerifyResult;
+  /** The closing clock-tolerance segment's future signature (`created` 120s ahead, no `expires`). */
+  clockToleranceFutureSigned: SignedHttpRequest;
+  /** The segment's near-future signature (`created` 30s ahead, inside the default skew). */
+  clockToleranceNearFutureSigned: SignedHttpRequest;
+  /** The segment's expired signature (`created` at `DEMO_CREATED`, `expires` 100s later). */
+  clockToleranceExpiredSigned: SignedHttpRequest;
+  /** Future signature under the wide skew (180s): ok. */
+  clockToleranceSkewWithinVerification: VerifyResult;
+  /** Future signature under the narrow skew (90s): rejected with `CREATED_IN_FUTURE`. */
+  clockToleranceSkewBeyondVerification: VerifyResult;
+  /** Near-future signature with no tolerance option (default skew 60s): ok. */
+  clockToleranceSkewDefaultWithinVerification: VerifyResult;
+  /** Future signature with no tolerance option (default skew 60s): rejected with `CREATED_IN_FUTURE`. */
+  clockToleranceSkewDefaultBeyondVerification: VerifyResult;
+  /** Expired signature 30s past `expires` under the wide grace (60s): ok. */
+  clockToleranceExpiredWithinGraceVerification: VerifyResult;
+  /** Expired signature 30s past `expires` under the narrow grace (20s): rejected with `EXPIRED`. */
+  clockToleranceExpiredBeyondGraceVerification: VerifyResult;
+  /** Expired signature 1s past `expires` with no grace option (default 0): rejected with `EXPIRED`. */
+  clockToleranceExpiredDefaultVerification: VerifyResult;
   lines: string[];
 }
 
@@ -5689,6 +5766,108 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Clock tolerance segment: the freshness checks above
+  // run with the default tolerances. This segment shows
+  // both tolerances as contrasts on pinned signatures.
+  // A future signature (created 120s ahead of the verify
+  // instant) verifies under a wide clockSkewToleranceSec
+  // and is rejected under a narrow one; with no option
+  // passed, a near-future signature (30s ahead) verifies
+  // and the 120s one fails — pinning the default skew at
+  // 60s. An expired signature (30s past expires) verifies
+  // under a wide expiredToleranceSec grace and is
+  // rejected under a narrow one; with no option passed,
+  // a signature just 1s past expires already fails —
+  // pinning the default grace at 0 (strict). Outside the
+  // printed lines the demo asserts every outcome equals
+  // the hand-pinned expectations.
+  const clockTolerancePair = generateEd25519KeyPair();
+  const clockToleranceReq = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: {},
+  };
+  const clockToleranceFutureSigned = signRequest(clockToleranceReq, {
+    keyId: DEMO_CLOCK_TOLERANCE_KEY_ID,
+    alg: "ed25519",
+    key: clockTolerancePair.privateKey,
+    created: DEMO_CLOCK_FUTURE_CREATED,
+    coveredComponents: [...DEMO_CLOCK_TOLERANCE_COVERED_COMPONENTS],
+  });
+  const clockToleranceNearFutureSigned = signRequest(clockToleranceReq, {
+    keyId: DEMO_CLOCK_TOLERANCE_KEY_ID,
+    alg: "ed25519",
+    key: clockTolerancePair.privateKey,
+    created: DEMO_CLOCK_NEAR_FUTURE_CREATED,
+    coveredComponents: [...DEMO_CLOCK_TOLERANCE_COVERED_COMPONENTS],
+  });
+  const clockToleranceExpiredSigned = signRequest(clockToleranceReq, {
+    keyId: DEMO_CLOCK_TOLERANCE_KEY_ID,
+    alg: "ed25519",
+    key: clockTolerancePair.privateKey,
+    created: DEMO_CREATED,
+    expires: DEMO_CLOCK_EXPIRES,
+    coveredComponents: [...DEMO_CLOCK_TOLERANCE_COVERED_COMPONENTS],
+  });
+  const clockToleranceSkewWithinVerification = verifyRequest(clockToleranceFutureSigned, {
+    key: clockTolerancePair.publicKey,
+    now: DEMO_CREATED,
+    clockSkewToleranceSec: DEMO_CLOCK_SKEW_SEC,
+  });
+  const clockToleranceSkewBeyondVerification = verifyRequest(clockToleranceFutureSigned, {
+    key: clockTolerancePair.publicKey,
+    now: DEMO_CREATED,
+    clockSkewToleranceSec: DEMO_CLOCK_SKEW_NARROW_SEC,
+  });
+  const clockToleranceSkewDefaultWithinVerification = verifyRequest(clockToleranceNearFutureSigned, {
+    key: clockTolerancePair.publicKey,
+    now: DEMO_CREATED,
+  });
+  const clockToleranceSkewDefaultBeyondVerification = verifyRequest(clockToleranceFutureSigned, {
+    key: clockTolerancePair.publicKey,
+    now: DEMO_CREATED,
+  });
+  const clockToleranceExpiredWithinGraceVerification = verifyRequest(clockToleranceExpiredSigned, {
+    key: clockTolerancePair.publicKey,
+    now: DEMO_CLOCK_EXPIRED_AT_SEC,
+    expiredToleranceSec: DEMO_CLOCK_EXPIRED_GRACE_SEC,
+  });
+  const clockToleranceExpiredBeyondGraceVerification = verifyRequest(clockToleranceExpiredSigned, {
+    key: clockTolerancePair.publicKey,
+    now: DEMO_CLOCK_EXPIRED_AT_SEC,
+    expiredToleranceSec: DEMO_CLOCK_EXPIRED_NARROW_GRACE_SEC,
+  });
+  const clockToleranceExpiredDefaultVerification = verifyRequest(clockToleranceExpiredSigned, {
+    key: clockTolerancePair.publicKey,
+    now: DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC,
+  });
+  if (
+    clockToleranceSkewWithinVerification.ok !== true ||
+    clockToleranceSkewBeyondVerification.ok !== false ||
+    clockToleranceSkewBeyondVerification.code !== DEMO_CLOCK_SKEW_CODE ||
+    clockToleranceSkewDefaultWithinVerification.ok !== true ||
+    clockToleranceSkewDefaultBeyondVerification.ok !== false ||
+    clockToleranceSkewDefaultBeyondVerification.code !== DEMO_CLOCK_SKEW_CODE ||
+    clockToleranceExpiredWithinGraceVerification.ok !== true ||
+    clockToleranceExpiredBeyondGraceVerification.ok !== false ||
+    clockToleranceExpiredBeyondGraceVerification.code !== DEMO_CLOCK_EXPIRED_CODE ||
+    clockToleranceExpiredDefaultVerification.ok !== false ||
+    clockToleranceExpiredDefaultVerification.code !== DEMO_CLOCK_EXPIRED_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: clock tolerances gave skew-within ` +
+        `${JSON.stringify(clockToleranceSkewWithinVerification)}, skew-beyond ` +
+        `${JSON.stringify(clockToleranceSkewBeyondVerification)}, skew-default-within ` +
+        `${JSON.stringify(clockToleranceSkewDefaultWithinVerification)}, skew-default-beyond ` +
+        `${JSON.stringify(clockToleranceSkewDefaultBeyondVerification)}, expired-within-grace ` +
+        `${JSON.stringify(clockToleranceExpiredWithinGraceVerification)}, expired-beyond-grace ` +
+        `${JSON.stringify(clockToleranceExpiredBeyondGraceVerification)} and expired-default ` +
+        `${JSON.stringify(clockToleranceExpiredDefaultVerification)}, instead of ` +
+        `skew-within/default-within/expired-within-grace ok and the rest rejected with ` +
+        `${DEMO_CLOCK_SKEW_CODE} / ${DEMO_CLOCK_EXPIRED_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -6018,6 +6197,29 @@ export async function runDemo(): Promise<DemoResult> {
     maxAgeNoCreatedVerification.ok
       ? `Maximum signature age without created: a hand-built signature carrying no created (expires=${DEMO_MAX_AGE_NO_CREATED_EXPIRES} only) verified at ${DEMO_MAX_AGE_TOO_OLD_AT_SEC} under the same cap: OK (no created bypasses the age check entirely — pair with requireCreated to mandate one)`
       : `Maximum signature age without created: a hand-built signature carrying no created (expires=${DEMO_MAX_AGE_NO_CREATED_EXPIRES} only) verified at ${DEMO_MAX_AGE_TOO_OLD_AT_SEC} under the same cap: FAILED (code ${maxAgeNoCreatedVerification.code}: ${maxAgeNoCreatedVerification.reason})`,
+    "",
+    "Clock tolerance: verifyRequest's clockSkewToleranceSec tolerates a signer clock running ahead and expiredToleranceSec grants a grace window past expires — both default to strict-ish values (skew 60s, grace 0) when no option is passed",
+    clockToleranceSkewWithinVerification.ok
+      ? `Clock skew within tolerance: signature created at ${DEMO_CLOCK_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_FUTURE_CREATED - DEMO_CREATED}s, clockSkewToleranceSec=${DEMO_CLOCK_SKEW_SEC}): OK (label ${clockToleranceSkewWithinVerification.label}, keyid="${clockToleranceSkewWithinVerification.keyId}", alg="${clockToleranceSkewWithinVerification.alg}")`
+      : `Clock skew within tolerance: signature created at ${DEMO_CLOCK_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_FUTURE_CREATED - DEMO_CREATED}s, clockSkewToleranceSec=${DEMO_CLOCK_SKEW_SEC}): FAILED (code ${clockToleranceSkewWithinVerification.code}: ${clockToleranceSkewWithinVerification.reason})`,
+    clockToleranceSkewBeyondVerification.ok
+      ? `Clock skew beyond tolerance: signature created at ${DEMO_CLOCK_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_FUTURE_CREATED - DEMO_CREATED}s, clockSkewToleranceSec=${DEMO_CLOCK_SKEW_NARROW_SEC}): OK (unexpected — the future signature was not rejected)`
+      : `Clock skew beyond tolerance: signature created at ${DEMO_CLOCK_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_FUTURE_CREATED - DEMO_CREATED}s, clockSkewToleranceSec=${DEMO_CLOCK_SKEW_NARROW_SEC}): FAILED (code ${clockToleranceSkewBeyondVerification.code}: ${clockToleranceSkewBeyondVerification.reason})`,
+    clockToleranceSkewDefaultWithinVerification.ok
+      ? `Clock skew default within: signature created at ${DEMO_CLOCK_NEAR_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_NEAR_FUTURE_CREATED - DEMO_CREATED}s, no clockSkewToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_SKEW_SEC}s): OK (label ${clockToleranceSkewDefaultWithinVerification.label}, keyid="${clockToleranceSkewDefaultWithinVerification.keyId}", alg="${clockToleranceSkewDefaultWithinVerification.alg}")`
+      : `Clock skew default within: signature created at ${DEMO_CLOCK_NEAR_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_NEAR_FUTURE_CREATED - DEMO_CREATED}s, no clockSkewToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_SKEW_SEC}s): FAILED (code ${clockToleranceSkewDefaultWithinVerification.code}: ${clockToleranceSkewDefaultWithinVerification.reason})`,
+    clockToleranceSkewDefaultBeyondVerification.ok
+      ? `Clock skew default beyond: signature created at ${DEMO_CLOCK_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_FUTURE_CREATED - DEMO_CREATED}s, no clockSkewToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_SKEW_SEC}s): OK (unexpected — the future signature was not rejected)`
+      : `Clock skew default beyond: signature created at ${DEMO_CLOCK_FUTURE_CREATED} verified at ${DEMO_CREATED} (skew ${DEMO_CLOCK_FUTURE_CREATED - DEMO_CREATED}s, no clockSkewToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_SKEW_SEC}s): FAILED (code ${clockToleranceSkewDefaultBeyondVerification.code}: ${clockToleranceSkewDefaultBeyondVerification.reason})`,
+    clockToleranceExpiredWithinGraceVerification.ok
+      ? `Expired within grace: signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_EXPIRED_AT_SEC} (${DEMO_CLOCK_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, expiredToleranceSec=${DEMO_CLOCK_EXPIRED_GRACE_SEC}): OK (label ${clockToleranceExpiredWithinGraceVerification.label}, keyid="${clockToleranceExpiredWithinGraceVerification.keyId}", alg="${clockToleranceExpiredWithinGraceVerification.alg}")`
+      : `Expired within grace: signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_EXPIRED_AT_SEC} (${DEMO_CLOCK_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, expiredToleranceSec=${DEMO_CLOCK_EXPIRED_GRACE_SEC}): FAILED (code ${clockToleranceExpiredWithinGraceVerification.code}: ${clockToleranceExpiredWithinGraceVerification.reason})`,
+    clockToleranceExpiredBeyondGraceVerification.ok
+      ? `Expired beyond grace: signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_EXPIRED_AT_SEC} (${DEMO_CLOCK_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, expiredToleranceSec=${DEMO_CLOCK_EXPIRED_NARROW_GRACE_SEC}): OK (unexpected — the expired signature was not rejected)`
+      : `Expired beyond grace: signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_EXPIRED_AT_SEC} (${DEMO_CLOCK_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, expiredToleranceSec=${DEMO_CLOCK_EXPIRED_NARROW_GRACE_SEC}): FAILED (code ${clockToleranceExpiredBeyondGraceVerification.code}: ${clockToleranceExpiredBeyondGraceVerification.reason})`,
+    clockToleranceExpiredDefaultVerification.ok
+      ? `Expired default (no grace): signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC} (${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, no expiredToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_GRACE_SEC}): OK (unexpected — the expired signature was not rejected)`
+      : `Expired default (no grace): signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC} (${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, no expiredToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_GRACE_SEC}): FAILED (code ${clockToleranceExpiredDefaultVerification.code}: ${clockToleranceExpiredDefaultVerification.reason})`,
   ];
 
   return {
@@ -6175,6 +6377,16 @@ export async function runDemo(): Promise<DemoResult> {
     maxAgeTooOldVerification,
     maxAgeNoCreatedSigned,
     maxAgeNoCreatedVerification,
+    clockToleranceFutureSigned,
+    clockToleranceNearFutureSigned,
+    clockToleranceExpiredSigned,
+    clockToleranceSkewWithinVerification,
+    clockToleranceSkewBeyondVerification,
+    clockToleranceSkewDefaultWithinVerification,
+    clockToleranceSkewDefaultBeyondVerification,
+    clockToleranceExpiredWithinGraceVerification,
+    clockToleranceExpiredBeyondGraceVerification,
+    clockToleranceExpiredDefaultVerification,
     lines,
   };
 }
