@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures the
+  ed25519 JWK round trip — the generic `exportPublicKeyJwk` →
+  JSON stringify/parse → `importPublicKeyJwk` path for the
+  library's default algorithm, in the OKP JWK shape a JWKS
+  document actually distributes for ed25519 — which the
+  existing per-curve JWK rows (P-256 / P-384 / P-521 /
+  RSA-2048) and the ed25519 PEM row never timed. The row
+  reuses the shared JWK round-trip helper (extended with an
+  optional per-export shape check): every measured pass
+  re-pins the exported JWK item by item (`kty` OKP, `crv`
+  Ed25519, a non-empty `x`, and no private `d` field), and
+  outside timing the re-imported public key must verify a
+  signature made with the original private key. The README
+  Benchmarks table was refreshed wholesale from one real
+  run and now carries the `roundtrip` row. The bench
+  performs zero network I/O and no wall-clock assertions.
 - The benchmark (`npm run bench`) now also measures
   `JwksKeyStore.refreshIfStale` on a stale snapshot — the
   refresh direction a gateway pays when its key snapshot

@@ -59,7 +59,7 @@
  * (no real server, zero network), self-checked outside timing
  * against a hand-pinned expected `RequestLike` (see NODE_FIXTURE
  * below), plus the key-distribution round trip a JWKS publisher /
- * verifier pays for every non-ed25519 key: `exportPublicKeyJwk*` →
+ * verifier pays for every key: `exportPublicKeyJwk*` →
  * JSON stringify/parse → `importPublicKeyJwk*` for each of P-256,
  * P-384, P-521 and RSA (one freshly generated key pair per shape,
  * generated outside timing; the RSA pair is the library's 2048-bit
@@ -67,7 +67,16 @@
  * self-checked outside timing by comparing the re-imported public
  * key's SPKI DER byte-for-byte against the original's — an
  * independent node:crypto encoding, not the JWK helpers' own
- * output, plus the PEM (SPKI / PKCS#8) round trip a signer /
+ * output, plus the same round trip for the library's default
+ * algorithm: `exportPublicKeyJwk` → JSON stringify/parse →
+ * `importPublicKeyJwk` over one fixed ed25519 key pair (generated
+ * once outside timing), self-checked on every measured pass
+ * against the hand-pinned OKP JWK shape (`kty` OKP, `crv`
+ * Ed25519, a non-empty `x` and no private `d` field — the shape
+ * a JWKS document actually distributes for ed25519), with a full
+ * sign → verify over the re-imported public key asserted
+ * outside timing (see the ed25519 JWK round-trip section below),
+ * plus the PEM (SPKI / PKCS#8) round trip a signer /
  * verifier pays when keys are handed over as PEM files — the
  * standard encoding for gateways, KMS tooling and peer verifiers:
  * `exportPublicKeyPem` + `exportPrivateKeyPem` on one fixed
@@ -272,6 +281,7 @@ import {
   getHeaderRaw,
   importPrivateKey,
   importPublicKey,
+  importPublicKeyJwk,
   importPublicKeyJwkP256,
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
@@ -1471,15 +1481,25 @@ function benchmarkFromNodeRequest(): number {
  * encoding — produced by node:crypto directly, independently of the
  * JWK helpers — must equal the original public key's DER
  * byte-for-byte, for every shape.
+ *
+ * The optional `checkJwk` hook runs on every exported JWK — the
+ * outside-timing pass and every measured pass — for shapes whose
+ * wire form carries a hand-pinned shape worth re-pinning per call
+ * (the ed25519 OKP shape; see {@link benchmarkJwkRoundTripEd25519}).
+ * The four EC / RSA rows pass no hook and keep their original
+ * measured shape.
  */
 function benchmarkJwkRoundTrip(
   shape: string,
   publicKey: KeyObject,
   exportJwk: (key: KeyObject) => unknown,
   importJwk: (jwk: unknown) => KeyObject,
+  checkJwk?: (jwk: unknown) => void,
 ): number {
   const originalDer = publicKey.export({ format: "der", type: "spki" });
-  const revived = importJwk(JSON.parse(JSON.stringify(exportJwk(publicKey))));
+  const exported = exportJwk(publicKey);
+  checkJwk?.(exported);
+  const revived = importJwk(JSON.parse(JSON.stringify(exported)));
   const revivedDer = revived.export({ format: "der", type: "spki" });
   if (!originalDer.equals(revivedDer))
     throw new Error(
@@ -1487,8 +1507,101 @@ function benchmarkJwkRoundTrip(
         `(re-imported DER ${revivedDer.length} bytes, original ${originalDer.length} bytes)`,
     );
   return measure(() => {
-    importJwk(JSON.parse(JSON.stringify(exportJwk(publicKey))));
+    const jwk = exportJwk(publicKey);
+    checkJwk?.(jwk);
+    importJwk(JSON.parse(JSON.stringify(jwk)));
   }, ITERATIONS);
+}
+
+/** Fixed `created` for the ed25519 JWK path's outside-timing sign → verify. */
+const JWK_ED25519_CREATED = 1_700_000_000;
+
+/**
+ * Hand-pinned shape of the ed25519 public JWK the generic
+ * `exportPublicKeyJwk` must produce on every call: exactly the
+ * RFC 8037 OKP form a JWKS document distributes for the library's
+ * default algorithm — `kty` "OKP", `crv` "Ed25519", a non-empty
+ * base64url `x`, and no private `d` field (public-key distribution
+ * only). Written out here, never derived from the exported value
+ * the bench is checking.
+ */
+function checkEd25519Jwk(jwk: unknown): void {
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk))
+    throw new Error(
+      "benchmark self-check failed: ed25519 JWK round trip exported a non-object JWK",
+    );
+  const o = jwk as Record<string, unknown>;
+  if (o["kty"] !== "OKP")
+    throw new Error(
+      `benchmark self-check failed: ed25519 JWK kty ${JSON.stringify(o["kty"])} (expected "OKP")`,
+    );
+  if (o["crv"] !== "Ed25519")
+    throw new Error(
+      `benchmark self-check failed: ed25519 JWK crv ${JSON.stringify(o["crv"])} (expected "Ed25519")`,
+    );
+  if ("d" in o)
+    throw new Error(
+      'benchmark self-check failed: ed25519 JWK carries private material ("d")',
+    );
+  if (typeof o["x"] !== "string" || o["x"].length === 0)
+    throw new Error(
+      "benchmark self-check failed: ed25519 JWK x is missing or empty",
+    );
+}
+
+/**
+ * ed25519 JWK round-trip steady state: the generic
+ * `exportPublicKeyJwk` → JSON stringify/parse → `importPublicKeyJwk`
+ * round trip over one fixed ed25519 key pair — the key-distribution
+ * work a JWKS publisher pays when serializing the library's default
+ * algorithm and a verifier pays when loading it, in the OKP JWK
+ * shape the JWKS documentation distributes. The EC / RSA rows above
+ * cover the per-curve helpers; this row covers the generic pair the
+ * PEM row does not (PEM is the other encoding of the same key).
+ *
+ * Fixture caliber (fixed, stated here as the backlog requires):
+ * one ed25519 key pair generated ONCE before timing with the
+ * library's own `generateEd25519KeyPair`. The key is random per
+ * bench run, but nothing measured depends on its value and no
+ * assertion names a random value — no wall clock, no network.
+ *
+ * Self-checks: every measured pass re-exports the JWK and re-pins
+ * its shape item by item via {@link checkEd25519Jwk} before
+ * re-importing (through the shared {@link benchmarkJwkRoundTrip}
+ * helper, whose outside-timing SPKI DER equality also applies);
+ * outside timing, the re-imported public key must verify a
+ * signature made with the original private key over the shared
+ * fixture (created pinned at JWK_ED25519_CREATED, verified at
+ * created+60) — the same sign → verify assertion shape the PEM
+ * round-trip row makes for its re-imported keys.
+ */
+function benchmarkJwkRoundTripEd25519(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const revived = importPublicKeyJwk(
+    JSON.parse(JSON.stringify(exportPublicKeyJwk(publicKey))),
+  );
+  const signed = signRequest(fixture, {
+    keyId: "bench-key",
+    alg: "ed25519",
+    key: privateKey,
+    created: JWK_ED25519_CREATED,
+  });
+  const verified = verifyRequest(signed, {
+    key: revived,
+    now: JWK_ED25519_CREATED + 60,
+  });
+  if (!verified.ok)
+    throw new Error(
+      `benchmark self-check failed: ed25519 JWK round-trip sign → verify gave ` +
+        `${verified.code}: ${verified.reason}`,
+    );
+  return benchmarkJwkRoundTrip(
+    "ed25519",
+    publicKey,
+    exportPublicKeyJwk,
+    importPublicKeyJwk,
+    checkEd25519Jwk,
+  );
 }
 
 /**
@@ -3624,6 +3737,11 @@ results.push({
     exportPublicKeyJwkRsa,
     importPublicKeyJwkRsa,
   ),
+});
+results.push({
+  alg: "JWK round-trip ed25519",
+  op: "roundtrip",
+  ops: benchmarkJwkRoundTripEd25519(),
 });
 results.push({
   alg: "PEM round-trip ed25519",
