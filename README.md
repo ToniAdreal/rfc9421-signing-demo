@@ -1041,7 +1041,7 @@ see [SECURITY.md](SECURITY.md).
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
-algorithm plus the key-resolution, JWKS snapshot-export, thumbprint-derivation, replay-check, replay snapshot-export,
+algorithm plus the key-resolution, JWKS snapshot-export, JWKS refresh, thumbprint-derivation, replay-check, replay snapshot-export,
 malformed-input rejection, standalone content-digest,
 inbound-normalization, per-curve JWK round-trip, PEM round-trip,
 signature-base-building, end-to-end signing, standalone signature-parser,
@@ -1052,60 +1052,61 @@ All rows below are from one real run on 2026-10-20:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519 | sign | ~5,059 ops/sec (197.68 µs/op) |
-| ed25519 | verify | ~1,844 ops/sec (542.31 µs/op) |
-| hmac-sha256 | sign | ~18,208 ops/sec (54.92 µs/op) |
-| hmac-sha256 | verify | ~12,011 ops/sec (83.26 µs/op) |
-| hmac-sha512 | sign | ~24,578 ops/sec (40.69 µs/op) |
-| hmac-sha512 | verify | ~15,508 ops/sec (64.48 µs/op) |
-| ecdsa-p256-sha256 | sign | ~2,115 ops/sec (472.92 µs/op) |
-| ecdsa-p256-sha256 | verify | ~1,797 ops/sec (556.47 µs/op) |
-| ecdsa-p384-sha384 | sign | ~346.6 ops/sec (2885.51 µs/op) |
-| ecdsa-p384-sha384 | verify | ~246.3 ops/sec (4060.25 µs/op) |
-| ecdsa-p521-sha512 | sign | ~95.9 ops/sec (10429.41 µs/op) |
-| ecdsa-p521-sha512 | verify | ~121.1 ops/sec (8255.36 µs/op) |
-| rsa-pss-sha512 | sign | ~370.8 ops/sec (2696.68 µs/op) |
-| rsa-pss-sha512 | verify | ~3,315 ops/sec (301.63 µs/op) |
-| rsa-v1_5-sha256 | sign | ~419.7 ops/sec (2382.61 µs/op) |
-| rsa-v1_5-sha256 | verify | ~2,865 ops/sec (349.10 µs/op) |
-| verifyAllLabels (2 labels) | verify | ~1,051 ops/sec (951.30 µs/op) |
-| JwksKeyStore.resolve (hit) | resolve | ~1,350,509 ops/sec (0.74 µs/op) |
-| memoizeKeyResolver (hit) | resolve | ~474,036 ops/sec (2.11 µs/op) |
-| memoizeKeyResolver (miss) | resolve | ~844,771 ops/sec (1.18 µs/op) |
-| JwksKeyStore.exportSnapshot (3 keys) | export | ~6,120 ops/sec (163.41 µs/op) |
-| jwkThumbprint (3 JWK shapes) | derive | ~24,720 ops/sec (40.45 µs/op) |
-| ReplayCache.check (hit, 1k) | check | ~1,594,911 ops/sec (0.63 µs/op) |
-| ReplayCache.exportSnapshot (3 live) | export | ~93,908 ops/sec (10.65 µs/op) |
-| verifyRequest (malformed, 566 cases) | reject | ~3,630 ops/sec (275.51 µs/op) |
-| contentDigest sha-512 (31-byte body) | digest | ~265,436 ops/sec (3.77 µs/op) |
-| contentDigest sha-256 (31-byte body) | digest | ~278,237 ops/sec (3.59 µs/op) |
-| fromNodeRequest (inbound, trailers) | normalize | ~85,931 ops/sec (11.64 µs/op) |
-| JWK round-trip P-256 | roundtrip | ~4,677 ops/sec (213.83 µs/op) |
-| JWK round-trip P-384 | roundtrip | ~2,602 ops/sec (384.37 µs/op) |
-| JWK round-trip P-521 | roundtrip | ~5,896 ops/sec (169.59 µs/op) |
-| JWK round-trip RSA-2048 | roundtrip | ~2,093 ops/sec (477.78 µs/op) |
-| PEM round-trip ed25519 | roundtrip | ~1,710 ops/sec (584.97 µs/op) |
-| buildSignatureBase (4 components) | build | ~26,853 ops/sec (37.24 µs/op) |
-| signRequest (ed25519, end-to-end) | sign | ~2,856 ops/sec (350.13 µs/op) |
-| listSignatureLabels (2 labels) | parse | ~79,489 ops/sec (12.58 µs/op) |
-| parseSignatureInput (merchant) | parse | ~38,075 ops/sec (26.26 µs/op) |
-| parseSignatureField (merchant) | parse | ~116,306 ops/sec (8.60 µs/op) |
+| ed25519 | sign | ~6,100 ops/sec (163.92 µs/op) |
+| ed25519 | verify | ~3,732 ops/sec (267.95 µs/op) |
+| hmac-sha256 | sign | ~30,203 ops/sec (33.11 µs/op) |
+| hmac-sha256 | verify | ~21,211 ops/sec (47.14 µs/op) |
+| hmac-sha512 | sign | ~14,590 ops/sec (68.54 µs/op) |
+| hmac-sha512 | verify | ~18,036 ops/sec (55.44 µs/op) |
+| ecdsa-p256-sha256 | sign | ~4,442 ops/sec (225.15 µs/op) |
+| ecdsa-p256-sha256 | verify | ~3,326 ops/sec (300.65 µs/op) |
+| ecdsa-p384-sha384 | sign | ~394.5 ops/sec (2534.76 µs/op) |
+| ecdsa-p384-sha384 | verify | ~336.7 ops/sec (2970.36 µs/op) |
+| ecdsa-p521-sha512 | sign | ~148.1 ops/sec (6750.81 µs/op) |
+| ecdsa-p521-sha512 | verify | ~193.7 ops/sec (5163.23 µs/op) |
+| rsa-pss-sha512 | sign | ~1,038 ops/sec (963.69 µs/op) |
+| rsa-pss-sha512 | verify | ~4,367 ops/sec (228.99 µs/op) |
+| rsa-v1_5-sha256 | sign | ~1,272 ops/sec (786.31 µs/op) |
+| rsa-v1_5-sha256 | verify | ~4,305 ops/sec (232.27 µs/op) |
+| verifyAllLabels (2 labels) | verify | ~2,930 ops/sec (341.31 µs/op) |
+| JwksKeyStore.resolve (hit) | resolve | ~3,273,333 ops/sec (0.31 µs/op) |
+| memoizeKeyResolver (hit) | resolve | ~3,086,861 ops/sec (0.32 µs/op) |
+| memoizeKeyResolver (miss) | resolve | ~2,461,393 ops/sec (0.41 µs/op) |
+| JwksKeyStore.exportSnapshot (3 keys) | export | ~17,200 ops/sec (58.14 µs/op) |
+| JwksKeyStore.refreshIfStale (stale) | refresh | ~15,833 ops/sec (63.16 µs/op) |
+| jwkThumbprint (3 JWK shapes) | derive | ~74,846 ops/sec (13.36 µs/op) |
+| ReplayCache.check (hit, 1k) | check | ~529,469 ops/sec (1.89 µs/op) |
+| ReplayCache.exportSnapshot (3 live) | export | ~428,054 ops/sec (2.34 µs/op) |
+| verifyRequest (malformed, 566 cases) | reject | ~6,249 ops/sec (160.03 µs/op) |
+| contentDigest sha-512 (31-byte body) | digest | ~557,195 ops/sec (1.79 µs/op) |
+| contentDigest sha-256 (31-byte body) | digest | ~686,048 ops/sec (1.46 µs/op) |
+| fromNodeRequest (inbound, trailers) | normalize | ~194,770 ops/sec (5.13 µs/op) |
+| JWK round-trip P-256 | roundtrip | ~4,746 ops/sec (210.71 µs/op) |
+| JWK round-trip P-384 | roundtrip | ~7,112 ops/sec (140.62 µs/op) |
+| JWK round-trip P-521 | roundtrip | ~6,088 ops/sec (164.25 µs/op) |
+| JWK round-trip RSA-2048 | roundtrip | ~2,562 ops/sec (390.37 µs/op) |
+| PEM round-trip ed25519 | roundtrip | ~2,220 ops/sec (450.55 µs/op) |
+| buildSignatureBase (4 components) | build | ~25,252 ops/sec (39.60 µs/op) |
+| signRequest (ed25519, end-to-end) | sign | ~4,511 ops/sec (221.66 µs/op) |
+| listSignatureLabels (2 labels) | parse | ~210,771 ops/sec (4.74 µs/op) |
+| parseSignatureInput (merchant) | parse | ~57,336 ops/sec (17.44 µs/op) |
+| parseSignatureField (merchant) | parse | ~523,154 ops/sec (1.91 µs/op) |
 | canonicalizeStructuredFieldValue (6 values) | canon | ~4,798 ops/sec (208.41 µs/op) |
 | serializeDictionaryMemberValue (6 keys) | extract | ~8,765 ops/sec (114.09 µs/op) |
-| serializeSignatureParams (5 cases) | serialize | ~9,630 ops/sec (103.84 µs/op) |
-| generateNonce (16 + 32 bytes) | generate | ~17,447 ops/sec (57.32 µs/op) |
-| verifyRequestOrThrow (valid) | verify | ~1,352 ops/sec (739.57 µs/op) |
-| verifyRequestOrThrow (tampered) | throw | ~1,422 ops/sec (703.38 µs/op) |
-| getHeader/getHeaderRaw (9 names ×2) | lookup | ~63,577 ops/sec (15.73 µs/op) |
-| joinHeaderValues (9 cases) | join | ~166,471 ops/sec (6.01 µs/op) |
-| contentDigestAlgOf (10 cases) | identify | ~402,713 ops/sec (2.48 µs/op) |
-| assertHmacSecretLength (10 cases) | guard | ~7,948 ops/sec (125.81 µs/op) |
-| assertRsaModulusLength (7 cases) | guard | ~7,737 ops/sec (129.25 µs/op) |
-| signatureInputValue (4 cases) | serialize | ~30,845 ops/sec (32.42 µs/op) |
-| assertContentDigestAlg (10 cases) | guard | ~5,930 ops/sec (168.65 µs/op) |
+| serializeSignatureParams (5 cases) | serialize | ~24,790 ops/sec (40.34 µs/op) |
+| generateNonce (16 + 32 bytes) | generate | ~49,073 ops/sec (20.38 µs/op) |
+| verifyRequestOrThrow (valid) | verify | ~3,864 ops/sec (258.80 µs/op) |
+| verifyRequestOrThrow (tampered) | throw | ~3,125 ops/sec (320.00 µs/op) |
+| getHeader/getHeaderRaw (9 names ×2) | lookup | ~91,881 ops/sec (10.88 µs/op) |
+| joinHeaderValues (9 cases) | join | ~169,089 ops/sec (5.91 µs/op) |
+| contentDigestAlgOf (10 cases) | identify | ~335,867 ops/sec (2.98 µs/op) |
+| assertHmacSecretLength (10 cases) | guard | ~12,447 ops/sec (80.34 µs/op) |
+| assertRsaModulusLength (7 cases) | guard | ~8,290 ops/sec (120.62 µs/op) |
+| signatureInputValue (4 cases) | serialize | ~22,186 ops/sec (45.07 µs/op) |
+| assertContentDigestAlg (10 cases) | guard | ~5,271 ops/sec (189.73 µs/op) |
 
 Load note for this run: it was taken on a shared host (load
-average ~4.1 at the start of the run), so the
+average ~3.3 at the start of the run), so the
 absolute throughputs above vary from quieter runs of the same
 bench, and rows measured at different moments in the run were
 not all hit equally by contention. Treat the table as one real
@@ -1115,14 +1116,14 @@ the bench on a quiet machine for capacity numbers.
 The `ecdsa-p384-sha384` rows: the P-384 path uses the same fixture
 caliber as P-256 (one fresh key pair per scenario, outside the timed
 loops), and in this run it measured markedly more expensive than
-P-256 — about 2,865 µs/op to sign versus about 254 µs/op, and about
-2,512 µs/op to verify versus about 358 µs/op.
+P-256 — about 2,535 µs/op to sign versus about 225 µs/op, and about
+2,970 µs/op to verify versus about 301 µs/op.
 
 The `ecdsa-p521-sha512` rows: the P-521 path uses the same fixture
 caliber as P-256 / P-384 (one fresh key pair per scenario, outside
 the timed loops; signatures are the raw r‖s form, 132 bytes total),
-and it is the most expensive EC tier in this run — about 2.8× the
-per-op sign cost and about 2.0× the verify cost of P-384.
+and it is the most expensive EC tier in this run — about 2.7× the
+per-op sign cost and about 1.7× the verify cost of P-384.
 
 The `verifyAllLabels` row covers the multi-party scenario: the merchant signs
 with ed25519 and the payment gateway appends its own hmac-sha256 signature
@@ -1133,8 +1134,8 @@ restored offline from a snapshot (the bench performs zero network I/O), a
 hit is a plain Map lookup, a `memoizeKeyResolver` hit is served from its
 TTL cache, and a miss uses an unknown keyid, which is never cached and so
 penetrates to the store on every call. In this run the raw
-store hit landed at ~0.31 µs/op, the memoized hit at ~0.26 µs/op
-and the miss at ~0.47 µs/op — all three are plain Map/cache
+store hit landed at ~0.31 µs/op, the memoized hit at ~0.32 µs/op
+and the miss at ~0.41 µs/op — all three are plain Map/cache
 operations whose relative ordering is contention noise on this
 offline fixture: memoizing pays off when the underlying
 resolver is slow or remote, which this offline fixture
@@ -1160,13 +1161,41 @@ and public-only JWK material — no entry may carry a private
 `"d"` member. Outside timing the bench also asserts that a
 never-refreshed store's export is refused with the pinned
 full message (there is no meaningful `fetchedAtSec` for keys
-that were never fetched). In this run it measured ~5,999
-ops/sec (~166.68 µs/op for the three-key pass, roughly
-55.6 µs per key) — about 667× the same run's raw resolve hit
-(~0.25 µs/op), which is the expected shape: a resolve is a
+that were never fetched). In this run it measured ~17,200
+ops/sec (~58.14 µs/op for the three-key pass, roughly
+19.4 µs per key) — about 188× the same run's raw resolve hit
+(~0.31 µs/op), which is the expected shape: a resolve is a
 Map lookup, while an export re-derives every key's JWK
 through node:crypto and assembles a fresh detached envelope
 on every call. The bench makes no wall-clock assertions.
+
+The `refresh` row is new: it measures
+`JwksKeyStore.refreshIfStale` on a stale snapshot — the
+refresh direction a gateway pays when its key snapshot ages
+out and rotation must be picked up, isolated from the
+`resolve` rows above, which only read the store, and from
+the `export` row, which serializes it. One measured op is
+one stale refresh of a one-key store: the injected clock is
+advanced by exactly the 120-second TTL before every call
+(`isStale()` uses `>=` semantics, so the snapshot is stale
+at the boundary), and the call must fetch the pinned JWKS
+document from a counting fake fetch (zero network), import
+the ed25519 JWK and rebuild the kid index. Every measured
+pass self-checks that the call reported a refresh (returned
+true), that the fetch count advanced by exactly one, that
+the store is fresh again at the advanced instant, and that
+the pinned kid resolves; after the run, the total fetch
+count must equal priming + warmup + timed calls exactly.
+Outside timing the bench also pins the not-stale case: a
+fresh snapshot's `refreshIfStale()` returns false and the
+fetch count does not move — the "no fetch while fresh"
+half of the contract costs nothing and fetches nothing.
+In this run it measured ~15,833 ops/sec (~63.16 µs/op) —
+the same order as the same run's three-key export
+(~58.14 µs/op), which is the expected shape: both rebuild
+key material through node:crypto on every call, while a
+resolve is a Map lookup. The bench makes no wall-clock
+assertions (the store's clock is injected).
 
 The `jwkThumbprint` row covers the key-management derivation a JWKS
 publisher runs for every key at publish/rotation time: one measured
@@ -1207,14 +1236,15 @@ timing the bench also asserts the detached-copy semantics
 (mutating an exported snapshot — an entry's nonce, its
 `seenAt`, an injected entry, the version — leaves a
 re-export unchanged) and that an empty cache exports
-`{ v: 1, entries: [] }`. In this run it measured ~93,908
-ops/sec (~10.65 µs/op for the three-live-entry pass) — about
-17× the same run's `ReplayCache.check` hit (~0.63 µs/op),
-which is the expected shape: a check is one Map hit, while
-an export scans the whole map, filters expired entries
-against the injected clock and assembles a fresh detached
-envelope on every call. The bench performs zero network I/O
-and makes no wall-clock assertions.
+`{ v: 1, entries: [] }`. In this run it measured ~428,054
+ops/sec (~2.34 µs/op for the three-live-entry pass) — close
+to the same run's `ReplayCache.check` hit (~1.89 µs/op):
+both are small-map operations at this size (a check is one
+Map hit; an export scans a four-entry map, filters expired
+entries against the injected clock and assembles a fresh
+detached envelope), so their relative ordering at this
+scale is contention-sensitive. The bench performs zero
+network I/O and makes no wall-clock assertions.
 
 The `reject` row covers the malformed-input path a verification gateway
 faces from adversarial or broken senders: measured calls rotate over a
@@ -1239,7 +1269,7 @@ hash, `contentDigest(body, alg)`, over the shared fixture body (the
 sign/verify paths that normally bundle hashing with an asymmetric
 signature — so a reader can see what hashing a body costs on its own
 and how the two algorithms compare at this size. In this run
-sha-256 landed ahead (~534,210 versus ~448,714 ops/sec) — at this
+sha-256 landed ahead (~686,048 versus ~557,195 ops/sec) — at this
 size the call is mostly fixed overhead, so the ordering (and the
 size of the gap) is shared-host noise, not bulk-hashing
 performance. The

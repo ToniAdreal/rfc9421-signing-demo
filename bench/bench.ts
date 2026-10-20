@@ -18,7 +18,15 @@
  * on every measured pass against the hand-pinned envelope (version,
  * fetch time, kid order, per-shape `kty`, public-only JWK fields with
  * no `"d"`), with a never-refreshed store's export refusal asserted
- * outside timing, plus the key-management
+ * outside timing, plus the refresh path a gateway runs when its
+ * snapshot ages out: `JwksKeyStore.refreshIfStale` over a store
+ * whose injected clock is advanced exactly to its TTL boundary
+ * before every measured call (a counting fake fetch serves one
+ * pinned JWKS document — zero network), self-checked on every
+ * measured pass (the call must report a refresh, the fetch count
+ * must advance by exactly one, and the pinned kid must resolve
+ * afterwards), with the not-stale no-fetch case asserted outside
+ * timing, plus the key-management
  * derivation a JWKS publisher runs for every key at publish/rotation
  * time: `jwkThumbprint` (RFC 7638) over a fixed three-shape fixture
  * (ed25519 / P-256 / RSA public JWKs, one derivation per shape per
@@ -287,6 +295,7 @@ import {
   verifyRequestOrThrow,
   type ContentDigestAlg,
   type IncomingRequestLike,
+  type JwksFetchImpl,
   type RequestLike,
   type SignatureParams,
   type SignAlg,
@@ -307,6 +316,18 @@ function measure(fn: () => void, iterations: number): number {
   for (let i = 0; i < WARMUP; i++) fn(); // warmup: JIT, key caching
   const start = process.hrtime.bigint();
   for (let i = 0; i < iterations; i++) fn();
+  const elapsedSec = Number(process.hrtime.bigint() - start) / 1e9;
+  return iterations / elapsedSec;
+}
+
+/** Async twin of {@link measure} for paths that return a promise. */
+async function measureAsync(
+  fn: () => Promise<void>,
+  iterations: number,
+): Promise<number> {
+  for (let i = 0; i < WARMUP; i++) await fn(); // warmup: JIT, key caching
+  const start = process.hrtime.bigint();
+  for (let i = 0; i < iterations; i++) await fn();
   const elapsedSec = Number(process.hrtime.bigint() - start) / 1e9;
   return iterations / elapsedSec;
 }
@@ -569,6 +590,93 @@ function benchmarkJwksExportSnapshot(store: JwksKeyStore): number {
   return measure(() => {
     assertJwksExportSnapshot(store.exportSnapshot());
   }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `JwksKeyStore.refreshIfStale` benchmark store:
+ * one ed25519 key (generated once, outside timing) published under
+ * this kid by the counting fake fetch, a 120-second TTL, and an
+ * injected clock starting at this instant. Every measured call
+ * advances the clock by exactly the TTL — `isStale()` uses `>=`
+ * semantics, so the snapshot is stale at the boundary — and must
+ * therefore fetch exactly once.
+ */
+const JWKS_REFRESH_T0_SEC = 1_700_000_000;
+const JWKS_REFRESH_TTL_SEC = 120;
+const JWKS_REFRESH_KID = "bench-refresh-key";
+
+/**
+ * `JwksKeyStore.refreshIfStale` on a stale snapshot: the refresh
+ * direction the resolve/export rows never pay — stale check against
+ * the injected clock, one fetch of the pinned JWKS document (fake
+ * fetch, zero network), JWK import and index rebuild by kid.
+ * Outside timing, the not-stale case is pinned first: a fresh
+ * snapshot's `refreshIfStale()` returns false and the fetch count
+ * does not move. Every measured call then self-checks that it
+ * refreshed (returned true), that the fetch count advanced by
+ * exactly one, that the store is fresh again at the advanced
+ * instant, and that the pinned kid resolves; after the measured
+ * run the total fetch count must equal priming + warmup + timed
+ * calls exactly.
+ */
+async function benchmarkJwksRefreshIfStale(): Promise<number> {
+  const { publicKey } = generateEd25519KeyPair();
+  const doc = {
+    keys: [{ ...exportPublicKeyJwk(publicKey), kid: JWKS_REFRESH_KID }],
+  };
+  let fetchCalls = 0;
+  const fetchImpl: JwksFetchImpl = async () => {
+    fetchCalls++;
+    return { ok: true, status: 200, json: async () => doc };
+  };
+  let t = JWKS_REFRESH_T0_SEC;
+  const store = new JwksKeyStore(
+    "https://gateway.example.com/.well-known/jwks.json",
+    { fetchImpl, ttlSec: JWKS_REFRESH_TTL_SEC, now: () => t },
+  );
+  // Prime: a never-refreshed store is stale, so this fetches once.
+  if ((await store.refreshIfStale()) !== true || fetchCalls !== 1)
+    throw new Error(
+      "benchmark self-check failed: priming refreshIfStale did not fetch exactly once",
+    );
+  // Outside timing: while fresh, refreshIfStale must not fetch.
+  if ((await store.refreshIfStale()) !== false || fetchCalls !== 1)
+    throw new Error(
+      "benchmark self-check failed: fresh refreshIfStale fetched or reported a refresh",
+    );
+  if (store.resolve(JWKS_REFRESH_KID) === undefined)
+    throw new Error(
+      "benchmark self-check failed: primed store does not resolve the pinned kid",
+    );
+  const ops = await measureAsync(async () => {
+    t += JWKS_REFRESH_TTL_SEC; // exactly at the >= boundary: stale
+    const before = fetchCalls;
+    if ((await store.refreshIfStale()) !== true)
+      throw new Error(
+        "benchmark self-check failed: stale refreshIfStale reported no refresh",
+      );
+    if (fetchCalls !== before + 1)
+      throw new Error(
+        `benchmark self-check failed: stale refreshIfStale made ${fetchCalls - before} fetches (expected 1)`,
+      );
+    if (store.isStale())
+      throw new Error(
+        "benchmark self-check failed: store still stale after refreshIfStale",
+      );
+    if (store.resolve(JWKS_REFRESH_KID) === undefined)
+      throw new Error(
+        "benchmark self-check failed: refreshed store does not resolve the pinned kid",
+      );
+  }, ITERATIONS);
+  if (fetchCalls !== 1 + WARMUP + ITERATIONS)
+    throw new Error(
+      `benchmark self-check failed: refresh path made ${fetchCalls} fetches (expected ${1 + WARMUP + ITERATIONS})`,
+    );
+  if (store.stats().refreshes !== fetchCalls)
+    throw new Error(
+      `benchmark self-check failed: stats().refreshes ${store.stats().refreshes} (expected ${fetchCalls})`,
+    );
+  return ops;
 }
 
 /** Steady-state `JwksKeyStore.resolve` hit: a Map lookup by keyid. */
@@ -3435,6 +3543,11 @@ results.push({
   alg: "JwksKeyStore.exportSnapshot (3 keys)",
   op: "export",
   ops: benchmarkJwksExportSnapshot(offlineJwksExportStore()),
+});
+results.push({
+  alg: "JwksKeyStore.refreshIfStale (stale)",
+  op: "refresh",
+  ops: await benchmarkJwksRefreshIfStale(),
 });
 results.push({
   alg: "jwkThumbprint (3 JWK shapes)",

@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `JwksKeyStore.refreshIfStale` on a stale snapshot — the
+  refresh direction a gateway pays when its key snapshot
+  ages out (stale check against the injected clock, one
+  fetch, JWK import and kid-index rebuild), which the
+  existing `resolve` and `exportSnapshot` rows never
+  timed. The store's injected clock is advanced by
+  exactly its 120-second TTL before every measured call
+  (stale under the `>=` rule), a counting fake fetch
+  serves one pinned JWKS document (zero network), and
+  every measured pass self-checks that the call reported
+  a refresh, that the fetch count advanced by exactly
+  one, and that the pinned kid resolves afterwards; the
+  not-stale case (returns false, fetch count unmoved) is
+  asserted outside timing. An async measurement helper
+  (`measureAsync`) was added for promise-returning paths.
+  The README Benchmarks table was refreshed wholesale
+  from one real run and now carries the `refresh` row.
 - The CLI demo (`npm run demo`) now closes with a
   ReplayCache clear segment: a fresh `ReplayCache` under
   the demo's fixed clock records one pinned nonce (a
