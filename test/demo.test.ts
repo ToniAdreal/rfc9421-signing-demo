@@ -178,6 +178,14 @@ import {
   DEMO_SIGNATURE_LABELS,
   DEMO_REPLAY_CACHE_MAX_ENTRIES,
   DEMO_REPLAY_CACHE_TTL_SEC,
+  DEMO_MAX_AGE_BOUNDARY_AT_SEC,
+  DEMO_MAX_AGE_COVERED_COMPONENTS,
+  DEMO_MAX_AGE_KEY_ID,
+  DEMO_MAX_AGE_NO_CREATED_EXPIRES,
+  DEMO_MAX_AGE_SEC,
+  DEMO_MAX_AGE_TOO_OLD_AT_SEC,
+  DEMO_MAX_AGE_TOO_OLD_CODE,
+  DEMO_MAX_AGE_WITHIN_AT_SEC,
   DEMO_REPLAY_CLEAR_CHECKS,
   DEMO_REPLAY_CLEAR_NONCE,
   DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR,
@@ -3977,7 +3985,7 @@ test("demo ReplayCache clear segment records, replays, clears to zero, and re-re
   assert.equal(verifyRequest(directSigned, directOpts).ok, true);
 });
 
-test("demo lines contain the ReplayCache clear segment (record, replay, cleared zero state, fresh re-record, closing the demo)", async () => {
+test("demo lines contain the ReplayCache clear segment (record, replay, cleared zero state, fresh re-record)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /ReplayCache clear: ReplayCache\.clear\(\) drops every tracked nonce/);
@@ -3995,8 +4003,70 @@ test("demo lines contain the ReplayCache clear segment (record, replay, cleared 
     `ReplayCache clear check("${DEMO_REPLAY_CLEAR_NONCE}") after clear(): returned ${c2} (the same nonce is fresh again — recorded anew), stats() = ${fmt(DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK)} (the counters re-accumulate from zero)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("ReplayCache clear:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
+});
+
+test("demo max-age segment caps a dated signature at maxSignatureAgeSec (within/boundary ok, past-cap SIGNATURE_TOO_OLD, undated bypass)", async () => {
+  const {
+    maxAgeSigned,
+    maxAgeWithinVerification,
+    maxAgeBoundaryVerification,
+    maxAgeTooOldVerification,
+    maxAgeNoCreatedSigned,
+    maxAgeNoCreatedVerification,
+  } = await runDemo();
+  assert.equal(DEMO_MAX_AGE_SEC, 300);
+  assert.equal(DEMO_MAX_AGE_KEY_ID, "demo-max-age-key-1");
+  assert.deepEqual(DEMO_MAX_AGE_COVERED_COMPONENTS, ["@method", "@authority", "@path"]);
+  assert.equal(DEMO_MAX_AGE_WITHIN_AT_SEC, DEMO_CREATED + 60);
+  assert.equal(DEMO_MAX_AGE_BOUNDARY_AT_SEC, DEMO_CREATED + DEMO_MAX_AGE_SEC);
+  assert.equal(DEMO_MAX_AGE_TOO_OLD_AT_SEC, DEMO_CREATED + DEMO_MAX_AGE_SEC + 1);
+  assert.equal(DEMO_MAX_AGE_TOO_OLD_CODE, "SIGNATURE_TOO_OLD");
+  assert.equal(DEMO_MAX_AGE_NO_CREATED_EXPIRES, DEMO_CREATED + 3600);
+  assert.equal(maxAgeWithinVerification.ok, true);
+  assert.equal(maxAgeBoundaryVerification.ok, true);
+  assert.equal(maxAgeTooOldVerification.ok, false);
+  assert.equal(maxAgeTooOldVerification.code, DEMO_MAX_AGE_TOO_OLD_CODE);
+  assert.equal(maxAgeNoCreatedVerification.ok, true);
+  // The dated signature carries created and no expires; the
+  // hand-built one carries expires and no created.
+  assert.match(maxAgeSigned.headers["signature-input"], /created=1700000000/);
+  assert.doesNotMatch(maxAgeSigned.headers["signature-input"], /expires=/);
+  assert.doesNotMatch(maxAgeNoCreatedSigned.headers["signature-input"], /created=/);
+  assert.match(maxAgeNoCreatedSigned.headers["signature-input"], /expires=1700003600/);
+  // Independent re-verification against a fresh key pair driven
+  // directly (the same age semantics test/signatureMaxAge.test.ts
+  // pins): age exactly at the cap passes, one second past fails.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const direct = signRequest(
+    { method: "POST", url: "https://api.example.com/v1/payments", headers: {} },
+    { keyId: DEMO_MAX_AGE_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, coveredComponents: [...DEMO_MAX_AGE_COVERED_COMPONENTS] },
+  );
+  assert.equal(verifyRequest(direct, { key: publicKey, now: DEMO_MAX_AGE_BOUNDARY_AT_SEC, maxSignatureAgeSec: DEMO_MAX_AGE_SEC }).ok, true);
+  const directOld = verifyRequest(direct, { key: publicKey, now: DEMO_MAX_AGE_TOO_OLD_AT_SEC, maxSignatureAgeSec: DEMO_MAX_AGE_SEC });
+  assert.equal(directOld.ok, false);
+  assert.equal(directOld.code, "SIGNATURE_TOO_OLD");
+});
+
+test("demo lines contain the max-age segment (within, past-cap rejection, boundary, undated bypass, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Maximum signature age: verifyRequest's opt-in maxSignatureAgeSec caps/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Maximum signature age:"));
+  const clearIdx = lines.findIndex((l) => l.startsWith("ReplayCache clear:"));
+  assert.ok(clearIdx !== -1 && headerIdx !== -1 && clearIdx < headerIdx);
+  const expectedLines = [
+    "Maximum signature age: verifyRequest's opt-in maxSignatureAgeSec caps how old a signature's created may be — a signature with created but no expires would otherwise verify forever, so the receiver bounds its age itself",
+    `Maximum signature age within the cap: signature created at ${DEMO_CREATED} verified at ${DEMO_MAX_AGE_WITHIN_AT_SEC} (age ${DEMO_MAX_AGE_WITHIN_AT_SEC - DEMO_CREATED}s, maxSignatureAgeSec=${DEMO_MAX_AGE_SEC}): OK (label sig1, keyid="${DEMO_MAX_AGE_KEY_ID}", alg="ed25519")`,
+    `Maximum signature age past the cap: signature created at ${DEMO_CREATED} verified at ${DEMO_MAX_AGE_TOO_OLD_AT_SEC} (age ${DEMO_MAX_AGE_TOO_OLD_AT_SEC - DEMO_CREATED}s, maxSignatureAgeSec=${DEMO_MAX_AGE_SEC}): FAILED (code SIGNATURE_TOO_OLD: signature is too old: created ${DEMO_MAX_AGE_TOO_OLD_AT_SEC - DEMO_CREATED}s ago, older than maxSignatureAgeSec=${DEMO_MAX_AGE_SEC})`,
+    `Maximum signature age at the boundary: signature created at ${DEMO_CREATED} verified at ${DEMO_MAX_AGE_BOUNDARY_AT_SEC} (age exactly ${DEMO_MAX_AGE_SEC}s): OK (the age check is a strict >, so exactly-at-the-cap still verifies)`,
+    `Maximum signature age without created: a hand-built signature carrying no created (expires=${DEMO_MAX_AGE_NO_CREATED_EXPIRES} only) verified at ${DEMO_MAX_AGE_TOO_OLD_AT_SEC} under the same cap: OK (no created bypasses the age check entirely — pair with requireCreated to mandate one)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Maximum signature age:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
 });

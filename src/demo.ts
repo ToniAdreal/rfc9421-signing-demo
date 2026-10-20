@@ -565,7 +565,7 @@
  * counting rules `test/replayStats.test.ts` pins). Every
  * clock is injected, so the segment's printed lines are
  * identical between runs.
- * The demo then closes with a ReplayCache clear segment: a
+ * The demo then shows a ReplayCache clear segment: a
  * fresh `ReplayCache` under the demo's fixed clock records
  * one pinned nonce and reports its repeat as a replay,
  * then `clear()` is called and the segment prints the
@@ -578,6 +578,23 @@
  * `test/replayStats.test.ts` pin for their own clear
  * cases). The clock never moves, so the segment's printed
  * lines are identical between runs.
+ * The demo then closes with a maximum signature age segment:
+ * one ed25519 signature pinned at `DEMO_CREATED` with no
+ * `expires` is verified under the opt-in
+ * `maxSignatureAgeSec` cap (`DEMO_MAX_AGE_SEC`) at three
+ * injected instants — inside the cap (verifies), exactly at
+ * the cap (verifies: the check is a strict `>`), and one
+ * second past it (rejected with the pinned
+ * `SIGNATURE_TOO_OLD` code) — and a hand-built signature
+ * carrying no `created` at all is verified at the past-cap
+ * instant and still verifies: a signature with no `created`
+ * bypasses the age check entirely (orthogonal to
+ * `requireCreated`). Outside the printed lines the demo
+ * asserts every outcome equals the hand-pinned expectations
+ * below (the same age semantics
+ * `test/signatureMaxAge.test.ts` pins). Every clock is
+ * injected and the segment's key pair is fresh per run, so
+ * the printed lines are identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -609,6 +626,7 @@ import { fileURLToPath } from "node:url";
 import {
   createSecretKey,
   generateKeyPairSync,
+  sign as edSign,
   type KeyObject,
 } from "node:crypto";
 import {
@@ -2045,6 +2063,58 @@ export const DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK: ReplayCacheStats = {
   evictions: 0,
 };
 
+/**
+ * Opt-in maximum signature age of the closing max-age
+ * segment, in seconds (`VerifyOptions.maxSignatureAgeSec`).
+ */
+export const DEMO_MAX_AGE_SEC = 300;
+/** Key id of the closing max-age segment's dated signature. */
+export const DEMO_MAX_AGE_KEY_ID = "demo-max-age-key-1";
+/**
+ * Covered components of both max-age segment signatures —
+ * the derived trio the hand-built undated signature in
+ * `test/signatureMaxAge.test.ts` also uses, so the two
+ * signatures differ only in their parameters.
+ */
+export const DEMO_MAX_AGE_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+];
+/**
+ * Injected verify instant inside the cap: the dated
+ * signature is `DEMO_CREATED + 60 - DEMO_CREATED` = 60
+ * seconds old, well under `DEMO_MAX_AGE_SEC`.
+ */
+export const DEMO_MAX_AGE_WITHIN_AT_SEC = DEMO_CREATED + 60;
+/**
+ * Injected verify instant exactly at the cap: the dated
+ * signature is exactly `DEMO_MAX_AGE_SEC` seconds old. The
+ * age check is a strict `>` (`now - created > maxAge`
+ * fails), so the boundary still verifies.
+ */
+export const DEMO_MAX_AGE_BOUNDARY_AT_SEC = DEMO_CREATED + DEMO_MAX_AGE_SEC;
+/**
+ * Injected verify instant one second past the cap: the
+ * dated signature is `DEMO_MAX_AGE_SEC + 1` seconds old
+ * and must be rejected.
+ */
+export const DEMO_MAX_AGE_TOO_OLD_AT_SEC = DEMO_CREATED + DEMO_MAX_AGE_SEC + 1;
+/**
+ * Hand-pinned failure code of the past-cap verification:
+ * `SIGNATURE_TOO_OLD`, the same code
+ * `test/signatureMaxAge.test.ts` pins.
+ */
+export const DEMO_MAX_AGE_TOO_OLD_CODE: VerifyFailureCode =
+  "SIGNATURE_TOO_OLD";
+/**
+ * `expires` of the hand-built undated signature: one hour
+ * after `DEMO_CREATED`, so at the past-cap verify instant
+ * the signature is still inside its freshness window and
+ * only the (bypassed) age check could have rejected it.
+ */
+export const DEMO_MAX_AGE_NO_CREATED_EXPIRES = DEMO_CREATED + 3600;
+
 /** Nonce of the thumbprint segment's signed request. */
 export const DEMO_THUMBPRINT_NONCE = "demo-nonce-thumbprint-001";
 /**
@@ -2940,6 +3010,43 @@ export interface DemoResult {
    * counters re-accumulated from zero).
    */
   replayClearStatsAfterRecheck: ReplayCacheStats;
+  /**
+   * The closing max-age segment's dated signature: an
+   * ed25519 signature pinned at `DEMO_CREATED` with no
+   * `expires`, so only the opt-in age cap bounds it.
+   */
+  maxAgeSigned: SignedHttpRequest;
+  /**
+   * The segment's verification at
+   * `DEMO_MAX_AGE_WITHIN_AT_SEC` under
+   * `maxSignatureAgeSec: DEMO_MAX_AGE_SEC`: ok.
+   */
+  maxAgeWithinVerification: VerifyResult;
+  /**
+   * The segment's verification at
+   * `DEMO_MAX_AGE_BOUNDARY_AT_SEC`: ok — the age check is
+   * a strict `>`, so exactly-at-the-cap still verifies.
+   */
+  maxAgeBoundaryVerification: VerifyResult;
+  /**
+   * The segment's verification at
+   * `DEMO_MAX_AGE_TOO_OLD_AT_SEC`: rejected with the
+   * hand-pinned `DEMO_MAX_AGE_TOO_OLD_CODE`
+   * (`SIGNATURE_TOO_OLD`).
+   */
+  maxAgeTooOldVerification: VerifyResult;
+  /**
+   * The segment's hand-built signature carrying no
+   * `created` parameter at all (only `expires`, `keyid`
+   * and `alg`) — the shape a third-party signer may send.
+   */
+  maxAgeNoCreatedSigned: SignedHttpRequest;
+  /**
+   * The segment's verification of the undated signature
+   * at `DEMO_MAX_AGE_TOO_OLD_AT_SEC` under the same cap:
+   * ok — no `created` bypasses the age check entirely.
+   */
+  maxAgeNoCreatedVerification: VerifyResult;
   lines: string[];
 }
 
@@ -5477,6 +5584,111 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Maximum signature age segment: the freshness segments
+  // above bound a signature by its own `expires`, but a
+  // signature carrying `created` and no `expires` would
+  // otherwise verify forever. The opt-in
+  // `maxSignatureAgeSec` verify option caps its age. This
+  // segment signs one ed25519 request pinned at
+  // DEMO_CREATED with no `expires` and verifies that same
+  // signature at three injected instants under the cap:
+  // inside it, exactly at it (the check is a strict `>`,
+  // so the boundary verifies), and one second past it
+  // (rejected with SIGNATURE_TOO_OLD). A second signature
+  // is then built by hand — buildSignatureBase +
+  // signatureInputValue + a raw ed25519 sign, the shape
+  // test/signatureMaxAge.test.ts uses — carrying no
+  // `created` at all (only `expires`, `keyid`, `alg`): at
+  // the past-cap instant it still verifies, because a
+  // signature with no `created` bypasses the age check
+  // entirely (orthogonal to `requireCreated`). Outside the
+  // printed lines the demo asserts every outcome equals
+  // the hand-pinned expectations.
+  const maxAgePair = generateEd25519KeyPair();
+  const maxAgeSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: {},
+    },
+    {
+      keyId: DEMO_MAX_AGE_KEY_ID,
+      alg: "ed25519",
+      key: maxAgePair.privateKey,
+      created: DEMO_CREATED,
+      coveredComponents: [...DEMO_MAX_AGE_COVERED_COMPONENTS],
+    },
+  );
+  const maxAgeWithinVerification = verifyRequest(maxAgeSigned, {
+    key: maxAgePair.publicKey,
+    now: DEMO_MAX_AGE_WITHIN_AT_SEC,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
+  });
+  const maxAgeBoundaryVerification = verifyRequest(maxAgeSigned, {
+    key: maxAgePair.publicKey,
+    now: DEMO_MAX_AGE_BOUNDARY_AT_SEC,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
+  });
+  const maxAgeTooOldVerification = verifyRequest(maxAgeSigned, {
+    key: maxAgePair.publicKey,
+    now: DEMO_MAX_AGE_TOO_OLD_AT_SEC,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
+  });
+  const maxAgeNoCreatedParams: SignatureParams = {
+    keyid: DEMO_MAX_AGE_KEY_ID,
+    alg: "ed25519",
+    expires: DEMO_MAX_AGE_NO_CREATED_EXPIRES,
+  };
+  const maxAgeNoCreatedRequest: RequestLike = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: {},
+  };
+  const maxAgeNoCreatedBase = buildSignatureBase(
+    [...DEMO_MAX_AGE_COVERED_COMPONENTS],
+    maxAgeNoCreatedRequest,
+    maxAgeNoCreatedParams,
+  );
+  const maxAgeNoCreatedSig = edSign(
+    null,
+    Buffer.from(maxAgeNoCreatedBase, "utf8"),
+    maxAgePair.privateKey,
+  );
+  const maxAgeNoCreatedSigned: SignedHttpRequest = {
+    method: maxAgeNoCreatedRequest.method,
+    url: maxAgeNoCreatedRequest.url,
+    headers: {
+      "signature-input": signatureInputValue(
+        "sig1",
+        [...DEMO_MAX_AGE_COVERED_COMPONENTS],
+        maxAgeNoCreatedParams,
+      ),
+      signature: `sig1=:${maxAgeNoCreatedSig.toString("base64")}:`,
+    },
+  };
+  const maxAgeNoCreatedVerification = verifyRequest(maxAgeNoCreatedSigned, {
+    key: maxAgePair.publicKey,
+    now: DEMO_MAX_AGE_TOO_OLD_AT_SEC,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
+  });
+  if (
+    maxAgeWithinVerification.ok !== true ||
+    maxAgeBoundaryVerification.ok !== true ||
+    maxAgeTooOldVerification.ok !== false ||
+    maxAgeTooOldVerification.code !== DEMO_MAX_AGE_TOO_OLD_CODE ||
+    maxAgeNoCreatedVerification.ok !== true
+  ) {
+    throw new Error(
+      `demo fixture broken: maxSignatureAgeSec gave within ` +
+        `${JSON.stringify(maxAgeWithinVerification)}, boundary ` +
+        `${JSON.stringify(maxAgeBoundaryVerification)}, too-old ` +
+        `${JSON.stringify(maxAgeTooOldVerification)} and no-created ` +
+        `${JSON.stringify(maxAgeNoCreatedVerification)}, instead of ` +
+        `within/boundary/no-created ok and too-old rejected with ` +
+        `${DEMO_MAX_AGE_TOO_OLD_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -5792,6 +6004,20 @@ export async function runDemo(): Promise<DemoResult> {
     `ReplayCache clear repeat check("${DEMO_REPLAY_CLEAR_NONCE}"): returned ${replayClearReplayCheck} (the nonce was already seen — a replay), stats() = ${formatReplayStats(replayClearStatsBefore)}`,
     `ReplayCache clear after clear(): size = ${replayClearSizeAfterClear}, stats() = ${formatReplayStats(replayClearStatsAfterClear)} (every tracked nonce dropped, every counter back at zero)`,
     `ReplayCache clear check("${DEMO_REPLAY_CLEAR_NONCE}") after clear(): returned ${replayClearRecheck} (the same nonce is fresh again — recorded anew), stats() = ${formatReplayStats(replayClearStatsAfterRecheck)} (the counters re-accumulate from zero)`,
+    "",
+    "Maximum signature age: verifyRequest's opt-in maxSignatureAgeSec caps how old a signature's created may be — a signature with created but no expires would otherwise verify forever, so the receiver bounds its age itself",
+    maxAgeWithinVerification.ok
+      ? `Maximum signature age within the cap: signature created at ${DEMO_CREATED} verified at ${DEMO_MAX_AGE_WITHIN_AT_SEC} (age ${DEMO_MAX_AGE_WITHIN_AT_SEC - DEMO_CREATED}s, maxSignatureAgeSec=${DEMO_MAX_AGE_SEC}): OK (label ${maxAgeWithinVerification.label}, keyid="${maxAgeWithinVerification.keyId}", alg="${maxAgeWithinVerification.alg}")`
+      : `Maximum signature age within the cap: signature created at ${DEMO_CREATED} verified at ${DEMO_MAX_AGE_WITHIN_AT_SEC} (age ${DEMO_MAX_AGE_WITHIN_AT_SEC - DEMO_CREATED}s, maxSignatureAgeSec=${DEMO_MAX_AGE_SEC}): FAILED (code ${maxAgeWithinVerification.code}: ${maxAgeWithinVerification.reason})`,
+    maxAgeTooOldVerification.ok
+      ? `Maximum signature age past the cap: signature created at ${DEMO_CREATED} verified at ${DEMO_MAX_AGE_TOO_OLD_AT_SEC} (age ${DEMO_MAX_AGE_TOO_OLD_AT_SEC - DEMO_CREATED}s, maxSignatureAgeSec=${DEMO_MAX_AGE_SEC}): OK (unexpected — the age cap was not enforced)`
+      : `Maximum signature age past the cap: signature created at ${DEMO_CREATED} verified at ${DEMO_MAX_AGE_TOO_OLD_AT_SEC} (age ${DEMO_MAX_AGE_TOO_OLD_AT_SEC - DEMO_CREATED}s, maxSignatureAgeSec=${DEMO_MAX_AGE_SEC}): FAILED (code ${maxAgeTooOldVerification.code}: ${maxAgeTooOldVerification.reason})`,
+    maxAgeBoundaryVerification.ok
+      ? `Maximum signature age at the boundary: signature created at ${DEMO_CREATED} verified at ${DEMO_MAX_AGE_BOUNDARY_AT_SEC} (age exactly ${DEMO_MAX_AGE_SEC}s): OK (the age check is a strict >, so exactly-at-the-cap still verifies)`
+      : `Maximum signature age at the boundary: signature created at ${DEMO_CREATED} verified at ${DEMO_MAX_AGE_BOUNDARY_AT_SEC} (age exactly ${DEMO_MAX_AGE_SEC}s): FAILED (code ${maxAgeBoundaryVerification.code}: ${maxAgeBoundaryVerification.reason})`,
+    maxAgeNoCreatedVerification.ok
+      ? `Maximum signature age without created: a hand-built signature carrying no created (expires=${DEMO_MAX_AGE_NO_CREATED_EXPIRES} only) verified at ${DEMO_MAX_AGE_TOO_OLD_AT_SEC} under the same cap: OK (no created bypasses the age check entirely — pair with requireCreated to mandate one)`
+      : `Maximum signature age without created: a hand-built signature carrying no created (expires=${DEMO_MAX_AGE_NO_CREATED_EXPIRES} only) verified at ${DEMO_MAX_AGE_TOO_OLD_AT_SEC} under the same cap: FAILED (code ${maxAgeNoCreatedVerification.code}: ${maxAgeNoCreatedVerification.reason})`,
   ];
 
   return {
@@ -5943,6 +6169,12 @@ export async function runDemo(): Promise<DemoResult> {
     replayClearStatsAfterClear,
     replayClearRecheck,
     replayClearStatsAfterRecheck,
+    maxAgeSigned,
+    maxAgeWithinVerification,
+    maxAgeBoundaryVerification,
+    maxAgeTooOldVerification,
+    maxAgeNoCreatedSigned,
+    maxAgeNoCreatedVerification,
     lines,
   };
 }

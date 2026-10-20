@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a maximum
+  signature age segment: one ed25519 signature pinned at
+  the demo's fixed `created` instant with no `expires` is
+  verified under the opt-in `maxSignatureAgeSec` cap
+  (300 seconds) at three injected instants — inside the
+  cap (verifies), exactly at the cap (verifies: the age
+  check is a strict `>`), and one second past it
+  (rejected with `SIGNATURE_TOO_OLD`) — and a hand-built
+  signature carrying no `created` at all (only `expires`,
+  `keyid` and `alg`) still verifies at the past-cap
+  instant, because a signature with no `created` bypasses
+  the age check entirely (orthogonal to
+  `requireCreated`). `DemoResult` gains the segment's
+  signed requests and four verification results, the demo
+  tests gain two cases pinning the segment end-to-end
+  (734 tests in total), and every clock in the segment is
+  injected — no network, no wall clock, no randomness in
+  the printed lines.
 - The benchmark (`npm run bench`) now also measures
   `ReplayCache.fromSnapshot` — the snapshot-restore path a
   single-process verifier runs at startup to rebuild its
