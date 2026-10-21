@@ -32,11 +32,23 @@ import {
   parseSignatureInput,
   ReplayCache,
   resolveComponent,
+  secretKey,
   signRequest,
   signatureInputValue,
   verifyRequest,
 } from "../src/index.js";
 import {
+  DEMO_ALG_FALLBACK_DATE,
+  DEMO_ALG_FALLBACK_DEFAULT_CODE,
+  DEMO_ALG_FALLBACK_INCOMPATIBLE_ERROR,
+  DEMO_ALG_FALLBACK_INFERRED_ALG,
+  DEMO_ALG_FALLBACK_KEY_ID,
+  DEMO_ALG_FALLBACK_LABEL,
+  DEMO_ALG_FALLBACK_SECRET_B64,
+  DEMO_ALG_FALLBACK_SIGNATURE,
+  DEMO_ALG_FALLBACK_SIGNATURE_INPUT,
+  DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR,
+  DEMO_ALG_FALLBACK_URL,
   DEMO_BODY,
   DEMO_COVERED_COMPONENTS,
   DEMO_CREATED,
@@ -4325,8 +4337,75 @@ test("demo lines contain the application-tag segment (match, mismatch, missing, 
     `No expectedTag pinned: the same signature with tag "${DEMO_EXPECTED_TAG}" verified without the option: OK (label sig1, keyid="${DEMO_EXPECTED_TAG_KEY_ID}", alg="ed25519", nonce="${DEMO_EXPECTED_TAG_NONCE}", tag="${DEMO_EXPECTED_TAG}") (no check is made — backwards compatible)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(lines[headerIdx + 6].startsWith("Alg fallback inference:"));
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Application tag binding:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
+});
+
+test("demo alg-fallback segment pins algFallback infer (inferred passes, legacy default fails, incompatible and uninferrable throw)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_ALG_FALLBACK_LABEL, "sig-b25");
+  assert.equal(DEMO_ALG_FALLBACK_KEY_ID, "test-shared-secret");
+  assert.equal(DEMO_ALG_FALLBACK_URL, "http://example.com/foo?param=Value&Pet=dog");
+  assert.equal(DEMO_ALG_FALLBACK_DATE, "Tue, 20 Apr 2021 02:07:55 GMT");
+  assert.equal(DEMO_ALG_FALLBACK_SIGNATURE_INPUT, 'sig-b25=("date" "@authority" "content-type");created=1618884473;keyid="test-shared-secret"');
+  assert.ok(!DEMO_ALG_FALLBACK_SIGNATURE_INPUT.includes("alg="));
+  assert.equal(DEMO_ALG_FALLBACK_SIGNATURE, "sig-b25=:pxcQw6G3AjtMBQjwo8XzkZf/bws5LelbaMk5rGIGtE8=:");
+  assert.equal(DEMO_ALG_FALLBACK_INFERRED_ALG, "hmac-sha256");
+  assert.equal(DEMO_ALG_FALLBACK_DEFAULT_CODE, "VERIFICATION_ERROR");
+  assert.equal(DEMO_ALG_FALLBACK_INCOMPATIBLE_ERROR, 'verifyRequest: wire alg "ed25519" is incompatible with the configured key (a secret (symmetric) key) — pass a matching key or remove the algFallback "infer" opt-in');
+  assert.equal(DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR, 'verifyRequest: algFallback "infer" cannot infer an algorithm for an asymmetric ec key (secp256k1) — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, P-384 (secp384r1) EC keys, P-521 (secp521r1) EC keys, and RSA keys (rsa-pss-sha512)');
+  assert.equal(r.algFallbackWire.headers["signature-input"], DEMO_ALG_FALLBACK_SIGNATURE_INPUT);
+  assert.equal(r.algFallbackWire.headers["signature"], DEMO_ALG_FALLBACK_SIGNATURE);
+  assert.equal(r.algFallbackInferVerification.ok, true);
+  assert.equal(r.algFallbackInferVerification.alg, DEMO_ALG_FALLBACK_INFERRED_ALG);
+  assert.equal(r.algFallbackInferVerification.keyId, DEMO_ALG_FALLBACK_KEY_ID);
+  assert.equal(r.algFallbackInferVerification.label, DEMO_ALG_FALLBACK_LABEL);
+  assert.equal(r.algFallbackDefaultVerification.ok, false);
+  assert.equal(r.algFallbackDefaultVerification.code, DEMO_ALG_FALLBACK_DEFAULT_CODE);
+  assert.equal(r.algFallbackIncompatibleError, DEMO_ALG_FALLBACK_INCOMPATIBLE_ERROR);
+  assert.equal(r.algFallbackUninferrableError, DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR);
+  // Independent checks driven directly (the same inference
+  // semantics test/algFallback.test.ts pins): the B.2.5 wire
+  // verifies under infer, fails under the legacy default,
+  // and both configuration errors throw verbatim.
+  const secret = secretKey(Buffer.from(DEMO_ALG_FALLBACK_SECRET_B64, "base64"));
+  const directInfer = verifyRequest(r.algFallbackWire, { key: secret, label: DEMO_ALG_FALLBACK_LABEL, algFallback: "infer" });
+  assert.equal(directInfer.ok, true);
+  assert.equal(directInfer.alg, "hmac-sha256");
+  const directDefault = verifyRequest(r.algFallbackWire, { key: secret, label: DEMO_ALG_FALLBACK_LABEL });
+  assert.equal(directDefault.ok, false);
+  assert.equal(directDefault.code, "VERIFICATION_ERROR");
+  assert.throws(
+    () => verifyRequest(r.signed, { key: secretKey(DEMO_GATEWAY_SECRET), algFallback: "infer" }),
+    (err: unknown) => err instanceof Error && err.message === DEMO_ALG_FALLBACK_INCOMPATIBLE_ERROR,
+  );
+  const { publicKey: k1Public } = generateKeyPairSync("ec", { namedCurve: "secp256k1" });
+  assert.throws(
+    () => verifyRequest(r.algFallbackWire, { key: k1Public, label: DEMO_ALG_FALLBACK_LABEL, algFallback: "infer" }),
+    (err: unknown) => err instanceof Error && err.message === DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR,
+  );
+});
+
+test("demo lines contain the alg-fallback segment (inferred, default, incompatible, uninferrable, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Alg fallback inference: verifyRequest's algFallback "infer" opt-in infers/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Alg fallback inference:"));
+  const tagIdx = lines.findIndex((l) => l.startsWith("Application tag binding:"));
+  assert.ok(tagIdx !== -1 && headerIdx !== -1 && tagIdx < headerIdx);
+  const expectedLines = [
+    'Alg fallback inference: verifyRequest\'s algFallback "infer" opt-in infers the algorithm from the verifying key\'s shape when a foreign signature omits the optional alg parameter (RFC 9421 §2.3) — inference is never automatic: without the opt-in a missing alg keeps the legacy ed25519 default, a wire alg that contradicts the key\'s shape throws a configuration error, and so does a key shape with no supported mapping',
+    `Inferred alg: RFC 9421 B.2.5 signature with no alg parameter verified with algFallback "infer" against its shared secret: OK (label ${DEMO_ALG_FALLBACK_LABEL}, keyid="${DEMO_ALG_FALLBACK_KEY_ID}", alg="${DEMO_ALG_FALLBACK_INFERRED_ALG}")`,
+    `No opt-in: the same no-alg signature verified without algFallback: FAILED (code ${DEMO_ALG_FALLBACK_DEFAULT_CODE}) (the legacy ed25519 default is tried against the secret key and the crypto layer rejects the shape)`,
+    `Incompatible wire alg: the main ed25519 signature verified with algFallback "infer" against a secret key: rejected with configuration error "${DEMO_ALG_FALLBACK_INCOMPATIBLE_ERROR}"`,
+    `Uninferrable key shape: the same no-alg signature verified with algFallback "infer" against a secp256k1 key: rejected with configuration error "${DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR}"`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Alg fallback inference:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
 });

@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with an
+  alg-fallback segment: the RFC 9421 Appendix B.2.5
+  hmac-sha256 wire value — whose signature-input carries
+  no `alg` parameter — is verified against its pinned
+  shared secret with `algFallback: "infer"` (the
+  algorithm is inferred from the secret key's shape and
+  reported as `hmac-sha256`) and without the opt-in
+  (the legacy `ed25519` default fails with
+  `VERIFICATION_ERROR`), and the two caller
+  configuration errors print verbatim: a wire
+  `alg="ed25519"` paired with a secret key, and the
+  no-`alg` wire paired with a secp256k1 key whose shape
+  has no supported mapping. `DemoResult` gains the
+  segment's wire request, two verification results and
+  the two thrown messages, and the demo tests gain two
+  cases pinning the segment end-to-end (742 tests in
+  total). Every fixture is fixed — no network, no wall
+  clock.
 - The benchmark (`npm run bench`) now also measures
   `verifyRequest` with `requireExpires` — the
   expiry-presence verify form a receiver uses to

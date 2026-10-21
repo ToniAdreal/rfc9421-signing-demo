@@ -654,6 +654,30 @@
  * `test/tag.test.ts` pins). Every clock is injected and
  * the segment's key pair is fresh per run, so the
  * printed lines are identical between runs.
+ * The demo then closes with an alg-fallback segment:
+ * `VerifyOptions.algFallback: "infer"` (`src/verify.ts`)
+ * is the explicit opt-in for foreign signers that omit
+ * the optional `alg` parameter (RFC 9421 §2.3): the
+ * algorithm is inferred from the verifying key's shape,
+ * a wire `alg` that contradicts the key's shape throws a
+ * caller configuration error, and an unmappable key shape
+ * throws one too — while without the opt-in a missing
+ * `alg` keeps the legacy `"ed25519"` default and no
+ * inference ever happens silently. The wire request is
+ * the RFC 9421 Appendix B.2.5 hmac-sha256 vector verbatim
+ * (it carries no `alg`), verified against its pinned
+ * shared secret; the incompatible shape reuses the main
+ * line's ed25519 signature against a secret key, and the
+ * uninferrable shape verifies the same B.2.5 request
+ * against a secp256k1 key. Outside the printed lines the
+ * demo asserts every outcome, inferred alg, failure code
+ * and thrown message equals the hand-pinned expectations
+ * below (the same inference semantics
+ * `test/algFallback.test.ts` pins). Every key and
+ * timestamp is a fixed demo constant (the secp256k1 key
+ * pair is generated only to obtain that key *shape*; no
+ * key bytes are printed), so the printed lines are
+ * identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2377,6 +2401,63 @@ export const DEMO_EXPECTED_TAG_MISMATCH_REASON =
 export const DEMO_EXPECTED_TAG_MISSING_REASON =
   'tag mismatch: expected "payment-webhook-v1", got no tag';
 
+/** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
+export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
+/** Key id carried by the segment's B.2.5 signature-input. */
+export const DEMO_ALG_FALLBACK_KEY_ID = "test-shared-secret";
+/**
+ * RFC 9421 §B.1.5 test-shared-secret: 64 bytes, Base64 — the
+ * pinned shared secret the B.2.5 vector verifies against
+ * (the same constant `test/algFallback.test.ts` pins).
+ */
+export const DEMO_ALG_FALLBACK_SECRET_B64 =
+  "uzvJfB4u3N0Jy4T7NZ75MDVcr8zSTInedJtkgcu46YW4XByzNJjxBdtjUkdJPBt" +
+  "bmHhIDi6pcl8jsasjlTMtDQ==";
+/** Absolute URL of the segment's B.2.5 wire request. */
+export const DEMO_ALG_FALLBACK_URL =
+  "http://example.com/foo?param=Value&Pet=dog";
+/** `date` header of the segment's B.2.5 wire request. */
+export const DEMO_ALG_FALLBACK_DATE = "Tue, 20 Apr 2021 02:07:55 GMT";
+/**
+ * B.2.5 Signature-Input value under label `sig-b25` — note it
+ * carries `created` and `keyid` but no `alg`: `alg` is
+ * optional per RFC 9421 §2.3, which is the whole point of
+ * the segment.
+ */
+export const DEMO_ALG_FALLBACK_SIGNATURE_INPUT = `sig-b25=("date" "@authority" "content-type");created=1618884473;keyid="test-shared-secret"`;
+/** B.2.5 expected MAC value, in `signature` header form. */
+export const DEMO_ALG_FALLBACK_SIGNATURE =
+  "sig-b25=:pxcQw6G3AjtMBQjwo8XzkZf/bws5LelbaMk5rGIGtE8=:";
+/**
+ * Algorithm `algFallback: "infer"` resolves for the B.2.5
+ * wire against a secret key: `hmac-sha256`.
+ */
+export const DEMO_ALG_FALLBACK_INFERRED_ALG = "hmac-sha256";
+/**
+ * Hand-pinned failure code when the same no-`alg` wire is
+ * verified *without* the opt-in: the legacy `"ed25519"`
+ * default is tried against the secret key and the crypto
+ * layer rejects the shape (`VERIFICATION_ERROR`).
+ */
+export const DEMO_ALG_FALLBACK_DEFAULT_CODE: VerifyFailureCode =
+  "VERIFICATION_ERROR";
+/**
+ * Hand-pinned configuration error thrown when a wire
+ * `alg="ed25519"` (the main line's signature) is verified
+ * under `algFallback: "infer"` against a secret key (the
+ * exact wording `src/verify.ts` throws).
+ */
+export const DEMO_ALG_FALLBACK_INCOMPATIBLE_ERROR =
+  'verifyRequest: wire alg "ed25519" is incompatible with the configured key (a secret (symmetric) key) — pass a matching key or remove the algFallback "infer" opt-in';
+/**
+ * Hand-pinned configuration error thrown when the no-`alg`
+ * B.2.5 wire is verified under `algFallback: "infer"`
+ * against a secp256k1 key, whose shape has no supported
+ * mapping (the exact wording `src/verify.ts` throws).
+ */
+export const DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR =
+  'verifyRequest: algFallback "infer" cannot infer an algorithm for an asymmetric ec key (secp256k1) — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, P-384 (secp384r1) EC keys, P-521 (secp521r1) EC keys, and RSA keys (rsa-pss-sha512)';
+
 export interface DemoResult {
   signed: SignedHttpRequest;
   tamperedBody: string;
@@ -3342,6 +3423,34 @@ export interface DemoResult {
    * `expectedTag` pinned (ok — no check is made).
    */
   expectedTagUnsetVerification: VerifyResult;
+  /** The closing alg-fallback segment's wire request: the RFC 9421 Appendix B.2.5 request, whose signature-input carries no `alg`. */
+  algFallbackWire: RequestLike;
+  /**
+   * Verification of `algFallbackWire` with
+   * `algFallback: "infer"` against its pinned shared secret
+   * (ok — the algorithm is inferred as `hmac-sha256`).
+   */
+  algFallbackInferVerification: VerifyResult;
+  /**
+   * Verification of `algFallbackWire` with no opt-in (fails
+   * with `VERIFICATION_ERROR` — the legacy `"ed25519"`
+   * default is tried against the secret key).
+   */
+  algFallbackDefaultVerification: VerifyResult;
+  /**
+   * Configuration error thrown when the main line's
+   * ed25519 signature is verified with `algFallback:
+   * "infer"` against a secret key (equals
+   * `DEMO_ALG_FALLBACK_INCOMPATIBLE_ERROR`).
+   */
+  algFallbackIncompatibleError: string;
+  /**
+   * Configuration error thrown when `algFallbackWire` is
+   * verified with `algFallback: "infer"` against a
+   * secp256k1 key (equals
+   * `DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR`).
+   */
+  algFallbackUninferrableError: string;
   lines: string[];
 }
 
@@ -6280,6 +6389,94 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Alg-fallback segment: `algFallback: "infer"` is the
+  // explicit opt-in for foreign signers that omit the
+  // optional `alg` parameter. The wire request is the
+  // RFC 9421 Appendix B.2.5 hmac-sha256 vector verbatim —
+  // its signature-input carries `created` and `keyid` but
+  // no `alg` — verified against its pinned shared secret:
+  // with the opt-in the algorithm is inferred from the
+  // secret key's shape (`hmac-sha256`); without it the
+  // legacy `"ed25519"` default is tried against the secret
+  // and fails. Two caller configuration errors print too:
+  // the main line's ed25519 signature (wire `alg` present)
+  // verified under the opt-in against a secret key, and
+  // the B.2.5 wire verified under the opt-in against a
+  // secp256k1 key, whose shape has no supported mapping.
+  // Outside the printed lines the demo asserts every
+  // outcome, the inferred alg, the failure code and both
+  // thrown messages equal the hand-pinned expectations.
+  const algFallbackWire: RequestLike = {
+    method: "POST",
+    url: DEMO_ALG_FALLBACK_URL,
+    headers: {
+      date: DEMO_ALG_FALLBACK_DATE,
+      "content-type": "application/json",
+      "signature-input": DEMO_ALG_FALLBACK_SIGNATURE_INPUT,
+      signature: DEMO_ALG_FALLBACK_SIGNATURE,
+    },
+  };
+  const algFallbackSecret = secretKey(
+    Buffer.from(DEMO_ALG_FALLBACK_SECRET_B64, "base64"),
+  );
+  const algFallbackInferVerification = verifyRequest(algFallbackWire, {
+    key: algFallbackSecret,
+    label: DEMO_ALG_FALLBACK_LABEL,
+    algFallback: "infer",
+  });
+  const algFallbackDefaultVerification = verifyRequest(algFallbackWire, {
+    key: algFallbackSecret,
+    label: DEMO_ALG_FALLBACK_LABEL,
+  });
+  let algFallbackIncompatibleError = "";
+  try {
+    verifyRequest(signed, {
+      key: secretKey(DEMO_GATEWAY_SECRET),
+      algFallback: "infer",
+    });
+  } catch (err) {
+    algFallbackIncompatibleError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const { publicKey: algFallbackK1PublicKey } = generateKeyPairSync("ec", {
+    namedCurve: "secp256k1",
+  });
+  let algFallbackUninferrableError = "";
+  try {
+    verifyRequest(algFallbackWire, {
+      key: algFallbackK1PublicKey,
+      label: DEMO_ALG_FALLBACK_LABEL,
+      algFallback: "infer",
+    });
+  } catch (err) {
+    algFallbackUninferrableError =
+      err instanceof Error ? err.message : String(err);
+  }
+  if (
+    algFallbackInferVerification.ok !== true ||
+    algFallbackInferVerification.alg !== DEMO_ALG_FALLBACK_INFERRED_ALG ||
+    algFallbackInferVerification.keyId !== DEMO_ALG_FALLBACK_KEY_ID ||
+    algFallbackInferVerification.label !== DEMO_ALG_FALLBACK_LABEL ||
+    algFallbackDefaultVerification.ok !== false ||
+    algFallbackDefaultVerification.code !==
+      DEMO_ALG_FALLBACK_DEFAULT_CODE ||
+    algFallbackIncompatibleError !==
+      DEMO_ALG_FALLBACK_INCOMPATIBLE_ERROR ||
+    algFallbackUninferrableError !== DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: algFallback gave infer ` +
+        `${JSON.stringify(algFallbackInferVerification)}, default ` +
+        `${JSON.stringify(algFallbackDefaultVerification)}, incompatible ` +
+        `"${algFallbackIncompatibleError}" and uninferrable ` +
+        `"${algFallbackUninferrableError}", instead of an ok inference ` +
+        `reporting alg "${DEMO_ALG_FALLBACK_INFERRED_ALG}" and keyid ` +
+        `"${DEMO_ALG_FALLBACK_KEY_ID}", a default failure with ` +
+        `${DEMO_ALG_FALLBACK_DEFAULT_CODE}, and the two pinned ` +
+        `configuration errors`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -6654,6 +6851,16 @@ export async function runDemo(): Promise<DemoResult> {
     expectedTagUnsetVerification.ok
       ? `No expectedTag pinned: the same signature with tag "${DEMO_EXPECTED_TAG}" verified without the option: OK (label ${expectedTagUnsetVerification.label}, keyid="${expectedTagUnsetVerification.keyId}", alg="${expectedTagUnsetVerification.alg}", nonce="${expectedTagUnsetVerification.nonce}", tag="${expectedTagUnsetVerification.tag}") (no check is made — backwards compatible)`
       : `No expectedTag pinned: the same signature with tag "${DEMO_EXPECTED_TAG}" verified without the option: FAILED (code ${expectedTagUnsetVerification.code}: ${expectedTagUnsetVerification.reason})`,
+    "",
+    "Alg fallback inference: verifyRequest's algFallback \"infer\" opt-in infers the algorithm from the verifying key's shape when a foreign signature omits the optional alg parameter (RFC 9421 §2.3) — inference is never automatic: without the opt-in a missing alg keeps the legacy ed25519 default, a wire alg that contradicts the key's shape throws a configuration error, and so does a key shape with no supported mapping",
+    algFallbackInferVerification.ok
+      ? `Inferred alg: RFC 9421 B.2.5 signature with no alg parameter verified with algFallback "infer" against its shared secret: OK (label ${algFallbackInferVerification.label}, keyid="${algFallbackInferVerification.keyId}", alg="${algFallbackInferVerification.alg}")`
+      : `Inferred alg: RFC 9421 B.2.5 signature with no alg parameter verified with algFallback "infer" against its shared secret: FAILED (code ${algFallbackInferVerification.code}: ${algFallbackInferVerification.reason})`,
+    algFallbackDefaultVerification.ok
+      ? `No opt-in: the same no-alg signature verified without algFallback: OK (unexpected — the legacy default was not applied)`
+      : `No opt-in: the same no-alg signature verified without algFallback: FAILED (code ${algFallbackDefaultVerification.code}) (the legacy ed25519 default is tried against the secret key and the crypto layer rejects the shape)`,
+    `Incompatible wire alg: the main ed25519 signature verified with algFallback "infer" against a secret key: rejected with configuration error "${algFallbackIncompatibleError}"`,
+    `Uninferrable key shape: the same no-alg signature verified with algFallback "infer" against a secp256k1 key: rejected with configuration error "${algFallbackUninferrableError}"`,
   ];
 
   return {
@@ -6834,6 +7041,11 @@ export async function runDemo(): Promise<DemoResult> {
     expectedTagMissingSigned,
     expectedTagMissingVerification,
     expectedTagUnsetVerification,
+    algFallbackWire,
+    algFallbackInferVerification,
+    algFallbackDefaultVerification,
+    algFallbackIncompatibleError,
+    algFallbackUninferrableError,
     lines,
   };
 }
