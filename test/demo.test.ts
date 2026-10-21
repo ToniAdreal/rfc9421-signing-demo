@@ -202,6 +202,14 @@ import {
   DEMO_CLOCK_SKEW_SEC,
   DEMO_CLOCK_TOLERANCE_COVERED_COMPONENTS,
   DEMO_CLOCK_TOLERANCE_KEY_ID,
+  DEMO_EXPECTED_TAG,
+  DEMO_EXPECTED_TAG_BODY,
+  DEMO_EXPECTED_TAG_KEY_ID,
+  DEMO_EXPECTED_TAG_MISMATCH_REASON,
+  DEMO_EXPECTED_TAG_MISSING_REASON,
+  DEMO_EXPECTED_TAG_NONCE,
+  DEMO_EXPECTED_TAG_OTHER_TAG,
+  DEMO_EXPECTED_TAG_URL,
   DEMO_NODE_TRAILERS_BODY,
   DEMO_NODE_TRAILERS_COVERED_COMPONENTS,
   DEMO_NODE_TRAILERS_HOST,
@@ -4234,7 +4242,7 @@ test("demo Node trailers segment normalizes parsed/raw/no trailers and verifies 
   assert.deepEqual(rawDirect.trailers, DEMO_NODE_TRAILERS_RAW);
 });
 
-test("demo lines contain the Node trailers segment (parsed, raw precedence, no trailers, round-trip, closing the demo)", async () => {
+test("demo lines contain the Node trailers segment (parsed, raw precedence, no trailers, round-trip, followed by the application-tag segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Node trailers: fromNodeRequest normalizes/);
@@ -4249,8 +4257,76 @@ test("demo lines contain the Node trailers segment (parsed, raw precedence, no t
     `Trailer-covered verification: OK (label sig1, keyid="${DEMO_NODE_TRAILERS_KEY_ID}", alg="ed25519", nonce="${DEMO_NODE_TRAILERS_NONCE}")`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(lines[headerIdx + 6].startsWith("Application tag binding:"));
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Node trailers:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
+});
+
+test("demo application-tag segment pins expectedTag (match passes, other tag and no tag rejected, unpinned unchanged)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_EXPECTED_TAG_KEY_ID, "demo-expected-tag-key-1");
+  assert.equal(DEMO_EXPECTED_TAG_NONCE, "demo-nonce-expected-tag-001");
+  assert.equal(DEMO_EXPECTED_TAG_URL, "https://api.example.com/v1/webhooks");
+  assert.equal(DEMO_EXPECTED_TAG_BODY, "{}");
+  assert.equal(DEMO_EXPECTED_TAG, "payment-webhook-v1");
+  assert.equal(DEMO_EXPECTED_TAG_OTHER_TAG, "admin-api-v1");
+  assert.equal(DEMO_EXPECTED_TAG_MISMATCH_REASON, 'tag mismatch: expected "payment-webhook-v1", got "admin-api-v1"');
+  assert.equal(DEMO_EXPECTED_TAG_MISSING_REASON, 'tag mismatch: expected "payment-webhook-v1", got no tag');
+  assert.match(r.expectedTagSigned.headers["signature-input"], /;tag="payment-webhook-v1"/);
+  assert.match(r.expectedTagMismatchSigned.headers["signature-input"], /;tag="admin-api-v1"/);
+  assert.ok(!/;tag=/.test(r.expectedTagMissingSigned.headers["signature-input"]));
+  assert.equal(r.expectedTagMatchVerification.ok, true);
+  assert.equal(r.expectedTagMatchVerification.tag, DEMO_EXPECTED_TAG);
+  assert.equal(r.expectedTagMismatchVerification.ok, false);
+  assert.equal(r.expectedTagMismatchVerification.code, "TAG_MISMATCH");
+  assert.equal(r.expectedTagMismatchVerification.reason, DEMO_EXPECTED_TAG_MISMATCH_REASON);
+  assert.equal(r.expectedTagMismatchVerification.tag, DEMO_EXPECTED_TAG_OTHER_TAG);
+  assert.equal(r.expectedTagMissingVerification.ok, false);
+  assert.equal(r.expectedTagMissingVerification.code, "TAG_MISMATCH");
+  assert.equal(r.expectedTagMissingVerification.reason, DEMO_EXPECTED_TAG_MISSING_REASON);
+  assert.equal(r.expectedTagMissingVerification.tag, undefined);
+  assert.equal(r.expectedTagUnsetVerification.ok, true);
+  assert.equal(r.expectedTagUnsetVerification.tag, DEMO_EXPECTED_TAG);
+  // Independent checks driven directly (the same tag semantics
+  // test/tag.test.ts pins): a fresh key pair, the pinned tag
+  // passes, the other protocol's tag and a missing tag are
+  // rejected with the pinned reasons.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const req = { method: "POST", url: DEMO_EXPECTED_TAG_URL, headers: {}, body: DEMO_EXPECTED_TAG_BODY };
+  const directTagged = signRequest(req, { keyId: DEMO_EXPECTED_TAG_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_EXPECTED_TAG_NONCE, tag: DEMO_EXPECTED_TAG });
+  const directOther = signRequest(req, { keyId: DEMO_EXPECTED_TAG_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_EXPECTED_TAG_NONCE, tag: DEMO_EXPECTED_TAG_OTHER_TAG });
+  const directUntagged = signRequest(req, { keyId: DEMO_EXPECTED_TAG_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_EXPECTED_TAG_NONCE });
+  assert.equal(verifyRequest(directTagged, { key: publicKey, now: DEMO_CREATED + 60, expectedTag: DEMO_EXPECTED_TAG }).ok, true);
+  const directMismatch = verifyRequest(directOther, { key: publicKey, now: DEMO_CREATED + 60, expectedTag: DEMO_EXPECTED_TAG });
+  assert.equal(directMismatch.ok, false);
+  assert.equal(directMismatch.code, "TAG_MISMATCH");
+  assert.equal(directMismatch.reason, DEMO_EXPECTED_TAG_MISMATCH_REASON);
+  const directMissing = verifyRequest(directUntagged, { key: publicKey, now: DEMO_CREATED + 60, expectedTag: DEMO_EXPECTED_TAG });
+  assert.equal(directMissing.ok, false);
+  assert.equal(directMissing.code, "TAG_MISMATCH");
+  assert.equal(directMissing.reason, DEMO_EXPECTED_TAG_MISSING_REASON);
+  assert.equal(verifyRequest(directTagged, { key: publicKey, now: DEMO_CREATED + 60 }).ok, true);
+});
+
+test("demo lines contain the application-tag segment (match, mismatch, missing, unpinned, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Application tag binding: verifyRequest's expectedTag pins/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Application tag binding:"));
+  const trailersIdx = lines.findIndex((l) => l.startsWith("Node trailers:"));
+  assert.ok(trailersIdx !== -1 && headerIdx !== -1 && trailersIdx < headerIdx);
+  const expectedLines = [
+    "Application tag binding: verifyRequest's expectedTag pins the application protocol a signature was minted for (RFC 9421 §2.3) — the tag check runs after the cryptographic check passes, so a signature minted for another protocol is rejected even when it shares the same key",
+    `Expected tag match: signature with tag "${DEMO_EXPECTED_TAG}" verified with expectedTag "${DEMO_EXPECTED_TAG}": OK (label sig1, keyid="${DEMO_EXPECTED_TAG_KEY_ID}", alg="ed25519", nonce="${DEMO_EXPECTED_TAG_NONCE}", tag="${DEMO_EXPECTED_TAG}")`,
+    `Expected tag mismatch: signature with tag "${DEMO_EXPECTED_TAG_OTHER_TAG}" verified with expectedTag "${DEMO_EXPECTED_TAG}": FAILED (code TAG_MISMATCH: ${DEMO_EXPECTED_TAG_MISMATCH_REASON})`,
+    `Expected tag missing: signature with no tag verified with expectedTag "${DEMO_EXPECTED_TAG}": FAILED (code TAG_MISMATCH: ${DEMO_EXPECTED_TAG_MISSING_REASON})`,
+    `No expectedTag pinned: the same signature with tag "${DEMO_EXPECTED_TAG}" verified without the option: OK (label sig1, keyid="${DEMO_EXPECTED_TAG_KEY_ID}", alg="ed25519", nonce="${DEMO_EXPECTED_TAG_NONCE}", tag="${DEMO_EXPECTED_TAG}") (no check is made — backwards compatible)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Application tag binding:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
 });

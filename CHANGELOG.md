@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with an
+  application-tag segment: one key pair signs the same
+  fixed request with the pinned tag
+  (`payment-webhook-v1`), with another protocol's tag
+  (`admin-api-v1`) and with no tag, showing
+  `verifyRequest`'s `expectedTag` pin — the matching
+  tag verifies, the other tag and the missing tag are
+  each rejected with `TAG_MISMATCH` and its pinned
+  reason, and the same tagged signature verified with
+  no `expectedTag` pinned shows the default (no check
+  is made). `DemoResult` gains the segment's three
+  signed requests and four verification results, and
+  the demo tests gain two cases pinning the segment
+  end-to-end (740 tests in total). Every fixture is
+  fixed — no network, no wall clock.
 - The CLI demo (`npm run demo`) now closes with a Node
   trailers segment: three fixed mock
   `IncomingMessage`-shaped objects show

@@ -633,6 +633,27 @@
  * `test/nodeHttpTrailers.test.ts` pins). Every input is
  * a fixed demo constant, so the segment is
  * byte-identical between runs.
+ * The demo then closes with an application-tag segment:
+ * `VerifyOptions.expectedTag` (`src/verify.ts`) lets a
+ * verifier pin the application protocol a signature was
+ * minted for (RFC 9421 §2.3) — e.g. a payment webhook
+ * verifier pins `payment-webhook-v1` — and, after the
+ * cryptographic check passes, a wire tag that differs
+ * (or a signature carrying no tag at all) is rejected
+ * with `TAG_MISMATCH`, so a signature minted for another
+ * protocol cannot be replayed into this verifier even
+ * when it shares the same key. Three fixed requests
+ * print the shapes: a signature whose tag matches the
+ * pin verifies, one minted with a different tag is
+ * rejected, and one carrying no tag is rejected too,
+ * while the same tagged signature verified with no
+ * `expectedTag` pinned shows the default (no check is
+ * made). Outside the printed lines the demo asserts
+ * every outcome, code and reason equals the hand-pinned
+ * expectations below (the same tag semantics
+ * `test/tag.test.ts` pins). Every clock is injected and
+ * the segment's key pair is fresh per run, so the
+ * printed lines are identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2321,6 +2342,41 @@ export const DEMO_NODE_TRAILERS_COVERED_COMPONENTS: string[] = [
   "x-checksum;tr",
 ];
 
+/** Key id of the closing application-tag segment's signed requests. */
+export const DEMO_EXPECTED_TAG_KEY_ID = "demo-expected-tag-key-1";
+/** Nonce of the closing application-tag segment's signed requests. */
+export const DEMO_EXPECTED_TAG_NONCE = "demo-nonce-expected-tag-001";
+/** Absolute URL the closing application-tag segment signs. */
+export const DEMO_EXPECTED_TAG_URL = "https://api.example.com/v1/webhooks";
+/** Body of the closing application-tag segment's requests. */
+export const DEMO_EXPECTED_TAG_BODY = "{}";
+/**
+ * Application tag the closing segment's verifier pins via
+ * `expectedTag` — the payment webhook protocol tag of
+ * `test/tag.test.ts`'s fixture.
+ */
+export const DEMO_EXPECTED_TAG = "payment-webhook-v1";
+/**
+ * Tag of a different application protocol, minted over the
+ * same request with the same key: the cross-protocol replay
+ * the pin exists to reject.
+ */
+export const DEMO_EXPECTED_TAG_OTHER_TAG = "admin-api-v1";
+/**
+ * Hand-pinned `TAG_MISMATCH` reason when the wire tag is the
+ * other protocol's tag (the exact wording `src/verify.ts`
+ * returns and `test/tag.test.ts` pins).
+ */
+export const DEMO_EXPECTED_TAG_MISMATCH_REASON =
+  'tag mismatch: expected "payment-webhook-v1", got "admin-api-v1"';
+/**
+ * Hand-pinned `TAG_MISMATCH` reason when the signature
+ * carries no tag at all (the exact wording `src/verify.ts`
+ * returns).
+ */
+export const DEMO_EXPECTED_TAG_MISSING_REASON =
+  'tag mismatch: expected "payment-webhook-v1", got no tag';
+
 export interface DemoResult {
   signed: SignedHttpRequest;
   tamperedBody: string;
@@ -3261,6 +3317,31 @@ export interface DemoResult {
   nodeTrailersNormalized: RequestLike;
   /** Verification of `nodeTrailersNormalized` (ok — the trailer round-trip holds). */
   nodeTrailersVerification: VerifyResult;
+  /** The request signed in the closing application-tag segment with `DEMO_EXPECTED_TAG`. */
+  expectedTagSigned: SignedHttpRequest;
+  /** Verification of `expectedTagSigned` with `expectedTag: DEMO_EXPECTED_TAG` (ok, tag reported). */
+  expectedTagMatchVerification: VerifyResult;
+  /** The request signed in the closing application-tag segment with `DEMO_EXPECTED_TAG_OTHER_TAG`. */
+  expectedTagMismatchSigned: SignedHttpRequest;
+  /**
+   * Verification of `expectedTagMismatchSigned` with
+   * `expectedTag: DEMO_EXPECTED_TAG` (fails with
+   * `TAG_MISMATCH` and `DEMO_EXPECTED_TAG_MISMATCH_REASON`).
+   */
+  expectedTagMismatchVerification: VerifyResult;
+  /** The request signed in the closing application-tag segment with no tag at all. */
+  expectedTagMissingSigned: SignedHttpRequest;
+  /**
+   * Verification of `expectedTagMissingSigned` with
+   * `expectedTag: DEMO_EXPECTED_TAG` (fails with
+   * `TAG_MISMATCH` and `DEMO_EXPECTED_TAG_MISSING_REASON`).
+   */
+  expectedTagMissingVerification: VerifyResult;
+  /**
+   * Verification of `expectedTagSigned` with no
+   * `expectedTag` pinned (ok — no check is made).
+   */
+  expectedTagUnsetVerification: VerifyResult;
   lines: string[];
 }
 
@@ -6103,6 +6184,102 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Application-tag segment: `expectedTag` pins the
+  // application protocol a signature was minted for, so a
+  // signature minted for another protocol cannot be
+  // replayed into this verifier even though it shares the
+  // same key. One fresh key pair signs the same fixed
+  // request three times — with the pinned tag, with the
+  // other protocol's tag, and with no tag — and the four
+  // verifications print the match / mismatch / missing /
+  // unpinned shapes. Outside the printed lines the demo
+  // asserts every outcome, code, reason and reported tag
+  // equals the hand-pinned expectations.
+  const expectedTagPair = generateEd25519KeyPair();
+  const expectedTagRequest = {
+    method: "POST",
+    url: DEMO_EXPECTED_TAG_URL,
+    headers: {},
+    body: DEMO_EXPECTED_TAG_BODY,
+  };
+  const expectedTagSigned = signRequest(expectedTagRequest, {
+    keyId: DEMO_EXPECTED_TAG_KEY_ID,
+    alg: "ed25519",
+    key: expectedTagPair.privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_EXPECTED_TAG_NONCE,
+    tag: DEMO_EXPECTED_TAG,
+  });
+  const expectedTagMismatchSigned = signRequest(expectedTagRequest, {
+    keyId: DEMO_EXPECTED_TAG_KEY_ID,
+    alg: "ed25519",
+    key: expectedTagPair.privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_EXPECTED_TAG_NONCE,
+    tag: DEMO_EXPECTED_TAG_OTHER_TAG,
+  });
+  const expectedTagMissingSigned = signRequest(expectedTagRequest, {
+    keyId: DEMO_EXPECTED_TAG_KEY_ID,
+    alg: "ed25519",
+    key: expectedTagPair.privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_EXPECTED_TAG_NONCE,
+  });
+  const expectedTagMatchVerification = verifyRequest(expectedTagSigned, {
+    key: expectedTagPair.publicKey,
+    now: DEMO_CREATED + 60,
+    expectedTag: DEMO_EXPECTED_TAG,
+  });
+  const expectedTagMismatchVerification = verifyRequest(
+    expectedTagMismatchSigned,
+    {
+      key: expectedTagPair.publicKey,
+      now: DEMO_CREATED + 60,
+      expectedTag: DEMO_EXPECTED_TAG,
+    },
+  );
+  const expectedTagMissingVerification = verifyRequest(
+    expectedTagMissingSigned,
+    {
+      key: expectedTagPair.publicKey,
+      now: DEMO_CREATED + 60,
+      expectedTag: DEMO_EXPECTED_TAG,
+    },
+  );
+  const expectedTagUnsetVerification = verifyRequest(expectedTagSigned, {
+    key: expectedTagPair.publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  if (
+    expectedTagMatchVerification.ok !== true ||
+    expectedTagMatchVerification.tag !== DEMO_EXPECTED_TAG ||
+    expectedTagMismatchVerification.ok !== false ||
+    expectedTagMismatchVerification.code !== "TAG_MISMATCH" ||
+    expectedTagMismatchVerification.reason !==
+      DEMO_EXPECTED_TAG_MISMATCH_REASON ||
+    expectedTagMismatchVerification.tag !== DEMO_EXPECTED_TAG_OTHER_TAG ||
+    expectedTagMissingVerification.ok !== false ||
+    expectedTagMissingVerification.code !== "TAG_MISMATCH" ||
+    expectedTagMissingVerification.reason !==
+      DEMO_EXPECTED_TAG_MISSING_REASON ||
+    expectedTagMissingVerification.tag !== undefined ||
+    expectedTagUnsetVerification.ok !== true ||
+    expectedTagUnsetVerification.tag !== DEMO_EXPECTED_TAG
+  ) {
+    throw new Error(
+      `demo fixture broken: expectedTag gave match ` +
+        `${JSON.stringify(expectedTagMatchVerification)}, mismatch ` +
+        `${JSON.stringify(expectedTagMismatchVerification)}, missing ` +
+        `${JSON.stringify(expectedTagMissingVerification)} and unset ` +
+        `${JSON.stringify(expectedTagUnsetVerification)}, instead of an ok ` +
+        `match reporting tag "${DEMO_EXPECTED_TAG}", a mismatch rejected ` +
+        `with TAG_MISMATCH (${DEMO_EXPECTED_TAG_MISMATCH_REASON}) reporting ` +
+        `tag "${DEMO_EXPECTED_TAG_OTHER_TAG}", a missing tag rejected with ` +
+        `TAG_MISMATCH (${DEMO_EXPECTED_TAG_MISSING_REASON}) and an ok ` +
+        `unpinned verification reporting tag "${DEMO_EXPECTED_TAG}"`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -6463,6 +6640,20 @@ export async function runDemo(): Promise<DemoResult> {
     nodeTrailersVerification.ok
       ? `Trailer-covered verification: OK (label ${nodeTrailersVerification.label}, keyid="${nodeTrailersVerification.keyId}", alg="${nodeTrailersVerification.alg}", nonce="${nodeTrailersVerification.nonce}")`
       : `Trailer-covered verification: FAILED (code ${nodeTrailersVerification.code}: ${nodeTrailersVerification.reason})`,
+    "",
+    "Application tag binding: verifyRequest's expectedTag pins the application protocol a signature was minted for (RFC 9421 §2.3) — the tag check runs after the cryptographic check passes, so a signature minted for another protocol is rejected even when it shares the same key",
+    expectedTagMatchVerification.ok
+      ? `Expected tag match: signature with tag "${DEMO_EXPECTED_TAG}" verified with expectedTag "${DEMO_EXPECTED_TAG}": OK (label ${expectedTagMatchVerification.label}, keyid="${expectedTagMatchVerification.keyId}", alg="${expectedTagMatchVerification.alg}", nonce="${expectedTagMatchVerification.nonce}", tag="${expectedTagMatchVerification.tag}")`
+      : `Expected tag match: signature with tag "${DEMO_EXPECTED_TAG}" verified with expectedTag "${DEMO_EXPECTED_TAG}": FAILED (code ${expectedTagMatchVerification.code}: ${expectedTagMatchVerification.reason})`,
+    expectedTagMismatchVerification.ok
+      ? `Expected tag mismatch: signature with tag "${DEMO_EXPECTED_TAG_OTHER_TAG}" verified with expectedTag "${DEMO_EXPECTED_TAG}": OK (unexpected — the cross-protocol signature was not rejected)`
+      : `Expected tag mismatch: signature with tag "${DEMO_EXPECTED_TAG_OTHER_TAG}" verified with expectedTag "${DEMO_EXPECTED_TAG}": FAILED (code ${expectedTagMismatchVerification.code}: ${expectedTagMismatchVerification.reason})`,
+    expectedTagMissingVerification.ok
+      ? `Expected tag missing: signature with no tag verified with expectedTag "${DEMO_EXPECTED_TAG}": OK (unexpected — the untagged signature was not rejected)`
+      : `Expected tag missing: signature with no tag verified with expectedTag "${DEMO_EXPECTED_TAG}": FAILED (code ${expectedTagMissingVerification.code}: ${expectedTagMissingVerification.reason})`,
+    expectedTagUnsetVerification.ok
+      ? `No expectedTag pinned: the same signature with tag "${DEMO_EXPECTED_TAG}" verified without the option: OK (label ${expectedTagUnsetVerification.label}, keyid="${expectedTagUnsetVerification.keyId}", alg="${expectedTagUnsetVerification.alg}", nonce="${expectedTagUnsetVerification.nonce}", tag="${expectedTagUnsetVerification.tag}") (no check is made — backwards compatible)`
+      : `No expectedTag pinned: the same signature with tag "${DEMO_EXPECTED_TAG}" verified without the option: FAILED (code ${expectedTagUnsetVerification.code}: ${expectedTagUnsetVerification.reason})`,
   ];
 
   return {
@@ -6636,6 +6827,13 @@ export async function runDemo(): Promise<DemoResult> {
     nodeTrailersSigned,
     nodeTrailersNormalized,
     nodeTrailersVerification,
+    expectedTagSigned,
+    expectedTagMatchVerification,
+    expectedTagMismatchSigned,
+    expectedTagMismatchVerification,
+    expectedTagMissingSigned,
+    expectedTagMissingVerification,
+    expectedTagUnsetVerification,
     lines,
   };
 }
