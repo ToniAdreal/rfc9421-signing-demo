@@ -222,6 +222,19 @@ import {
   DEMO_EXPECTED_TAG_NONCE,
   DEMO_EXPECTED_TAG_OTHER_TAG,
   DEMO_EXPECTED_TAG_URL,
+  DEMO_REQUIRED_COMPONENTS_BODY,
+  DEMO_REQUIRED_COMPONENTS_CASE_REQUIRED,
+  DEMO_REQUIRED_COMPONENTS_COVERED_COMPONENTS,
+  DEMO_REQUIRED_COMPONENTS_KEY_ID,
+  DEMO_REQUIRED_COMPONENTS_MALFORMED,
+  DEMO_REQUIRED_COMPONENTS_MALFORMED_ERROR,
+  DEMO_REQUIRED_COMPONENTS_MISSING_CODE,
+  DEMO_REQUIRED_COMPONENTS_MISSING_REASON,
+  DEMO_REQUIRED_COMPONENTS_MISSING_REQUIRED,
+  DEMO_REQUIRED_COMPONENTS_NARROW_COMPONENTS,
+  DEMO_REQUIRED_COMPONENTS_NONCE,
+  DEMO_REQUIRED_COMPONENTS_REQUIRED,
+  DEMO_REQUIRED_COMPONENTS_URL,
   DEMO_NODE_TRAILERS_BODY,
   DEMO_NODE_TRAILERS_COVERED_COMPONENTS,
   DEMO_NODE_TRAILERS_HOST,
@@ -4404,8 +4417,79 @@ test("demo lines contain the alg-fallback segment (inferred, default, incompatib
     `Uninferrable key shape: the same no-alg signature verified with algFallback "infer" against a secp256k1 key: rejected with configuration error "${DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR}"`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(lines[headerIdx + 6].startsWith("Required components:"));
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Alg fallback inference:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
+});
+
+test("demo required-components segment pins requiredComponents (covered passes, missing rejected, case-insensitive passes, malformed throws, unset unchanged)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_REQUIRED_COMPONENTS_KEY_ID, "demo-required-components-key-1");
+  assert.equal(DEMO_REQUIRED_COMPONENTS_NONCE, "demo-nonce-required-components-001");
+  assert.equal(DEMO_REQUIRED_COMPONENTS_URL, "https://api.example.com/v1/payments");
+  assert.equal(DEMO_REQUIRED_COMPONENTS_BODY, '{"amount":100}');
+  assert.deepEqual(DEMO_REQUIRED_COMPONENTS_COVERED_COMPONENTS, ["@method", "@path", "content-digest"]);
+  assert.deepEqual(DEMO_REQUIRED_COMPONENTS_NARROW_COMPONENTS, ["@method"]);
+  assert.deepEqual(DEMO_REQUIRED_COMPONENTS_REQUIRED, ["content-digest", "@method", "@path"]);
+  assert.deepEqual(DEMO_REQUIRED_COMPONENTS_MISSING_REQUIRED, ["content-digest"]);
+  assert.deepEqual(DEMO_REQUIRED_COMPONENTS_CASE_REQUIRED, ["Content-Digest", "@METHOD"]);
+  assert.equal(DEMO_REQUIRED_COMPONENTS_MISSING_CODE, "MISSING_REQUIRED_COMPONENT");
+  assert.equal(DEMO_REQUIRED_COMPONENTS_MISSING_REASON, 'signature does not cover required component: "content-digest"');
+  assert.deepEqual(DEMO_REQUIRED_COMPONENTS_MALFORMED, ["@method", ""]);
+  assert.equal(DEMO_REQUIRED_COMPONENTS_MALFORMED_ERROR, "verifyRequest: `requiredComponents` entries must be non-empty strings, got \"\"");
+  assert.match(r.requiredComponentsSigned.headers["signature-input"], /"@method" "@path" "content-digest"/);
+  assert.match(r.requiredComponentsNarrowSigned.headers["signature-input"], /\("@method"\)/);
+  assert.equal(r.requiredComponentsCoveredVerification.ok, true);
+  assert.equal(r.requiredComponentsMissingVerification.ok, false);
+  assert.equal(r.requiredComponentsMissingVerification.code, DEMO_REQUIRED_COMPONENTS_MISSING_CODE);
+  assert.equal(r.requiredComponentsMissingVerification.reason, DEMO_REQUIRED_COMPONENTS_MISSING_REASON);
+  assert.equal(r.requiredComponentsMissingVerification.keyId, DEMO_REQUIRED_COMPONENTS_KEY_ID);
+  assert.equal(r.requiredComponentsCaseVerification.ok, true);
+  assert.equal(r.requiredComponentsMalformedError, DEMO_REQUIRED_COMPONENTS_MALFORMED_ERROR);
+  assert.equal(r.requiredComponentsUnsetVerification.ok, true);
+  // Independent checks driven directly (the same coverage
+  // semantics test/requiredComponents.test.ts pins): a fresh
+  // key pair, the fully covered signature passes, the narrow
+  // one is rejected with the pinned reason, differently-cased
+  // names pass, the malformed list throws verbatim, and the
+  // narrow signature verifies with no option set.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const req = { method: "POST", url: DEMO_REQUIRED_COMPONENTS_URL, headers: {}, body: DEMO_REQUIRED_COMPONENTS_BODY };
+  const directFull = signRequest(req, { keyId: DEMO_REQUIRED_COMPONENTS_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_REQUIRED_COMPONENTS_NONCE, coveredComponents: DEMO_REQUIRED_COMPONENTS_COVERED_COMPONENTS });
+  const directNarrow = signRequest(req, { keyId: DEMO_REQUIRED_COMPONENTS_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_REQUIRED_COMPONENTS_NONCE, coveredComponents: DEMO_REQUIRED_COMPONENTS_NARROW_COMPONENTS });
+  assert.equal(verifyRequest(directFull, { key: publicKey, now: DEMO_CREATED + 60, requiredComponents: DEMO_REQUIRED_COMPONENTS_REQUIRED }).ok, true);
+  const directMissing = verifyRequest(directNarrow, { key: publicKey, now: DEMO_CREATED + 60, requiredComponents: DEMO_REQUIRED_COMPONENTS_MISSING_REQUIRED });
+  assert.equal(directMissing.ok, false);
+  assert.equal(directMissing.code, "MISSING_REQUIRED_COMPONENT");
+  assert.equal(directMissing.reason, DEMO_REQUIRED_COMPONENTS_MISSING_REASON);
+  assert.equal(verifyRequest(directFull, { key: publicKey, now: DEMO_CREATED + 60, requiredComponents: DEMO_REQUIRED_COMPONENTS_CASE_REQUIRED }).ok, true);
+  assert.throws(
+    () => verifyRequest(directFull, { key: publicKey, now: DEMO_CREATED + 60, requiredComponents: DEMO_REQUIRED_COMPONENTS_MALFORMED }),
+    (err: unknown) => err instanceof Error && err.message === DEMO_REQUIRED_COMPONENTS_MALFORMED_ERROR,
+  );
+  assert.equal(verifyRequest(directNarrow, { key: publicKey, now: DEMO_CREATED + 60 }).ok, true);
+});
+
+test("demo lines contain the required-components segment (covered, missing, case-insensitive, malformed, unset, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Required components: verifyRequest's requiredComponents policy requires/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Required components:"));
+  const algIdx = lines.findIndex((l) => l.startsWith("Alg fallback inference:"));
+  assert.ok(algIdx !== -1 && headerIdx !== -1 && algIdx < headerIdx);
+  const expectedLines = [
+    'Required components: verifyRequest\'s requiredComponents policy requires a signature to cover the components a verifier depends on — the check runs before any cryptographic work, so a signature covering only "@method" is rejected as a policy violation even though it is cryptographically valid',
+    `Fully covered: signature covering "@method", "@path", "content-digest" verified with requiredComponents "content-digest", "@method", "@path": OK (label sig1, keyid="${DEMO_REQUIRED_COMPONENTS_KEY_ID}", alg="ed25519", nonce="${DEMO_REQUIRED_COMPONENTS_NONCE}")`,
+    `Missing required component: signature covering only "@method" verified with requiredComponents "content-digest": FAILED (code ${DEMO_REQUIRED_COMPONENTS_MISSING_CODE}: ${DEMO_REQUIRED_COMPONENTS_MISSING_REASON})`,
+    `Case-insensitive required names: the fully covered signature verified with requiredComponents "Content-Digest", "@METHOD": OK (label sig1, keyid="${DEMO_REQUIRED_COMPONENTS_KEY_ID}", alg="ed25519", nonce="${DEMO_REQUIRED_COMPONENTS_NONCE}")`,
+    `Malformed requiredComponents: the fully covered signature verified with a requiredComponents list containing an empty string: rejected with configuration error "${DEMO_REQUIRED_COMPONENTS_MALFORMED_ERROR}"`,
+    `No requiredComponents set: the same "@method"-only signature verified without the option: OK (label sig1, keyid="${DEMO_REQUIRED_COMPONENTS_KEY_ID}", alg="ed25519", nonce="${DEMO_REQUIRED_COMPONENTS_NONCE}") (no check is made — backwards compatible)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Required components:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 6), lines.slice(headerIdx, headerIdx + 6));
 });

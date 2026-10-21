@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  required-components segment: one key pair signs the
+  same fixed payment request fully covered
+  (`@method`, `@path`, `content-digest`) and covering
+  only `@method`, showing `verifyRequest`'s
+  `requiredComponents` coverage policy — the fully
+  covered signature verifies, the narrow one is
+  rejected before any cryptographic work with
+  `MISSING_REQUIRED_COMPONENT` and its pinned reason,
+  differently-cased required names still pass, a
+  malformed list containing an empty string throws
+  the pinned configuration error verbatim, and the
+  narrow signature verified with no option set shows
+  the default (no check is made). `DemoResult` gains
+  the segment's two signed requests, four verification
+  results and the thrown message, and the demo tests
+  gain two cases pinning the segment end-to-end (744
+  tests in total). Every fixture is fixed — no
+  network, no wall clock.
 - The CLI demo (`npm run demo`) now closes with an
   alg-fallback segment: the RFC 9421 Appendix B.2.5
   hmac-sha256 wire value — whose signature-input carries

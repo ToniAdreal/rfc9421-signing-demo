@@ -678,6 +678,32 @@
  * pair is generated only to obtain that key *shape*; no
  * key bytes are printed), so the printed lines are
  * identical between runs.
+ * The demo then closes with a required-components segment:
+ * `VerifyOptions.requiredComponents` (`src/verify.ts`) is
+ * the opt-in component-coverage policy a verifier sets so
+ * a signature must cover the components it depends on —
+ * e.g. a payment-gateway verifier requires
+ * `content-digest` and `@path`, because a signature
+ * covering only `@method` is cryptographically valid but
+ * protects nothing. The check is fail-fast, before any
+ * cryptographic work: a signature missing a required
+ * component fails with `MISSING_REQUIRED_COMPONENT` and a
+ * reason naming it, the comparison is case-insensitive,
+ * and a malformed list (a non-array, or a non-string /
+ * empty-string entry) is a caller configuration error
+ * (throw), not a verification failure. One fresh key pair
+ * signs the same fixed payment request twice — fully
+ * covered and `@method`-only — and the printed shapes are
+ * the fully covered signature passing, the narrow one
+ * rejected, differently-cased required names passing, the
+ * malformed list throwing, and the narrow signature with
+ * no option set verifying unchanged. Outside the printed
+ * lines the demo asserts every outcome, code, reason and
+ * thrown message equals the hand-pinned expectations
+ * below (the same coverage semantics
+ * `test/requiredComponents.test.ts` pins). Every clock is
+ * injected and the segment's key pair is fresh per run,
+ * so the printed lines are identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2458,6 +2484,91 @@ export const DEMO_ALG_FALLBACK_INCOMPATIBLE_ERROR =
 export const DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR =
   'verifyRequest: algFallback "infer" cannot infer an algorithm for an asymmetric ec key (secp256k1) — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, P-384 (secp384r1) EC keys, P-521 (secp521r1) EC keys, and RSA keys (rsa-pss-sha512)';
 
+/** Key id of the closing required-components segment's signed requests. */
+export const DEMO_REQUIRED_COMPONENTS_KEY_ID =
+  "demo-required-components-key-1";
+/** Nonce of the closing required-components segment's signed requests. */
+export const DEMO_REQUIRED_COMPONENTS_NONCE =
+  "demo-nonce-required-components-001";
+/** Absolute URL the closing required-components segment signs. */
+export const DEMO_REQUIRED_COMPONENTS_URL =
+  "https://api.example.com/v1/payments";
+/** Body of the closing required-components segment's requests. */
+export const DEMO_REQUIRED_COMPONENTS_BODY = '{"amount":100}';
+/**
+ * Components the segment's fully covered signature covers:
+ * the request method, the request target and the digest of
+ * its body — the set a payment-gateway verifier depends on.
+ */
+export const DEMO_REQUIRED_COMPONENTS_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@path",
+  "content-digest",
+];
+/**
+ * Components the segment's narrow signature covers: only
+ * `@method` — cryptographically valid, but it protects
+ * nothing, which is exactly what the policy exists to
+ * reject.
+ */
+export const DEMO_REQUIRED_COMPONENTS_NARROW_COMPONENTS: string[] = [
+  "@method",
+];
+/**
+ * Required list the fully covered signature is verified
+ * against: every entry is covered, so it passes.
+ */
+export const DEMO_REQUIRED_COMPONENTS_REQUIRED: string[] = [
+  "content-digest",
+  "@method",
+  "@path",
+];
+/**
+ * Required list the narrow signature is verified against:
+ * its one entry is not covered, so it is rejected.
+ */
+export const DEMO_REQUIRED_COMPONENTS_MISSING_REQUIRED: string[] = [
+  "content-digest",
+];
+/**
+ * Differently-cased spelling of a covered subset: the
+ * comparison is case-insensitive, so the fully covered
+ * signature passes against this list too.
+ */
+export const DEMO_REQUIRED_COMPONENTS_CASE_REQUIRED: string[] = [
+  "Content-Digest",
+  "@METHOD",
+];
+/**
+ * Hand-pinned failure code when a required component is
+ * missing (`MISSING_REQUIRED_COMPONENT`).
+ */
+export const DEMO_REQUIRED_COMPONENTS_MISSING_CODE: VerifyFailureCode =
+  "MISSING_REQUIRED_COMPONENT";
+/**
+ * Hand-pinned `MISSING_REQUIRED_COMPONENT` reason when the
+ * narrow signature is checked for `content-digest` (the
+ * exact wording `src/verify.ts` returns and
+ * `test/requiredComponents.test.ts` pins).
+ */
+export const DEMO_REQUIRED_COMPONENTS_MISSING_REASON =
+  'signature does not cover required component: "content-digest"';
+/**
+ * Malformed required list: an empty-string entry is a
+ * caller configuration error, not a verification failure.
+ */
+export const DEMO_REQUIRED_COMPONENTS_MALFORMED: string[] = [
+  "@method",
+  "",
+];
+/**
+ * Hand-pinned configuration error thrown for
+ * `DEMO_REQUIRED_COMPONENTS_MALFORMED` (the exact wording
+ * `src/verify.ts` throws).
+ */
+export const DEMO_REQUIRED_COMPONENTS_MALFORMED_ERROR =
+  "verifyRequest: `requiredComponents` entries must be non-empty strings, got \"\"";
+
 export interface DemoResult {
   signed: SignedHttpRequest;
   tamperedBody: string;
@@ -3451,6 +3562,41 @@ export interface DemoResult {
    * `DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR`).
    */
   algFallbackUninferrableError: string;
+  /** The request signed in the closing required-components segment covering `DEMO_REQUIRED_COMPONENTS_COVERED_COMPONENTS`. */
+  requiredComponentsSigned: SignedHttpRequest;
+  /**
+   * Verification of `requiredComponentsSigned` with
+   * `requiredComponents: DEMO_REQUIRED_COMPONENTS_REQUIRED`
+   * (ok — every required component is covered).
+   */
+  requiredComponentsCoveredVerification: VerifyResult;
+  /** The request signed in the closing required-components segment covering only `@method`. */
+  requiredComponentsNarrowSigned: SignedHttpRequest;
+  /**
+   * Verification of `requiredComponentsNarrowSigned` with
+   * `requiredComponents: DEMO_REQUIRED_COMPONENTS_MISSING_REQUIRED`
+   * (fails with `MISSING_REQUIRED_COMPONENT` and
+   * `DEMO_REQUIRED_COMPONENTS_MISSING_REASON`).
+   */
+  requiredComponentsMissingVerification: VerifyResult;
+  /**
+   * Verification of `requiredComponentsSigned` with
+   * `requiredComponents: DEMO_REQUIRED_COMPONENTS_CASE_REQUIRED`
+   * (ok — the comparison is case-insensitive).
+   */
+  requiredComponentsCaseVerification: VerifyResult;
+  /**
+   * Configuration error thrown when `requiredComponentsSigned`
+   * is verified with
+   * `requiredComponents: DEMO_REQUIRED_COMPONENTS_MALFORMED`
+   * (equals `DEMO_REQUIRED_COMPONENTS_MALFORMED_ERROR`).
+   */
+  requiredComponentsMalformedError: string;
+  /**
+   * Verification of `requiredComponentsNarrowSigned` with no
+   * `requiredComponents` set (ok — no check is made).
+   */
+  requiredComponentsUnsetVerification: VerifyResult;
   lines: string[];
 }
 
@@ -6477,6 +6623,117 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Required-components segment: `requiredComponents` is
+  // the opt-in coverage policy — a signature covering only
+  // `@method` is cryptographically valid but protects
+  // nothing, so a verifier that depends on the body and
+  // the target requires them up front. The check runs
+  // before any crypto work and is case-insensitive; a
+  // malformed list throws a caller configuration error.
+  // One fresh key pair signs the same fixed payment
+  // request twice — fully covered and `@method`-only —
+  // and the five verifications print the covered /
+  // missing / case-insensitive / malformed / unset
+  // shapes. Outside the printed lines the demo asserts
+  // every outcome, code, reason and thrown message equals
+  // the hand-pinned expectations.
+  const requiredComponentsPair = generateEd25519KeyPair();
+  const requiredComponentsRequest = {
+    method: "POST",
+    url: DEMO_REQUIRED_COMPONENTS_URL,
+    headers: {},
+    body: DEMO_REQUIRED_COMPONENTS_BODY,
+  };
+  const requiredComponentsSigned = signRequest(requiredComponentsRequest, {
+    keyId: DEMO_REQUIRED_COMPONENTS_KEY_ID,
+    alg: "ed25519",
+    key: requiredComponentsPair.privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_REQUIRED_COMPONENTS_NONCE,
+    coveredComponents: DEMO_REQUIRED_COMPONENTS_COVERED_COMPONENTS,
+  });
+  const requiredComponentsNarrowSigned = signRequest(
+    requiredComponentsRequest,
+    {
+      keyId: DEMO_REQUIRED_COMPONENTS_KEY_ID,
+      alg: "ed25519",
+      key: requiredComponentsPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_REQUIRED_COMPONENTS_NONCE,
+      coveredComponents: DEMO_REQUIRED_COMPONENTS_NARROW_COMPONENTS,
+    },
+  );
+  const requiredComponentsCoveredVerification = verifyRequest(
+    requiredComponentsSigned,
+    {
+      key: requiredComponentsPair.publicKey,
+      now: DEMO_CREATED + 60,
+      requiredComponents: DEMO_REQUIRED_COMPONENTS_REQUIRED,
+    },
+  );
+  const requiredComponentsMissingVerification = verifyRequest(
+    requiredComponentsNarrowSigned,
+    {
+      key: requiredComponentsPair.publicKey,
+      now: DEMO_CREATED + 60,
+      requiredComponents: DEMO_REQUIRED_COMPONENTS_MISSING_REQUIRED,
+    },
+  );
+  const requiredComponentsCaseVerification = verifyRequest(
+    requiredComponentsSigned,
+    {
+      key: requiredComponentsPair.publicKey,
+      now: DEMO_CREATED + 60,
+      requiredComponents: DEMO_REQUIRED_COMPONENTS_CASE_REQUIRED,
+    },
+  );
+  let requiredComponentsMalformedError = "";
+  try {
+    verifyRequest(requiredComponentsSigned, {
+      key: requiredComponentsPair.publicKey,
+      now: DEMO_CREATED + 60,
+      requiredComponents: DEMO_REQUIRED_COMPONENTS_MALFORMED,
+    });
+  } catch (err) {
+    requiredComponentsMalformedError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const requiredComponentsUnsetVerification = verifyRequest(
+    requiredComponentsNarrowSigned,
+    {
+      key: requiredComponentsPair.publicKey,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  if (
+    requiredComponentsCoveredVerification.ok !== true ||
+    requiredComponentsMissingVerification.ok !== false ||
+    requiredComponentsMissingVerification.code !==
+      DEMO_REQUIRED_COMPONENTS_MISSING_CODE ||
+    requiredComponentsMissingVerification.reason !==
+      DEMO_REQUIRED_COMPONENTS_MISSING_REASON ||
+    requiredComponentsMissingVerification.keyId !==
+      DEMO_REQUIRED_COMPONENTS_KEY_ID ||
+    requiredComponentsCaseVerification.ok !== true ||
+    requiredComponentsMalformedError !==
+      DEMO_REQUIRED_COMPONENTS_MALFORMED_ERROR ||
+    requiredComponentsUnsetVerification.ok !== true
+  ) {
+    throw new Error(
+      `demo fixture broken: requiredComponents gave covered ` +
+        `${JSON.stringify(requiredComponentsCoveredVerification)}, missing ` +
+        `${JSON.stringify(requiredComponentsMissingVerification)}, case ` +
+        `${JSON.stringify(requiredComponentsCaseVerification)}, malformed ` +
+        `\"${requiredComponentsMalformedError}\" and unset ` +
+        `${JSON.stringify(requiredComponentsUnsetVerification)}, instead of an ok ` +
+        `covered verification, a missing rejection with ` +
+        `${DEMO_REQUIRED_COMPONENTS_MISSING_CODE} (${DEMO_REQUIRED_COMPONENTS_MISSING_REASON}) ` +
+        `reporting keyid \"${DEMO_REQUIRED_COMPONENTS_KEY_ID}\", an ok ` +
+        `case-insensitive verification, the pinned malformed ` +
+        `configuration error and an ok unset verification`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -6861,6 +7118,21 @@ export async function runDemo(): Promise<DemoResult> {
       : `No opt-in: the same no-alg signature verified without algFallback: FAILED (code ${algFallbackDefaultVerification.code}) (the legacy ed25519 default is tried against the secret key and the crypto layer rejects the shape)`,
     `Incompatible wire alg: the main ed25519 signature verified with algFallback "infer" against a secret key: rejected with configuration error "${algFallbackIncompatibleError}"`,
     `Uninferrable key shape: the same no-alg signature verified with algFallback "infer" against a secp256k1 key: rejected with configuration error "${algFallbackUninferrableError}"`,
+    "",
+    "Required components: verifyRequest's requiredComponents policy requires a signature to cover the components a verifier depends on — the check runs before any cryptographic work, so a signature covering only \"@method\" is rejected as a policy violation even though it is cryptographically valid",
+    requiredComponentsCoveredVerification.ok
+      ? `Fully covered: signature covering ${DEMO_REQUIRED_COMPONENTS_COVERED_COMPONENTS.map((c) => `"${c}"`).join(", ")} verified with requiredComponents ${DEMO_REQUIRED_COMPONENTS_REQUIRED.map((c) => `"${c}"`).join(", ")}: OK (label ${requiredComponentsCoveredVerification.label}, keyid="${requiredComponentsCoveredVerification.keyId}", alg="${requiredComponentsCoveredVerification.alg}", nonce="${requiredComponentsCoveredVerification.nonce}")`
+      : `Fully covered: signature covering ${DEMO_REQUIRED_COMPONENTS_COVERED_COMPONENTS.map((c) => `"${c}"`).join(", ")} verified with requiredComponents ${DEMO_REQUIRED_COMPONENTS_REQUIRED.map((c) => `"${c}"`).join(", ")}: FAILED (code ${requiredComponentsCoveredVerification.code}: ${requiredComponentsCoveredVerification.reason})`,
+    requiredComponentsMissingVerification.ok
+      ? `Missing required component: signature covering only "@method" verified with requiredComponents "content-digest": OK (unexpected — the narrow signature was not rejected)`
+      : `Missing required component: signature covering only "@method" verified with requiredComponents "content-digest": FAILED (code ${requiredComponentsMissingVerification.code}: ${requiredComponentsMissingVerification.reason})`,
+    requiredComponentsCaseVerification.ok
+      ? `Case-insensitive required names: the fully covered signature verified with requiredComponents ${DEMO_REQUIRED_COMPONENTS_CASE_REQUIRED.map((c) => `"${c}"`).join(", ")}: OK (label ${requiredComponentsCaseVerification.label}, keyid="${requiredComponentsCaseVerification.keyId}", alg="${requiredComponentsCaseVerification.alg}", nonce="${requiredComponentsCaseVerification.nonce}")`
+      : `Case-insensitive required names: the fully covered signature verified with requiredComponents ${DEMO_REQUIRED_COMPONENTS_CASE_REQUIRED.map((c) => `"${c}"`).join(", ")}: FAILED (code ${requiredComponentsCaseVerification.code}: ${requiredComponentsCaseVerification.reason})`,
+    `Malformed requiredComponents: the fully covered signature verified with a requiredComponents list containing an empty string: rejected with configuration error "${requiredComponentsMalformedError}"`,
+    requiredComponentsUnsetVerification.ok
+      ? `No requiredComponents set: the same "@method"-only signature verified without the option: OK (label ${requiredComponentsUnsetVerification.label}, keyid="${requiredComponentsUnsetVerification.keyId}", alg="${requiredComponentsUnsetVerification.alg}", nonce="${requiredComponentsUnsetVerification.nonce}") (no check is made — backwards compatible)`
+      : `No requiredComponents set: the same "@method"-only signature verified without the option: FAILED (code ${requiredComponentsUnsetVerification.code}: ${requiredComponentsUnsetVerification.reason})`,
   ];
 
   return {
@@ -7046,6 +7318,13 @@ export async function runDemo(): Promise<DemoResult> {
     algFallbackDefaultVerification,
     algFallbackIncompatibleError,
     algFallbackUninferrableError,
+    requiredComponentsSigned,
+    requiredComponentsCoveredVerification,
+    requiredComponentsNarrowSigned,
+    requiredComponentsMissingVerification,
+    requiredComponentsCaseVerification,
+    requiredComponentsMalformedError,
+    requiredComponentsUnsetVerification,
     lines,
   };
 }
