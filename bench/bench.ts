@@ -39,7 +39,18 @@
  * each returned `keyId` equal to its pinned value), with the
  * unknown-keyid `KEY_RESOLUTION_FAILED` result and the
  * `key` + `keyResolver` mutual-exclusion configuration error
- * asserted outside timing, plus the refresh path a gateway runs when its
+ * asserted outside timing, plus the maximum-signature-age
+ * verify path a receiver runs to bound replayability of
+ * long-lived signed messages: `verifyRequest` with
+ * `maxSignatureAgeSec` over one ed25519 fixture signed
+ * outside timing with `created` pinned (the verifier's
+ * `now` injected 60 seconds later, inside the 300-second
+ * cap — see MAX_AGE_* below), self-checked on every
+ * measured pass (the result is ok), with the past-cap
+ * `SIGNATURE_TOO_OLD` result (pinned code and reason) and
+ * the no-`created` bypass (a hand-built undated signature
+ * still verifies at the past-cap instant) asserted
+ * outside timing, plus the refresh path a gateway runs when its
  * snapshot ages out: `JwksKeyStore.refreshIfStale` over a store
  * whose injected clock is advanced exactly to its TTL boundary
  * before every measured call (a counting fake fetch serves one
@@ -314,6 +325,7 @@
 import {
   createSecretKey,
   generateKeyPairSync,
+  sign as edSign,
   type KeyObject,
 } from "node:crypto";
 import { cpus } from "node:os";
@@ -1064,6 +1076,141 @@ function benchmarkVerifyKeyResolver(): number {
   return measure(() => {
     assertResolved(signed1, KEY_RESOLVER_KIDS[0], "measured pass");
     assertResolved(signed2, KEY_RESOLVER_KIDS[1], "measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` maxSignatureAgeSec
+ * benchmark: one ed25519 key pair (generated once, outside
+ * timing), a dated fixture signed outside timing with
+ * `created` pinned at this instant and no `expires`, a
+ * 300-second age cap, and the verifier's injected `now`
+ * 60 seconds after `created` — inside the cap, so the
+ * measured steady state is the accepting path.
+ */
+const MAX_AGE_CREATED = 1_700_000_000;
+const MAX_AGE_SEC = 300;
+const MAX_AGE_KID = "bench-max-age-key-1";
+const MAX_AGE_WITHIN_AT_SEC = MAX_AGE_CREATED + 60;
+const MAX_AGE_TOO_OLD_AT_SEC = MAX_AGE_CREATED + MAX_AGE_SEC + 1;
+const MAX_AGE_NO_CREATED_EXPIRES = MAX_AGE_CREATED + 3600;
+const MAX_AGE_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+];
+
+/**
+ * `verifyRequest` with `maxSignatureAgeSec` steady state:
+ * the age-cap form a receiver uses to bound how long a
+ * signed message stays replayable when it carries
+ * `created` but no `expires` — every measured call runs
+ * the age computation (`now - created`) and the strict
+ * `>` boundary check the plain verify rows above never
+ * pay, because they pass no cap. One measured op verifies
+ * the one pinned dated fixture at the within-cap instant
+ * and re-pins that the result is ok. Outside timing, the
+ * rejecting and bypass halves are pinned once: the same
+ * fixture at one second past the cap returns exactly
+ * `{ ok: false, code: "SIGNATURE_TOO_OLD" }` with the
+ * pinned reason, and a hand-built signature carrying no
+ * `created` at all (only `expires`, `keyid`, `alg` —
+ * built with `buildSignatureBase` + `signatureInputValue`
+ * + a raw ed25519 sign, the shape
+ * `test/signatureMaxAge.test.ts` uses) still verifies at
+ * that past-cap instant, because a signature with no
+ * `created` bypasses the age check entirely. Zero
+ * network, zero randomness in the measured assertions,
+ * no wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyMaxSignatureAge(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: MAX_AGE_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: MAX_AGE_CREATED,
+  });
+  const verifyOpts = {
+    key: publicKey,
+    now: MAX_AGE_WITHIN_AT_SEC,
+    maxSignatureAgeSec: MAX_AGE_SEC,
+  };
+  const assertWithinCap = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with maxSignatureAgeSec (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the dated fixture verifies inside the cap.
+  assertWithinCap("outside timing");
+
+  // Outside timing: one second past the cap the same
+  // fixture is rejected as too old, with the pinned reason.
+  const tooOld = verifyRequest(signed, {
+    key: publicKey,
+    now: MAX_AGE_TOO_OLD_AT_SEC,
+    maxSignatureAgeSec: MAX_AGE_SEC,
+  });
+  if (
+    tooOld.ok ||
+    tooOld.code !== "SIGNATURE_TOO_OLD" ||
+    tooOld.reason !==
+      `signature is too old: created ${MAX_AGE_TOO_OLD_AT_SEC - MAX_AGE_CREATED}s ago, older than maxSignatureAgeSec=${MAX_AGE_SEC}`
+  )
+    throw new Error(
+      `benchmark self-check failed: past-cap result ${JSON.stringify(tooOld)} ` +
+        `(expected SIGNATURE_TOO_OLD at age ${MAX_AGE_TOO_OLD_AT_SEC - MAX_AGE_CREATED}s)`,
+    );
+
+  // Outside timing: a signature with no `created` bypasses
+  // the age check entirely, even at the past-cap instant.
+  const noCreatedParams: SignatureParams = {
+    keyid: MAX_AGE_KID,
+    alg: "ed25519",
+    expires: MAX_AGE_NO_CREATED_EXPIRES,
+  };
+  const noCreatedRequest: RequestLike = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: {},
+  };
+  const noCreatedBase = buildSignatureBase(
+    MAX_AGE_COVERED_COMPONENTS,
+    noCreatedRequest,
+    noCreatedParams,
+  );
+  const noCreatedSig = edSign(
+    null,
+    Buffer.from(noCreatedBase, "utf8"),
+    privateKey,
+  );
+  const noCreatedSigned: SignedHttpRequest = {
+    method: noCreatedRequest.method,
+    url: noCreatedRequest.url,
+    headers: {
+      "signature-input": signatureInputValue(
+        "sig1",
+        MAX_AGE_COVERED_COMPONENTS,
+        noCreatedParams,
+      ),
+      signature: `sig1=:${noCreatedSig.toString("base64")}:`,
+    },
+  };
+  const noCreated = verifyRequest(noCreatedSigned, {
+    key: publicKey,
+    now: MAX_AGE_TOO_OLD_AT_SEC,
+    maxSignatureAgeSec: MAX_AGE_SEC,
+  });
+  if (!noCreated.ok)
+    throw new Error(
+      `benchmark self-check failed: no-created bypass gave ${JSON.stringify(noCreated)}`,
+    );
+
+  return measure(() => {
+    assertWithinCap("measured pass");
   }, ITERATIONS);
 }
 
@@ -4792,6 +4939,11 @@ results.push({
   alg: "verifyRequest keyResolver (2 keyids)",
   op: "verify",
   ops: benchmarkVerifyKeyResolver(),
+});
+results.push({
+  alg: "verifyRequest maxSignatureAgeSec (300s cap)",
+  op: "verify",
+  ops: benchmarkVerifyMaxSignatureAge(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",

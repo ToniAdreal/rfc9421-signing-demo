@@ -12,6 +12,27 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `verifyRequest` with `maxSignatureAgeSec` — the
+  age-capped verify form a receiver uses to bound how
+  long a signed message stays replayable when it
+  carries `created` but no `expires`, which the
+  existing verify rows never timed (they pass no cap,
+  so the age computation and its strict `>` boundary
+  check were never a measured cost). The fixture is
+  one ed25519 request signed outside timing with
+  `created` pinned, verified at an injected `now`
+  60 seconds later under a 300-second cap. Every
+  measured pass re-pins that the result is ok. The
+  past-cap result (exactly `SIGNATURE_TOO_OLD` with
+  the pinned reason) and the no-`created` bypass (a
+  hand-built undated signature still verifies at the
+  past-cap instant) are asserted outside timing. The
+  README Benchmarks table was refreshed wholesale
+  from one real run and now carries the
+  `verifyRequest maxSignatureAgeSec (300s cap)` row.
+  The bench performs zero network I/O and no
+  wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `verifyRequest` through a `keyResolver` — the
   keyid→key resolution verify form a gateway runs while
   its keys rotate by keyid, which the existing verify rows
