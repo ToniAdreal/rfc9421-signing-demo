@@ -60,7 +60,20 @@
  * with the hand-built no-`expires` signature's pinned
  * `MISSING_EXPIRES` result (code and reason) and that same
  * signature's acceptance without the option asserted
- * outside timing, plus the refresh path a gateway runs when its
+ * outside timing, plus the clock-skew verify path a
+ * receiver runs to tolerate a signer clock running ahead:
+ * `verifyRequest` with `clockSkewToleranceSec` over one
+ * ed25519 fixture signed outside timing with `created`
+ * pinned 30 seconds ahead of the verifier's injected
+ * `now` (see CLOCK_SKEW_* below), self-checked on every
+ * measured pass (the result is ok under a 120-second
+ * tolerance), with the same fixture's pinned
+ * `CREATED_IN_FUTURE` result (code and reason) under a
+ * 10-second tolerance, its acceptance exactly at the
+ * tolerance boundary (the comparison is strict `>`), and
+ * its acceptance with no option passed (the 60-second
+ * default covers the 30-second skew) asserted outside
+ * timing, plus the refresh path a gateway runs when its
  * snapshot ages out: `JwksKeyStore.refreshIfStale` over a store
  * whose injected clock is advanced exactly to its TTL boundary
  * before every measured call (a counting fake fetch serves one
@@ -1351,6 +1364,118 @@ function benchmarkVerifyRequireExpires(): number {
   if (!defaulted.ok)
     throw new Error(
       `benchmark self-check failed: no-expires default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` clockSkewToleranceSec
+ * benchmark: one ed25519 key pair (generated once, outside
+ * timing), a fixture signed outside timing with `created`
+ * pinned 30 seconds ahead of the verifier's injected `now`,
+ * and the measured tolerance of 120 seconds — wide enough
+ * to accept that skew, so the measured steady state is the
+ * accepting path.
+ */
+const CLOCK_SKEW_NOW = 1_700_000_000;
+const CLOCK_SKEW_CREATED = CLOCK_SKEW_NOW + 30;
+const CLOCK_SKEW_TOLERANCE_SEC = 120;
+const CLOCK_SKEW_NARROW_SEC = 10;
+const CLOCK_SKEW_KID = "bench-clock-skew-key-1";
+
+/**
+ * `verifyRequest` with `clockSkewToleranceSec` steady
+ * state: the future-`created` tolerance form a receiver
+ * uses to accept signatures from a signer whose clock runs
+ * ahead — every measured call runs the
+ * `created > now + skew` future check with a caller-pinned
+ * tolerance the plain verify rows above never pay, because
+ * they rely on the 60-second default against fixtures that
+ * are not dated in the future. One measured op verifies
+ * the one pinned future-dated fixture with
+ * `clockSkewToleranceSec: 120` and re-pins that the result
+ * is ok. Outside timing, the rejecting, boundary and
+ * default halves are pinned once: the same fixture under
+ * a 10-second tolerance returns exactly
+ * `{ ok: false, code: "CREATED_IN_FUTURE" }` with the
+ * pinned reason, at exactly the boundary
+ * (`clockSkewToleranceSec` equal to the 30-second skew,
+ * so `created === now + skew`) the same fixture still
+ * verifies because the comparison is strict `>`, and with
+ * no option passed the same fixture verifies because the
+ * 60-second default covers the 30-second skew. Zero
+ * network, zero randomness in the measured assertions, no
+ * wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyClockSkewTolerance(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: CLOCK_SKEW_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: CLOCK_SKEW_CREATED,
+  });
+  const verifyOpts = {
+    key: publicKey,
+    now: CLOCK_SKEW_NOW,
+    clockSkewToleranceSec: CLOCK_SKEW_TOLERANCE_SEC,
+  };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with clockSkewToleranceSec (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the future-dated fixture verifies
+  // under the wide tolerance.
+  assertAccepted("outside timing");
+
+  // Outside timing: under a narrow 10-second tolerance the
+  // same fixture is rejected as created in the future,
+  // with the pinned code and reason.
+  const future = verifyRequest(signed, {
+    key: publicKey,
+    now: CLOCK_SKEW_NOW,
+    clockSkewToleranceSec: CLOCK_SKEW_NARROW_SEC,
+  });
+  if (
+    future.ok ||
+    future.code !== "CREATED_IN_FUTURE" ||
+    future.reason !== "signature created in the future (clock skew)"
+  )
+    throw new Error(
+      `benchmark self-check failed: narrow-tolerance result ${JSON.stringify(future)} ` +
+        `(expected CREATED_IN_FUTURE)`,
+    );
+
+  // Outside timing: exactly at the boundary
+  // (`created === now + skew`) the same fixture still
+  // verifies — the future check is a strict `>`.
+  const boundary = verifyRequest(signed, {
+    key: publicKey,
+    now: CLOCK_SKEW_NOW,
+    clockSkewToleranceSec: CLOCK_SKEW_CREATED - CLOCK_SKEW_NOW,
+  });
+  if (!boundary.ok)
+    throw new Error(
+      `benchmark self-check failed: boundary result ${JSON.stringify(boundary)}`,
+    );
+
+  // Outside timing: with no option passed the same fixture
+  // verifies — the 60-second default covers the 30-second
+  // skew, so the default behaviour is unchanged.
+  const defaulted = verifyRequest(signed, {
+    key: publicKey,
+    now: CLOCK_SKEW_NOW,
+  });
+  if (!defaulted.ok)
+    throw new Error(
+      `benchmark self-check failed: default-skew result ${JSON.stringify(defaulted)}`,
     );
 
   return measure(() => {
@@ -5093,6 +5218,11 @@ results.push({
   alg: "verifyRequest requireExpires",
   op: "verify",
   ops: benchmarkVerifyRequireExpires(),
+});
+results.push({
+  alg: "verifyRequest clockSkewToleranceSec (120s)",
+  op: "verify",
+  ops: benchmarkVerifyClockSkewTolerance(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",

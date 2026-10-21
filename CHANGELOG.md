@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `verifyRequest` with `clockSkewToleranceSec` — the
+  clock-skew verify form a receiver uses to tolerate a
+  signer whose clock runs ahead, which the existing
+  verify rows never timed (they rely on the 60-second
+  default against fixtures that are not dated in the
+  future, so a caller-pinned future-`created` window
+  was never a measured cost). The fixture is one
+  ed25519 request signed outside timing with `created`
+  pinned 30 seconds ahead of the verifier's injected
+  `now`, verified under a 120-second tolerance. Every
+  measured pass re-pins that the result is ok. The
+  narrow-tolerance result (exactly
+  `CREATED_IN_FUTURE` with the pinned reason), the
+  exact-boundary acceptance (the comparison is a
+  strict `>`) and the no-option acceptance (the
+  60-second default covers the 30-second skew) are
+  asserted outside timing. The README Benchmarks
+  table was refreshed wholesale from one real run and
+  now carries the
+  `verifyRequest clockSkewToleranceSec (120s)` row.
 - The CLI demo (`npm run demo`) now closes with a
   required-components segment: one key pair signs the
   same fixed payment request fully covered
