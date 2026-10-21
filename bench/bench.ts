@@ -30,7 +30,16 @@
  * TTL boundary in the target's clock restores stale), with the
  * corrupt-envelope rejections (unsupported version, malformed
  * kid) and the fail-closed unchanged-store assertions outside
- * timing, plus the refresh path a gateway runs when its
+ * timing, plus the key-resolution verify path a gateway runs
+ * on every request whose keys rotate by keyid: `verifyRequest`
+ * with a `keyResolver` over a pinned two-keyid Map keystore
+ * (two ed25519 fixtures signed outside timing with `created`
+ * pinned, the verifier's `now` injected at the same instant),
+ * self-checked on every measured pass (both results ok and
+ * each returned `keyId` equal to its pinned value), with the
+ * unknown-keyid `KEY_RESOLUTION_FAILED` result and the
+ * `key` + `keyResolver` mutual-exclusion configuration error
+ * asserted outside timing, plus the refresh path a gateway runs when its
  * snapshot ages out: `JwksKeyStore.refreshIfStale` over a store
  * whose injected clock is advanced exactly to its TTL boundary
  * before every measured call (a counting fake fetch serves one
@@ -934,6 +943,127 @@ async function benchmarkJwksRestoreSnapshot(): Promise<number> {
       throw new Error(
         "benchmark self-check failed: restored store does not resolve the pinned kid",
       );
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` keyResolver benchmark:
+ * two ed25519 key pairs (generated once, outside timing) held
+ * in a plain Map keystore under these kids, and one signed
+ * fixture request per kid over the shared bench fixture, both
+ * signed outside timing with `created` pinned at this instant
+ * — the verifier's injected `now`, so no wall clock is read.
+ */
+const KEY_RESOLVER_CREATED = 1_700_000_000;
+const KEY_RESOLVER_KIDS = [
+  "bench-resolver-key-1",
+  "bench-resolver-key-2",
+] as const;
+const KEY_RESOLVER_UNKNOWN_KID = "bench-resolver-unknown";
+
+/**
+ * `verifyRequest` through a `keyResolver` steady state: the
+ * keyid→key resolution form a gateway uses while its keys
+ * rotate — every measured call first resolves the signature's
+ * claimed `keyid` through the pinned Map resolver and only
+ * then runs the cryptographic check, the cost the static-`key`
+ * verify rows above never pay as a separate step. One measured
+ * op verifies both pinned fixtures (one per keyid) and
+ * re-pins both results: each must be ok and each returned
+ * `keyId` must equal the kid that fixture was signed under.
+ * Outside timing, the fail-closed half is pinned once: a
+ * fixture signed under an unknown kid returns exactly
+ * `{ ok: false, code: "KEY_RESOLUTION_FAILED" }` carrying
+ * that kid and the pinned reason, and passing a static `key`
+ * together with the resolver throws the pinned
+ * mutual-exclusion configuration error. Zero network, zero
+ * randomness in the measured assertions, no wall clock (the
+ * verifier clock is the pinned `created` instant).
+ */
+function benchmarkVerifyKeyResolver(): number {
+  const k1 = generateEd25519KeyPair();
+  const k2 = generateEd25519KeyPair();
+  const store = new Map<string, KeyObject>([
+    [KEY_RESOLVER_KIDS[0], k1.publicKey],
+    [KEY_RESOLVER_KIDS[1], k2.publicKey],
+  ]);
+  const keyResolver = (id: string) => store.get(id);
+  const signed1 = signRequest(fixture, {
+    keyId: KEY_RESOLVER_KIDS[0],
+    alg: "ed25519",
+    key: k1.privateKey,
+    created: KEY_RESOLVER_CREATED,
+  });
+  const signed2 = signRequest(fixture, {
+    keyId: KEY_RESOLVER_KIDS[1],
+    alg: "ed25519",
+    key: k2.privateKey,
+    created: KEY_RESOLVER_CREATED,
+  });
+  const verifyOpts = { keyResolver, now: KEY_RESOLVER_CREATED };
+  const assertResolved = (
+    signed: SignedHttpRequest,
+    kid: string,
+    where: string,
+  ): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest via keyResolver (${where}) gave ${JSON.stringify(r)}`,
+      );
+    if (r.keyId !== kid)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest via keyResolver (${where}) returned keyId ${JSON.stringify(r.keyId)} (expected ${JSON.stringify(kid)})`,
+      );
+  };
+
+  // Outside timing: both keyids verify through the resolver.
+  assertResolved(signed1, KEY_RESOLVER_KIDS[0], "outside timing");
+  assertResolved(signed2, KEY_RESOLVER_KIDS[1], "outside timing");
+
+  // Outside timing: an unknown keyid fails closed.
+  const unknownSigned = signRequest(fixture, {
+    keyId: KEY_RESOLVER_UNKNOWN_KID,
+    alg: "ed25519",
+    key: k1.privateKey,
+    created: KEY_RESOLVER_CREATED,
+  });
+  const unknown = verifyRequest(unknownSigned, verifyOpts);
+  if (
+    unknown.ok ||
+    unknown.code !== "KEY_RESOLUTION_FAILED" ||
+    unknown.keyId !== KEY_RESOLVER_UNKNOWN_KID ||
+    unknown.reason !==
+      `keyid "${KEY_RESOLVER_UNKNOWN_KID}" could not be resolved to a key`
+  )
+    throw new Error(
+      `benchmark self-check failed: unknown keyid result ${JSON.stringify(unknown)} ` +
+        `(expected KEY_RESOLUTION_FAILED for ${KEY_RESOLVER_UNKNOWN_KID})`,
+    );
+
+  // Outside timing: key + keyResolver together is a caller
+  // configuration error, not a verification failure.
+  let conflict: string | undefined;
+  try {
+    verifyRequest(signed1, {
+      key: k1.publicKey,
+      keyResolver,
+      now: KEY_RESOLVER_CREATED,
+    });
+  } catch (err) {
+    conflict = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    conflict !==
+    "verifyRequest: `key` and `keyResolver` are mutually exclusive — pass one or the other"
+  )
+    throw new Error(
+      `benchmark self-check failed: key+keyResolver conflict ${JSON.stringify(conflict)}`,
+    );
+
+  return measure(() => {
+    assertResolved(signed1, KEY_RESOLVER_KIDS[0], "measured pass");
+    assertResolved(signed2, KEY_RESOLVER_KIDS[1], "measured pass");
   }, ITERATIONS);
 }
 
@@ -4657,6 +4787,11 @@ results.push({
   alg: "JwksKeyStore.restoreSnapshot (3 keys)",
   op: "restore",
   ops: await benchmarkJwksRestoreSnapshot(),
+});
+results.push({
+  alg: "verifyRequest keyResolver (2 keyids)",
+  op: "verify",
+  ops: benchmarkVerifyKeyResolver(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",

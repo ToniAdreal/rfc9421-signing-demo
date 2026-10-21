@@ -12,6 +12,29 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `verifyRequest` through a `keyResolver` — the
+  keyid→key resolution verify form a gateway runs while
+  its keys rotate by keyid, which the existing verify rows
+  never timed (they all pass a static `key`, and the
+  `memoizeKeyResolver` rows time the resolver cache itself
+  rather than a full verification through a resolver). The
+  fixture is a plain Map keystore holding two pinned
+  ed25519 public keys (generated once outside timing)
+  under two pinned kids, with one signed fixture request
+  per kid signed outside timing with `created` pinned and
+  the verifier's `now` injected at the same instant.
+  Every measured pass verifies both fixtures through the
+  resolver and re-pins that each result is ok and each
+  returned `keyId` equals its pinned kid. The
+  unknown-keyid result (exactly `KEY_RESOLUTION_FAILED`
+  carrying the unknown kid and the pinned reason) and the
+  `key` + `keyResolver` mutual-exclusion configuration
+  error are asserted outside timing. The README
+  Benchmarks table was refreshed wholesale from one real
+  run and now carries the `verifyRequest keyResolver
+  (2 keyids)` row. The bench performs zero network I/O
+  and no wall-clock assertions.
+- The benchmark (`npm run bench`) now also measures
   `JwksKeyStore.restoreSnapshot` — the snapshot-restore
   path a gateway runs at cold start to rebuild its key
   store from the persisted envelope in an existing store
