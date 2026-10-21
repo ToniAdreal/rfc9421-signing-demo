@@ -18,7 +18,19 @@
  * on every measured pass against the hand-pinned envelope (version,
  * fetch time, kid order, per-shape `kty`, public-only JWK fields with
  * no `"d"`), with a never-refreshed store's export refusal asserted
- * outside timing, plus the refresh path a gateway runs when its
+ * outside timing, plus the snapshot-restore path a gateway runs at
+ * cold start: `JwksKeyStore.restoreSnapshot` restoring a pinned
+ * three-shape envelope (exported outside timing from a source store
+ * refreshed once through a counting fake fetch) into an existing
+ * target store primed through its own counting fake fetch,
+ * self-checked on every measured pass (the pinned kid resolves
+ * after the restore, `stats()` is identical before and after it —
+ * restoring resets no counters — and `isStale()` counts from the
+ * envelope's original fetch time, so an envelope exactly at its
+ * TTL boundary in the target's clock restores stale), with the
+ * corrupt-envelope rejections (unsupported version, malformed
+ * kid) and the fail-closed unchanged-store assertions outside
+ * timing, plus the refresh path a gateway runs when its
  * snapshot ages out: `JwksKeyStore.refreshIfStale` over a store
  * whose injected clock is advanced exactly to its TTL boundary
  * before every measured call (a counting fake fetch serves one
@@ -643,6 +655,285 @@ function benchmarkJwksExportSnapshot(store: JwksKeyStore): number {
     );
   return measure(() => {
     assertJwksExportSnapshot(store.exportSnapshot());
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `JwksKeyStore.restoreSnapshot` benchmark:
+ * a source store refreshed once through a counting fake fetch
+ * (three keys, one per supported shape, generated once outside
+ * timing) at this fetch instant under a 120-second TTL, and a
+ * target store primed through its own counting fake fetch at the
+ * instant exactly one TTL after the source fetch — so in the
+ * target's clock the exported envelope sits exactly at its
+ * staleness boundary (`isStale()` uses `>=` semantics).
+ */
+const JWKS_RESTORE_FETCHED_AT_SEC = 1_700_000_000;
+const JWKS_RESTORE_TTL_SEC = 120;
+const JWKS_RESTORE_KIDS = [
+  "bench-restore-jwks-ed25519",
+  "bench-restore-jwks-p256",
+  "bench-restore-jwks-rsa",
+] as const;
+const JWKS_RESTORE_KTYS = ["OKP", "EC", "RSA"] as const;
+/** Kid of the target store's own primed key, replaced by a restore. */
+const JWKS_RESTORE_TARGET_KID = "bench-restore-target-key";
+
+/**
+ * Pin one restore-source envelope against the hand-written
+ * expectation: version 1, the pinned fetch time, exactly the
+ * three pinned kids in document order, the per-shape `kty`
+ * dispatch (OKP / EC / RSA, the EC entry naming P-256), and
+ * public-only JWK material — no entry may carry a private `"d"`.
+ */
+function assertJwksRestoreSnapshot(
+  snapshot: ReturnType<JwksKeyStore["exportSnapshot"]>,
+): void {
+  if (snapshot.v !== 1)
+    throw new Error(
+      `benchmark self-check failed: restoreSnapshot envelope v ${String(snapshot.v)} (expected 1)`,
+    );
+  if (snapshot.fetchedAtSec !== JWKS_RESTORE_FETCHED_AT_SEC)
+    throw new Error(
+      `benchmark self-check failed: restoreSnapshot envelope fetchedAtSec ${snapshot.fetchedAtSec} ` +
+        `(expected ${JWKS_RESTORE_FETCHED_AT_SEC})`,
+    );
+  if (snapshot.keys.length !== JWKS_RESTORE_KIDS.length)
+    throw new Error(
+      `benchmark self-check failed: restoreSnapshot envelope carries ${snapshot.keys.length} keys ` +
+        `(expected ${JWKS_RESTORE_KIDS.length})`,
+    );
+  for (let i = 0; i < JWKS_RESTORE_KIDS.length; i++) {
+    const key = snapshot.keys[i]!;
+    if (key.kid !== JWKS_RESTORE_KIDS[i])
+      throw new Error(
+        `benchmark self-check failed: restoreSnapshot envelope keys[${i}].kid ${JSON.stringify(key.kid)} ` +
+          `(expected ${JSON.stringify(JWKS_RESTORE_KIDS[i])})`,
+      );
+    if (key.kty !== JWKS_RESTORE_KTYS[i])
+      throw new Error(
+        `benchmark self-check failed: restoreSnapshot envelope keys[${i}].kty ${JSON.stringify(key.kty)} ` +
+          `(expected ${JSON.stringify(JWKS_RESTORE_KTYS[i])})`,
+      );
+    if ("d" in key)
+      throw new Error(
+        `benchmark self-check failed: restoreSnapshot envelope keys[${i}] carries private "d" material`,
+      );
+  }
+  const ecCrv = (snapshot.keys[1] as { crv?: unknown }).crv;
+  if (ecCrv !== "P-256")
+    throw new Error(
+      `benchmark self-check failed: restoreSnapshot envelope EC crv ${JSON.stringify(ecCrv)} (expected "P-256")`,
+    );
+}
+
+/**
+ * `JwksKeyStore.restoreSnapshot` steady state: every measured
+ * call restores the pinned three-shape envelope into the primed
+ * target store and re-pins the restore contract — the pinned
+ * kid resolves afterwards, `stats()` is identical before and
+ * after the restore (the counters are not part of a snapshot
+ * and restoring resets none of them), the freshness timestamp
+ * is the envelope's original fetch time, and `isStale()` counts
+ * from that time, so at the target clock's TTL-boundary instant
+ * the just-restored store is already stale. Outside timing, the
+ * full contract is pinned once exhaustively (all three kids
+ * resolve, the target's primed kid no longer does, the restored
+ * store re-exports the identical envelope), and two corrupt
+ * envelopes — an unsupported version and an empty kid — are
+ * rejected with the pinned full messages while leaving the
+ * store's keys, freshness and counters exactly as they were
+ * (restore is fail-closed, never partially applied). Both
+ * stores fetch only through counting fake fetches: the bench
+ * performs zero network I/O and no wall-clock assertions.
+ */
+async function benchmarkJwksRestoreSnapshot(): Promise<number> {
+  const ed = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const rsa = generateRsaPssKeyPair();
+  const sourceDoc = {
+    keys: [
+      { ...exportPublicKeyJwk(ed.publicKey), kid: JWKS_RESTORE_KIDS[0] },
+      { ...exportPublicKeyJwkP256(p256.publicKey), kid: JWKS_RESTORE_KIDS[1] },
+      { ...exportPublicKeyJwkRsa(rsa.publicKey), kid: JWKS_RESTORE_KIDS[2] },
+    ],
+  };
+  let sourceFetches = 0;
+  const sourceFetch: JwksFetchImpl = async () => {
+    sourceFetches++;
+    return { ok: true, status: 200, json: async () => sourceDoc };
+  };
+  const source = new JwksKeyStore(
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: sourceFetch,
+      ttlSec: JWKS_RESTORE_TTL_SEC,
+      now: () => JWKS_RESTORE_FETCHED_AT_SEC,
+    },
+  );
+  await source.refresh();
+  if (sourceFetches !== 1)
+    throw new Error(
+      `benchmark self-check failed: source store made ${sourceFetches} fetches (expected 1)`,
+    );
+  const snapshot = source.exportSnapshot();
+  assertJwksRestoreSnapshot(snapshot);
+
+  const targetPair = generateEd25519KeyPair();
+  const targetDoc = {
+    keys: [
+      { ...exportPublicKeyJwk(targetPair.publicKey), kid: JWKS_RESTORE_TARGET_KID },
+    ],
+  };
+  let targetFetches = 0;
+  const targetFetch: JwksFetchImpl = async () => {
+    targetFetches++;
+    return { ok: true, status: 200, json: async () => targetDoc };
+  };
+  const targetNow = JWKS_RESTORE_FETCHED_AT_SEC + JWKS_RESTORE_TTL_SEC;
+  const target = new JwksKeyStore(
+    "https://gateway.example.com/.well-known/jwks.json",
+    { fetchImpl: targetFetch, ttlSec: JWKS_RESTORE_TTL_SEC, now: () => targetNow },
+  );
+  await target.refresh();
+  if (targetFetches !== 1 || target.isStale())
+    throw new Error(
+      "benchmark self-check failed: primed target store did not fetch exactly once or is stale at its own fetch instant",
+    );
+  if (target.resolve(JWKS_RESTORE_TARGET_KID) === undefined)
+    throw new Error(
+      "benchmark self-check failed: primed target store does not resolve its own kid",
+    );
+  if (target.resolve("bench-restore-unknown") !== undefined)
+    throw new Error(
+      "benchmark self-check failed: primed target store resolves an unknown kid",
+    );
+  const primedStats = target.stats();
+  if (
+    primedStats.refreshes !== 1 ||
+    primedStats.refreshFailures !== 0 ||
+    primedStats.hits !== 1 ||
+    primedStats.misses !== 1
+  )
+    throw new Error(
+      `benchmark self-check failed: primed target stats ${JSON.stringify(primedStats)} ` +
+        "(expected refreshes 1, refreshFailures 0, hits 1, misses 1)",
+    );
+
+  // Outside timing: one restore pins the whole contract.
+  target.restoreSnapshot(snapshot);
+  if (JSON.stringify(target.stats()) !== JSON.stringify(primedStats))
+    throw new Error(
+      `benchmark self-check failed: restoreSnapshot changed stats ${JSON.stringify(target.stats())} ` +
+        `(expected ${JSON.stringify(primedStats)})`,
+    );
+  if (target.size !== JWKS_RESTORE_KIDS.length)
+    throw new Error(
+      `benchmark self-check failed: restored size ${target.size} (expected ${JWKS_RESTORE_KIDS.length})`,
+    );
+  if (target.lastRefreshedAt !== JWKS_RESTORE_FETCHED_AT_SEC)
+    throw new Error(
+      `benchmark self-check failed: restored lastRefreshedAt ${target.lastRefreshedAt} ` +
+        `(expected ${JWKS_RESTORE_FETCHED_AT_SEC})`,
+    );
+  if (!target.isStale())
+    throw new Error(
+      "benchmark self-check failed: restored store is not stale at the TTL boundary of the original fetch time",
+    );
+  for (const kid of JWKS_RESTORE_KIDS) {
+    if (target.resolve(kid) === undefined)
+      throw new Error(
+        `benchmark self-check failed: restored store does not resolve ${kid}`,
+      );
+  }
+  if (target.resolve(JWKS_RESTORE_TARGET_KID) !== undefined)
+    throw new Error(
+      "benchmark self-check failed: restored store still resolves the replaced target kid",
+    );
+  if (JSON.stringify(target.exportSnapshot()) !== JSON.stringify(snapshot))
+    throw new Error(
+      "benchmark self-check failed: restored store does not re-export the identical envelope",
+    );
+
+  // Outside timing: corrupt envelopes are rejected, store unchanged.
+  const statsBeforeCorrupt = target.stats();
+  const badVersion = JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>;
+  badVersion["v"] = 2;
+  let versionError: string | undefined;
+  try {
+    target.restoreSnapshot(badVersion);
+  } catch (err) {
+    versionError = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    versionError !==
+    "JwksKeyStore: invalid snapshot: unsupported snapshot version 2 (expected 1)"
+  )
+    throw new Error(
+      `benchmark self-check failed: wrong-version restore error ${JSON.stringify(versionError)}`,
+    );
+  const badKid = JSON.parse(JSON.stringify(snapshot)) as {
+    keys: Array<Record<string, unknown>>;
+  };
+  badKid.keys[0]!["kid"] = "";
+  let kidError: string | undefined;
+  try {
+    target.restoreSnapshot(badKid);
+  } catch (err) {
+    kidError = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    kidError !==
+    "JwksKeyStore: invalid snapshot: keys[0]: kid must be a non-empty string " +
+      "(snapshot restore is fail-closed: unlike refresh(), kid-less entries are not skipped)"
+  )
+    throw new Error(
+      `benchmark self-check failed: empty-kid restore error ${JSON.stringify(kidError)}`,
+    );
+  if (
+    JSON.stringify(target.stats()) !== JSON.stringify(statsBeforeCorrupt) ||
+    target.size !== JWKS_RESTORE_KIDS.length ||
+    target.lastRefreshedAt !== JWKS_RESTORE_FETCHED_AT_SEC ||
+    JSON.stringify(target.exportSnapshot()) !== JSON.stringify(snapshot)
+  )
+    throw new Error(
+      "benchmark self-check failed: a rejected restoreSnapshot changed the store",
+    );
+  if (sourceFetches !== 1 || targetFetches !== 1)
+    throw new Error(
+      "benchmark self-check failed: restore path performed a fetch (restores are offline)",
+    );
+
+  return measure(() => {
+    const before = target.stats();
+    target.restoreSnapshot(snapshot);
+    const after = target.stats();
+    if (
+      after.refreshes !== before.refreshes ||
+      after.refreshFailures !== before.refreshFailures ||
+      after.hits !== before.hits ||
+      after.misses !== before.misses
+    )
+      throw new Error(
+        `benchmark self-check failed: restoreSnapshot changed stats ${JSON.stringify(before)} -> ${JSON.stringify(after)}`,
+      );
+    if (target.size !== JWKS_RESTORE_KIDS.length)
+      throw new Error(
+        `benchmark self-check failed: restored size ${target.size} (expected ${JWKS_RESTORE_KIDS.length})`,
+      );
+    if (target.lastRefreshedAt !== JWKS_RESTORE_FETCHED_AT_SEC)
+      throw new Error(
+        `benchmark self-check failed: restored lastRefreshedAt ${target.lastRefreshedAt} ` +
+          `(expected ${JWKS_RESTORE_FETCHED_AT_SEC})`,
+      );
+    if (!target.isStale())
+      throw new Error(
+        "benchmark self-check failed: restored store is not stale at the TTL boundary of the original fetch time",
+      );
+    if (target.resolve(JWKS_RESTORE_KIDS[0]) === undefined)
+      throw new Error(
+        "benchmark self-check failed: restored store does not resolve the pinned kid",
+      );
   }, ITERATIONS);
 }
 
@@ -4361,6 +4652,11 @@ results.push({
   alg: "JwksKeyStore.exportSnapshot (3 keys)",
   op: "export",
   ops: benchmarkJwksExportSnapshot(offlineJwksExportStore()),
+});
+results.push({
+  alg: "JwksKeyStore.restoreSnapshot (3 keys)",
+  op: "restore",
+  ops: await benchmarkJwksRestoreSnapshot(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",

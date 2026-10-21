@@ -11,6 +11,34 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `JwksKeyStore.restoreSnapshot` — the snapshot-restore
+  path a gateway runs at cold start to rebuild its key
+  store from the persisted envelope in an existing store
+  object, which the existing `exportSnapshot` row never
+  timed (it measures only the serialize direction, and
+  the static `restore` construction behind the `resolve`
+  rows was never itself a measured op). The fixture
+  envelope is a pinned three-key set (ed25519 / P-256 /
+  RSA, generated once outside timing) exported outside
+  timing from a source store refreshed once through a
+  counting fake fetch at a pinned fetch time under a
+  120-second TTL; the target store is primed through its
+  own counting fake fetch with a different single key at
+  the instant exactly one TTL later. Every measured pass
+  restores the envelope and re-pins that the pinned kid
+  resolves, that `stats()` is identical before and after
+  the restore (restoring resets no counters), and that
+  `isStale()` counts from the envelope's original fetch
+  time — so the just-restored store is already stale at
+  the boundary instant. The corrupt-envelope rejections
+  (an unsupported version and an empty kid, each with its
+  pinned full message) and the fail-closed
+  unchanged-store assertions are asserted outside timing.
+  The README Benchmarks table was refreshed wholesale
+  from one real run and now carries the `restore` row.
+  The bench performs zero network I/O and no wall-clock
+  assertions.
 - The CLI demo (`npm run demo`) now closes with a clock
   tolerance segment: a signature created 120 seconds in
   the future verifies under a wide
