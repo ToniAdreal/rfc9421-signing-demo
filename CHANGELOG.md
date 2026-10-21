@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `verifyRequest` with `requireExpires` — the
+  expiry-presence verify form a receiver uses to
+  refuse a signature that carries no `expires` and so
+  has no bounded lifetime, which the existing verify
+  rows never timed (they pass no requirement, so the
+  post-cryptographic presence check was never a
+  measured cost). The fixture is one ed25519 request
+  signed outside timing with `created` and `expires`
+  both pinned, verified at an injected `now` equal to
+  `created`. Every measured pass re-pins that the
+  result is ok. The hand-built no-`expires` result
+  (exactly `MISSING_EXPIRES` with the pinned reason)
+  and that same signature's acceptance without the
+  option are asserted outside timing. The README
+  Benchmarks table was refreshed wholesale from one
+  real run and now carries the
+  `verifyRequest requireExpires` row.
 - The CLI demo (`npm run demo`) now closes with an
   application-tag segment: one key pair signs the same
   fixed request with the pinned tag

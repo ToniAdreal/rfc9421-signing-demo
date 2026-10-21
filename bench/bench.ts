@@ -50,6 +50,16 @@
  * `SIGNATURE_TOO_OLD` result (pinned code and reason) and
  * the no-`created` bypass (a hand-built undated signature
  * still verifies at the past-cap instant) asserted
+ * outside timing, plus the expiry-presence verify path a
+ * receiver runs to refuse signatures with no bounded
+ * lifetime: `verifyRequest` with `requireExpires` over one
+ * ed25519 fixture signed outside timing with `created` and
+ * `expires` both pinned (the verifier's `now` injected at
+ * the `created` instant — see REQUIRE_EXPIRES_* below),
+ * self-checked on every measured pass (the result is ok),
+ * with the hand-built no-`expires` signature's pinned
+ * `MISSING_EXPIRES` result (code and reason) and that same
+ * signature's acceptance without the option asserted
  * outside timing, plus the refresh path a gateway runs when its
  * snapshot ages out: `JwksKeyStore.refreshIfStale` over a store
  * whose injected clock is advanced exactly to its TTL boundary
@@ -1211,6 +1221,140 @@ function benchmarkVerifyMaxSignatureAge(): number {
 
   return measure(() => {
     assertWithinCap("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` requireExpires
+ * benchmark: one ed25519 key pair (generated once, outside
+ * timing), a fixture signed outside timing with `created`
+ * and `expires` both pinned (a 600-second lifetime), and
+ * the verifier's injected `now` at the `created` instant —
+ * inside the lifetime, so the measured steady state is the
+ * accepting path.
+ */
+const REQUIRE_EXPIRES_CREATED = 1_700_000_000;
+const REQUIRE_EXPIRES_EXPIRES = REQUIRE_EXPIRES_CREATED + 600;
+const REQUIRE_EXPIRES_KID = "bench-require-expires-key-1";
+const REQUIRE_EXPIRES_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+];
+
+/**
+ * `verifyRequest` with `requireExpires` steady state: the
+ * expiry-presence form a receiver uses to refuse a
+ * signature with no bounded lifetime — every measured call
+ * runs the post-cryptographic `expires === undefined`
+ * presence check the plain verify rows above never pay,
+ * because they pass no such requirement. One measured op
+ * verifies the one pinned dated fixture with
+ * `requireExpires: true` and re-pins that the result is
+ * ok. Outside timing, the rejecting and default halves are
+ * pinned once: a hand-built signature carrying `created`
+ * but no `expires` (built with `buildSignatureBase` +
+ * `signatureInputValue` + a raw ed25519 sign, the shape
+ * `test/requireFreshness.test.ts` uses, because
+ * `signRequest` always emits `created` and a third-party
+ * signer may omit `expires`) returns exactly
+ * `{ ok: false, code: "MISSING_EXPIRES" }` with the pinned
+ * reason under `requireExpires: true`, and the same
+ * signature still verifies with the option unset, because
+ * the requirement is opt-in. Zero network, zero randomness
+ * in the measured assertions, no wall clock (every verify
+ * instant is injected).
+ */
+function benchmarkVerifyRequireExpires(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: REQUIRE_EXPIRES_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: REQUIRE_EXPIRES_CREATED,
+    expires: REQUIRE_EXPIRES_EXPIRES,
+  });
+  const verifyOpts = {
+    key: publicKey,
+    now: REQUIRE_EXPIRES_CREATED,
+    requireExpires: true,
+  };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with requireExpires (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the dated fixture verifies under the
+  // requirement.
+  assertAccepted("outside timing");
+
+  // Outside timing: a hand-built signature with no
+  // `expires` is rejected with the pinned code and reason.
+  const noExpiresParams: SignatureParams = {
+    keyid: REQUIRE_EXPIRES_KID,
+    alg: "ed25519",
+    created: REQUIRE_EXPIRES_CREATED,
+  };
+  const noExpiresRequest: RequestLike = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: {},
+  };
+  const noExpiresBase = buildSignatureBase(
+    REQUIRE_EXPIRES_COVERED_COMPONENTS,
+    noExpiresRequest,
+    noExpiresParams,
+  );
+  const noExpiresSig = edSign(
+    null,
+    Buffer.from(noExpiresBase, "utf8"),
+    privateKey,
+  );
+  const noExpiresSigned: SignedHttpRequest = {
+    method: noExpiresRequest.method,
+    url: noExpiresRequest.url,
+    headers: {
+      "signature-input": signatureInputValue(
+        "sig1",
+        REQUIRE_EXPIRES_COVERED_COMPONENTS,
+        noExpiresParams,
+      ),
+      signature: `sig1=:${noExpiresSig.toString("base64")}:`,
+    },
+  };
+  const missing = verifyRequest(noExpiresSigned, {
+    key: publicKey,
+    now: REQUIRE_EXPIRES_CREATED,
+    requireExpires: true,
+  });
+  if (
+    missing.ok ||
+    missing.code !== "MISSING_EXPIRES" ||
+    missing.reason !==
+      "signature carries no `expires` timestamp but requireExpires is set"
+  )
+    throw new Error(
+      `benchmark self-check failed: no-expires result ${JSON.stringify(missing)} ` +
+        `(expected MISSING_EXPIRES)`,
+    );
+
+  // Outside timing: without the option the same
+  // no-`expires` signature verifies — the requirement is
+  // opt-in and the default behaviour is unchanged.
+  const defaulted = verifyRequest(noExpiresSigned, {
+    key: publicKey,
+    now: REQUIRE_EXPIRES_CREATED,
+  });
+  if (!defaulted.ok)
+    throw new Error(
+      `benchmark self-check failed: no-expires default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
   }, ITERATIONS);
 }
 
@@ -4944,6 +5088,11 @@ results.push({
   alg: "verifyRequest maxSignatureAgeSec (300s cap)",
   op: "verify",
   ops: benchmarkVerifyMaxSignatureAge(),
+});
+results.push({
+  alg: "verifyRequest requireExpires",
+  op: "verify",
+  ops: benchmarkVerifyRequireExpires(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",
