@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a Node
+  trailers segment: three fixed mock
+  `IncomingMessage`-shaped objects show
+  `fromNodeRequest`'s trailer normalization — a parsed
+  `trailers` object normalized to lowercase keys with
+  multi-value fields trimmed and joined, a non-empty
+  `rawTrailers` winning over a stale parsed object
+  (duplicate raw names merged), and a message with no
+  trailers gaining no `trailers` field at all — and a
+  request whose `x-checksum` trailer is bound via a
+  `;tr` covered component completes a sign ->
+  `fromNodeRequest` -> verify round-trip.
+  `DemoResult` gains the segment's three normalized
+  requests, its signed request and its verification
+  result, and the demo tests gain two cases pinning
+  the segment end-to-end (738 tests in total). Every
+  fixture is fixed — no network, no wall clock.
 - The benchmark (`npm run bench`) now also measures
   `verifyRequest` with `maxSignatureAgeSec` — the
   age-capped verify form a receiver uses to bound how

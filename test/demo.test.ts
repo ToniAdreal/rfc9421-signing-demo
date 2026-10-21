@@ -13,6 +13,7 @@ import {
   exportPublicKeyJwkP384,
   exportPublicKeyJwkP521,
   exportPublicKeyJwkRsa,
+  fromNodeRequest,
   generateEd25519KeyPair,
   generateP256KeyPair,
   generateP384KeyPair,
@@ -201,6 +202,19 @@ import {
   DEMO_CLOCK_SKEW_SEC,
   DEMO_CLOCK_TOLERANCE_COVERED_COMPONENTS,
   DEMO_CLOCK_TOLERANCE_KEY_ID,
+  DEMO_NODE_TRAILERS_BODY,
+  DEMO_NODE_TRAILERS_COVERED_COMPONENTS,
+  DEMO_NODE_TRAILERS_HOST,
+  DEMO_NODE_TRAILERS_KEY_ID,
+  DEMO_NODE_TRAILERS_NONCE,
+  DEMO_NODE_TRAILERS_PARSED,
+  DEMO_NODE_TRAILERS_PARSED_INPUT,
+  DEMO_NODE_TRAILERS_RAW,
+  DEMO_NODE_TRAILERS_RAW_INPUT,
+  DEMO_NODE_TRAILERS_ROUNDTRIP,
+  DEMO_NODE_TRAILERS_ROUNDTRIP_INPUT,
+  DEMO_NODE_TRAILERS_STALE_PARSED,
+  DEMO_NODE_TRAILERS_URL,
   DEMO_REPLAY_CLEAR_CHECKS,
   DEMO_REPLAY_CLEAR_NONCE,
   DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR,
@@ -4130,7 +4144,7 @@ test("demo clock-tolerance segment shows skew/grace contrasts (wide ok, narrow r
   assert.equal(directBeyond.code, "CREATED_IN_FUTURE");
 });
 
-test("demo lines contain the clock-tolerance segment (skew within/beyond/default, grace within/beyond/default, closing the demo)", async () => {
+test("demo lines contain the clock-tolerance segment (skew within/beyond/default, grace within/beyond/default, followed by the Node trailers segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Clock tolerance: verifyRequest's clockSkewToleranceSec tolerates/);
@@ -4148,8 +4162,95 @@ test("demo lines contain the clock-tolerance segment (skew within/beyond/default
     `Expired default (no grace): signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC} (${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, no expiredToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_GRACE_SEC}): FAILED (code EXPIRED: signature expired)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 8), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  assert.equal(lines[headerIdx + 8], "");
+  assert.ok(lines[headerIdx + 9].startsWith("Node trailers:"));
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Clock tolerance:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 8), lines.slice(headerIdx, headerIdx + 8));
+});
+
+test("demo Node trailers segment normalizes parsed/raw/no trailers and verifies a ;tr round-trip", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_NODE_TRAILERS_KEY_ID, "demo-node-trailers-key-1");
+  assert.equal(DEMO_NODE_TRAILERS_NONCE, "demo-nonce-node-trailers-001");
+  assert.equal(DEMO_NODE_TRAILERS_HOST, "hooks.example.com");
+  assert.equal(DEMO_NODE_TRAILERS_URL, `https://${DEMO_NODE_TRAILERS_HOST}/webhook`);
+  assert.equal(DEMO_NODE_TRAILERS_BODY, "hello");
+  assert.deepEqual(DEMO_NODE_TRAILERS_COVERED_COMPONENTS, ["@method", "@authority", "@path", "x-checksum;tr"]);
+  assert.deepEqual(DEMO_NODE_TRAILERS_PARSED, { "x-checksum": "trailer-value", "x-dup": "alpha, beta" });
+  assert.deepEqual(DEMO_NODE_TRAILERS_RAW, { "x-checksum": "trailer-value", "x-dup": "a, b" });
+  assert.deepEqual(DEMO_NODE_TRAILERS_ROUNDTRIP, { "x-checksum": "trailer-value" });
+  assert.deepEqual(r.nodeTrailersParsed.trailers, DEMO_NODE_TRAILERS_PARSED);
+  assert.deepEqual(r.nodeTrailersRaw.trailers, DEMO_NODE_TRAILERS_RAW);
+  assert.equal(r.nodeTrailersNone.trailers, undefined);
+  assert.equal("trailers" in r.nodeTrailersNone, false);
+  assert.deepEqual(r.nodeTrailersNormalized.trailers, DEMO_NODE_TRAILERS_ROUNDTRIP);
+  assert.equal(r.nodeTrailersVerification.ok, true);
+  if (r.nodeTrailersVerification.ok) {
+    assert.equal(r.nodeTrailersVerification.keyId, DEMO_NODE_TRAILERS_KEY_ID);
+    assert.equal(r.nodeTrailersVerification.alg, "ed25519");
+    assert.equal(r.nodeTrailersVerification.nonce, DEMO_NODE_TRAILERS_NONCE);
+  }
+  assert.match(r.nodeTrailersSigned.headers["signature-input"], /"x-checksum";tr/);
+  // Independent round-trip driven directly (the same normalization
+  // test/nodeHttpTrailers.test.ts pins): sign a ;tr request with a
+  // fresh key pair, rebuild it from a mock message, verify.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const direct = signRequest(
+    {
+      method: "POST",
+      url: DEMO_NODE_TRAILERS_URL,
+      headers: { "content-type": "application/json" },
+      trailers: { ...DEMO_NODE_TRAILERS_ROUNDTRIP },
+      body: DEMO_NODE_TRAILERS_BODY,
+    },
+    { keyId: DEMO_NODE_TRAILERS_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_NODE_TRAILERS_NONCE, coveredComponents: [...DEMO_NODE_TRAILERS_COVERED_COMPONENTS] },
+  );
+  const rebuilt = fromNodeRequest(
+    {
+      method: "POST",
+      url: "/webhook",
+      headers: {
+        Host: DEMO_NODE_TRAILERS_HOST,
+        "Content-Type": "application/json",
+        "Signature-Input": direct.headers["signature-input"] as string,
+        Signature: direct.headers["signature"] as string,
+      },
+      trailers: DEMO_NODE_TRAILERS_ROUNDTRIP_INPUT,
+      socket: { encrypted: true },
+    },
+    DEMO_NODE_TRAILERS_BODY,
+  );
+  assert.deepEqual(rebuilt.trailers, DEMO_NODE_TRAILERS_ROUNDTRIP);
+  assert.equal(verifyRequest(rebuilt, { key: publicKey, now: DEMO_CREATED + 60 }).ok, true);
+  // Independent raw-precedence check driven directly.
+  const rawDirect = fromNodeRequest({
+    method: "POST",
+    url: "/webhook",
+    headers: { host: DEMO_NODE_TRAILERS_HOST },
+    trailers: DEMO_NODE_TRAILERS_STALE_PARSED,
+    rawTrailers: [...DEMO_NODE_TRAILERS_RAW_INPUT],
+  });
+  assert.deepEqual(rawDirect.trailers, DEMO_NODE_TRAILERS_RAW);
+});
+
+test("demo lines contain the Node trailers segment (parsed, raw precedence, no trailers, round-trip, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Node trailers: fromNodeRequest normalizes/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Node trailers:"));
+  const clockIdx = lines.findIndex((l) => l.startsWith("Clock tolerance:"));
+  assert.ok(clockIdx !== -1 && headerIdx !== -1 && clockIdx < headerIdx);
+  const expectedLines = [
+    "Node trailers: fromNodeRequest normalizes a message's trailers with the header conventions — names lowercased, multi-value fields trimmed and joined with \", \" — a non-empty rawTrailers wins over the parsed trailers object, and a message with no trailers gains no trailers field at all",
+    `Parsed trailers ${JSON.stringify(DEMO_NODE_TRAILERS_PARSED_INPUT)}: normalized to ${JSON.stringify(DEMO_NODE_TRAILERS_PARSED)}`,
+    `Raw trailers ${JSON.stringify(DEMO_NODE_TRAILERS_RAW_INPUT)} over a stale parsed trailers object (${JSON.stringify(DEMO_NODE_TRAILERS_STALE_PARSED)}): normalized to ${JSON.stringify(DEMO_NODE_TRAILERS_RAW)} (rawTrailers takes precedence, duplicate raw names merged)`,
+    `No trailers: normalized trailers is undefined and "trailers" in the normalized request is false (no trailers field is attached)`,
+    `Trailer-covered verification: OK (label sig1, keyid="${DEMO_NODE_TRAILERS_KEY_ID}", alg="ed25519", nonce="${DEMO_NODE_TRAILERS_NONCE}")`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Node trailers:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
 });

@@ -613,6 +613,26 @@
  * semantics `test/freshness.test.ts` pins). Every clock
  * is injected and the segment's key pair is fresh per
  * run, so the printed lines are identical between runs.
+ * The demo then closes with a Node trailers segment: the
+ * inbound segment above shows `fromNodeRequest` carrying
+ * headers over, but never its trailer normalization
+ * (`src/nodeHttp.ts`: a non-empty `rawTrailers` wins over
+ * the parsed `trailers` object, names are lowercased,
+ * multi-value fields are merged and joined with ", ",
+ * and a message with no trailers gains no `trailers`
+ * field at all) — the adapter half a webhook receiver
+ * relies on for trailer-bound fields such as a trailing
+ * content-digest. Three fixed mock messages print the
+ * three shapes (parsed form, raw form winning over a
+ * stale parsed object, no trailers), and a request whose
+ * `x-checksum` trailer is bound via a `;tr` covered
+ * component completes a sign -> `fromNodeRequest` ->
+ * verify round-trip. Outside the printed lines the demo
+ * asserts every normalized result equals the hand-pinned
+ * expectations below (the same normalization
+ * `test/nodeHttpTrailers.test.ts` pins). Every input is
+ * a fixed demo constant, so the segment is
+ * byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2209,6 +2229,98 @@ export const DEMO_INBOUND_COVERED_COMPONENTS: string[] = [
 /** Wrong scheme the inbound segment rebuilds with (must be rejected). */
 export const DEMO_INBOUND_WRONG_SCHEME = "http";
 
+/** Key id of the closing Node-trailers segment's signed request. */
+export const DEMO_NODE_TRAILERS_KEY_ID = "demo-node-trailers-key-1";
+/** Nonce of the closing Node-trailers segment's signed request. */
+export const DEMO_NODE_TRAILERS_NONCE = "demo-nonce-node-trailers-001";
+/** Host of the closing Node-trailers segment's mock messages. */
+export const DEMO_NODE_TRAILERS_HOST = "hooks.example.com";
+/** Absolute URL the closing Node-trailers segment signs and then rebuilds. */
+export const DEMO_NODE_TRAILERS_URL = `https://${DEMO_NODE_TRAILERS_HOST}/webhook`;
+/** Body of the closing Node-trailers segment's requests. */
+export const DEMO_NODE_TRAILERS_BODY = "hello";
+/**
+ * Parsed trailers of the segment's first mock message, as Node
+ * exposes them on `IncomingMessage.trailers`: a mixed-case
+ * single field and a padded multi-value field.
+ */
+export const DEMO_NODE_TRAILERS_PARSED_INPUT: Record<
+  string,
+  string | string[]
+> = {
+  "X-Checksum": "trailer-value",
+  "X-Dup": ["  alpha  ", "beta "],
+};
+/**
+ * Hand-pinned normalization of `DEMO_NODE_TRAILERS_PARSED_INPUT`:
+ * names lowercased, the multi-value field's elements trimmed and
+ * joined with ", " — the header conventions `normalizeTrailers`
+ * applies (the same result `test/nodeHttpTrailers.test.ts` pins
+ * for its multi-value fixture). Written out here, never derived
+ * from the adapter output the demo is checking.
+ */
+export const DEMO_NODE_TRAILERS_PARSED: Readonly<Record<string, string>> = {
+  "x-checksum": "trailer-value",
+  "x-dup": "alpha, beta",
+};
+/**
+ * Raw trailers of the segment's second mock message, as Node
+ * exposes them on `IncomingMessage.rawTrailers`: a flat
+ * wire-order array with the sender's original casing and one
+ * name (`X-Dup` / `x-dup`) sent twice.
+ */
+export const DEMO_NODE_TRAILERS_RAW_INPUT: ReadonlyArray<string> = [
+  "X-Checksum",
+  "trailer-value",
+  "X-Dup",
+  "a",
+  "x-dup",
+  "b",
+];
+/**
+ * Stale parsed trailers object carried alongside
+ * `DEMO_NODE_TRAILERS_RAW_INPUT`: its `x-checksum` disagrees
+ * with the raw form, so the segment proves the raw (lossless
+ * wire) form wins when both are present.
+ */
+export const DEMO_NODE_TRAILERS_STALE_PARSED: Record<string, string> = {
+  "x-checksum": "stale-object-value",
+};
+/**
+ * Hand-pinned normalization of the raw form: the raw value of
+ * `x-checksum` (not the stale parsed one), and the two raw
+ * `x-dup` entries merged and joined with ", ".
+ */
+export const DEMO_NODE_TRAILERS_RAW: Readonly<Record<string, string>> = {
+  "x-checksum": "trailer-value",
+  "x-dup": "a, b",
+};
+/** Parsed trailers of the segment's round-trip mock message (mixed-case name). */
+export const DEMO_NODE_TRAILERS_ROUNDTRIP_INPUT: Record<string, string> = {
+  "X-Checksum": "trailer-value",
+};
+/**
+ * Hand-pinned normalization of the round-trip trailers — and
+ * the signer-side trailer value the round-trip signature
+ * binds through its `;tr` covered component.
+ */
+export const DEMO_NODE_TRAILERS_ROUNDTRIP: Readonly<Record<string, string>> =
+  {
+    "x-checksum": "trailer-value",
+  };
+/**
+ * Covered components of the round-trip signature: the trailer
+ * field is bound via `x-checksum;tr` (RFC 9421 §2.1.4), so
+ * verification only passes if the adapter reproduces the
+ * signer-side trailer value exactly.
+ */
+export const DEMO_NODE_TRAILERS_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+  "x-checksum;tr",
+];
+
 export interface DemoResult {
   signed: SignedHttpRequest;
   tamperedBody: string;
@@ -3124,6 +3236,31 @@ export interface DemoResult {
   clockToleranceExpiredBeyondGraceVerification: VerifyResult;
   /** Expired signature 1s past `expires` with no grace option (default 0): rejected with `EXPIRED`. */
   clockToleranceExpiredDefaultVerification: VerifyResult;
+  /**
+   * The closing Node-trailers segment's parsed-form mock
+   * message normalized by `fromNodeRequest` (its `trailers`
+   * equal `DEMO_NODE_TRAILERS_PARSED`).
+   */
+  nodeTrailersParsed: RequestLike;
+  /**
+   * The segment's raw-form mock message normalized by
+   * `fromNodeRequest`: the raw form won over the stale
+   * parsed object (its `trailers` equal
+   * `DEMO_NODE_TRAILERS_RAW`).
+   */
+  nodeTrailersRaw: RequestLike;
+  /**
+   * The segment's no-trailer mock message normalized by
+   * `fromNodeRequest`: it gains no `trailers` field at all
+   * (`trailers` is `undefined`).
+   */
+  nodeTrailersNone: RequestLike;
+  /** The request signed in the closing Node-trailers segment with a `;tr` covered trailer. */
+  nodeTrailersSigned: SignedHttpRequest;
+  /** `nodeTrailersSigned`'s wire form normalized by `fromNodeRequest` from a mock message carrying the parsed trailer. */
+  nodeTrailersNormalized: RequestLike;
+  /** Verification of `nodeTrailersNormalized` (ok — the trailer round-trip holds). */
+  nodeTrailersVerification: VerifyResult;
   lines: string[];
 }
 
@@ -5868,6 +6005,104 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Node trailers segment: the inbound segment above shows
+  // `fromNodeRequest` carrying headers over, but a webhook
+  // receiver also relies on its trailer normalization for
+  // trailer-bound fields (a trailing content-digest, say).
+  // Three fixed mock messages print the three shapes: the
+  // parsed `trailers` object normalized (names lowercased,
+  // multi-value fields joined), a non-empty `rawTrailers`
+  // winning over a stale parsed object (duplicates merged),
+  // and a message with no trailers gaining no `trailers`
+  // field at all. A request whose `x-checksum` trailer is
+  // bound via a `;tr` covered component then completes a
+  // sign -> fromNodeRequest -> verify round-trip. Outside
+  // the printed lines the demo asserts every normalized
+  // result equals the hand-pinned expectations.
+  const nodeTrailersBase: IncomingRequestLike = {
+    method: "POST",
+    url: "/webhook",
+    headers: { Host: DEMO_NODE_TRAILERS_HOST },
+    socket: { encrypted: true },
+  };
+  const nodeTrailersParsed = fromNodeRequest(
+    { ...nodeTrailersBase, trailers: DEMO_NODE_TRAILERS_PARSED_INPUT },
+    DEMO_NODE_TRAILERS_BODY,
+  );
+  const nodeTrailersRaw = fromNodeRequest(
+    {
+      ...nodeTrailersBase,
+      trailers: DEMO_NODE_TRAILERS_STALE_PARSED,
+      rawTrailers: [...DEMO_NODE_TRAILERS_RAW_INPUT],
+    },
+    DEMO_NODE_TRAILERS_BODY,
+  );
+  const nodeTrailersNone = fromNodeRequest(
+    { ...nodeTrailersBase },
+    DEMO_NODE_TRAILERS_BODY,
+  );
+  const nodeTrailersPair = generateEd25519KeyPair();
+  const nodeTrailersSigned = signRequest(
+    {
+      method: "POST",
+      url: DEMO_NODE_TRAILERS_URL,
+      headers: { "content-type": "application/json" },
+      trailers: { ...DEMO_NODE_TRAILERS_ROUNDTRIP },
+      body: DEMO_NODE_TRAILERS_BODY,
+    },
+    {
+      keyId: DEMO_NODE_TRAILERS_KEY_ID,
+      alg: "ed25519",
+      key: nodeTrailersPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_NODE_TRAILERS_NONCE,
+      coveredComponents: [...DEMO_NODE_TRAILERS_COVERED_COMPONENTS],
+    },
+  );
+  const nodeTrailersNormalized = fromNodeRequest(
+    {
+      method: "POST",
+      url: "/webhook",
+      headers: {
+        Host: DEMO_NODE_TRAILERS_HOST,
+        "Content-Type": "application/json",
+        "Signature-Input": nodeTrailersSigned.headers["signature-input"],
+        Signature: nodeTrailersSigned.headers["signature"],
+      },
+      trailers: DEMO_NODE_TRAILERS_ROUNDTRIP_INPUT,
+      socket: { encrypted: true },
+    },
+    DEMO_NODE_TRAILERS_BODY,
+  );
+  const nodeTrailersVerification = verifyRequest(nodeTrailersNormalized, {
+    key: nodeTrailersPair.publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  if (
+    JSON.stringify(nodeTrailersParsed.trailers) !==
+      JSON.stringify(DEMO_NODE_TRAILERS_PARSED) ||
+    JSON.stringify(nodeTrailersRaw.trailers) !==
+      JSON.stringify(DEMO_NODE_TRAILERS_RAW) ||
+    nodeTrailersNone.trailers !== undefined ||
+    "trailers" in nodeTrailersNone ||
+    JSON.stringify(nodeTrailersNormalized.trailers) !==
+      JSON.stringify(DEMO_NODE_TRAILERS_ROUNDTRIP) ||
+    nodeTrailersVerification.ok !== true
+  ) {
+    throw new Error(
+      `demo fixture broken: fromNodeRequest trailers gave parsed ` +
+        `${JSON.stringify(nodeTrailersParsed.trailers)}, raw ` +
+        `${JSON.stringify(nodeTrailersRaw.trailers)}, none ` +
+        `${JSON.stringify(nodeTrailersNone.trailers)} (field present: ` +
+        `${"trailers" in nodeTrailersNone}), round-trip ` +
+        `${JSON.stringify(nodeTrailersNormalized.trailers)} and verification ` +
+        `${JSON.stringify(nodeTrailersVerification)}, instead of the pinned ` +
+        `${JSON.stringify(DEMO_NODE_TRAILERS_PARSED)} / ` +
+        `${JSON.stringify(DEMO_NODE_TRAILERS_RAW)} / undefined (no field) / ` +
+        `${JSON.stringify(DEMO_NODE_TRAILERS_ROUNDTRIP)} and an ok verification`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -6220,6 +6455,14 @@ export async function runDemo(): Promise<DemoResult> {
     clockToleranceExpiredDefaultVerification.ok
       ? `Expired default (no grace): signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC} (${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, no expiredToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_GRACE_SEC}): OK (unexpected — the expired signature was not rejected)`
       : `Expired default (no grace): signature expired at ${DEMO_CLOCK_EXPIRES} verified at ${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC} (${DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC - DEMO_CLOCK_EXPIRES}s past expires, no expiredToleranceSec passed — default ${DEMO_CLOCK_DEFAULT_GRACE_SEC}): FAILED (code ${clockToleranceExpiredDefaultVerification.code}: ${clockToleranceExpiredDefaultVerification.reason})`,
+    "",
+    "Node trailers: fromNodeRequest normalizes a message's trailers with the header conventions — names lowercased, multi-value fields trimmed and joined with \", \" — a non-empty rawTrailers wins over the parsed trailers object, and a message with no trailers gains no trailers field at all",
+    `Parsed trailers ${JSON.stringify(DEMO_NODE_TRAILERS_PARSED_INPUT)}: normalized to ${JSON.stringify(nodeTrailersParsed.trailers)}`,
+    `Raw trailers ${JSON.stringify(DEMO_NODE_TRAILERS_RAW_INPUT)} over a stale parsed trailers object (${JSON.stringify(DEMO_NODE_TRAILERS_STALE_PARSED)}): normalized to ${JSON.stringify(nodeTrailersRaw.trailers)} (rawTrailers takes precedence, duplicate raw names merged)`,
+    `No trailers: normalized trailers is ${nodeTrailersNone.trailers} and "trailers" in the normalized request is ${"trailers" in nodeTrailersNone} (no trailers field is attached)`,
+    nodeTrailersVerification.ok
+      ? `Trailer-covered verification: OK (label ${nodeTrailersVerification.label}, keyid="${nodeTrailersVerification.keyId}", alg="${nodeTrailersVerification.alg}", nonce="${nodeTrailersVerification.nonce}")`
+      : `Trailer-covered verification: FAILED (code ${nodeTrailersVerification.code}: ${nodeTrailersVerification.reason})`,
   ];
 
   return {
@@ -6387,6 +6630,12 @@ export async function runDemo(): Promise<DemoResult> {
     clockToleranceExpiredWithinGraceVerification,
     clockToleranceExpiredBeyondGraceVerification,
     clockToleranceExpiredDefaultVerification,
+    nodeTrailersParsed,
+    nodeTrailersRaw,
+    nodeTrailersNone,
+    nodeTrailersSigned,
+    nodeTrailersNormalized,
+    nodeTrailersVerification,
     lines,
   };
 }
