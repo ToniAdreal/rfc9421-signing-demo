@@ -12,6 +12,28 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `verifyRequest` with `algFallback: "infer"` — the
+  algorithm-inference verify form a receiver uses for
+  foreign signers that omit the optional `alg`
+  parameter, which the existing verify rows never
+  timed (their fixtures always carry `alg` on the
+  wire). The fixture is the RFC 9421 Appendix B.2.5
+  wire value verbatim (no `alg` parameter) verified
+  against its pinned shared secret at an injected
+  `now` equal to the vector's `created` instant.
+  Every measured pass re-pins that the result is ok
+  and that the inferred `alg` and the returned
+  `keyId` equal their pinned values. The same wire's
+  `VERIFICATION_ERROR` result without the opt-in, a
+  wire `alg` contradicting the key's shape throwing
+  the pinned configuration error, and a secp256k1 key
+  shape with no supported mapping throwing the
+  pinned cannot-infer configuration error are
+  asserted outside timing. The README Benchmarks
+  table was refreshed wholesale from one real run
+  and now carries the `verifyRequest algFallback
+  (infer)` row.
+- The benchmark (`npm run bench`) now also measures
   `verifyRequest` with `expiredToleranceSec` — the
   expiry-grace verify form a receiver uses to accept a
   signature that expired moments ago, which the

@@ -133,7 +133,21 @@
  * the pinned configuration error, and `keyResolvers`
  * combined with `keys` throwing the pinned
  * mutual-exclusion configuration error asserted
- * outside timing, plus the refresh path a gateway runs when its
+ * outside timing, plus the algorithm-inference verify path a
+ * receiver runs for foreign signers that omit the optional
+ * `alg` parameter: `verifyRequest` with
+ * `algFallback: "infer"` over the RFC 9421 Appendix B.2.5
+ * no-`alg` wire value verbatim against its pinned shared
+ * secret (see ALG_FALLBACK_* below), self-checked on every
+ * measured pass (the result is ok and the inferred `alg`
+ * and returned `keyId` equal their pinned values), with
+ * the same wire's pinned `VERIFICATION_ERROR` result
+ * without the opt-in (the legacy `ed25519` default is
+ * tried against the secret key), a wire `alg` that
+ * contradicts the key's shape throwing the pinned
+ * configuration error, and a secp256k1 key shape with no
+ * supported mapping throwing the pinned cannot-infer
+ * configuration error asserted outside timing, plus the refresh path a gateway runs when its
  * snapshot ages out: `JwksKeyStore.refreshIfStale` over a store
  * whose injected clock is advanced exactly to its TTL boundary
  * before every measured call (a counting fake fetch serves one
@@ -2258,6 +2272,169 @@ function benchmarkVerifyAllKeyResolvers(): number {
     throw new Error(
       `benchmark self-check failed: keys+keyResolvers conflict gave ${String(conflictError)} ` +
         `(expected the pinned mutual-exclusion error)`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` algFallback
+ * benchmark: the RFC 9421 Appendix B.2.5 hmac-sha256
+ * wire value verbatim — its signature-input carries
+ * `created` and `keyid` but no `alg` (`alg` is optional
+ * per RFC 9421 §2.3) — verified against the §B.1.5
+ * pinned shared secret, with the verifier's injected
+ * `now` at the vector's own `created` instant, so no
+ * wall clock is read.
+ */
+const ALG_FALLBACK_NOW = 1_618_884_473;
+const ALG_FALLBACK_LABEL = "sig-b25";
+const ALG_FALLBACK_KID = "test-shared-secret";
+const ALG_FALLBACK_SECRET_B64 =
+  "uzvJfB4u3N0Jy4T7NZ75MDVcr8zSTInedJtkgcu46YW4XByzNJjxBdtjUkdJPBt" +
+  "bmHhIDi6pcl8jsasjlTMtDQ==";
+const ALG_FALLBACK_SIGNATURE_INPUT = `sig-b25=("date" "@authority" "content-type");created=1618884473;keyid="test-shared-secret"`;
+const ALG_FALLBACK_SIGNATURE_B64 =
+  "pxcQw6G3AjtMBQjwo8XzkZf/bws5LelbaMk5rGIGtE8=";
+const ALG_FALLBACK_INFERRED_ALG = "hmac-sha256";
+const ALG_FALLBACK_INCOMPATIBLE_ERROR =
+  'verifyRequest: wire alg "ed25519" is incompatible with the configured key (a secret (symmetric) key) — pass a matching key or remove the algFallback "infer" opt-in';
+const ALG_FALLBACK_UNINFERRABLE_ERROR =
+  'verifyRequest: algFallback "infer" cannot infer an algorithm for an asymmetric ec key (secp256k1) — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, P-384 (secp384r1) EC keys, P-521 (secp521r1) EC keys, and RSA keys (rsa-pss-sha512)';
+const ALG_FALLBACK_ED_CREATED = 1_700_000_000;
+const ALG_FALLBACK_ED_KID = "bench-alg-fallback-ed25519";
+
+/**
+ * `verifyRequest` with `algFallback: "infer"` steady
+ * state: the algorithm-inference form a receiver uses
+ * for foreign signers that omit the optional `alg`
+ * parameter — every measured call runs the key-shape
+ * inference the plain verify rows above never pay,
+ * because their fixtures always carry `alg` on the
+ * wire. One measured op verifies the pinned B.2.5
+ * no-`alg` fixture with `algFallback: "infer"` and
+ * re-pins that the result is ok and that the inferred
+ * `alg` and the returned `keyId` equal their pinned
+ * values. Outside timing, the default and
+ * configuration-error halves are pinned once: the
+ * same wire with no opt-in returns exactly
+ * `{ ok: false, code: "VERIFICATION_ERROR" }` (only
+ * the code is pinned — the reason carries the crypto
+ * layer's own message, the same half the CLI demo
+ * pins), a wire `alg="ed25519"` verified under the
+ * opt-in against a secret key throws the pinned
+ * incompatible-key configuration error, and the same
+ * no-`alg` wire verified under the opt-in against a
+ * secp256k1 key — a shape with no supported mapping —
+ * throws the pinned cannot-infer configuration
+ * error. Zero network, zero randomness in the
+ * measured assertions, no wall clock (the verifier
+ * clock is the vector's pinned `created` instant;
+ * the secp256k1 key pair is generated once outside
+ * timing and only its shape is ever asserted).
+ */
+function benchmarkVerifyAlgFallback(): number {
+  const wire: RequestLike = {
+    method: "POST",
+    url: "http://example.com/foo?param=Value&Pet=dog",
+    headers: {
+      date: "Tue, 20 Apr 2021 02:07:55 GMT",
+      "content-type": "application/json",
+      "signature-input": ALG_FALLBACK_SIGNATURE_INPUT,
+      signature: `${ALG_FALLBACK_LABEL}=:${ALG_FALLBACK_SIGNATURE_B64}:`,
+    },
+  };
+  const secret = secretKey(Buffer.from(ALG_FALLBACK_SECRET_B64, "base64"));
+  const verifyOpts = {
+    key: secret,
+    label: ALG_FALLBACK_LABEL,
+    now: ALG_FALLBACK_NOW,
+    algFallback: "infer" as const,
+  };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(wire, verifyOpts);
+    if (
+      !r.ok ||
+      r.alg !== ALG_FALLBACK_INFERRED_ALG ||
+      r.keyId !== ALG_FALLBACK_KID ||
+      r.label !== ALG_FALLBACK_LABEL
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with algFallback (${where}) gave ${JSON.stringify(r)} ` +
+          `(expected ok with inferred alg ${JSON.stringify(ALG_FALLBACK_INFERRED_ALG)})`,
+      );
+  };
+
+  // Outside timing: the no-alg B.2.5 wire verifies
+  // under the opt-in, with the algorithm inferred
+  // from the secret key's shape.
+  assertAccepted("outside timing");
+
+  // Outside timing: with no opt-in the same wire
+  // keeps the legacy behavior — the `ed25519` default
+  // is tried against the secret key and the crypto
+  // layer rejects the shape.
+  const defaulted = verifyRequest(wire, {
+    key: secret,
+    label: ALG_FALLBACK_LABEL,
+    now: ALG_FALLBACK_NOW,
+  });
+  if (defaulted.ok || defaulted.code !== "VERIFICATION_ERROR")
+    throw new Error(
+      `benchmark self-check failed: no-opt-in result ${JSON.stringify(defaulted)} ` +
+        `(expected VERIFICATION_ERROR)`,
+    );
+
+  // Outside timing: a wire `alg` that contradicts the
+  // configured key's shape is a caller configuration
+  // error with the pinned full message, not a
+  // verification failure.
+  const { privateKey: edPrivate } = generateEd25519KeyPair();
+  const edSigned = signRequest(fixture, {
+    keyId: ALG_FALLBACK_ED_KID,
+    alg: "ed25519",
+    key: edPrivate,
+    created: ALG_FALLBACK_ED_CREATED,
+  });
+  let incompatibleError: string | undefined;
+  try {
+    verifyRequest(edSigned, {
+      key: secret,
+      now: ALG_FALLBACK_ED_CREATED,
+      algFallback: "infer",
+    });
+  } catch (err) {
+    incompatibleError = err instanceof Error ? err.message : String(err);
+  }
+  if (incompatibleError !== ALG_FALLBACK_INCOMPATIBLE_ERROR)
+    throw new Error(
+      `benchmark self-check failed: incompatible-alg error ${JSON.stringify(incompatibleError)} ` +
+        `(expected the pinned configuration error)`,
+    );
+
+  // Outside timing: a key shape with no supported
+  // mapping (secp256k1) throws the pinned cannot-infer
+  // configuration error.
+  const { publicKey: k1Public } = generateKeyPairSync("ec", {
+    namedCurve: "secp256k1",
+  });
+  let uninferrableError: string | undefined;
+  try {
+    verifyRequest(wire, {
+      key: k1Public,
+      label: ALG_FALLBACK_LABEL,
+      now: ALG_FALLBACK_NOW,
+      algFallback: "infer",
+    });
+  } catch (err) {
+    uninferrableError = err instanceof Error ? err.message : String(err);
+  }
+  if (uninferrableError !== ALG_FALLBACK_UNINFERRABLE_ERROR)
+    throw new Error(
+      `benchmark self-check failed: uninferrable-key error ${JSON.stringify(uninferrableError)} ` +
+        `(expected the pinned configuration error)`,
     );
 
   return measure(() => {
@@ -6025,6 +6202,11 @@ results.push({
   alg: "verifyAllLabels keyResolvers (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllKeyResolvers(),
+});
+results.push({
+  alg: "verifyRequest algFallback (infer)",
+  op: "verify",
+  ops: benchmarkVerifyAlgFallback(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",
