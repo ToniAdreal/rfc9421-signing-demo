@@ -85,6 +85,22 @@
  * hand-built no-keyid signature's `KEYID_MISMATCH`
  * result with the `got no keyid` reason shape, and
  * that signature's acceptance with no option passed
+ * asserted outside timing, plus the per-label key-id
+ * binding verify path a multi-party receiver runs to
+ * pin each signer's key independently:
+ * `verifyAllLabels` with `expectedKeyIds` over a dual
+ * ed25519 fixture signed outside timing with `created`
+ * pinned under two pinned keyids (see
+ * EXPECTED_KEY_IDS_* below), self-checked on every
+ * measured pass (both results are ok, in wire order,
+ * and each returned `keyId` equals its label's pinned
+ * value), with one label's mismatched pin returning
+ * the pinned `KEYID_MISMATCH` result (code and
+ * reason) while the other label still verifies, a
+ * label missing from the map falling back to the
+ * global `expectedKeyId` (both the matching and the
+ * mismatching fallback halves), and an empty-string
+ * map value throwing the pinned configuration error
  * asserted outside timing, plus the refresh path a gateway runs when its
  * snapshot ages out: `JwksKeyStore.refreshIfStale` over a store
  * whose injected clock is advanced exactly to its TTL boundary
@@ -1638,6 +1654,197 @@ function benchmarkVerifyExpectedKeyId(): number {
   if (!defaulted.ok)
     throw new Error(
       `benchmark self-check failed: no-keyid default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels` expectedKeyIds
+ * benchmark: two ed25519 key pairs (generated once,
+ * outside timing), a dual-label fixture signed outside
+ * timing with `created` pinned under two pinned keyids
+ * (merchant / gateway, the canonical multi-party labels),
+ * and the verifier's injected `now` at the `created`
+ * instant.
+ */
+const EXPECTED_KEY_IDS_CREATED = 1_700_000_000;
+const EXPECTED_KEY_IDS_MERCHANT_KID =
+  "bench-expected-key-ids-merchant-1";
+const EXPECTED_KEY_IDS_GATEWAY_KID =
+  "bench-expected-key-ids-gateway-7";
+const EXPECTED_KEY_IDS_GATEWAY_WRONG =
+  "bench-expected-key-ids-gateway-other";
+
+/**
+ * `verifyAllLabels` with `expectedKeyIds` steady state:
+ * the per-label key-id binding form a multi-party
+ * receiver uses to pin each signer's key independently
+ * (key-confusion defense when the merchant and the
+ * gateway use different key ids) — every measured call
+ * runs the per-label pin resolution and the
+ * post-cryptographic keyid comparison for both labels,
+ * which the plain `verifyAllLabels` row above never
+ * pays, because it passes no pins. One measured op
+ * verifies the dual-label fixture with a fully matching
+ * `expectedKeyIds` map and re-pins that both results
+ * are ok, in wire order, and that each returned
+ * `keyId` equals its label's pinned value. Outside
+ * timing, the rejecting and fallback halves are pinned
+ * once: one label pinned wrong returns exactly
+ * `{ ok: false, code: "KEYID_MISMATCH" }` with the
+ * pinned reason while the other label still verifies,
+ * a label missing from the map falls back to the
+ * global `expectedKeyId` (matching fallback verifies
+ * both labels; an empty map makes the gateway label
+ * fail against the merchant global pin with the
+ * pinned code and reason), and an empty-string map
+ * value throws the pinned configuration error. Zero
+ * network, zero randomness in the measured assertions,
+ * no wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyAllExpectedKeyIds(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantSigned = signRequest(fixture, {
+    keyId: EXPECTED_KEY_IDS_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: EXPECTED_KEY_IDS_CREATED,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: EXPECTED_KEY_IDS_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: EXPECTED_KEY_IDS_CREATED,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: EXPECTED_KEY_IDS_CREATED,
+    expectedKeyIds: {
+      merchant: EXPECTED_KEY_IDS_MERCHANT_KID,
+      gateway: EXPECTED_KEY_IDS_GATEWAY_KID,
+    },
+  };
+  const assertAccepted = (where: string): void => {
+    const results = verifyAllLabels(dual, verifyOpts);
+    if (
+      results.length !== 2 ||
+      results[0].label !== "merchant" ||
+      !results[0].ok ||
+      results[0].keyId !== EXPECTED_KEY_IDS_MERCHANT_KID ||
+      results[1].label !== "gateway" ||
+      !results[1].ok ||
+      results[1].keyId !== EXPECTED_KEY_IDS_GATEWAY_KID
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with expectedKeyIds (${where}) gave ${JSON.stringify(results)}`,
+      );
+  };
+
+  // Outside timing: the pinned fixture verifies under
+  // the fully matching per-label pins.
+  assertAccepted("outside timing");
+
+  // Outside timing: a wrong pin on the gateway label
+  // rejects only that label with the pinned code and
+  // reason; the merchant label still verifies.
+  const mismatched = verifyAllLabels(dual, {
+    keys,
+    now: EXPECTED_KEY_IDS_CREATED,
+    expectedKeyIds: {
+      merchant: EXPECTED_KEY_IDS_MERCHANT_KID,
+      gateway: EXPECTED_KEY_IDS_GATEWAY_WRONG,
+    },
+  });
+  if (
+    mismatched.length !== 2 ||
+    mismatched[0].label !== "merchant" ||
+    !mismatched[0].ok ||
+    mismatched[1].label !== "gateway" ||
+    mismatched[1].ok ||
+    mismatched[1].code !== "KEYID_MISMATCH" ||
+    mismatched[1].reason !==
+      `keyid mismatch: expected "${EXPECTED_KEY_IDS_GATEWAY_WRONG}", got "${EXPECTED_KEY_IDS_GATEWAY_KID}"` ||
+    mismatched[1].keyId !== EXPECTED_KEY_IDS_GATEWAY_KID
+  )
+    throw new Error(
+      `benchmark self-check failed: mismatched-pin result ${JSON.stringify(mismatched)} ` +
+        `(expected KEYID_MISMATCH on gateway only)`,
+    );
+
+  // Outside timing: a label missing from the map falls
+  // back to the global `expectedKeyId` — here the
+  // merchant label is unpinned per label and the
+  // global pin matches it, so both labels verify.
+  const fallbackOk = verifyAllLabels(dual, {
+    keys,
+    now: EXPECTED_KEY_IDS_CREATED,
+    expectedKeyId: EXPECTED_KEY_IDS_MERCHANT_KID,
+    expectedKeyIds: { gateway: EXPECTED_KEY_IDS_GATEWAY_KID },
+  });
+  if (
+    fallbackOk.length !== 2 ||
+    fallbackOk.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: global-fallback result ${JSON.stringify(fallbackOk)}`,
+    );
+
+  // Outside timing: with an empty map the same global
+  // pin applies to every label, so the gateway label
+  // fails it with the pinned code and reason while the
+  // merchant label still verifies.
+  const fallbackMismatch = verifyAllLabels(dual, {
+    keys,
+    now: EXPECTED_KEY_IDS_CREATED,
+    expectedKeyId: EXPECTED_KEY_IDS_MERCHANT_KID,
+    expectedKeyIds: {},
+  });
+  if (
+    fallbackMismatch.length !== 2 ||
+    !fallbackMismatch[0].ok ||
+    fallbackMismatch[1].ok ||
+    fallbackMismatch[1].code !== "KEYID_MISMATCH" ||
+    fallbackMismatch[1].reason !==
+      `keyid mismatch: expected "${EXPECTED_KEY_IDS_MERCHANT_KID}", got "${EXPECTED_KEY_IDS_GATEWAY_KID}"` ||
+    fallbackMismatch[1].keyId !== EXPECTED_KEY_IDS_GATEWAY_KID
+  )
+    throw new Error(
+      `benchmark self-check failed: global-fallback mismatch result ${JSON.stringify(fallbackMismatch)} ` +
+        `(expected KEYID_MISMATCH on gateway only)`,
+    );
+
+  // Outside timing: an empty-string map value is a
+  // caller configuration error with the pinned full
+  // message, thrown before any verification runs.
+  let configError: unknown;
+  try {
+    verifyAllLabels(dual, {
+      keys,
+      now: EXPECTED_KEY_IDS_CREATED,
+      expectedKeyIds: { merchant: "" },
+    });
+  } catch (e) {
+    configError = e;
+  }
+  if (
+    !(configError instanceof Error) ||
+    configError.message !==
+      'verifyAllLabels: `expectedKeyIds["merchant"]` must be a non-empty string, got ""'
+  )
+    throw new Error(
+      `benchmark self-check failed: empty-string pin gave ${String(configError)} ` +
+        `(expected the pinned configuration error)`,
     );
 
   return measure(() => {
@@ -5390,6 +5597,11 @@ results.push({
   alg: "verifyRequest expectedKeyId",
   op: "verify",
   ops: benchmarkVerifyExpectedKeyId(),
+});
+results.push({
+  alg: "verifyAllLabels expectedKeyIds (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllExpectedKeyIds(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",

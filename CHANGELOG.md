@@ -11,6 +11,31 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `verifyAllLabels` with `expectedKeyIds` — the
+  per-label key-id binding verify form a multi-party
+  receiver uses to pin each signer's key
+  independently (key-confusion defense), which the
+  existing multi-label verify row never timed (it
+  passes no pins, so the per-label pin resolution
+  and keyid comparisons were never a measured
+  cost). The fixture is a dual-label ed25519
+  request signed outside timing with `created`
+  pinned under two pinned keyids, verified with a
+  fully matching `expectedKeyIds` map. Every
+  measured pass re-pins that both results are ok,
+  in wire order, and that each returned `keyId`
+  equals its label's pinned value. The one-label
+  mismatched-pin result (exactly `KEYID_MISMATCH`
+  with the pinned reason, the other label still
+  verifying), the global-`expectedKeyId` fallback
+  for a label missing from the map (both the
+  matching and the mismatching halves) and the
+  empty-string map value's pinned configuration
+  error are asserted outside timing. The README
+  Benchmarks table was refreshed wholesale from
+  one real run and now carries the
+  `verifyAllLabels expectedKeyIds (2 labels)` row.
 - The CLI demo (`npm run demo`) now closes with a
   required-nonce segment: one key pair mints a
   nonce-carrying signature via `signRequest` and two
