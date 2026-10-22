@@ -729,6 +729,32 @@
  * pins). Every clock is injected and the segment's key
  * pair is fresh per run, so the printed lines are
  * identical between runs.
+ * The demo then closes with a per-label keyid pinning
+ * segment: `VerifyAllOptions.expectedKeyIds`
+ * (`src/verify.ts`) pins each signature label's `keyid`
+ * independently, the key-confusion defense for
+ * multi-party requests whose signers use different key
+ * ids. Two fresh ed25519 key pairs mint a dual-label
+ * fixture (`merchant` via `signRequest`, `gateway`
+ * appended via `addSignature`), and the printed shapes
+ * are both labels passing under a fully matching map,
+ * the gateway label alone rejected with
+ * `KEYID_MISMATCH` under a wrong per-label pin while
+ * the merchant label still verifies, a label missing
+ * from the map falling back to the global
+ * `expectedKeyId` (the matching fallback passing both
+ * labels, the empty-map fallback failing the gateway
+ * label against the merchant global pin), and an
+ * empty-string map value throwing the pinned
+ * configuration error before any verification runs.
+ * Outside the printed lines the demo asserts every
+ * outcome, label, code, reason and keyid equals the
+ * hand-pinned expectations below (the same per-label
+ * pinning semantics `test/keyidPinningPerLabel.test.ts`
+ * pins, and the same shape the benchmark measures).
+ * Every clock is injected and the segment's key pairs
+ * are fresh per run, so the printed lines are identical
+ * between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2626,6 +2652,52 @@ export const DEMO_REQUIRE_NONCE_MISSING_CODE: VerifyFailureCode =
 export const DEMO_REQUIRE_NONCE_MISSING_REASON =
   "signature carries no `nonce` but requireNonce is set";
 
+/** Label of the closing per-label keyid pinning segment's merchant signature. */
+export const DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL = "merchant";
+/** Label of the closing per-label keyid pinning segment's gateway signature. */
+export const DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL = "gateway";
+/** Key id the closing per-label keyid pinning segment's merchant signature carries. */
+export const DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID =
+  "demo-expected-key-ids-merchant-1";
+/** Key id the closing per-label keyid pinning segment's gateway signature carries. */
+export const DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID =
+  "demo-expected-key-ids-gateway-7";
+/** Wrong key id the closing per-label keyid pinning segment pins the gateway label to. */
+export const DEMO_EXPECTED_KEY_IDS_GATEWAY_WRONG_KEY_ID =
+  "demo-expected-key-ids-gateway-other";
+/** Absolute URL the closing per-label keyid pinning segment signs. */
+export const DEMO_EXPECTED_KEY_IDS_URL =
+  "https://api.example.com/v1/payments";
+/**
+ * Hand-pinned failure code when a label's keyid does not
+ * equal its per-label (or fallback global) pin
+ * (`KEYID_MISMATCH`).
+ */
+export const DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE: VerifyFailureCode =
+  "KEYID_MISMATCH";
+/**
+ * Hand-pinned `KEYID_MISMATCH` reason for the wrong
+ * gateway pin (the exact wording `src/verify.ts`
+ * returns and `test/keyidPinningPerLabel.test.ts` pins
+ * in shape).
+ */
+export const DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON =
+  `keyid mismatch: expected "${DEMO_EXPECTED_KEY_IDS_GATEWAY_WRONG_KEY_ID}", got "${DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID}"`;
+/**
+ * Hand-pinned `KEYID_MISMATCH` reason for the empty-map
+ * fallback: the gateway label falls back to the global
+ * pin, which names the merchant key id.
+ */
+export const DEMO_EXPECTED_KEY_IDS_FALLBACK_MISMATCH_REASON =
+  `keyid mismatch: expected "${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}", got "${DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID}"`;
+/**
+ * Hand-pinned configuration error thrown for an
+ * empty-string `expectedKeyIds` map value (the exact
+ * wording `src/verify.ts` throws).
+ */
+export const DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR =
+  'verifyAllLabels: `expectedKeyIds["merchant"]` must be a non-empty string, got ""';
+
 export interface DemoResult {
   signed: SignedHttpRequest;
   tamperedBody: string;
@@ -3683,6 +3755,42 @@ export interface DemoResult {
    * `requireNonce` set (ok — no check is made).
    */
   requireNonceUnsetVerification: VerifyResult;
+  /** The dual-signed request signed in the closing per-label keyid pinning segment (labels `merchant` and `gateway`). */
+  expectedKeyIdsSigned: SignedHttpRequest;
+  /**
+   * Per-label results for `expectedKeyIdsSigned` with a
+   * fully matching `expectedKeyIds` map (both ok, each
+   * reporting its own pinned keyid).
+   */
+  expectedKeyIdsMatchVerification: VerifyResult[];
+  /**
+   * Per-label results for `expectedKeyIdsSigned` with
+   * the gateway label pinned wrong (merchant ok, gateway
+   * fails with `KEYID_MISMATCH` and
+   * `DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON`).
+   */
+  expectedKeyIdsMismatchVerification: VerifyResult[];
+  /**
+   * Per-label results for `expectedKeyIdsSigned` with
+   * the merchant label missing from the map and the
+   * global `expectedKeyId` naming the merchant key id
+   * (both ok — the missing label falls back to the
+   * global pin).
+   */
+  expectedKeyIdsFallbackVerification: VerifyResult[];
+  /**
+   * Per-label results for `expectedKeyIdsSigned` with
+   * an empty map and the same global pin (merchant ok,
+   * gateway fails with `KEYID_MISMATCH` and
+   * `DEMO_EXPECTED_KEY_IDS_FALLBACK_MISMATCH_REASON`).
+   */
+  expectedKeyIdsFallbackMismatchVerification: VerifyResult[];
+  /**
+   * Configuration error thrown when `expectedKeyIdsSigned`
+   * is verified with an empty-string map value (equals
+   * `DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR`).
+   */
+  expectedKeyIdsEmptyError: string;
   lines: string[];
 }
 
@@ -6950,6 +7058,167 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Per-label keyid pinning segment: in a multi-party
+  // request the merchant and the gateway sign under
+  // different key ids, so a single global pin cannot
+  // express "this label must carry that keyid" —
+  // `verifyAllLabels`' `expectedKeyIds` map pins each
+  // label independently and a label missing from the
+  // map falls back to the global `expectedKeyId`. Two
+  // fresh ed25519 key pairs mint the dual-label fixture
+  // (`merchant` via `signRequest`, `gateway` appended
+  // via `addSignature`) at the pinned created instant,
+  // and every verify call injects the same fixed `now`.
+  // Outside the printed lines the demo asserts every
+  // outcome, label, code, reason and keyid equals the
+  // hand-pinned expectations, and that an empty-string
+  // map value throws the pinned configuration error.
+  const expectedKeyIdsMerchantPair = generateEd25519KeyPair();
+  const expectedKeyIdsGatewayPair = generateEd25519KeyPair();
+  const expectedKeyIdsRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_EXPECTED_KEY_IDS_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const expectedKeyIdsMerchantSigned = signRequest(expectedKeyIdsRequest, {
+    keyId: DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID,
+    alg: "ed25519",
+    key: expectedKeyIdsMerchantPair.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL,
+  });
+  const expectedKeyIdsSigned = addSignature(expectedKeyIdsMerchantSigned, {
+    keyId: DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID,
+    alg: "ed25519",
+    key: expectedKeyIdsGatewayPair.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL,
+  });
+  const expectedKeyIdsKeys = {
+    [DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL]:
+      expectedKeyIdsMerchantPair.publicKey,
+    [DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL]:
+      expectedKeyIdsGatewayPair.publicKey,
+  };
+  const expectedKeyIdsMatchVerification = verifyAllLabels(
+    expectedKeyIdsSigned,
+    {
+      keys: expectedKeyIdsKeys,
+      now: DEMO_CREATED + 60,
+      expectedKeyIds: {
+        [DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL]:
+          DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID,
+        [DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL]:
+          DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID,
+      },
+    },
+  );
+  const expectedKeyIdsMismatchVerification = verifyAllLabels(
+    expectedKeyIdsSigned,
+    {
+      keys: expectedKeyIdsKeys,
+      now: DEMO_CREATED + 60,
+      expectedKeyIds: {
+        [DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL]:
+          DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID,
+        [DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL]:
+          DEMO_EXPECTED_KEY_IDS_GATEWAY_WRONG_KEY_ID,
+      },
+    },
+  );
+  const expectedKeyIdsFallbackVerification = verifyAllLabels(
+    expectedKeyIdsSigned,
+    {
+      keys: expectedKeyIdsKeys,
+      now: DEMO_CREATED + 60,
+      expectedKeyId: DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID,
+      expectedKeyIds: {
+        [DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL]:
+          DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID,
+      },
+    },
+  );
+  const expectedKeyIdsFallbackMismatchVerification = verifyAllLabels(
+    expectedKeyIdsSigned,
+    {
+      keys: expectedKeyIdsKeys,
+      now: DEMO_CREATED + 60,
+      expectedKeyId: DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID,
+      expectedKeyIds: {},
+    },
+  );
+  let expectedKeyIdsEmptyError = "";
+  try {
+    verifyAllLabels(expectedKeyIdsSigned, {
+      keys: expectedKeyIdsKeys,
+      now: DEMO_CREATED + 60,
+      expectedKeyIds: {
+        [DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL]: "",
+      },
+    });
+  } catch (e) {
+    expectedKeyIdsEmptyError = (e as Error).message;
+  }
+  const pinShape = (
+    results: VerifyResult[],
+  ): ReadonlyArray<readonly [string, boolean, string | undefined]> =>
+    results.map(
+      (r) =>
+        [r.label, r.ok, r.ok ? r.keyId : r.code] as const,
+    );
+  if (
+    JSON.stringify(pinShape(expectedKeyIdsMatchVerification)) !==
+      JSON.stringify([
+        [
+          DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL,
+          true,
+          DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID,
+        ],
+        [
+          DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL,
+          true,
+          DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID,
+        ],
+      ]) ||
+    expectedKeyIdsMismatchVerification.length !== 2 ||
+    expectedKeyIdsMismatchVerification[0].ok !== true ||
+    expectedKeyIdsMismatchVerification[1].ok !== false ||
+    expectedKeyIdsMismatchVerification[1].code !==
+      DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE ||
+    expectedKeyIdsMismatchVerification[1].reason !==
+      DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON ||
+    expectedKeyIdsMismatchVerification[1].keyId !==
+      DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID ||
+    expectedKeyIdsFallbackVerification.length !== 2 ||
+    expectedKeyIdsFallbackVerification.some((r) => !r.ok) ||
+    expectedKeyIdsFallbackMismatchVerification.length !== 2 ||
+    expectedKeyIdsFallbackMismatchVerification[0].ok !== true ||
+    expectedKeyIdsFallbackMismatchVerification[1].ok !== false ||
+    expectedKeyIdsFallbackMismatchVerification[1].code !==
+      DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE ||
+    expectedKeyIdsFallbackMismatchVerification[1].reason !==
+      DEMO_EXPECTED_KEY_IDS_FALLBACK_MISMATCH_REASON ||
+    expectedKeyIdsFallbackMismatchVerification[1].keyId !==
+      DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID ||
+    expectedKeyIdsEmptyError !== DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: expectedKeyIds gave match ` +
+        `${JSON.stringify(expectedKeyIdsMatchVerification)}, mismatch ` +
+        `${JSON.stringify(expectedKeyIdsMismatchVerification)}, fallback ` +
+        `${JSON.stringify(expectedKeyIdsFallbackVerification)}, fallback-mismatch ` +
+        `${JSON.stringify(expectedKeyIdsFallbackMismatchVerification)} and empty error ` +
+        `"${expectedKeyIdsEmptyError}", instead of both labels ok under the matching ` +
+        `map, the gateway label alone rejected with ` +
+        `${DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE} (${DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON}), ` +
+        `both labels ok under the matching global fallback, the gateway label alone ` +
+        `rejected under the empty map with ` +
+        `${DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE} (${DEMO_EXPECTED_KEY_IDS_FALLBACK_MISMATCH_REASON}), ` +
+        `and the pinned empty-string configuration error`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -7363,6 +7632,21 @@ export async function runDemo(): Promise<DemoResult> {
     requireNonceUnsetVerification.ok
       ? `No requireNonce set: the same nonce-less signature verified without the option: OK (label ${requireNonceUnsetVerification.label}, keyid="${requireNonceUnsetVerification.keyId}", alg="${requireNonceUnsetVerification.alg}") (no check is made — backwards compatible)`
       : `No requireNonce set: the same nonce-less signature verified without the option: FAILED (code ${requireNonceUnsetVerification.code}: ${requireNonceUnsetVerification.reason})`,
+    "",
+    "Per-label keyid pinning: verifyAllLabels' expectedKeyIds option pins each label's keyid independently (key-confusion defense when the merchant and the gateway use different key ids) — a label missing from the map falls back to the global expectedKeyId, and a malformed map value is a caller configuration error thrown before any verification runs",
+    expectedKeyIdsMatchVerification.every((r) => r.ok)
+      ? `All pins match: dual-signed request verified with expectedKeyIds merchant="${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}", gateway="${DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID}": merchant OK (label ${expectedKeyIdsMatchVerification[0].label}, keyid="${expectedKeyIdsMatchVerification[0].keyId}", alg="${expectedKeyIdsMatchVerification[0].alg}"), gateway OK (label ${expectedKeyIdsMatchVerification[1].label}, keyid="${expectedKeyIdsMatchVerification[1].keyId}", alg="${expectedKeyIdsMatchVerification[1].alg}")`
+      : `All pins match: dual-signed request verified with expectedKeyIds merchant="${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}", gateway="${DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID}": FAILED (merchant ${expectedKeyIdsMatchVerification[0].ok ? "OK" : `code ${expectedKeyIdsMatchVerification[0].code}: ${expectedKeyIdsMatchVerification[0].reason}`}, gateway ${expectedKeyIdsMatchVerification[1].ok ? "OK" : `code ${expectedKeyIdsMatchVerification[1].code}: ${expectedKeyIdsMatchVerification[1].reason}`})`,
+    expectedKeyIdsMismatchVerification[1].ok
+      ? `Gateway pin wrong: the same request verified with the gateway label pinned to "${DEMO_EXPECTED_KEY_IDS_GATEWAY_WRONG_KEY_ID}": gateway OK (unexpected — the wrong pin was not rejected), merchant OK`
+      : `Gateway pin wrong: the same request verified with the gateway label pinned to "${DEMO_EXPECTED_KEY_IDS_GATEWAY_WRONG_KEY_ID}": gateway FAILED (code ${expectedKeyIdsMismatchVerification[1].code}: ${expectedKeyIdsMismatchVerification[1].reason}), merchant still OK (label ${expectedKeyIdsMismatchVerification[0].label}, keyid="${expectedKeyIdsMismatchVerification[0].keyId}", alg="${expectedKeyIdsMismatchVerification[0].alg}")`,
+    expectedKeyIdsFallbackVerification.every((r) => r.ok)
+      ? `Missing label falls back: the same request verified with expectedKeyIds naming only gateway and the global expectedKeyId "${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}": merchant OK (label ${expectedKeyIdsFallbackVerification[0].label}, keyid="${expectedKeyIdsFallbackVerification[0].keyId}", alg="${expectedKeyIdsFallbackVerification[0].alg}") via the global fallback, gateway OK (label ${expectedKeyIdsFallbackVerification[1].label}, keyid="${expectedKeyIdsFallbackVerification[1].keyId}", alg="${expectedKeyIdsFallbackVerification[1].alg}")`
+      : `Missing label falls back: the same request verified with expectedKeyIds naming only gateway and the global expectedKeyId "${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}": FAILED (merchant ${expectedKeyIdsFallbackVerification[0].ok ? "OK" : `code ${expectedKeyIdsFallbackVerification[0].code}: ${expectedKeyIdsFallbackVerification[0].reason}`}, gateway ${expectedKeyIdsFallbackVerification[1].ok ? "OK" : `code ${expectedKeyIdsFallbackVerification[1].code}: ${expectedKeyIdsFallbackVerification[1].reason}`})`,
+    expectedKeyIdsFallbackMismatchVerification[1].ok
+      ? `Empty map falls back for every label: the same request verified with an empty expectedKeyIds map and the global expectedKeyId "${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}": gateway OK (unexpected — the global pin was not applied to it), merchant OK`
+      : `Empty map falls back for every label: the same request verified with an empty expectedKeyIds map and the global expectedKeyId "${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}": gateway FAILED (code ${expectedKeyIdsFallbackMismatchVerification[1].code}: ${expectedKeyIdsFallbackMismatchVerification[1].reason}), merchant still OK (label ${expectedKeyIdsFallbackMismatchVerification[0].label}, keyid="${expectedKeyIdsFallbackMismatchVerification[0].keyId}", alg="${expectedKeyIdsFallbackMismatchVerification[0].alg}")`,
+    `Empty pin value: the same request verified with expectedKeyIds merchant set to an empty string: rejected with configuration error "${expectedKeyIdsEmptyError}"`,
   ];
 
   return {
@@ -7562,6 +7846,12 @@ export async function runDemo(): Promise<DemoResult> {
     requireNonceEmptySigned,
     requireNonceEmptyVerification,
     requireNonceUnsetVerification,
+    expectedKeyIdsSigned,
+    expectedKeyIdsMatchVerification,
+    expectedKeyIdsMismatchVerification,
+    expectedKeyIdsFallbackVerification,
+    expectedKeyIdsFallbackMismatchVerification,
+    expectedKeyIdsEmptyError,
     lines,
   };
 }

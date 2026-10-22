@@ -5,6 +5,7 @@ import { createSecretKey, generateKeyPairSync, sign as edSign } from "node:crypt
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
+  addSignature,
   assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
@@ -37,6 +38,7 @@ import {
   signRequest,
   signatureInputValue,
   verifyRequest,
+  verifyAllLabels,
 } from "../src/index.js";
 import {
   DEMO_ALG_FALLBACK_DATE,
@@ -223,6 +225,16 @@ import {
   DEMO_EXPECTED_TAG_NONCE,
   DEMO_EXPECTED_TAG_OTHER_TAG,
   DEMO_EXPECTED_TAG_URL,
+  DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR,
+  DEMO_EXPECTED_KEY_IDS_FALLBACK_MISMATCH_REASON,
+  DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID,
+  DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL,
+  DEMO_EXPECTED_KEY_IDS_GATEWAY_WRONG_KEY_ID,
+  DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID,
+  DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL,
+  DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE,
+  DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON,
+  DEMO_EXPECTED_KEY_IDS_URL,
   DEMO_REQUIRED_COMPONENTS_BODY,
   DEMO_REQUIRED_COMPONENTS_CASE_REQUIRED,
   DEMO_REQUIRED_COMPONENTS_COVERED_COMPONENTS,
@@ -4545,7 +4557,7 @@ test("demo required-nonce segment pins requireNonce (nonce present passes, missi
   assert.equal(verifyRequest(handBuilt({ keyid: DEMO_REQUIRE_NONCE_KEY_ID, alg: "ed25519", created: DEMO_CREATED }), { key: publicKey, now: DEMO_CREATED + 60 }).ok, true);
 });
 
-test("demo lines contain the required-nonce segment (present, missing, empty, unset, closing the demo)", async () => {
+test("demo lines contain the required-nonce segment (present, missing, empty, unset)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Required nonce: verifyRequest's requireNonce option closes/);
@@ -4560,8 +4572,80 @@ test("demo lines contain the required-nonce segment (present, missing, empty, un
     `No requireNonce set: the same nonce-less signature verified without the option: OK (label sig1, keyid="${DEMO_REQUIRE_NONCE_KEY_ID}", alg="ed25519") (no check is made — backwards compatible)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Required nonce:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
+});
+
+test("demo per-label keyid pinning segment pins expectedKeyIds (all match passes, wrong pin rejects one label, fallback both ways, empty value throws)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL, "gateway");
+  assert.equal(DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID, "demo-expected-key-ids-merchant-1");
+  assert.equal(DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID, "demo-expected-key-ids-gateway-7");
+  assert.equal(DEMO_EXPECTED_KEY_IDS_GATEWAY_WRONG_KEY_ID, "demo-expected-key-ids-gateway-other");
+  assert.equal(DEMO_EXPECTED_KEY_IDS_URL, "https://api.example.com/v1/payments");
+  assert.equal(DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE, "KEYID_MISMATCH");
+  assert.equal(DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON, 'keyid mismatch: expected "demo-expected-key-ids-gateway-other", got "demo-expected-key-ids-gateway-7"');
+  assert.equal(DEMO_EXPECTED_KEY_IDS_FALLBACK_MISMATCH_REASON, 'keyid mismatch: expected "demo-expected-key-ids-merchant-1", got "demo-expected-key-ids-gateway-7"');
+  assert.equal(DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR, 'verifyAllLabels: `expectedKeyIds["merchant"]` must be a non-empty string, got ""');
+  assert.match(r.expectedKeyIdsSigned.headers["signature-input"], /merchant=\(/);
+  assert.match(r.expectedKeyIdsSigned.headers["signature-input"], /gateway=\(/);
+  assert.match(r.expectedKeyIdsSigned.headers["signature-input"], /;keyid="demo-expected-key-ids-merchant-1"/);
+  assert.match(r.expectedKeyIdsSigned.headers["signature-input"], /;keyid="demo-expected-key-ids-gateway-7"/);
+  assert.equal(r.expectedKeyIdsMatchVerification.length, 2);
+  assert.deepEqual(r.expectedKeyIdsMatchVerification.map((x) => [x.label, x.ok, x.keyId]), [[DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL, true, DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID], [DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL, true, DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID]]);
+  assert.equal(r.expectedKeyIdsMismatchVerification[0].ok, true);
+  assert.equal(r.expectedKeyIdsMismatchVerification[1].ok, false);
+  assert.equal(r.expectedKeyIdsMismatchVerification[1].code, DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE);
+  assert.equal(r.expectedKeyIdsMismatchVerification[1].reason, DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON);
+  assert.equal(r.expectedKeyIdsMismatchVerification[1].keyId, DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID);
+  assert.equal(r.expectedKeyIdsFallbackVerification.every((x) => x.ok), true);
+  assert.equal(r.expectedKeyIdsFallbackMismatchVerification[0].ok, true);
+  assert.equal(r.expectedKeyIdsFallbackMismatchVerification[1].ok, false);
+  assert.equal(r.expectedKeyIdsFallbackMismatchVerification[1].code, DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE);
+  assert.equal(r.expectedKeyIdsFallbackMismatchVerification[1].reason, DEMO_EXPECTED_KEY_IDS_FALLBACK_MISMATCH_REASON);
+  assert.equal(r.expectedKeyIdsEmptyError, DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR);
+  // Independent checks driven directly (the same per-label
+  // pinning semantics test/keyidPinningPerLabel.test.ts pins):
+  // two fresh key pairs, a dual-label fixture, the matching
+  // map passes, a wrong gateway pin rejects only that label,
+  // the missing-label fallback passes, and an empty-string
+  // map value throws the pinned configuration error.
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const req = { method: "POST", url: DEMO_EXPECTED_KEY_IDS_URL, headers: { "content-type": "application/json" }, body: "{}" };
+  const first = signRequest(req, { keyId: DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID, alg: "ed25519", key: merchant.privateKey, created: DEMO_CREATED, label: DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL });
+  const dual = addSignature(first, { keyId: DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID, alg: "ed25519", key: gateway.privateKey, created: DEMO_CREATED, label: DEMO_EXPECTED_KEY_IDS_GATEWAY_LABEL });
+  const keys = { merchant: merchant.publicKey, gateway: gateway.publicKey };
+  assert.equal(verifyAllLabels(dual, { keys, now: DEMO_CREATED + 60, expectedKeyIds: { merchant: DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID, gateway: DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID } }).every((x) => x.ok), true);
+  const directMismatch = verifyAllLabels(dual, { keys, now: DEMO_CREATED + 60, expectedKeyIds: { merchant: DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID, gateway: DEMO_EXPECTED_KEY_IDS_GATEWAY_WRONG_KEY_ID } });
+  assert.equal(directMismatch[0].ok, true);
+  assert.equal(directMismatch[1].ok, false);
+  assert.equal(directMismatch[1].code, "KEYID_MISMATCH");
+  assert.equal(directMismatch[1].reason, DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON);
+  assert.equal(verifyAllLabels(dual, { keys, now: DEMO_CREATED + 60, expectedKeyId: DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID, expectedKeyIds: { gateway: DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID } }).every((x) => x.ok), true);
+  assert.throws(() => verifyAllLabels(dual, { keys, now: DEMO_CREATED + 60, expectedKeyIds: { merchant: "" } }), (e: unknown) => e instanceof Error && e.message === DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR);
+});
+
+test("demo lines contain the per-label keyid pinning segment (match, wrong pin, fallback, fallback mismatch, empty value, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Per-label keyid pinning: verifyAllLabels' expectedKeyIds option pins/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Per-label keyid pinning:"));
+  const rnIdx = lines.findIndex((l) => l.startsWith("Required nonce:"));
+  assert.ok(rnIdx !== -1 && headerIdx !== -1 && rnIdx < headerIdx);
+  const expectedLines = [
+    "Per-label keyid pinning: verifyAllLabels' expectedKeyIds option pins each label's keyid independently (key-confusion defense when the merchant and the gateway use different key ids) — a label missing from the map falls back to the global expectedKeyId, and a malformed map value is a caller configuration error thrown before any verification runs",
+    `All pins match: dual-signed request verified with expectedKeyIds merchant="${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}", gateway="${DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID}": merchant OK (label merchant, keyid="${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label gateway, keyid="${DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID}", alg="ed25519")`,
+    `Gateway pin wrong: the same request verified with the gateway label pinned to "${DEMO_EXPECTED_KEY_IDS_GATEWAY_WRONG_KEY_ID}": gateway FAILED (code ${DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE}: ${DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON}), merchant still OK (label merchant, keyid="${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}", alg="ed25519")`,
+    `Missing label falls back: the same request verified with expectedKeyIds naming only gateway and the global expectedKeyId "${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}": merchant OK (label merchant, keyid="${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}", alg="ed25519") via the global fallback, gateway OK (label gateway, keyid="${DEMO_EXPECTED_KEY_IDS_GATEWAY_KEY_ID}", alg="ed25519")`,
+    `Empty map falls back for every label: the same request verified with an empty expectedKeyIds map and the global expectedKeyId "${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}": gateway FAILED (code ${DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE}: ${DEMO_EXPECTED_KEY_IDS_FALLBACK_MISMATCH_REASON}), merchant still OK (label merchant, keyid="${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}", alg="ed25519")`,
+    `Empty pin value: the same request verified with expectedKeyIds merchant set to an empty string: rejected with configuration error "${DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR}"`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Per-label keyid pinning:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 6), lines.slice(headerIdx, headerIdx + 6));
 });

@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  per-label keyid pinning segment: two fresh ed25519
+  key pairs mint a dual-label fixture (`merchant` via
+  `signRequest`, `gateway` appended via
+  `addSignature`), showing `verifyAllLabels`'
+  `expectedKeyIds` option — both labels verify under
+  a fully matching map, the gateway label alone is
+  rejected with `KEYID_MISMATCH` and its pinned
+  reason under a wrong per-label pin while the
+  merchant label still verifies, a label missing
+  from the map falls back to the global
+  `expectedKeyId` (the matching fallback verifying
+  both labels, the empty-map fallback failing the
+  gateway label against the merchant global pin),
+  and an empty-string map value throws the pinned
+  configuration error before any verification runs.
+  `DemoResult` gains the segment's dual-signed
+  request, four per-label result arrays and the
+  thrown configuration error, and the demo tests
+  gain two cases pinning the segment end-to-end
+  (748 tests in total). Every fixture is fixed —
+  injected clock, no network, no randomness in the
+  printed lines.
 - The benchmark (`npm run bench`) now also measures
   `verifyRequest` with `algFallback: "infer"` — the
   algorithm-inference verify form a receiver uses for
