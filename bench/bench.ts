@@ -101,7 +101,25 @@
  * global `expectedKeyId` (both the matching and the
  * mismatching fallback halves), and an empty-string
  * map value throwing the pinned configuration error
- * asserted outside timing, plus the refresh path a gateway runs when its
+ * asserted outside timing, plus the per-label key-resolution
+ * verify path a multi-party receiver runs when each
+ * signer's keyids live in a separate keystore:
+ * `verifyAllLabels` with `keyResolvers` over a dual
+ * ed25519 fixture signed outside timing with `created`
+ * pinned under two pinned keyids, each belonging to
+ * its own resolver (see KEY_RESOLVERS_ALL_* below),
+ * self-checked on every measured pass (both results
+ * are ok, in wire order, and each returned `keyId`
+ * equals its label's pinned value), with one label's
+ * resolver returning `undefined` giving that label
+ * the pinned `KEY_RESOLUTION_FAILED` result while
+ * the other label still verifies, a label missing
+ * from the map falling back to the global
+ * `keyResolver`, a non-function map value throwing
+ * the pinned configuration error, and `keyResolvers`
+ * combined with `keys` throwing the pinned
+ * mutual-exclusion configuration error asserted
+ * outside timing, plus the refresh path a gateway runs when its
  * snapshot ages out: `JwksKeyStore.refreshIfStale` over a store
  * whose injected clock is advanced exactly to its TTL boundary
  * before every measured call (a counting fake fetch serves one
@@ -1845,6 +1863,210 @@ function benchmarkVerifyAllExpectedKeyIds(): number {
     throw new Error(
       `benchmark self-check failed: empty-string pin gave ${String(configError)} ` +
         `(expected the pinned configuration error)`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels` keyResolvers
+ * benchmark: two ed25519 key pairs (generated once,
+ * outside timing) held in two separate pinned Map
+ * keystores, a dual-label fixture signed outside
+ * timing with `created` pinned under two pinned keyids
+ * (merchant / gateway, each belonging to its own
+ * resolver), and the verifier's injected `now` at the
+ * `created` instant.
+ */
+const KEY_RESOLVERS_ALL_CREATED = 1_700_000_000;
+const KEY_RESOLVERS_ALL_MERCHANT_KID =
+  "bench-key-resolvers-merchant-1";
+const KEY_RESOLVERS_ALL_GATEWAY_KID =
+  "bench-key-resolvers-gateway-7";
+
+/**
+ * `verifyAllLabels` with `keyResolvers` steady state:
+ * the per-label key-resolution form a multi-party
+ * receiver uses when the merchant's and the gateway's
+ * keyids live in separate keystores — every measured
+ * call runs the per-label resolver lookup for both
+ * labels, which the plain `verifyAllLabels` row above
+ * never pays, because it passes static keys, and which
+ * the single-label `verifyRequest keyResolver` row
+ * pays for only one label. One measured op verifies
+ * the dual-label fixture with a fully resolving
+ * `keyResolvers` map and re-pins that both results
+ * are ok, in wire order, and that each returned
+ * `keyId` equals its label's pinned value. Outside
+ * timing, the fail-closed, fallback and configuration
+ * halves are pinned once: one label's resolver
+ * returning `undefined` gives that label exactly
+ * `{ ok: false, code: "KEY_RESOLUTION_FAILED" }`
+ * with the pinned reason while the other label still
+ * verifies, a label missing from the map falls back
+ * to the global `keyResolver`, a non-function map
+ * value throws the pinned configuration error, and
+ * `keyResolvers` combined with `keys` throws the
+ * pinned mutual-exclusion configuration error. Zero
+ * network, zero randomness in the measured assertions,
+ * no wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyAllKeyResolvers(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantSigned = signRequest(fixture, {
+    keyId: KEY_RESOLVERS_ALL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: KEY_RESOLVERS_ALL_CREATED,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: KEY_RESOLVERS_ALL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: KEY_RESOLVERS_ALL_CREATED,
+  });
+  const merchantStore = new Map<string, KeyObject>([
+    [KEY_RESOLVERS_ALL_MERCHANT_KID, merchantPublic],
+  ]);
+  const gatewayStore = new Map<string, KeyObject>([
+    [KEY_RESOLVERS_ALL_GATEWAY_KID, gatewayPublic],
+  ]);
+  const merchantResolver = (id: string) => merchantStore.get(id);
+  const gatewayResolver = (id: string) => gatewayStore.get(id);
+  const verifyOpts = {
+    now: KEY_RESOLVERS_ALL_CREATED,
+    keyResolvers: {
+      merchant: merchantResolver,
+      gateway: gatewayResolver,
+    },
+  };
+  const assertAccepted = (where: string): void => {
+    const results = verifyAllLabels(dual, verifyOpts);
+    if (
+      results.length !== 2 ||
+      results[0].label !== "merchant" ||
+      !results[0].ok ||
+      results[0].keyId !== KEY_RESOLVERS_ALL_MERCHANT_KID ||
+      results[1].label !== "gateway" ||
+      !results[1].ok ||
+      results[1].keyId !== KEY_RESOLVERS_ALL_GATEWAY_KID
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with keyResolvers (${where}) gave ${JSON.stringify(results)}`,
+      );
+  };
+
+  // Outside timing: the pinned fixture verifies through
+  // its two per-label resolvers.
+  assertAccepted("outside timing");
+
+  // Outside timing: the gateway resolver returning
+  // `undefined` (its kid rotated out of that keystore)
+  // fails only the gateway label closed, with the
+  // pinned code and reason; the merchant label still
+  // verifies through its own resolver.
+  const unresolved = verifyAllLabels(dual, {
+    now: KEY_RESOLVERS_ALL_CREATED,
+    keyResolvers: {
+      merchant: merchantResolver,
+      gateway: () => undefined,
+    },
+  });
+  if (
+    unresolved.length !== 2 ||
+    unresolved[0].label !== "merchant" ||
+    !unresolved[0].ok ||
+    unresolved[1].label !== "gateway" ||
+    unresolved[1].ok ||
+    unresolved[1].code !== "KEY_RESOLUTION_FAILED" ||
+    unresolved[1].reason !==
+      `keyid "${KEY_RESOLVERS_ALL_GATEWAY_KID}" could not be resolved to a key` ||
+    unresolved[1].keyId !== KEY_RESOLVERS_ALL_GATEWAY_KID
+  )
+    throw new Error(
+      `benchmark self-check failed: unresolved-resolver result ${JSON.stringify(unresolved)} ` +
+        `(expected KEY_RESOLUTION_FAILED on gateway only)`,
+    );
+
+  // Outside timing: a label missing from the map falls
+  // back to the global `keyResolver` — here the gateway
+  // label is unmapped and the global resolver holds
+  // only the gateway key, so both labels verify (the
+  // merchant through its per-label resolver, the
+  // gateway through the fallback).
+  const globalStore = new Map<string, KeyObject>([
+    [KEY_RESOLVERS_ALL_GATEWAY_KID, gatewayPublic],
+  ]);
+  const fallback = verifyAllLabels(dual, {
+    now: KEY_RESOLVERS_ALL_CREATED,
+    keyResolver: (id: string) => globalStore.get(id),
+    keyResolvers: { merchant: merchantResolver },
+  });
+  if (
+    fallback.length !== 2 ||
+    fallback.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: global-fallback result ${JSON.stringify(fallback)}`,
+    );
+
+  // Outside timing: a non-function map value is a
+  // caller configuration error with the pinned full
+  // message, thrown before any verification runs.
+  let configError: unknown;
+  try {
+    verifyAllLabels(dual, {
+      now: KEY_RESOLVERS_ALL_CREATED,
+      keyResolvers: {
+        merchant: "not-a-function" as never,
+      },
+    });
+  } catch (e) {
+    configError = e;
+  }
+  if (
+    !(configError instanceof Error) ||
+    configError.message !==
+      'verifyAllLabels: `keyResolvers["merchant"]` must be a function, got string'
+  )
+    throw new Error(
+      `benchmark self-check failed: non-function resolver gave ${String(configError)} ` +
+        `(expected the pinned configuration error)`,
+    );
+
+  // Outside timing: `keyResolvers` combined with
+  // `keys` is a caller configuration error with the
+  // pinned mutual-exclusion message.
+  let conflictError: unknown;
+  try {
+    verifyAllLabels(dual, {
+      now: KEY_RESOLVERS_ALL_CREATED,
+      keys: { merchant: merchantPublic, gateway: gatewayPublic },
+      keyResolvers: {
+        merchant: merchantResolver,
+        gateway: gatewayResolver,
+      },
+    });
+  } catch (e) {
+    conflictError = e;
+  }
+  if (
+    !(conflictError instanceof Error) ||
+    conflictError.message !==
+      "verifyAllLabels: `keys`/`key` is mutually exclusive with `keyResolver`/`keyResolvers` — pass one or the other"
+  )
+    throw new Error(
+      `benchmark self-check failed: keys+keyResolvers conflict gave ${String(conflictError)} ` +
+        `(expected the pinned mutual-exclusion error)`,
     );
 
   return measure(() => {
@@ -5602,6 +5824,11 @@ results.push({
   alg: "verifyAllLabels expectedKeyIds (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllExpectedKeyIds(),
+});
+results.push({
+  alg: "verifyAllLabels keyResolvers (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllKeyResolvers(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",

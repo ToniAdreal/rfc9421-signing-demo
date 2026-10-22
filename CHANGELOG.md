@@ -12,6 +12,32 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `verifyAllLabels` with `keyResolvers` — the
+  per-label key-resolution verify form a multi-party
+  receiver uses when each signer's keyids live in a
+  separate keystore (the merchant's and the gateway's
+  own resolvers), which the existing multi-label
+  verify row never timed (it passes static keys, so
+  the per-label resolver lookups were never a
+  measured cost). The fixture is a dual-label
+  ed25519 request signed outside timing with
+  `created` pinned under two pinned keyids, each
+  belonging to its own resolver, verified with a
+  fully resolving `keyResolvers` map. Every measured
+  pass re-pins that both results are ok, in wire
+  order, and that each returned `keyId` equals its
+  label's pinned value. The one-label unresolved
+  result (exactly `KEY_RESOLUTION_FAILED` with the
+  pinned reason, the other label still verifying),
+  the global-`keyResolver` fallback for a label
+  missing from the map, the non-function map value's
+  pinned configuration error and the
+  `keyResolvers`-with-`keys` mutual-exclusion
+  configuration error are asserted outside timing.
+  The README Benchmarks table was refreshed
+  wholesale from one real run and now carries the
+  `verifyAllLabels keyResolvers (2 labels)` row.
+- The benchmark (`npm run bench`) now also measures
   `verifyAllLabels` with `expectedKeyIds` — the
   per-label key-id binding verify form a multi-party
   receiver uses to pin each signer's key
