@@ -73,7 +73,19 @@
  * tolerance boundary (the comparison is strict `>`), and
  * its acceptance with no option passed (the 60-second
  * default covers the 30-second skew) asserted outside
- * timing, plus the refresh path a gateway runs when its
+ * timing, plus the key-id binding verify path a
+ * receiver runs to pin the expected signer key:
+ * `verifyRequest` with `expectedKeyId` over one
+ * ed25519 fixture signed outside timing with `created`
+ * pinned under a pinned keyid (see EXPECTED_KEY_ID_*
+ * below), self-checked on every measured pass (the
+ * result is ok and its returned `keyId` equals the
+ * pinned value), with the mismatched pin's pinned
+ * `KEYID_MISMATCH` result (code and reason), the
+ * hand-built no-keyid signature's `KEYID_MISMATCH`
+ * result with the `got no keyid` reason shape, and
+ * that signature's acceptance with no option passed
+ * asserted outside timing, plus the refresh path a gateway runs when its
  * snapshot ages out: `JwksKeyStore.refreshIfStale` over a store
  * whose injected clock is advanced exactly to its TTL boundary
  * before every measured call (a counting fake fetch serves one
@@ -1476,6 +1488,156 @@ function benchmarkVerifyClockSkewTolerance(): number {
   if (!defaulted.ok)
     throw new Error(
       `benchmark self-check failed: default-skew result ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` expectedKeyId
+ * benchmark: one ed25519 key pair (generated once, outside
+ * timing), a fixture signed outside timing with `created`
+ * pinned under a pinned keyid, and the verifier's injected
+ * `now` at the `created` instant.
+ */
+const EXPECTED_KEY_ID_CREATED = 1_700_000_000;
+const EXPECTED_KEY_ID_KID = "bench-expected-key-id-key-1";
+const EXPECTED_KEY_ID_WRONG = "bench-expected-key-id-key-2";
+const EXPECTED_KEY_ID_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+];
+
+/**
+ * `verifyRequest` with `expectedKeyId` steady state: the
+ * key-id binding form a receiver uses to pin the expected
+ * signer key (key-confusion defense) — every measured call
+ * runs the post-cryptographic keyid comparison the plain
+ * verify rows above never pay, because they pass no pin.
+ * One measured op verifies the one pinned fixture with a
+ * matching `expectedKeyId` and re-pins that the result is
+ * ok and its returned `keyId` equals the pinned value.
+ * Outside timing, the rejecting and default halves are
+ * pinned once: a mismatched pin returns exactly
+ * `{ ok: false, code: "KEYID_MISMATCH" }` with the pinned
+ * reason, a hand-built signature carrying no `keyid`
+ * (built with `buildSignatureBase` + `signatureInputValue`
+ * + a raw ed25519 sign, the shape
+ * `test/keyidBinding.test.ts` uses) returns the same code
+ * with the `got no keyid` reason shape, and that same
+ * no-keyid signature still verifies with the option unset,
+ * because the pin is opt-in. Zero network, zero randomness
+ * in the measured assertions, no wall clock (every verify
+ * instant is injected).
+ */
+function benchmarkVerifyExpectedKeyId(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: EXPECTED_KEY_ID_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: EXPECTED_KEY_ID_CREATED,
+  });
+  const verifyOpts = {
+    key: publicKey,
+    now: EXPECTED_KEY_ID_CREATED,
+    expectedKeyId: EXPECTED_KEY_ID_KID,
+  };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok || r.keyId !== EXPECTED_KEY_ID_KID)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with expectedKeyId (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the pinned fixture verifies under the
+  // matching pin.
+  assertAccepted("outside timing");
+
+  // Outside timing: a mismatched pin is rejected with the
+  // pinned code and reason.
+  const mismatched = verifyRequest(signed, {
+    key: publicKey,
+    now: EXPECTED_KEY_ID_CREATED,
+    expectedKeyId: EXPECTED_KEY_ID_WRONG,
+  });
+  if (
+    mismatched.ok ||
+    mismatched.code !== "KEYID_MISMATCH" ||
+    mismatched.reason !==
+      `keyid mismatch: expected "${EXPECTED_KEY_ID_WRONG}", got "${EXPECTED_KEY_ID_KID}"` ||
+    mismatched.keyId !== EXPECTED_KEY_ID_KID
+  )
+    throw new Error(
+      `benchmark self-check failed: mismatched-pin result ${JSON.stringify(mismatched)} ` +
+        `(expected KEYID_MISMATCH)`,
+    );
+
+  // Outside timing: a hand-built signature with no
+  // `keyid` is rejected with the pinned code and the
+  // `got no keyid` reason shape.
+  const noKeyIdParams: SignatureParams = {
+    alg: "ed25519",
+    created: EXPECTED_KEY_ID_CREATED,
+  };
+  const noKeyIdRequest: RequestLike = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: {},
+  };
+  const noKeyIdBase = buildSignatureBase(
+    EXPECTED_KEY_ID_COVERED_COMPONENTS,
+    noKeyIdRequest,
+    noKeyIdParams,
+  );
+  const noKeyIdSig = edSign(
+    null,
+    Buffer.from(noKeyIdBase, "utf8"),
+    privateKey,
+  );
+  const noKeyIdSigned: SignedHttpRequest = {
+    method: noKeyIdRequest.method,
+    url: noKeyIdRequest.url,
+    headers: {
+      "signature-input": signatureInputValue(
+        "sig1",
+        EXPECTED_KEY_ID_COVERED_COMPONENTS,
+        noKeyIdParams,
+      ),
+      signature: `sig1=:${noKeyIdSig.toString("base64")}:`,
+    },
+  };
+  const noKeyId = verifyRequest(noKeyIdSigned, {
+    key: publicKey,
+    now: EXPECTED_KEY_ID_CREATED,
+    expectedKeyId: EXPECTED_KEY_ID_KID,
+  });
+  if (
+    noKeyId.ok ||
+    noKeyId.code !== "KEYID_MISMATCH" ||
+    noKeyId.reason !==
+      `keyid mismatch: expected "${EXPECTED_KEY_ID_KID}", got no keyid` ||
+    noKeyId.keyId !== undefined
+  )
+    throw new Error(
+      `benchmark self-check failed: no-keyid result ${JSON.stringify(noKeyId)} ` +
+        `(expected KEYID_MISMATCH)`,
+    );
+
+  // Outside timing: without the option the same
+  // no-keyid signature verifies — the pin is opt-in and
+  // the default behaviour is unchanged.
+  const defaulted = verifyRequest(noKeyIdSigned, {
+    key: publicKey,
+    now: EXPECTED_KEY_ID_CREATED,
+  });
+  if (!defaulted.ok)
+    throw new Error(
+      `benchmark self-check failed: no-keyid default gave ${JSON.stringify(defaulted)}`,
     );
 
   return measure(() => {
@@ -5223,6 +5385,11 @@ results.push({
   alg: "verifyRequest clockSkewToleranceSec (120s)",
   op: "verify",
   ops: benchmarkVerifyClockSkewTolerance(),
+});
+results.push({
+  alg: "verifyRequest expectedKeyId",
+  op: "verify",
+  ops: benchmarkVerifyExpectedKeyId(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",

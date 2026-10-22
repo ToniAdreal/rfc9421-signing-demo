@@ -12,6 +12,25 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `verifyRequest` with `expectedKeyId` — the key-id
+  binding verify form a receiver uses to pin the
+  expected signer key (key-confusion defense), which
+  the existing verify rows never timed (they pass no
+  pin, so the post-cryptographic keyid comparison was
+  never a measured cost). The fixture is one ed25519
+  request signed outside timing with `created` pinned
+  under a pinned keyid, verified with a matching
+  `expectedKeyId`. Every measured pass re-pins that
+  the result is ok and its returned `keyId` equals
+  the pinned value. The mismatched-pin result
+  (exactly `KEYID_MISMATCH` with the pinned reason),
+  the hand-built no-`keyid` result (the same code
+  with the `got no keyid` reason shape) and that same
+  signature's acceptance without the option are
+  asserted outside timing. The README Benchmarks
+  table was refreshed wholesale from one real run and
+  now carries the `verifyRequest expectedKeyId` row.
+- The benchmark (`npm run bench`) now also measures
   `verifyRequest` with `clockSkewToleranceSec` — the
   clock-skew verify form a receiver uses to tolerate a
   signer whose clock runs ahead, which the existing
