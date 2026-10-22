@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createSecretKey, generateKeyPairSync } from "node:crypto";
+import { createSecretKey, generateKeyPairSync, sign as edSign } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
@@ -31,6 +31,7 @@ import {
   parseSignatureField,
   parseSignatureInput,
   ReplayCache,
+  buildSignatureBase,
   resolveComponent,
   secretKey,
   signRequest,
@@ -235,6 +236,12 @@ import {
   DEMO_REQUIRED_COMPONENTS_NONCE,
   DEMO_REQUIRED_COMPONENTS_REQUIRED,
   DEMO_REQUIRED_COMPONENTS_URL,
+  DEMO_REQUIRE_NONCE_COVERED_COMPONENTS,
+  DEMO_REQUIRE_NONCE_KEY_ID,
+  DEMO_REQUIRE_NONCE_MISSING_CODE,
+  DEMO_REQUIRE_NONCE_MISSING_REASON,
+  DEMO_REQUIRE_NONCE_NONCE,
+  DEMO_REQUIRE_NONCE_URL,
   DEMO_NODE_TRAILERS_BODY,
   DEMO_NODE_TRAILERS_COVERED_COMPONENTS,
   DEMO_NODE_TRAILERS_HOST,
@@ -4488,8 +4495,73 @@ test("demo lines contain the required-components segment (covered, missing, case
     `No requiredComponents set: the same "@method"-only signature verified without the option: OK (label sig1, keyid="${DEMO_REQUIRED_COMPONENTS_KEY_ID}", alg="ed25519", nonce="${DEMO_REQUIRED_COMPONENTS_NONCE}") (no check is made — backwards compatible)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Required components:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 6), lines.slice(headerIdx, headerIdx + 6));
+});
+
+test("demo required-nonce segment pins requireNonce (nonce present passes, missing rejected, empty rejected, unset unchanged)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_REQUIRE_NONCE_KEY_ID, "demo-require-nonce-key-1");
+  assert.equal(DEMO_REQUIRE_NONCE_NONCE, "demo-nonce-require-nonce-001");
+  assert.equal(DEMO_REQUIRE_NONCE_URL, "https://api.example.com/v1/payments");
+  assert.deepEqual(DEMO_REQUIRE_NONCE_COVERED_COMPONENTS, ["@method", "@authority", "@path"]);
+  assert.equal(DEMO_REQUIRE_NONCE_MISSING_CODE, "MISSING_NONCE");
+  assert.equal(DEMO_REQUIRE_NONCE_MISSING_REASON, "signature carries no `nonce` but requireNonce is set");
+  assert.match(r.requireNonceSigned.headers["signature-input"], /;nonce="demo-nonce-require-nonce-001"/);
+  assert.doesNotMatch(r.requireNonceMissingSigned.headers["signature-input"], /;nonce=/);
+  assert.match(r.requireNonceEmptySigned.headers["signature-input"], /;nonce=""/);
+  assert.equal(r.requireNonceWithNonceVerification.ok, true);
+  assert.equal(r.requireNonceWithNonceVerification.nonce, DEMO_REQUIRE_NONCE_NONCE);
+  assert.equal(r.requireNonceMissingVerification.ok, false);
+  assert.equal(r.requireNonceMissingVerification.code, DEMO_REQUIRE_NONCE_MISSING_CODE);
+  assert.equal(r.requireNonceMissingVerification.reason, DEMO_REQUIRE_NONCE_MISSING_REASON);
+  assert.equal(r.requireNonceMissingVerification.keyId, DEMO_REQUIRE_NONCE_KEY_ID);
+  assert.equal(r.requireNonceEmptyVerification.ok, false);
+  assert.equal(r.requireNonceEmptyVerification.code, DEMO_REQUIRE_NONCE_MISSING_CODE);
+  assert.equal(r.requireNonceEmptyVerification.reason, DEMO_REQUIRE_NONCE_MISSING_REASON);
+  assert.equal(r.requireNonceUnsetVerification.ok, true);
+  // Independent checks driven directly (the same require-nonce
+  // semantics test/requireNonce.test.ts pins): a fresh key pair,
+  // the nonce-carrying signature passes, hand-built nonce-less
+  // and empty-nonce signatures are rejected with the pinned
+  // reason, and the nonce-less one verifies with no option set.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const req = { method: "POST", url: DEMO_REQUIRE_NONCE_URL, headers: {} };
+  const directWithNonce = signRequest(req, { keyId: DEMO_REQUIRE_NONCE_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_REQUIRE_NONCE_NONCE, coveredComponents: DEMO_REQUIRE_NONCE_COVERED_COMPONENTS });
+  assert.equal(verifyRequest(directWithNonce, { key: publicKey, now: DEMO_CREATED + 60, requireNonce: true }).ok, true);
+  const handBuilt = (params: { keyid: string; alg: "ed25519"; created: number; nonce?: string }) => {
+    const base = buildSignatureBase(DEMO_REQUIRE_NONCE_COVERED_COMPONENTS, req, params);
+    const sig = edSign(null, Buffer.from(base, "utf8"), privateKey);
+    return { method: req.method, url: req.url, headers: { "signature-input": signatureInputValue("sig1", DEMO_REQUIRE_NONCE_COVERED_COMPONENTS, params), signature: `sig1=:${sig.toString("base64")}:` } };
+  };
+  const directMissing = verifyRequest(handBuilt({ keyid: DEMO_REQUIRE_NONCE_KEY_ID, alg: "ed25519", created: DEMO_CREATED }), { key: publicKey, now: DEMO_CREATED + 60, requireNonce: true });
+  assert.equal(directMissing.ok, false);
+  assert.equal(directMissing.code, "MISSING_NONCE");
+  assert.equal(directMissing.reason, DEMO_REQUIRE_NONCE_MISSING_REASON);
+  const directEmpty = verifyRequest(handBuilt({ keyid: DEMO_REQUIRE_NONCE_KEY_ID, alg: "ed25519", created: DEMO_CREATED, nonce: "" }), { key: publicKey, now: DEMO_CREATED + 60, requireNonce: true });
+  assert.equal(directEmpty.ok, false);
+  assert.equal(directEmpty.code, "MISSING_NONCE");
+  assert.equal(verifyRequest(handBuilt({ keyid: DEMO_REQUIRE_NONCE_KEY_ID, alg: "ed25519", created: DEMO_CREATED }), { key: publicKey, now: DEMO_CREATED + 60 }).ok, true);
+});
+
+test("demo lines contain the required-nonce segment (present, missing, empty, unset, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Required nonce: verifyRequest's requireNonce option closes/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Required nonce:"));
+  const rcIdx = lines.findIndex((l) => l.startsWith("Required components:"));
+  assert.ok(rcIdx !== -1 && headerIdx !== -1 && rcIdx < headerIdx);
+  const expectedLines = [
+    "Required nonce: verifyRequest's requireNonce option closes the replay-cache bypass — the replay store is only consulted for signatures carrying a non-empty nonce, so without the option a nonce-less signature silently skips replay protection even when a cache is configured; with it, the missing nonce is an explicit rejection after the cryptographic check",
+    `Nonce present: signature carrying nonce "${DEMO_REQUIRE_NONCE_NONCE}" verified with requireNonce: OK (label sig1, keyid="${DEMO_REQUIRE_NONCE_KEY_ID}", alg="ed25519", nonce="${DEMO_REQUIRE_NONCE_NONCE}")`,
+    `Nonce missing: hand-built signature with no nonce verified with requireNonce: FAILED (code ${DEMO_REQUIRE_NONCE_MISSING_CODE}: ${DEMO_REQUIRE_NONCE_MISSING_REASON})`,
+    `Nonce empty: hand-built signature with an empty-string nonce verified with requireNonce: FAILED (code ${DEMO_REQUIRE_NONCE_MISSING_CODE}: ${DEMO_REQUIRE_NONCE_MISSING_REASON})`,
+    `No requireNonce set: the same nonce-less signature verified without the option: OK (label sig1, keyid="${DEMO_REQUIRE_NONCE_KEY_ID}", alg="ed25519") (no check is made — backwards compatible)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Required nonce:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
 });

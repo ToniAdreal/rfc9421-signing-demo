@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a
+  required-nonce segment: one key pair mints a
+  nonce-carrying signature via `signRequest` and two
+  hand-built signatures via the public signature-base
+  primitives (no nonce at all, and an empty-string
+  nonce — the wire shapes a foreign signer sends),
+  showing `verifyRequest`'s `requireNonce` option —
+  the nonce-carrying signature verifies, both
+  hand-built ones are rejected after the
+  cryptographic check with `MISSING_NONCE` and its
+  pinned reason (an empty-string nonce counts as
+  missing), and the same nonce-less signature
+  verified with no option set shows the default (no
+  check is made, so the replay-cache bypass the
+  option closes stays visible). `DemoResult` gains
+  the segment's three signed requests and four
+  verification results, and the demo tests gain two
+  cases pinning the segment end-to-end (746 tests
+  in total). Every fixture is fixed — no network,
+  no wall clock.
 - The benchmark (`npm run bench`) now also measures
   `verifyRequest` with `expectedKeyId` — the key-id
   binding verify form a receiver uses to pin the

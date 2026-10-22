@@ -704,6 +704,31 @@
  * `test/requiredComponents.test.ts` pins). Every clock is
  * injected and the segment's key pair is fresh per run,
  * so the printed lines are identical between runs.
+ * The demo then closes with a required-nonce segment:
+ * `VerifyOptions.requireNonce` (`src/verify.ts`) closes the
+ * silent gap left by a replay cache on its own — the cache
+ * is only consulted when a signature carries a non-empty
+ * nonce, so a nonce-less signature would otherwise bypass
+ * replay protection without any signal. With the option
+ * set, a cryptographically valid signature carrying no
+ * nonce (an empty-string nonce counts as missing) is
+ * rejected with `MISSING_NONCE` after the cryptographic
+ * check and before the replay store is queried. One fresh
+ * key pair mints a nonce-carrying signature via
+ * `signRequest` and two hand-built signatures via the
+ * public signature-base primitives (the wire shape a
+ * foreign signer sends: no nonce at all, and an
+ * empty-string nonce), and the printed shapes are the
+ * nonce-carrying signature passing, both hand-built ones
+ * rejected with the pinned code and reason, and the same
+ * nonce-less signature verified with no option set
+ * passing unchanged. Outside the printed lines the demo
+ * asserts every outcome, code, reason and keyid equals
+ * the hand-pinned expectations below (the same
+ * require-nonce semantics `test/requireNonce.test.ts`
+ * pins). Every clock is injected and the segment's key
+ * pair is fresh per run, so the printed lines are
+ * identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2569,6 +2594,38 @@ export const DEMO_REQUIRED_COMPONENTS_MALFORMED: string[] = [
 export const DEMO_REQUIRED_COMPONENTS_MALFORMED_ERROR =
   "verifyRequest: `requiredComponents` entries must be non-empty strings, got \"\"";
 
+/** Key id of the closing required-nonce segment's signed requests. */
+export const DEMO_REQUIRE_NONCE_KEY_ID = "demo-require-nonce-key-1";
+/** Nonce of the closing required-nonce segment's nonce-carrying signature. */
+export const DEMO_REQUIRE_NONCE_NONCE = "demo-nonce-require-nonce-001";
+/** Absolute URL the closing required-nonce segment signs. */
+export const DEMO_REQUIRE_NONCE_URL = "https://api.example.com/v1/payments";
+/**
+ * Covered components of the closing required-nonce
+ * segment's signatures — the same set the hand-built
+ * foreign-signer fixtures in `test/requireNonce.test.ts`
+ * cover.
+ */
+export const DEMO_REQUIRE_NONCE_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+];
+/**
+ * Hand-pinned failure code when a signature carries no
+ * (non-empty) nonce but `requireNonce` is set
+ * (`MISSING_NONCE`).
+ */
+export const DEMO_REQUIRE_NONCE_MISSING_CODE: VerifyFailureCode =
+  "MISSING_NONCE";
+/**
+ * Hand-pinned `MISSING_NONCE` reason (the exact wording
+ * `src/verify.ts` returns and `test/requireNonce.test.ts`
+ * pins).
+ */
+export const DEMO_REQUIRE_NONCE_MISSING_REASON =
+  "signature carries no `nonce` but requireNonce is set";
+
 export interface DemoResult {
   signed: SignedHttpRequest;
   tamperedBody: string;
@@ -3597,6 +3654,35 @@ export interface DemoResult {
    * `requiredComponents` set (ok — no check is made).
    */
   requiredComponentsUnsetVerification: VerifyResult;
+  /** The request signed in the closing required-nonce segment carrying `DEMO_REQUIRE_NONCE_NONCE`. */
+  requireNonceSigned: SignedHttpRequest;
+  /**
+   * Verification of `requireNonceSigned` with
+   * `requireNonce: true` (ok — a nonce is present).
+   */
+  requireNonceWithNonceVerification: VerifyResult;
+  /** The hand-built request signed in the closing required-nonce segment carrying no nonce at all. */
+  requireNonceMissingSigned: SignedHttpRequest;
+  /**
+   * Verification of `requireNonceMissingSigned` with
+   * `requireNonce: true` (fails with `MISSING_NONCE` and
+   * `DEMO_REQUIRE_NONCE_MISSING_REASON`).
+   */
+  requireNonceMissingVerification: VerifyResult;
+  /** The hand-built request signed in the closing required-nonce segment carrying an empty-string nonce. */
+  requireNonceEmptySigned: SignedHttpRequest;
+  /**
+   * Verification of `requireNonceEmptySigned` with
+   * `requireNonce: true` (fails with `MISSING_NONCE` and
+   * `DEMO_REQUIRE_NONCE_MISSING_REASON` — an empty-string
+   * nonce counts as missing).
+   */
+  requireNonceEmptyVerification: VerifyResult;
+  /**
+   * Verification of `requireNonceMissingSigned` with no
+   * `requireNonce` set (ok — no check is made).
+   */
+  requireNonceUnsetVerification: VerifyResult;
   lines: string[];
 }
 
@@ -6734,6 +6820,136 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Required-nonce segment: a replay cache on its own is
+  // only consulted for signatures that carry a non-empty
+  // nonce, so a nonce-less signature silently bypasses
+  // replay protection; `requireNonce` turns that silent
+  // bypass into an explicit `MISSING_NONCE` rejection,
+  // checked after the cryptographic check (forgeries
+  // still report SIGNATURE_MISMATCH) and before the store
+  // query. One fresh key pair mints the nonce-carrying
+  // signature through `signRequest`; the nonce-less and
+  // empty-nonce signatures are built by hand over the
+  // public signature-base primitives, because
+  // `signRequest` makes the nonce optional and refuses an
+  // empty one — the hand-built pair is the wire shape a
+  // foreign signer sends. Outside the printed lines the
+  // demo asserts every outcome, code, reason and keyid
+  // equals the hand-pinned expectations.
+  const requireNoncePair = generateEd25519KeyPair();
+  const requireNonceRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_REQUIRE_NONCE_URL,
+    headers: {},
+  };
+  const requireNonceSigned = signRequest(requireNonceRequest, {
+    keyId: DEMO_REQUIRE_NONCE_KEY_ID,
+    alg: "ed25519",
+    key: requireNoncePair.privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_REQUIRE_NONCE_NONCE,
+    coveredComponents: DEMO_REQUIRE_NONCE_COVERED_COMPONENTS,
+  });
+  const requireNonceHandBuilt = (
+    params: SignatureParams,
+  ): SignedHttpRequest => {
+    const base = buildSignatureBase(
+      DEMO_REQUIRE_NONCE_COVERED_COMPONENTS,
+      requireNonceRequest,
+      params,
+    );
+    const sig = edSign(
+      null,
+      Buffer.from(base, "utf8"),
+      requireNoncePair.privateKey,
+    );
+    return {
+      method: requireNonceRequest.method,
+      url: requireNonceRequest.url,
+      headers: {
+        "signature-input": signatureInputValue(
+          "sig1",
+          DEMO_REQUIRE_NONCE_COVERED_COMPONENTS,
+          params,
+        ),
+        signature: `sig1=:${sig.toString("base64")}:`,
+      },
+    };
+  };
+  const requireNonceMissingSigned = requireNonceHandBuilt({
+    keyid: DEMO_REQUIRE_NONCE_KEY_ID,
+    alg: "ed25519",
+    created: DEMO_CREATED,
+  });
+  const requireNonceEmptySigned = requireNonceHandBuilt({
+    keyid: DEMO_REQUIRE_NONCE_KEY_ID,
+    alg: "ed25519",
+    created: DEMO_CREATED,
+    nonce: "",
+  });
+  const requireNonceWithNonceVerification = verifyRequest(
+    requireNonceSigned,
+    {
+      key: requireNoncePair.publicKey,
+      now: DEMO_CREATED + 60,
+      requireNonce: true,
+    },
+  );
+  const requireNonceMissingVerification = verifyRequest(
+    requireNonceMissingSigned,
+    {
+      key: requireNoncePair.publicKey,
+      now: DEMO_CREATED + 60,
+      requireNonce: true,
+    },
+  );
+  const requireNonceEmptyVerification = verifyRequest(
+    requireNonceEmptySigned,
+    {
+      key: requireNoncePair.publicKey,
+      now: DEMO_CREATED + 60,
+      requireNonce: true,
+    },
+  );
+  const requireNonceUnsetVerification = verifyRequest(
+    requireNonceMissingSigned,
+    {
+      key: requireNoncePair.publicKey,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  if (
+    requireNonceWithNonceVerification.ok !== true ||
+    requireNonceWithNonceVerification.nonce !==
+      DEMO_REQUIRE_NONCE_NONCE ||
+    requireNonceMissingVerification.ok !== false ||
+    requireNonceMissingVerification.code !==
+      DEMO_REQUIRE_NONCE_MISSING_CODE ||
+    requireNonceMissingVerification.reason !==
+      DEMO_REQUIRE_NONCE_MISSING_REASON ||
+    requireNonceMissingVerification.keyId !==
+      DEMO_REQUIRE_NONCE_KEY_ID ||
+    requireNonceEmptyVerification.ok !== false ||
+    requireNonceEmptyVerification.code !==
+      DEMO_REQUIRE_NONCE_MISSING_CODE ||
+    requireNonceEmptyVerification.reason !==
+      DEMO_REQUIRE_NONCE_MISSING_REASON ||
+    requireNonceUnsetVerification.ok !== true
+  ) {
+    throw new Error(
+      `demo fixture broken: requireNonce gave with-nonce ` +
+        `${JSON.stringify(requireNonceWithNonceVerification)}, missing ` +
+        `${JSON.stringify(requireNonceMissingVerification)}, empty ` +
+        `${JSON.stringify(requireNonceEmptyVerification)} and unset ` +
+        `${JSON.stringify(requireNonceUnsetVerification)}, instead of an ok ` +
+        `with-nonce verification reporting nonce ` +
+        `"${DEMO_REQUIRE_NONCE_NONCE}", missing and empty rejections with ` +
+        `${DEMO_REQUIRE_NONCE_MISSING_CODE} (${DEMO_REQUIRE_NONCE_MISSING_REASON}) ` +
+        `reporting keyid "${DEMO_REQUIRE_NONCE_KEY_ID}", and an ok unset ` +
+        `verification`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -7133,6 +7349,20 @@ export async function runDemo(): Promise<DemoResult> {
     requiredComponentsUnsetVerification.ok
       ? `No requiredComponents set: the same "@method"-only signature verified without the option: OK (label ${requiredComponentsUnsetVerification.label}, keyid="${requiredComponentsUnsetVerification.keyId}", alg="${requiredComponentsUnsetVerification.alg}", nonce="${requiredComponentsUnsetVerification.nonce}") (no check is made — backwards compatible)`
       : `No requiredComponents set: the same "@method"-only signature verified without the option: FAILED (code ${requiredComponentsUnsetVerification.code}: ${requiredComponentsUnsetVerification.reason})`,
+    "",
+    "Required nonce: verifyRequest's requireNonce option closes the replay-cache bypass — the replay store is only consulted for signatures carrying a non-empty nonce, so without the option a nonce-less signature silently skips replay protection even when a cache is configured; with it, the missing nonce is an explicit rejection after the cryptographic check",
+    requireNonceWithNonceVerification.ok
+      ? `Nonce present: signature carrying nonce "${DEMO_REQUIRE_NONCE_NONCE}" verified with requireNonce: OK (label ${requireNonceWithNonceVerification.label}, keyid="${requireNonceWithNonceVerification.keyId}", alg="${requireNonceWithNonceVerification.alg}", nonce="${requireNonceWithNonceVerification.nonce}")`
+      : `Nonce present: signature carrying nonce "${DEMO_REQUIRE_NONCE_NONCE}" verified with requireNonce: FAILED (code ${requireNonceWithNonceVerification.code}: ${requireNonceWithNonceVerification.reason})`,
+    requireNonceMissingVerification.ok
+      ? `Nonce missing: hand-built signature with no nonce verified with requireNonce: OK (unexpected — the nonce-less signature was not rejected)`
+      : `Nonce missing: hand-built signature with no nonce verified with requireNonce: FAILED (code ${requireNonceMissingVerification.code}: ${requireNonceMissingVerification.reason})`,
+    requireNonceEmptyVerification.ok
+      ? `Nonce empty: hand-built signature with an empty-string nonce verified with requireNonce: OK (unexpected — the empty nonce was not treated as missing)`
+      : `Nonce empty: hand-built signature with an empty-string nonce verified with requireNonce: FAILED (code ${requireNonceEmptyVerification.code}: ${requireNonceEmptyVerification.reason})`,
+    requireNonceUnsetVerification.ok
+      ? `No requireNonce set: the same nonce-less signature verified without the option: OK (label ${requireNonceUnsetVerification.label}, keyid="${requireNonceUnsetVerification.keyId}", alg="${requireNonceUnsetVerification.alg}") (no check is made — backwards compatible)`
+      : `No requireNonce set: the same nonce-less signature verified without the option: FAILED (code ${requireNonceUnsetVerification.code}: ${requireNonceUnsetVerification.reason})`,
   ];
 
   return {
@@ -7325,6 +7555,13 @@ export async function runDemo(): Promise<DemoResult> {
     requiredComponentsCaseVerification,
     requiredComponentsMalformedError,
     requiredComponentsUnsetVerification,
+    requireNonceSigned,
+    requireNonceWithNonceVerification,
+    requireNonceMissingSigned,
+    requireNonceMissingVerification,
+    requireNonceEmptySigned,
+    requireNonceEmptyVerification,
+    requireNonceUnsetVerification,
     lines,
   };
 }
