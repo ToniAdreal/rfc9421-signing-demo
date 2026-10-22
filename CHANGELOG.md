@@ -12,6 +12,26 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `verifyRequest` with `expiredToleranceSec` — the
+  expiry-grace verify form a receiver uses to accept a
+  signature that expired moments ago, which the
+  existing verify rows never timed (they rely on the
+  default zero grace against fixtures that have not
+  expired). The fixture is an ed25519 request signed
+  outside timing with `created` pinned one hour before
+  and `expires` pinned 30 seconds before the
+  verifier's injected `now`, verified under a
+  120-second grace. Every measured pass re-pins that
+  the result is ok. The narrow-grace `EXPIRED` result
+  (pinned code and reason), the acceptance exactly at
+  the grace boundary, the rejection under the default
+  zero grace and a hand-built born-expired signature's
+  `INVALID_TIME_WINDOW` result inside a wide grace are
+  asserted outside timing. The README Benchmarks table
+  was refreshed wholesale from one real run and now
+  carries the `verifyRequest expiredToleranceSec
+  (120s grace)` row.
+- The benchmark (`npm run bench`) now also measures
   `verifyAllLabels` with `keyResolvers` — the
   per-label key-resolution verify form a multi-party
   receiver uses when each signer's keyids live in a

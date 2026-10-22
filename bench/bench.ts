@@ -73,7 +73,21 @@
  * tolerance boundary (the comparison is strict `>`), and
  * its acceptance with no option passed (the 60-second
  * default covers the 30-second skew) asserted outside
- * timing, plus the key-id binding verify path a
+ * timing, plus the expired-grace verify path a receiver
+ * runs to accept a just-expired signature inside a
+ * caller-pinned grace window: `verifyRequest` with
+ * `expiredToleranceSec` over one ed25519 fixture signed
+ * outside timing with `expires` pinned 30 seconds before
+ * the verifier's injected `now` (see
+ * EXPIRED_TOLERANCE_* below), self-checked on every
+ * measured pass (the result is ok under a 120-second
+ * grace), with the same fixture's pinned `EXPIRED`
+ * result (code and reason) under a 10-second grace, its
+ * acceptance exactly at the grace boundary (the
+ * comparison is strict `>`), its rejection under the
+ * default zero grace, and a hand-built born-expired
+ * signature's pinned `INVALID_TIME_WINDOW` result
+ * inside a wide grace asserted outside timing, plus the key-id binding verify path a
  * receiver runs to pin the expected signer key:
  * `verifyRequest` with `expectedKeyId` over one
  * ed25519 fixture signed outside timing with `created`
@@ -1522,6 +1536,183 @@ function benchmarkVerifyClockSkewTolerance(): number {
   if (!defaulted.ok)
     throw new Error(
       `benchmark self-check failed: default-skew result ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` expiredToleranceSec
+ * benchmark: one ed25519 key pair (generated once, outside
+ * timing), a fixture signed outside timing with `created`
+ * pinned one hour before and `expires` pinned 30 seconds
+ * before the verifier's injected `now`, and the measured
+ * grace of 120 seconds — wide enough to accept that
+ * expiry, so the measured steady state is the accepting
+ * path.
+ */
+const EXPIRED_TOLERANCE_NOW = 1_700_000_000;
+const EXPIRED_TOLERANCE_CREATED = EXPIRED_TOLERANCE_NOW - 3_600;
+const EXPIRED_TOLERANCE_EXPIRES = EXPIRED_TOLERANCE_NOW - 30;
+const EXPIRED_TOLERANCE_GRACE_SEC = 120;
+const EXPIRED_TOLERANCE_NARROW_SEC = 10;
+const EXPIRED_TOLERANCE_KID = "bench-expired-tolerance-key-1";
+const EXPIRED_TOLERANCE_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+];
+const BORN_EXPIRED_CREATED = EXPIRED_TOLERANCE_NOW + 100;
+const BORN_EXPIRED_EXPIRES = EXPIRED_TOLERANCE_NOW;
+
+/**
+ * `verifyRequest` with `expiredToleranceSec` steady
+ * state: the expiry-grace form a receiver uses to accept
+ * a signature that expired moments ago (clock drift,
+ * in-flight requests) — every measured call runs the
+ * `now > expires + tolerance` expiry check with a
+ * caller-pinned grace the plain verify rows above never
+ * pay, because they rely on the default zero grace
+ * against fixtures that have not expired. One measured
+ * op verifies the one pinned expired fixture with
+ * `expiredToleranceSec: 120` and re-pins that the result
+ * is ok. Outside timing, the rejecting, boundary,
+ * default and born-expired halves are pinned once: the
+ * same fixture under a 10-second grace returns exactly
+ * `{ ok: false, code: "EXPIRED" }` with the pinned
+ * reason, at exactly the boundary
+ * (`now === expires + tolerance`) the same fixture still
+ * verifies because the comparison is strict `>`, with
+ * no option passed the same fixture is rejected because
+ * the default grace is zero, and a hand-built signature
+ * whose `expires` precedes its `created` returns
+ * exactly `INVALID_TIME_WINDOW` with the pinned reason
+ * even inside the wide grace — the grace can extend a
+ * lifetime, it cannot resurrect a signature that was
+ * expired at birth. Zero network, zero randomness in
+ * the measured assertions, no wall clock (every verify
+ * instant is injected).
+ */
+function benchmarkVerifyExpiredTolerance(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: EXPIRED_TOLERANCE_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: EXPIRED_TOLERANCE_CREATED,
+    expires: EXPIRED_TOLERANCE_EXPIRES,
+  });
+  const verifyOpts = {
+    key: publicKey,
+    now: EXPIRED_TOLERANCE_NOW,
+    expiredToleranceSec: EXPIRED_TOLERANCE_GRACE_SEC,
+  };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with expiredToleranceSec (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the expired fixture verifies under
+  // the wide grace.
+  assertAccepted("outside timing");
+
+  // Outside timing: under a narrow 10-second grace the
+  // same fixture is rejected as expired, with the pinned
+  // code and reason.
+  const expired = verifyRequest(signed, {
+    key: publicKey,
+    now: EXPIRED_TOLERANCE_NOW,
+    expiredToleranceSec: EXPIRED_TOLERANCE_NARROW_SEC,
+  });
+  if (
+    expired.ok ||
+    expired.code !== "EXPIRED" ||
+    expired.reason !== "signature expired"
+  )
+    throw new Error(
+      `benchmark self-check failed: narrow-grace result ${JSON.stringify(expired)} ` +
+        `(expected EXPIRED)`,
+    );
+
+  // Outside timing: exactly at the boundary
+  // (`now === expires + tolerance`) the same fixture
+  // still verifies — the expiry check is a strict `>`.
+  const boundary = verifyRequest(signed, {
+    key: publicKey,
+    now: EXPIRED_TOLERANCE_EXPIRES + EXPIRED_TOLERANCE_GRACE_SEC,
+    expiredToleranceSec: EXPIRED_TOLERANCE_GRACE_SEC,
+  });
+  if (!boundary.ok)
+    throw new Error(
+      `benchmark self-check failed: boundary result ${JSON.stringify(boundary)}`,
+    );
+
+  // Outside timing: with no option passed the same
+  // fixture is rejected — the default grace is zero, so
+  // the default behaviour is unchanged.
+  const defaulted = verifyRequest(signed, {
+    key: publicKey,
+    now: EXPIRED_TOLERANCE_NOW,
+  });
+  if (defaulted.ok || defaulted.code !== "EXPIRED")
+    throw new Error(
+      `benchmark self-check failed: default-grace result ${JSON.stringify(defaulted)}`,
+    );
+
+  // Outside timing: a hand-built signature whose
+  // `expires` precedes its `created` is rejected with
+  // INVALID_TIME_WINDOW even inside the wide grace.
+  // `signRequest` refuses to mint such a signature, so
+  // it is built by hand from the public signature-base
+  // primitives, the shape a foreign signer would send.
+  const bornReq: RequestLike = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: {},
+  };
+  const bornParams: SignatureParams = {
+    keyid: EXPIRED_TOLERANCE_KID,
+    alg: "ed25519",
+    created: BORN_EXPIRED_CREATED,
+    expires: BORN_EXPIRED_EXPIRES,
+  };
+  const bornBase = buildSignatureBase(
+    EXPIRED_TOLERANCE_COVERED_COMPONENTS,
+    bornReq,
+    bornParams,
+  );
+  const bornSig = edSign(null, Buffer.from(bornBase, "utf8"), privateKey);
+  const bornExpired: SignedHttpRequest = {
+    method: bornReq.method,
+    url: bornReq.url,
+    headers: {
+      "signature-input": signatureInputValue(
+        "sig1",
+        EXPIRED_TOLERANCE_COVERED_COMPONENTS,
+        bornParams,
+      ),
+      signature: `sig1=:${bornSig.toString("base64")}:`,
+    },
+  };
+  const born = verifyRequest(bornExpired, {
+    key: publicKey,
+    now: EXPIRED_TOLERANCE_NOW + 50,
+    expiredToleranceSec: EXPIRED_TOLERANCE_GRACE_SEC,
+  });
+  if (
+    born.ok ||
+    born.code !== "INVALID_TIME_WINDOW" ||
+    born.reason !==
+      `signature expires (${BORN_EXPIRED_EXPIRES}) is earlier than its created (${BORN_EXPIRED_CREATED}): the signature was already expired at birth`
+  )
+    throw new Error(
+      `benchmark self-check failed: born-expired result ${JSON.stringify(born)} ` +
+        `(expected INVALID_TIME_WINDOW)`,
     );
 
   return measure(() => {
@@ -5814,6 +6005,11 @@ results.push({
   alg: "verifyRequest clockSkewToleranceSec (120s)",
   op: "verify",
   ops: benchmarkVerifyClockSkewTolerance(),
+});
+results.push({
+  alg: "verifyRequest expiredToleranceSec (120s grace)",
+  op: "verify",
+  ops: benchmarkVerifyExpiredTolerance(),
 });
 results.push({
   alg: "verifyRequest expectedKeyId",
