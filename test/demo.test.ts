@@ -235,6 +235,14 @@ import {
   DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE,
   DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON,
   DEMO_EXPECTED_KEY_IDS_URL,
+  DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID,
+  DEMO_KEY_RESOLVERS_GATEWAY_LABEL,
+  DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID,
+  DEMO_KEY_RESOLVERS_MERCHANT_LABEL,
+  DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR,
+  DEMO_KEY_RESOLVERS_UNRESOLVED_CODE,
+  DEMO_KEY_RESOLVERS_UNRESOLVED_REASON,
+  DEMO_KEY_RESOLVERS_URL,
   DEMO_REQUIRED_COMPONENTS_BODY,
   DEMO_REQUIRED_COMPONENTS_CASE_REQUIRED,
   DEMO_REQUIRED_COMPONENTS_COVERED_COMPONENTS,
@@ -4644,8 +4652,75 @@ test("demo lines contain the per-label keyid pinning segment (match, wrong pin, 
     `Empty pin value: the same request verified with expectedKeyIds merchant set to an empty string: rejected with configuration error "${DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR}"`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Per-label keyid pinning:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 6), lines.slice(headerIdx, headerIdx + 6));
+});
+
+test("demo per-label key resolver segment pins keyResolvers (each label through its own keystore, unresolved gateway fails alone, missing label falls back to the global resolver, non-function value throws)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_KEY_RESOLVERS_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_KEY_RESOLVERS_GATEWAY_LABEL, "gateway");
+  assert.equal(DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID, "demo-key-resolvers-merchant-1");
+  assert.equal(DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID, "demo-key-resolvers-gateway-7");
+  assert.equal(DEMO_KEY_RESOLVERS_URL, "https://api.example.com/v1/payments");
+  assert.equal(DEMO_KEY_RESOLVERS_UNRESOLVED_CODE, "KEY_RESOLUTION_FAILED");
+  assert.equal(DEMO_KEY_RESOLVERS_UNRESOLVED_REASON, 'keyid "demo-key-resolvers-gateway-7" could not be resolved to a key');
+  assert.equal(DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR, 'verifyAllLabels: `keyResolvers["merchant"]` must be a function, got string');
+  assert.match(r.keyResolversSigned.headers["signature-input"], /merchant=\(/);
+  assert.match(r.keyResolversSigned.headers["signature-input"], /gateway=\(/);
+  assert.match(r.keyResolversSigned.headers["signature-input"], /;keyid="demo-key-resolvers-merchant-1"/);
+  assert.match(r.keyResolversSigned.headers["signature-input"], /;keyid="demo-key-resolvers-gateway-7"/);
+  assert.equal(r.keyResolversMatchVerification.length, 2);
+  assert.deepEqual(r.keyResolversMatchVerification.map((x) => [x.label, x.ok, x.keyId]), [[DEMO_KEY_RESOLVERS_MERCHANT_LABEL, true, DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID], [DEMO_KEY_RESOLVERS_GATEWAY_LABEL, true, DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID]]);
+  assert.equal(r.keyResolversUnresolvedVerification[0].ok, true);
+  assert.equal(r.keyResolversUnresolvedVerification[1].ok, false);
+  assert.equal(r.keyResolversUnresolvedVerification[1].code, DEMO_KEY_RESOLVERS_UNRESOLVED_CODE);
+  assert.equal(r.keyResolversUnresolvedVerification[1].reason, DEMO_KEY_RESOLVERS_UNRESOLVED_REASON);
+  assert.equal(r.keyResolversUnresolvedVerification[1].keyId, DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID);
+  assert.equal(r.keyResolversFallbackVerification.every((x) => x.ok), true);
+  assert.equal(r.keyResolversNonFunctionError, DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR);
+  // Independent checks driven directly (the same per-label
+  // resolver semantics test/keyResolversPerLabel.test.ts pins):
+  // two fresh key pairs, a dual-label fixture, each label
+  // resolved through its own keystore passes, an empty
+  // gateway keystore rejects only that label, the
+  // missing-label fallback passes, and a non-function map
+  // value throws the pinned configuration error.
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const req = { method: "POST", url: DEMO_KEY_RESOLVERS_URL, headers: { "content-type": "application/json" }, body: "{}" };
+  const first = signRequest(req, { keyId: DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID, alg: "ed25519", key: merchant.privateKey, created: DEMO_CREATED, label: DEMO_KEY_RESOLVERS_MERCHANT_LABEL });
+  const dual = addSignature(first, { keyId: DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID, alg: "ed25519", key: gateway.privateKey, created: DEMO_CREATED, label: DEMO_KEY_RESOLVERS_GATEWAY_LABEL });
+  const merchantStore = new Map([[DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID, merchant.publicKey]]);
+  const gatewayStore = new Map([[DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID, gateway.publicKey]]);
+  assert.equal(verifyAllLabels(dual, { now: DEMO_CREATED + 60, keyResolvers: { merchant: (id) => merchantStore.get(id), gateway: (id) => gatewayStore.get(id) } }).every((x) => x.ok), true);
+  const directUnresolved = verifyAllLabels(dual, { now: DEMO_CREATED + 60, keyResolvers: { merchant: (id) => merchantStore.get(id), gateway: () => undefined } });
+  assert.equal(directUnresolved[0].ok, true);
+  assert.equal(directUnresolved[1].ok, false);
+  assert.equal(directUnresolved[1].code, "KEY_RESOLUTION_FAILED");
+  assert.equal(directUnresolved[1].reason, DEMO_KEY_RESOLVERS_UNRESOLVED_REASON);
+  assert.equal(verifyAllLabels(dual, { now: DEMO_CREATED + 60, keyResolver: (id) => gatewayStore.get(id), keyResolvers: { merchant: (id) => merchantStore.get(id) } }).every((x) => x.ok), true);
+  assert.throws(() => verifyAllLabels(dual, { now: DEMO_CREATED + 60, keyResolvers: { merchant: "not-a-function" as never } }), (e: unknown) => e instanceof Error && e.message === DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR);
+});
+
+test("demo lines contain the per-label key resolver segment (own keystores, unresolved, fallback, non-function value, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Per-label key resolvers: verifyAllLabels' keyResolvers option maps/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Per-label key resolvers:"));
+  const pinIdx = lines.findIndex((l) => l.startsWith("Per-label keyid pinning:"));
+  assert.ok(pinIdx !== -1 && headerIdx !== -1 && pinIdx < headerIdx);
+  const expectedLines = [
+    "Per-label key resolvers: verifyAllLabels' keyResolvers option maps each label to its own keyid\u2192key resolver (separate keystores when the merchant and the gateway keep their keys apart) — a label missing from the map falls back to the global keyResolver, and a malformed map value is a caller configuration error thrown before any verification runs",
+    `Each label through its own keystore: dual-signed request verified with keyResolvers merchant and gateway backed by separate keystores: merchant OK (label merchant, keyid="${DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label gateway, keyid="${DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID}", alg="ed25519")`,
+    `Gateway key rotated out: the same request verified with the gateway resolver's keystore no longer holding "${DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID}": gateway FAILED (code ${DEMO_KEY_RESOLVERS_UNRESOLVED_CODE}: ${DEMO_KEY_RESOLVERS_UNRESOLVED_REASON}), merchant still OK (label merchant, keyid="${DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID}", alg="ed25519")`,
+    `Missing label falls back: the same request verified with keyResolvers naming only merchant and a global keyResolver holding the gateway key: merchant OK (label merchant, keyid="${DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID}", alg="ed25519") via its own resolver, gateway OK (label gateway, keyid="${DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID}", alg="ed25519") via the global fallback`,
+    `Non-function resolver value: the same request verified with keyResolvers merchant set to a string: rejected with configuration error "${DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR}"`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Per-label key resolvers:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
 });

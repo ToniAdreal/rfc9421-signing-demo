@@ -755,6 +755,30 @@
  * Every clock is injected and the segment's key pairs
  * are fresh per run, so the printed lines are identical
  * between runs.
+ * The demo then closes with a per-label key resolver
+ * segment: `VerifyAllOptions.keyResolvers`
+ * (`src/verify.ts`) maps each signature label to its own
+ * `keyid`→key resolver, for multi-party requests whose
+ * signers' key ids live in separate keystores. Two fresh
+ * ed25519 key pairs mint a dual-label fixture (`merchant`
+ * via `signRequest`, `gateway` appended via
+ * `addSignature`), and the printed shapes are both labels
+ * verifying through their own keystore resolvers, the
+ * gateway label alone rejected with
+ * `KEY_RESOLUTION_FAILED` when its resolver returns
+ * `undefined` (its key id rotated out of the gateway
+ * keystore) while the merchant label still verifies, a
+ * label missing from the map falling back to the global
+ * `keyResolver`, and a non-function map value throwing
+ * the pinned configuration error before any verification
+ * runs. Outside the printed lines the demo asserts every
+ * outcome, label, code, reason and keyid equals the
+ * hand-pinned expectations below (the same per-label
+ * resolver semantics `test/keyResolversPerLabel.test.ts`
+ * pins, and the same shape the benchmark measures).
+ * Every clock is injected and the segment's key pairs
+ * are fresh per run, so the printed lines are identical
+ * between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2698,6 +2722,43 @@ export const DEMO_EXPECTED_KEY_IDS_FALLBACK_MISMATCH_REASON =
 export const DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR =
   'verifyAllLabels: `expectedKeyIds["merchant"]` must be a non-empty string, got ""';
 
+/** Label of the closing per-label key resolver segment's merchant signature. */
+export const DEMO_KEY_RESOLVERS_MERCHANT_LABEL = "merchant";
+/** Label of the closing per-label key resolver segment's gateway signature. */
+export const DEMO_KEY_RESOLVERS_GATEWAY_LABEL = "gateway";
+/** Key id the closing per-label key resolver segment's merchant signature carries. */
+export const DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID =
+  "demo-key-resolvers-merchant-1";
+/** Key id the closing per-label key resolver segment's gateway signature carries. */
+export const DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID =
+  "demo-key-resolvers-gateway-7";
+/** Absolute URL the closing per-label key resolver segment signs. */
+export const DEMO_KEY_RESOLVERS_URL =
+  "https://api.example.com/v1/payments";
+/**
+ * Hand-pinned failure code when a label's resolver
+ * returns `undefined` for its keyid
+ * (`KEY_RESOLUTION_FAILED`).
+ */
+export const DEMO_KEY_RESOLVERS_UNRESOLVED_CODE: VerifyFailureCode =
+  "KEY_RESOLUTION_FAILED";
+/**
+ * Hand-pinned `KEY_RESOLUTION_FAILED` reason for the
+ * gateway label whose key id is absent from its own
+ * keystore (the exact wording `src/verify.ts` returns
+ * and `test/keyResolversPerLabel.test.ts` pins in
+ * shape).
+ */
+export const DEMO_KEY_RESOLVERS_UNRESOLVED_REASON =
+  `keyid "${DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID}" could not be resolved to a key`;
+/**
+ * Hand-pinned configuration error thrown for a
+ * non-function `keyResolvers` map value (the exact
+ * wording `src/verify.ts` throws).
+ */
+export const DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR =
+  'verifyAllLabels: `keyResolvers["merchant"]` must be a function, got string';
+
 export interface DemoResult {
   signed: SignedHttpRequest;
   tamperedBody: string;
@@ -3791,6 +3852,34 @@ export interface DemoResult {
    * `DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR`).
    */
   expectedKeyIdsEmptyError: string;
+  /** The dual-signed request signed in the closing per-label key resolver segment (labels `merchant` and `gateway`). */
+  keyResolversSigned: SignedHttpRequest;
+  /**
+   * Per-label results for `keyResolversSigned` with each
+   * label resolved through its own keystore resolver
+   * (both ok, each reporting its own keyid).
+   */
+  keyResolversMatchVerification: VerifyResult[];
+  /**
+   * Per-label results for `keyResolversSigned` with the
+   * gateway resolver returning `undefined` (merchant ok,
+   * gateway fails with `KEY_RESOLUTION_FAILED` and
+   * `DEMO_KEY_RESOLVERS_UNRESOLVED_REASON`).
+   */
+  keyResolversUnresolvedVerification: VerifyResult[];
+  /**
+   * Per-label results for `keyResolversSigned` with the
+   * gateway label missing from the map and the global
+   * `keyResolver` holding the gateway key (both ok — the
+   * missing label falls back to the global resolver).
+   */
+  keyResolversFallbackVerification: VerifyResult[];
+  /**
+   * Configuration error thrown when `keyResolversSigned`
+   * is verified with a non-function map value (equals
+   * `DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR`).
+   */
+  keyResolversNonFunctionError: string;
   lines: string[];
 }
 
@@ -7219,6 +7308,147 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+
+  // Per-label key resolver segment: in a multi-party
+  // request the merchant's and the gateway's key ids live
+  // in separate keystores, so a single global resolver
+  // cannot express "resolve this label through that
+  // keystore" — `verifyAllLabels`' `keyResolvers` map
+  // gives each label its own resolver and a label missing
+  // from the map falls back to the global `keyResolver`.
+  // Two fresh ed25519 key pairs mint the dual-label
+  // fixture (`merchant` via `signRequest`, `gateway`
+  // appended via `addSignature`) at the pinned created
+  // instant, and every verify call injects the same fixed
+  // `now`. Outside the printed lines the demo asserts
+  // every outcome, label, code, reason and keyid equals
+  // the hand-pinned expectations, and that a non-function
+  // map value throws the pinned configuration error.
+  const keyResolversMerchantPair = generateEd25519KeyPair();
+  const keyResolversGatewayPair = generateEd25519KeyPair();
+  const keyResolversRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_KEY_RESOLVERS_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const keyResolversMerchantSigned = signRequest(keyResolversRequest, {
+    keyId: DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID,
+    alg: "ed25519",
+    key: keyResolversMerchantPair.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_KEY_RESOLVERS_MERCHANT_LABEL,
+  });
+  const keyResolversSigned = addSignature(keyResolversMerchantSigned, {
+    keyId: DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID,
+    alg: "ed25519",
+    key: keyResolversGatewayPair.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_KEY_RESOLVERS_GATEWAY_LABEL,
+  });
+  const keyResolversMerchantStore = new Map<string, KeyObject>([
+    [DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID, keyResolversMerchantPair.publicKey],
+  ]);
+  const keyResolversGatewayStore = new Map<string, KeyObject>([
+    [DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID, keyResolversGatewayPair.publicKey],
+  ]);
+  const keyResolversEmptyGatewayStore = new Map<string, KeyObject>();
+  const keyResolversGlobalStore = new Map<string, KeyObject>([
+    [DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID, keyResolversGatewayPair.publicKey],
+  ]);
+  const keyResolversMatchVerification = verifyAllLabels(keyResolversSigned, {
+    now: DEMO_CREATED + 60,
+    keyResolvers: {
+      [DEMO_KEY_RESOLVERS_MERCHANT_LABEL]: (id) =>
+        keyResolversMerchantStore.get(id),
+      [DEMO_KEY_RESOLVERS_GATEWAY_LABEL]: (id) =>
+        keyResolversGatewayStore.get(id),
+    },
+  });
+  const keyResolversUnresolvedVerification = verifyAllLabels(
+    keyResolversSigned,
+    {
+      now: DEMO_CREATED + 60,
+      keyResolvers: {
+        [DEMO_KEY_RESOLVERS_MERCHANT_LABEL]: (id) =>
+          keyResolversMerchantStore.get(id),
+        [DEMO_KEY_RESOLVERS_GATEWAY_LABEL]: (id) =>
+          keyResolversEmptyGatewayStore.get(id),
+      },
+    },
+  );
+  const keyResolversFallbackVerification = verifyAllLabels(
+    keyResolversSigned,
+    {
+      now: DEMO_CREATED + 60,
+      keyResolver: (id) => keyResolversGlobalStore.get(id),
+      keyResolvers: {
+        [DEMO_KEY_RESOLVERS_MERCHANT_LABEL]: (id) =>
+          keyResolversMerchantStore.get(id),
+      },
+    },
+  );
+  let keyResolversNonFunctionError = "";
+  try {
+    verifyAllLabels(keyResolversSigned, {
+      now: DEMO_CREATED + 60,
+      keyResolvers: {
+        [DEMO_KEY_RESOLVERS_MERCHANT_LABEL]:
+          "not-a-function" as unknown as (
+            keyId: string,
+          ) => KeyObject | undefined,
+      },
+    });
+  } catch (e) {
+    keyResolversNonFunctionError = (e as Error).message;
+  }
+  const resolverShape = (
+    results: VerifyResult[],
+  ): ReadonlyArray<readonly [string, boolean, string | undefined]> =>
+    results.map(
+      (r) =>
+        [r.label, r.ok, r.ok ? r.keyId : r.code] as const,
+    );
+  if (
+    JSON.stringify(resolverShape(keyResolversMatchVerification)) !==
+      JSON.stringify([
+        [
+          DEMO_KEY_RESOLVERS_MERCHANT_LABEL,
+          true,
+          DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID,
+        ],
+        [
+          DEMO_KEY_RESOLVERS_GATEWAY_LABEL,
+          true,
+          DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID,
+        ],
+      ]) ||
+    keyResolversUnresolvedVerification.length !== 2 ||
+    keyResolversUnresolvedVerification[0].ok !== true ||
+    keyResolversUnresolvedVerification[1].ok !== false ||
+    keyResolversUnresolvedVerification[1].code !==
+      DEMO_KEY_RESOLVERS_UNRESOLVED_CODE ||
+    keyResolversUnresolvedVerification[1].reason !==
+      DEMO_KEY_RESOLVERS_UNRESOLVED_REASON ||
+    keyResolversUnresolvedVerification[1].keyId !==
+      DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID ||
+    keyResolversFallbackVerification.length !== 2 ||
+    keyResolversFallbackVerification.some((r) => !r.ok) ||
+    keyResolversNonFunctionError !== DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: keyResolvers gave match ` +
+        `${JSON.stringify(keyResolversMatchVerification)}, unresolved ` +
+        `${JSON.stringify(keyResolversUnresolvedVerification)}, fallback ` +
+        `${JSON.stringify(keyResolversFallbackVerification)} and non-function error ` +
+        `"${keyResolversNonFunctionError}", instead of both labels ok through their ` +
+        `own keystore resolvers, the gateway label alone rejected with ` +
+        `${DEMO_KEY_RESOLVERS_UNRESOLVED_CODE} (${DEMO_KEY_RESOLVERS_UNRESOLVED_REASON}), ` +
+        `both labels ok under the global-resolver fallback, ` +
+        `and the pinned non-function configuration error`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -7647,6 +7877,18 @@ export async function runDemo(): Promise<DemoResult> {
       ? `Empty map falls back for every label: the same request verified with an empty expectedKeyIds map and the global expectedKeyId "${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}": gateway OK (unexpected — the global pin was not applied to it), merchant OK`
       : `Empty map falls back for every label: the same request verified with an empty expectedKeyIds map and the global expectedKeyId "${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}": gateway FAILED (code ${expectedKeyIdsFallbackMismatchVerification[1].code}: ${expectedKeyIdsFallbackMismatchVerification[1].reason}), merchant still OK (label ${expectedKeyIdsFallbackMismatchVerification[0].label}, keyid="${expectedKeyIdsFallbackMismatchVerification[0].keyId}", alg="${expectedKeyIdsFallbackMismatchVerification[0].alg}")`,
     `Empty pin value: the same request verified with expectedKeyIds merchant set to an empty string: rejected with configuration error "${expectedKeyIdsEmptyError}"`,
+    "",
+    "Per-label key resolvers: verifyAllLabels' keyResolvers option maps each label to its own keyid→key resolver (separate keystores when the merchant and the gateway keep their keys apart) — a label missing from the map falls back to the global keyResolver, and a malformed map value is a caller configuration error thrown before any verification runs",
+    keyResolversMatchVerification.every((r) => r.ok)
+      ? `Each label through its own keystore: dual-signed request verified with keyResolvers merchant and gateway backed by separate keystores: merchant OK (label ${keyResolversMatchVerification[0].label}, keyid="${keyResolversMatchVerification[0].keyId}", alg="${keyResolversMatchVerification[0].alg}"), gateway OK (label ${keyResolversMatchVerification[1].label}, keyid="${keyResolversMatchVerification[1].keyId}", alg="${keyResolversMatchVerification[1].alg}")`
+      : `Each label through its own keystore: dual-signed request verified with keyResolvers merchant and gateway backed by separate keystores: FAILED (merchant ${keyResolversMatchVerification[0].ok ? "OK" : `code ${keyResolversMatchVerification[0].code}: ${keyResolversMatchVerification[0].reason}`}, gateway ${keyResolversMatchVerification[1].ok ? "OK" : `code ${keyResolversMatchVerification[1].code}: ${keyResolversMatchVerification[1].reason}`})`,
+    keyResolversUnresolvedVerification[1].ok
+      ? `Gateway key rotated out: the same request verified with the gateway resolver's keystore no longer holding "${DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID}": gateway OK (unexpected — the unresolvable keyid was not rejected), merchant OK`
+      : `Gateway key rotated out: the same request verified with the gateway resolver's keystore no longer holding "${DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID}": gateway FAILED (code ${keyResolversUnresolvedVerification[1].code}: ${keyResolversUnresolvedVerification[1].reason}), merchant still OK (label ${keyResolversUnresolvedVerification[0].label}, keyid="${keyResolversUnresolvedVerification[0].keyId}", alg="${keyResolversUnresolvedVerification[0].alg}")`,
+    keyResolversFallbackVerification.every((r) => r.ok)
+      ? `Missing label falls back: the same request verified with keyResolvers naming only merchant and a global keyResolver holding the gateway key: merchant OK (label ${keyResolversFallbackVerification[0].label}, keyid="${keyResolversFallbackVerification[0].keyId}", alg="${keyResolversFallbackVerification[0].alg}") via its own resolver, gateway OK (label ${keyResolversFallbackVerification[1].label}, keyid="${keyResolversFallbackVerification[1].keyId}", alg="${keyResolversFallbackVerification[1].alg}") via the global fallback`
+      : `Missing label falls back: the same request verified with keyResolvers naming only merchant and a global keyResolver holding the gateway key: FAILED (merchant ${keyResolversFallbackVerification[0].ok ? "OK" : `code ${keyResolversFallbackVerification[0].code}: ${keyResolversFallbackVerification[0].reason}`}, gateway ${keyResolversFallbackVerification[1].ok ? "OK" : `code ${keyResolversFallbackVerification[1].code}: ${keyResolversFallbackVerification[1].reason}`})`,
+    `Non-function resolver value: the same request verified with keyResolvers merchant set to a string: rejected with configuration error "${keyResolversNonFunctionError}"`,
   ];
 
   return {
@@ -7852,6 +8094,11 @@ export async function runDemo(): Promise<DemoResult> {
     expectedKeyIdsFallbackVerification,
     expectedKeyIdsFallbackMismatchVerification,
     expectedKeyIdsEmptyError,
+    keyResolversSigned,
+    keyResolversMatchVerification,
+    keyResolversUnresolvedVerification,
+    keyResolversFallbackVerification,
+    keyResolversNonFunctionError,
     lines,
   };
 }

@@ -12,6 +12,27 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The CLI demo (`npm run demo`) now closes with a
+  per-label key resolver segment: two fresh ed25519
+  key pairs mint a dual-label fixture (`merchant` via
+  `signRequest`, `gateway` appended via
+  `addSignature`), showing `verifyAllLabels`'
+  `keyResolvers` option — both labels verify through
+  their own keystore resolvers, the gateway label
+  alone is rejected with `KEY_RESOLUTION_FAILED` and
+  its pinned reason when its resolver returns
+  `undefined` (its key id rotated out of the gateway
+  keystore) while the merchant label still verifies,
+  a label missing from the map falls back to the
+  global `keyResolver`, and a non-function map value
+  throws the pinned configuration error before any
+  verification runs. `DemoResult` gains the segment's
+  dual-signed request, three per-label result arrays
+  and the thrown configuration error, and the demo
+  tests gain two cases pinning the segment
+  end-to-end (750 tests in total). Every fixture is
+  fixed — injected clock, no network, no randomness
+  in the printed lines.
+- The CLI demo (`npm run demo`) now closes with a
   per-label keyid pinning segment: two fresh ed25519
   key pairs mint a dual-label fixture (`merchant` via
   `signRequest`, `gateway` appended via
