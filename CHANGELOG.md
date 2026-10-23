@@ -12,6 +12,30 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `verifyRequest` with `replayCache` — the replay-defense
+  verify form a receiver uses to refuse an already-seen
+  request (nonce replay protection), which the existing
+  verify rows never timed (they pass no cache, so the
+  post-cryptographic cache consultation was never a
+  measured cost). One measured op verifies a pinned
+  ed25519 fixture (signed outside timing with `created`
+  and `nonce` pinned) twice against a fresh
+  `ReplayCache` sharing the verifier's injected clock:
+  the first verify records the nonce and is ok, the
+  second is rejected with exactly the pinned
+  `NONCE_REPLAY` code and reason — the measured steady
+  state is the replay-rejecting path. Outside timing
+  the bypassing and non-polluting halves are asserted:
+  the same fixture verifies twice without a cache, a
+  nonce-less signature verifies twice under a cache
+  (nonce-less signatures bypass the cache entirely),
+  and a forged signature (tampered bytes) returns
+  `SIGNATURE_MISMATCH` without polluting the cache —
+  the cryptographic check runs before the cache
+  consultation. The README Benchmarks table was
+  refreshed wholesale from one real run and now carries
+  the `verifyRequest replayCache` row.
+- The benchmark (`npm run bench`) now also measures
   `verifyRequest` with `requireCreated` — the
   created-presence verify form a receiver uses to refuse
   signatures with no bounded age, which the existing

@@ -88,7 +88,24 @@
  * different expectation, the no-`tag` signature's pinned
  * `TAG_MISMATCH` (`got no tag`) result, and that same
  * signature's acceptance without the option asserted
- * outside timing, plus the clock-skew verify path a
+ * outside timing, plus the replay-defense verify
+ * path a receiver runs to refuse already-seen
+ * requests: `verifyRequest` with `replayCache` over
+ * one ed25519 fixture signed outside timing with
+ * `created` pinned and a pinned `nonce` (the
+ * verifier's `now` injected at the `created`
+ * instant, and the cache shares that injected
+ * instant — see REPLAY_CACHE_* below), self-checked
+ * on every measured pass (each measured op verifies
+ * the fixture once against a fresh cache — the
+ * nonce is recorded and the result is ok — then
+ * verifies again and re-pins exactly the pinned
+ * `NONCE_REPLAY` code and reason), with that same
+ * fixture's double acceptance without a cache, a
+ * nonce-less signature's double acceptance under a
+ * cache, and a forged signature's non-polluting
+ * `SIGNATURE_MISMATCH` result asserted outside
+ * timing, plus the clock-skew verify path a
  * receiver runs to tolerate a signer clock running ahead:
  * `verifyRequest` with `clockSkewToleranceSec` over one
  * ed25519 fixture signed outside timing with `created`
@@ -1736,6 +1753,159 @@ function benchmarkVerifyExpectedTag(): number {
 
   return measure(() => {
     assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` replayCache
+ * benchmark: one ed25519 key pair (generated once,
+ * outside timing), a fixture signed outside timing
+ * with `created` pinned and `nonce` pinned, and the
+ * cache sharing the verifier's injected clock — the
+ * measured steady state is the replay-rejecting path.
+ */
+const REPLAY_CACHE_NOW = 1_700_000_000;
+const REPLAY_CACHE_KID = "bench-replay-cache-key-1";
+const REPLAY_CACHE_NONCE = "bench-replay-nonce-1";
+const REPLAY_CACHE_CODE = "NONCE_REPLAY";
+const REPLAY_CACHE_REASON = `nonce replay detected: "${REPLAY_CACHE_NONCE}" was already seen`;
+
+/**
+ * `verifyRequest` with `replayCache` steady state: the
+ * replay-defense form a receiver runs to refuse a
+ * request whose signature is valid but was already
+ * seen — every measured op consults the cache the
+ * plain verify rows above never pay, because they
+ * pass no cache. One measured op verifies the one
+ * pinned nonced fixture twice against a fresh
+ * `ReplayCache` sharing the verifier's injected
+ * clock: the first verify records the nonce and is
+ * ok, the second is rejected with exactly the pinned
+ * `NONCE_REPLAY` code and reason. Outside timing,
+ * the bypassing and non-polluting halves are pinned
+ * once: without a cache the same fixture verifies
+ * twice (both ok), a nonce-less signature verifies
+ * twice under a cache (nonce-less signatures bypass
+ * the cache entirely), and a forged signature
+ * (signature bytes tampered) with a cache returns
+ * `SIGNATURE_MISMATCH` — the cryptographic check
+ * runs before the cache consultation, so a forgery
+ * never pollutes the cache, and the unmodified
+ * fixture still verifies (and is then
+ * replay-rejected) afterwards. Zero network, zero
+ * randomness in the measured assertions, no wall
+ * clock (every verify instant is injected; the
+ * cache's own clock is that same pinned instant).
+ */
+function benchmarkVerifyReplayCache(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: REPLAY_CACHE_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: REPLAY_CACHE_NOW,
+    nonce: REPLAY_CACHE_NONCE,
+  });
+
+  const verifyWithCache = (cache: ReplayCache) =>
+    verifyRequest(signed, {
+      key: publicKey,
+      now: REPLAY_CACHE_NOW,
+      replayCache: cache,
+    });
+
+  const assertReplayed = (cache: ReplayCache, where: string): void => {
+    const r = verifyWithCache(cache);
+    if (r.ok || r.code !== REPLAY_CACHE_CODE || r.reason !== REPLAY_CACHE_REASON)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with replayCache (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: without a cache the same fixture
+  // verifies twice — replay defense is opt-in and the
+  // default behaviour is unchanged.
+  const uncachedFirst = verifyRequest(signed, {
+    key: publicKey,
+    now: REPLAY_CACHE_NOW,
+  });
+  const uncachedSecond = verifyRequest(signed, {
+    key: publicKey,
+    now: REPLAY_CACHE_NOW,
+  });
+  if (!uncachedFirst.ok || !uncachedSecond.ok)
+    throw new Error(
+      `benchmark self-check failed: uncached fixture gave ${JSON.stringify(uncachedFirst)} / ${JSON.stringify(uncachedSecond)}`,
+    );
+
+  // Outside timing: a nonce-less signature verifies
+  // twice under a cache — nonce-less signatures
+  // bypass the replay cache entirely.
+  const nonceLess = signRequest(fixture, {
+    keyId: REPLAY_CACHE_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: REPLAY_CACHE_NOW,
+  });
+  const nonceLessCache = new ReplayCache({ now: () => REPLAY_CACHE_NOW });
+  const verifyNonceLess = () =>
+    verifyRequest(nonceLess, {
+      key: publicKey,
+      now: REPLAY_CACHE_NOW,
+      replayCache: nonceLessCache,
+    });
+  if (!verifyNonceLess().ok || !verifyNonceLess().ok)
+    throw new Error(
+      `benchmark self-check failed: nonce-less fixture under cache did not verify twice`,
+    );
+
+  // Outside timing: a forged signature (signature
+  // bytes tampered) with a cache returns
+  // SIGNATURE_MISMATCH — the cryptographic check runs
+  // before the cache consultation, so a forgery never
+  // pollutes the cache; the unmodified fixture still
+  // verifies and is then replay-rejected afterwards.
+  const poisonedCache = new ReplayCache({ now: () => REPLAY_CACHE_NOW });
+  const sigField = signed.headers["signature"];
+  const sigMatch = /^sig1=:(.+):$/.exec(sigField);
+  if (!sigMatch)
+    throw new Error(
+      `benchmark self-check failed: unexpected signature header shape ${JSON.stringify(sigField)}`,
+    );
+  const raw = Buffer.from(sigMatch[1], "base64");
+  raw[raw.length - 1] ^= 0xff;
+  const forged: SignedHttpRequest = {
+    method: signed.method,
+    url: signed.url,
+    headers: {
+      ...signed.headers,
+      signature: `sig1=:${raw.toString("base64")}:`,
+    },
+  };
+  const forgedResult = verifyRequest(forged, {
+    key: publicKey,
+    now: REPLAY_CACHE_NOW,
+    replayCache: poisonedCache,
+  });
+  if (forgedResult.ok || forgedResult.code !== "SIGNATURE_MISMATCH")
+    throw new Error(
+      `benchmark self-check failed: forged result ${JSON.stringify(forgedResult)} ` +
+        `(expected SIGNATURE_MISMATCH)`,
+    );
+  if (!verifyWithCache(poisonedCache).ok)
+    throw new Error(
+      `benchmark self-check failed: fixture after forgery was rejected (cache was polluted)`,
+    );
+  assertReplayed(poisonedCache, "replay after unpolluted first verify");
+
+  return measure(() => {
+    const cache = new ReplayCache({ now: () => REPLAY_CACHE_NOW });
+    const first = verifyWithCache(cache);
+    if (!first.ok)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with replayCache (measured first pass) gave ${JSON.stringify(first)}`,
+      );
+    assertReplayed(cache, "measured pass");
   }, ITERATIONS);
 }
 
@@ -6481,6 +6651,11 @@ results.push({
   alg: "verifyRequest expectedTag",
   op: "verify",
   ops: benchmarkVerifyExpectedTag(),
+});
+results.push({
+  alg: "verifyRequest replayCache",
+  op: "verify",
+  ops: benchmarkVerifyReplayCache(),
 });
 results.push({
   alg: "verifyRequest clockSkewToleranceSec (120s)",
