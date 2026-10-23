@@ -60,7 +60,22 @@
  * with the hand-built no-`expires` signature's pinned
  * `MISSING_EXPIRES` result (code and reason) and that same
  * signature's acceptance without the option asserted
- * outside timing, plus the application-tag-pinning verify
+ * outside timing, plus the created-presence verify path a
+ * receiver runs to refuse undated signatures:
+ * `verifyRequest` with `requireCreated` over a hand-built
+ * no-`created` signature (built with `buildSignatureBase`
+ * + `signatureInputValue` + a raw ed25519 sign, the shape
+ * `test/requireFreshness.test.ts` uses, because
+ * `signRequest` always emits `created` — see
+ * REQUIRE_CREATED_* below), self-checked on every
+ * measured pass (the result is exactly the pinned
+ * `MISSING_CREATED` code and reason), with that same
+ * signature's acceptance without the option, a dated
+ * fixture's acceptance under the requirement, and a
+ * forged no-`created` signature's pinned
+ * `SIGNATURE_MISMATCH` result (the crypto check runs
+ * first) asserted outside timing, plus the
+ * application-tag-pinning verify
  * path a receiver runs for cross-protocol replay
  * protection: `verifyRequest` with `expectedTag` over one
  * ed25519 fixture signed outside timing with `created`
@@ -1459,14 +1474,158 @@ function benchmarkVerifyRequireExpires(): number {
 }
 
 /**
- * Pinned shape of the `verifyRequest` expectedTag
+ * Pinned shape of the `verifyRequest` requireCreated
  * benchmark: one ed25519 key pair (generated once, outside
- * timing), a fixture signed outside timing with `created`
- * pinned and `tag` pinned to the application protocol
- * `"payment-webhook-v1"`, and the verifier's injected `now`
- * at the `created` instant — so the measured steady state
- * is the accepting path.
+ * timing), a hand-built signature with no `created`
+ * parameter (built with `buildSignatureBase` +
+ * `signatureInputValue` + a raw ed25519 sign — the shape
+ * `test/requireFreshness.test.ts` uses, because
+ * `signRequest` always emits `created` and a third-party
+ * signer may omit it), and the verifier's injected `now`
+ * — so the measured steady state is the rejecting path:
+ * the post-cryptographic `created === undefined` presence
+ * check the plain verify rows above never pay, because
+ * they pass no such requirement.
  */
+const REQUIRE_CREATED_NOW = 1_700_000_000;
+const REQUIRE_CREATED_KID = "bench-require-created-key-1";
+const REQUIRE_CREATED_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+];
+const REQUIRE_CREATED_CODE = "MISSING_CREATED";
+const REQUIRE_CREATED_REASON =
+  "signature carries no `created` timestamp but requireCreated is set";
+
+/**
+ * `verifyRequest` with `requireCreated` steady state: the
+ * created-presence form a receiver uses to refuse
+ * signatures with no bounded age — every measured call
+ * runs the post-cryptographic `created === undefined`
+ * presence check the plain verify rows above never pay,
+ * because they set no requirement. One measured op
+ * verifies the one pinned hand-built no-`created`
+ * fixture with `requireCreated: true` and re-pins that
+ * the result is exactly `{ ok: false, code:
+ * "MISSING_CREATED" }` with the pinned reason.
+ * Outside timing, the accepting and ordering halves are
+ * pinned once: the same no-`created` signature still
+ * verifies with the option unset (the requirement is
+ * opt-in), a dated `signRequest` fixture verifies under
+ * `requireCreated: true`, and a forged (tampered
+ * signature bytes) no-`created` signature returns
+ * `SIGNATURE_MISMATCH` — the cryptographic check runs
+ * before the presence check, so a forgery is never
+ * mistaken for a policy violation. Zero network, zero
+ * randomness in the measured assertions, no wall clock
+ * (every verify instant is injected).
+ */
+function benchmarkVerifyRequireCreated(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const noCreatedParams: SignatureParams = {
+    keyid: REQUIRE_CREATED_KID,
+    alg: "ed25519",
+  };
+  const noCreatedRequest: RequestLike = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: {},
+  };
+  const noCreatedBase = buildSignatureBase(
+    REQUIRE_CREATED_COVERED_COMPONENTS,
+    noCreatedRequest,
+    noCreatedParams,
+  );
+  const noCreatedSig = edSign(
+    null,
+    Buffer.from(noCreatedBase, "utf8"),
+    privateKey,
+  );
+  const noCreatedSigned: SignedHttpRequest = {
+    method: noCreatedRequest.method,
+    url: noCreatedRequest.url,
+    headers: {
+      "signature-input": signatureInputValue(
+        "sig1",
+        REQUIRE_CREATED_COVERED_COMPONENTS,
+        noCreatedParams,
+      ),
+      signature: `sig1=:${noCreatedSig.toString("base64")}:`,
+    },
+  };
+  const verifyOpts = {
+    key: publicKey,
+    now: REQUIRE_CREATED_NOW,
+    requireCreated: true,
+  };
+  const assertRejected = (where: string): void => {
+    const r = verifyRequest(noCreatedSigned, verifyOpts);
+    if (
+      r.ok ||
+      r.code !== REQUIRE_CREATED_CODE ||
+      r.reason !== REQUIRE_CREATED_REASON
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with requireCreated (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the hand-built no-`created` fixture
+  // is rejected with the pinned code and reason.
+  assertRejected("outside timing");
+
+  // Outside timing: without the option the same
+  // no-`created` signature verifies — the requirement is
+  // opt-in and the default behaviour is unchanged.
+  const defaulted = verifyRequest(noCreatedSigned, {
+    key: publicKey,
+    now: REQUIRE_CREATED_NOW,
+  });
+  if (!defaulted.ok)
+    throw new Error(
+      `benchmark self-check failed: no-created default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  // Outside timing: a dated signature still verifies
+  // under the requirement.
+  const dated = signRequest(noCreatedRequest, {
+    keyId: REQUIRE_CREATED_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: REQUIRE_CREATED_NOW,
+  });
+  const datedResult = verifyRequest(dated, verifyOpts);
+  if (!datedResult.ok)
+    throw new Error(
+      `benchmark self-check failed: dated fixture under requireCreated gave ${JSON.stringify(datedResult)}`,
+    );
+
+  // Outside timing: a forged no-`created` signature
+  // (signature bytes tampered) is reported as
+  // SIGNATURE_MISMATCH — the cryptographic check runs
+  // before the presence check.
+  const tamperedBytes = Buffer.from(noCreatedSig);
+  tamperedBytes[tamperedBytes.length - 1] ^= 0xff;
+  const forged: SignedHttpRequest = {
+    method: noCreatedRequest.method,
+    url: noCreatedRequest.url,
+    headers: {
+      ...noCreatedSigned.headers,
+      signature: `sig1=:${tamperedBytes.toString("base64")}:`,
+    },
+  };
+  const forgedResult = verifyRequest(forged, verifyOpts);
+  if (forgedResult.ok || forgedResult.code !== "SIGNATURE_MISMATCH")
+    throw new Error(
+      `benchmark self-check failed: forged no-created result ${JSON.stringify(forgedResult)} ` +
+        `(expected SIGNATURE_MISMATCH)`,
+    );
+
+  return measure(() => {
+    assertRejected("measured pass");
+  }, ITERATIONS);
+}
 const EXPECTED_TAG_VALUE = "payment-webhook-v1";
 const EXPECTED_TAG_OTHER = "refund-webhook-v1";
 const EXPECTED_TAG_CREATED = 1_700_000_000;
@@ -6312,6 +6471,11 @@ results.push({
   alg: "verifyRequest requireExpires",
   op: "verify",
   ops: benchmarkVerifyRequireExpires(),
+});
+results.push({
+  alg: "verifyRequest requireCreated",
+  op: "verify",
+  ops: benchmarkVerifyRequireCreated(),
 });
 results.push({
   alg: "verifyRequest expectedTag",

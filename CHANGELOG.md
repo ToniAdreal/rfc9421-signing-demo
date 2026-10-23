@@ -12,6 +12,29 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `verifyRequest` with `requireCreated` — the
+  created-presence verify form a receiver uses to refuse
+  signatures with no bounded age, which the existing
+  verify rows never timed (they set no requirement, so
+  the post-cryptographic `created === undefined`
+  presence check was never a measured cost). The fixture
+  is a hand-built no-`created` ed25519 signature minted
+  outside timing with `buildSignatureBase` +
+  `signatureInputValue` + a raw ed25519 sign (the shape
+  `test/requireFreshness.test.ts` uses, because
+  `signRequest` always emits `created`); every measured
+  pass re-pins that the result is exactly
+  `MISSING_CREATED` with the pinned reason — the
+  measured steady state is the rejecting path. The
+  same signature's acceptance without the option, a
+  dated fixture's acceptance under the requirement,
+  and a forged (tampered signature bytes) no-`created`
+  signature's `SIGNATURE_MISMATCH` result (the
+  cryptographic check runs before the presence check)
+  are asserted outside timing. The README Benchmarks
+  table was refreshed wholesale from one real run and
+  now carries the `verifyRequest requireCreated` row.
+- The benchmark (`npm run bench`) now also measures
   `verifyRequest` with `expectedTag` — the
   application-tag-pinning verify form a receiver uses
   for cross-protocol replay protection (RFC 9421
