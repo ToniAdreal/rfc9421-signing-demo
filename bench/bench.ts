@@ -458,7 +458,20 @@
  * timing, so the cost of turning one covered component
  * into its signature-base value is visible apart from the
  * `buildSignatureBase` row that bundles it with the
- * `@signature-params` serialization.
+ * `@signature-params` serialization, plus the
+ * component-coverage policy check a receiver runs before
+ * any cryptography: `verifyRequest` with
+ * `requiredComponents` over one ed25519 fixture signed
+ * outside timing covering exactly `@method`, `@path`
+ * and `content-digest`, self-checked on every measured
+ * pass (the result is ok with all three required —
+ * see REQUIRED_COMPONENTS_* below), with the
+ * one-missing-component rejection's pinned
+ * `MISSING_REQUIRED_COMPONENT` code and singular reason,
+ * the two-missing-components plural reason,
+ * case-insensitive requirement matching, the opt-in
+ * default-off behaviour, and the malformed-entry
+ * configuration error asserted outside timing.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -2899,6 +2912,161 @@ function benchmarkVerifyAlgFallback(): number {
     throw new Error(
       `benchmark self-check failed: uninferrable-key error ${JSON.stringify(uninferrableError)} ` +
         `(expected the pinned configuration error)`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` requiredComponents
+ * benchmark: one ed25519 key pair (generated once, outside
+ * timing), a fixture signed outside timing covering exactly
+ * the components a payment-gateway verifier wants covered —
+ * `@method`, `@path` and `content-digest` — and a
+ * `requiredComponents` list pinning those three, so the
+ * measured steady state is the accepting path: the
+ * pre-cryptographic coverage check the plain verify rows
+ * above never pay, because they pass no such requirement.
+ * The requirement check runs before any cryptography — a
+ * missing component is a policy violation, not an
+ * authenticity verdict — and comparison is case-insensitive,
+ * matching the `cid.toLowerCase()` convention of
+ * `resolveComponent`.
+ */
+const REQUIRED_COMPONENTS_KID = "bench-required-components-key-1";
+const REQUIRED_COMPONENTS_COVERED: string[] = [
+  "@method",
+  "@path",
+  "content-digest",
+];
+const REQUIRED_COMPONENTS_PINNED: string[] = [
+  "@method",
+  "@path",
+  "content-digest",
+];
+const REQUIRED_COMPONENTS_CODE = "MISSING_REQUIRED_COMPONENT";
+const REQUIRED_COMPONENTS_MISSING_ONE_REASON =
+  'signature does not cover required component: "@authority"';
+const REQUIRED_COMPONENTS_MISSING_TWO_REASON =
+  'signature does not cover required components: "@authority", "@scheme"';
+const REQUIRED_COMPONENTS_BAD_ENTRY_ERROR =
+  'verifyRequest: `requiredComponents` entries must be non-empty strings, got ""';
+
+/**
+ * `verifyRequest` with `requiredComponents` steady state: the
+ * coverage-policy form a receiver uses to refuse a
+ * cryptographically valid signature that covers none of the
+ * components it needs — every measured call runs the
+ * pre-cryptographic component-coverage check and re-pins
+ * that the fully-covered fixture is ok. Outside timing, the
+ * rejecting and boundary halves are pinned once: one
+ * missing required component returns exactly
+ * `{ ok: false, code: "MISSING_REQUIRED_COMPONENT" }` with
+ * the pinned singular-form reason, two missing give the
+ * pinned plural-form reason, case-mismatched requirement
+ * names (`Content-Digest`, `@PATH`) still match the
+ * covered components, the same fixture verifies with the
+ * option unset (the check is opt-in and the default is
+ * unchanged), and an empty-string entry throws the pinned
+ * configuration error. Zero network, zero randomness in
+ * the measured assertions, no wall clock (the fixture
+ * carries no lifetime parameters and the option is
+ * clock-independent).
+ */
+function benchmarkVerifyRequiredComponents(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: REQUIRED_COMPONENTS_KID,
+    alg: "ed25519",
+    key: privateKey,
+    coveredComponents: REQUIRED_COMPONENTS_COVERED,
+  });
+  const verifyOpts = {
+    key: publicKey,
+    requiredComponents: REQUIRED_COMPONENTS_PINNED,
+  };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with requiredComponents (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the fully-covered fixture verifies
+  // under the requirement.
+  assertAccepted("outside timing");
+
+  // Outside timing: one missing required component is
+  // rejected with the pinned code and the singular-form
+  // reason.
+  const missingOne = verifyRequest(signed, {
+    key: publicKey,
+    requiredComponents: [...REQUIRED_COMPONENTS_PINNED, "@authority"],
+  });
+  if (
+    missingOne.ok ||
+    missingOne.code !== REQUIRED_COMPONENTS_CODE ||
+    missingOne.reason !== REQUIRED_COMPONENTS_MISSING_ONE_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: missing-one result ${JSON.stringify(missingOne)} ` +
+        "(expected MISSING_REQUIRED_COMPONENT)",
+    );
+
+  // Outside timing: two missing required components give
+  // the plural-form reason.
+  const missingTwo = verifyRequest(signed, {
+    key: publicKey,
+    requiredComponents: [...REQUIRED_COMPONENTS_PINNED, "@authority", "@scheme"],
+  });
+  if (
+    missingTwo.ok ||
+    missingTwo.code !== REQUIRED_COMPONENTS_CODE ||
+    missingTwo.reason !== REQUIRED_COMPONENTS_MISSING_TWO_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: missing-two result ${JSON.stringify(missingTwo)} ` +
+        "(expected MISSING_REQUIRED_COMPONENT)",
+    );
+
+  // Outside timing: case-mismatched requirement names
+  // still match — the comparison is case-insensitive.
+  const caseMismatched = verifyRequest(signed, {
+    key: publicKey,
+    requiredComponents: ["Content-Digest", "@PATH"],
+  });
+  if (!caseMismatched.ok)
+    throw new Error(
+      `benchmark self-check failed: case-mismatched requiredComponents gave ${JSON.stringify(caseMismatched)}`,
+    );
+
+  // Outside timing: without the option the same fixture
+  // verifies — the requirement is opt-in and the default
+  // behaviour is unchanged.
+  const defaulted = verifyRequest(signed, { key: publicKey });
+  if (!defaulted.ok)
+    throw new Error(
+      `benchmark self-check failed: requiredComponents default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  // Outside timing: an empty-string entry is a caller
+  // configuration error and throws the pinned message.
+  let badEntryError: string | undefined;
+  try {
+    verifyRequest(signed, {
+      key: publicKey,
+      requiredComponents: ["@method", ""],
+    });
+  } catch (err) {
+    badEntryError = err instanceof Error ? err.message : String(err);
+  }
+  if (badEntryError !== REQUIRED_COMPONENTS_BAD_ENTRY_ERROR)
+    throw new Error(
+      `benchmark self-check failed: bad-entry error ${JSON.stringify(badEntryError)} ` +
+        "(expected the pinned configuration error)",
     );
 
   return measure(() => {
@@ -6686,6 +6854,11 @@ results.push({
   alg: "verifyRequest algFallback (infer)",
   op: "verify",
   ops: benchmarkVerifyAlgFallback(),
+});
+results.push({
+  alg: "verifyRequest requiredComponents",
+  op: "verify",
+  ops: benchmarkVerifyRequiredComponents(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",

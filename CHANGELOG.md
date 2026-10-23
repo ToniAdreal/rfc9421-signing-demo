@@ -12,6 +12,32 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `verifyRequest` with `requiredComponents` — the
+  component-coverage policy form a receiver runs to refuse a
+  cryptographically valid signature that covers none of the
+  components it needs (a payment-gateway verifier typically
+  wants `content-digest` and `@path` covered), which the
+  existing verify rows never timed (they pass no requirement,
+  so the pre-cryptographic coverage check was never a
+  measured cost). One measured op verifies a pinned ed25519
+  fixture (signed outside timing with `coveredComponents`
+  `@method`, `@path`, `content-digest`) with exactly those
+  three components required and re-pins that the result is
+  ok — the measured steady state is the accepting path.
+  Outside timing the rejecting and boundary halves are
+  asserted once: one missing required component returns
+  exactly the pinned `MISSING_REQUIRED_COMPONENT` code with
+  the pinned singular-form reason, two missing give the
+  pinned plural-form reason, case-mismatched requirement
+  names (`Content-Digest`, `@PATH`) still match, the same
+  fixture verifies with the option unset (the check is
+  opt-in and the default is unchanged), and an empty-string
+  entry throws the pinned configuration error. The README
+  Benchmarks table was refreshed wholesale from one real
+  run and now carries the `verifyRequest requiredComponents`
+  row (~4,321 ops/sec on this run).
+
+- The benchmark (`npm run bench`) now also measures
   `verifyRequest` with `replayCache` — the replay-defense
   verify form a receiver uses to refuse an already-seen
   request (nonce replay protection), which the existing
