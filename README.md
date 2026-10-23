@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 781 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 793 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -466,6 +466,46 @@ chunked messages and are complete only after the request's `end`
 event, which is when the example above calls the adapter. A message
 with no trailers produces no `trailers` field at all.
 
+Verifying signed *responses* with a Node `http` client — the
+receive→verify chain via `fromNodeResponse`:
+
+```ts
+import { get } from "node:http";
+import { fromNodeResponse, verifyRequest } from "./dist/src/index.js";
+
+// The request the client actually sent — the response signature can be
+// bound to it (see ";req" below), so keep it around.
+const request = { method: "GET", url, headers: { host } };
+
+get(url, (res) => {
+  const chunks: Buffer[] = [];
+  res.on("data", (c) => chunks.push(c));
+  res.on("end", () => {
+    // A response has no method/url of its own: they describe the request
+    // it answers, so they come from `opts.request` (attached as
+    // RequestLike.request, enabling covered ";req" components such as
+    // "@method";req) or from an explicit `opts.method` + `opts.url` pair.
+    const result = verifyRequest(fromNodeResponse(res, Buffer.concat(chunks), { request }), {
+      key: gatewayPublicKey,
+      requiredComponents: ["@status"], // insist the signer bound the status
+    });
+    if (!result.ok) {
+      throw new Error(`bad gateway signature: ${result.code}`);
+    }
+  });
+});
+```
+
+What `fromNodeResponse` does: takes the response `statusCode` (a covered
+`@status` binds it; a missing `statusCode` throws a configuration `Error`
+instead of silently defaulting), lowercases header names and joins
+multi-value headers with `", "` (the same convention as
+`fromNodeRequest`), passes the buffered body through untouched, and
+carries trailers into `RequestLike.trailers` (from `res.rawTrailers`
+when present, else `res.trailers`). On a real client the trailers are
+complete only after the response's `end` event — which is when the
+example above calls the adapter.
+
 ## What it implements
 
 - **Signature base** (§2.5): `"id": value` lines for each covered component,
@@ -722,6 +762,13 @@ with no trailers produces no `trailers` field at all.
   rebuilt from the `host` header, lowercased header names, multi-value
   headers joined with `", "`), so `verifyRequest` plugs straight into a
   webhook receiver — see the Quickstart receive→verify example.
+- **Node http client adapter**: `fromNodeResponse(res, body, opts?)`
+  normalizes a client's received `http.IncomingMessage` into a
+  `RequestLike` (response `statusCode` bound via `@status`, same header
+  and trailer conventions), so `verifyRequest` plugs straight into
+  verifying gateway-signed responses — pass `opts.request` (the request
+  you sent) to enable covered `;req` request-binding components. See
+  the Quickstart response receive→verify example.
 - **Multi-signature verification**: `verifyAllLabels(req, { key, keys })`
   parses every label from the `Signature-Input` header and verifies each
   one with `verifyRequest`, returning one `VerifyResult` per label in wire
@@ -2507,7 +2554,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 781 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 793 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

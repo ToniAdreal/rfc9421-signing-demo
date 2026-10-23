@@ -82,5 +82,11 @@ export {
   canonicalizeStructuredFieldValue,
   serializeDictionaryMemberValue,
 } from "./structuredFields.js";
-export { fromNodeRequest } from "./nodeHttp.js";
-export type { FromNodeRequestOptions, IncomingRequestLike } from "./nodeHttp.js";
+export { fromNodeRequest, fromNodeResponse } from "./nodeHttp.js";
+export type {
+  FromNodeRequestOptions,
+  FromNodeResponseOptions,
+  IncomingRequestLike,
+  IncomingResponseLike,
+  IncomingTrailersLike,
+} from "./nodeHttp.js";

@@ -1,10 +1,12 @@
 /**
- * Node.js HTTP server adapter.
+ * Node.js HTTP adapters (client + server direction).
  *
- * Normalizes an `http.IncomingMessage` (or any structurally identical
- * object, e.g. a test double) into the library's `RequestLike` shape so
- * `verifyRequest` can check signatures on requests received by a real
- * server. Zero runtime dependencies.
+ * Normalizes Node `http` message shapes (or any structurally identical
+ * objects, e.g. test doubles) into the library's `RequestLike` shape so
+ * `verifyRequest` can check signatures on messages received by a real
+ * server (`fromNodeRequest`) or on responses received by a real client
+ * (`fromNodeResponse`, e.g. verifying a gateway-signed settlement
+ * callback). Zero runtime dependencies.
  *
  * The request body is NOT read here: `IncomingMessage` is a stream, so
  * the caller must buffer it first and pass the complete bytes (string or
@@ -27,15 +29,12 @@
 import { joinHeaderValues, type RequestLike } from "./components.js";
 
 /**
- * The `IncomingMessage` fields this adapter actually reads. A real
- * `http.IncomingMessage` satisfies this interface; plain test doubles do
- * too, without importing `node:http`.
+ * The trailer fields an adapter actually reads, shared by the request
+ * and response message shapes. `normalizeTrailers` is typed against this
+ * minimal shape so both adapters reuse the exact same normalization
+ * (and its `getHeaderRaw`-consistent conventions).
  */
-export interface IncomingRequestLike {
-  method?: string;
-  /** Origin-form path+query on real servers (e.g. "/webhook?event=push"). */
-  url?: string;
-  headers: Record<string, string | string[] | undefined>;
+export interface IncomingTrailersLike {
   /**
    * Parsed trailer fields, as Node exposes them on
    * `IncomingMessage.trailers`. Read only when `rawTrailers` is absent
@@ -53,8 +52,115 @@ export interface IncomingRequestLike {
    * original casing is NOT preserved in `RequestLike.trailers`.
    */
   rawTrailers?: string[];
+}
+
+/**
+ * The `IncomingMessage` fields the request adapter actually reads. A real
+ * `http.IncomingMessage` satisfies this interface; plain test doubles do
+ * too, without importing `node:http`.
+ */
+export interface IncomingRequestLike extends IncomingTrailersLike {
+  method?: string;
+  /** Origin-form path+query on real servers (e.g. "/webhook?event=push"). */
+  url?: string;
+  headers: Record<string, string | string[] | undefined>;
   /** Only `encrypted` is read, to infer the URL scheme. */
   socket?: { encrypted?: boolean } | null | undefined;
+}
+
+/**
+ * The `IncomingMessage` fields the response adapter actually reads. On
+ * the client side a real `http.IncomingMessage` (the object an
+ * `http.get` callback receives) satisfies this interface; plain test
+ * doubles do too, without importing `node:http`.
+ */
+export interface IncomingResponseLike extends IncomingTrailersLike {
+  /** The response status code — the field a covered `@status` binds. */
+  statusCode?: number;
+  headers: Record<string, string | string[] | undefined>;
+}
+
+export interface FromNodeResponseOptions {
+  /**
+   * The request that triggered this response. Supplies the
+   * `RequestLike.method`/`url` fields (which a pure `@status` flow never
+   * covers, but the type requires) and is attached as
+   * `RequestLike.request`, so a covered `;req` component
+   * (e.g. `"@method";req`) resolves against it and binds the response
+   * signature to that request. Takes precedence over the explicit
+   * `method`/`url` pair.
+   */
+  request?: RequestLike;
+  /**
+   * Explicit request method, used only when `request` is absent. Must be
+   * paired with `url`.
+   */
+  method?: string;
+  /**
+   * Explicit request URL, used only when `request` is absent. Must be
+   * paired with `method`.
+   */
+  url?: string;
+}
+
+/**
+ * Build a `RequestLike` from a Node HTTP response plus its
+ * already-buffered body.
+ *
+ * `RequestLike.method`/`url` are required by the type, but a response
+ * message has neither of its own — they describe the *request* the
+ * response answers, so the caller supplies them via `opts.request` (the
+ * request the client actually sent; also attached as
+ * `RequestLike.request`, enabling `;req` binding) or via the explicit
+ * `opts.method` + `opts.url` pair. Neither → a descriptive `Error`.
+ *
+ * Throws a descriptive `Error` on a missing `res.statusCode`: `@status`
+ * is the whole point of response verification, so a response without a
+ * status is a caller configuration mistake, never silently defaulted.
+ */
+export function fromNodeResponse(
+  res: IncomingResponseLike,
+  body?: string | Buffer,
+  opts?: FromNodeResponseOptions,
+): RequestLike {
+  const status = res.statusCode;
+  if (status === undefined)
+    throw new Error(
+      "fromNodeResponse: res.statusCode is missing — @status verification needs the response status",
+    );
+
+  let method: string | undefined;
+  let url: string | undefined;
+  let boundRequest: RequestLike | undefined;
+  if (opts?.request !== undefined) {
+    boundRequest = opts.request;
+    method = boundRequest.method;
+    url = boundRequest.url;
+  } else {
+    method = opts?.method;
+    url = opts?.url;
+  }
+  if (method === undefined || method === "" || url === undefined || url === "")
+    throw new Error(
+      "fromNodeResponse: cannot determine the request this response answers — " +
+        "pass opts.request, or the opts.method + opts.url pair",
+    );
+
+  const headers = normalizeHeaders(res.headers);
+  const requestLike: RequestLike = {
+    method,
+    url,
+    headers,
+    body,
+    status,
+    ...(boundRequest !== undefined ? { request: boundRequest } : {}),
+  };
+
+  // Trailers are only attached when the message actually carries them;
+  // on a real client they are complete only after the response's `end`
+  // event, which is when the caller has the buffered body anyway.
+  const trailers = normalizeTrailers(res);
+  return trailers === undefined ? requestLike : { ...requestLike, trailers };
 }
 
 export interface FromNodeRequestOptions {
@@ -108,7 +214,7 @@ function normalizeHeaders(
  * with no value — Node never produces one) is ignored.
  */
 function normalizeTrailers(
-  req: IncomingRequestLike,
+  req: IncomingTrailersLike,
 ): Record<string, string> | undefined {
   if (Array.isArray(req.rawTrailers) && req.rawTrailers.length > 0) {
     const grouped = new Map<string, string[]>();
