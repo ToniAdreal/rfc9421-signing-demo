@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `verifyRequest` with `expectedTag` — the
+  application-tag-pinning verify form a receiver uses
+  for cross-protocol replay protection (RFC 9421
+  §2.3), which the existing verify rows never timed
+  (they set no expectation, so the post-cryptographic
+  `tag === expectedTag` comparison was never a
+  measured cost). The fixture is one ed25519 signature
+  minted outside timing with `created` pinned and
+  `tag` pinned to `"payment-webhook-v1"`, verified
+  with the matching `expectedTag` at an injected
+  `now` equal to `created`; every measured pass
+  re-pins that the result is ok and the returned
+  `tag` equals the pinned value. The same signature
+  under a different `expectedTag`, a fixture signed
+  with no `tag` at all (`got no tag` reason shape),
+  and the unchanged default behaviour without the
+  option are asserted outside timing with pinned
+  `TAG_MISMATCH` codes and reasons. The README
+  Benchmarks table was refreshed wholesale from one
+  real run and now carries the `verifyRequest
+  expectedTag` row.
 - The CLI demo (`npm run demo`) now closes with a
   per-label key resolver segment: two fresh ed25519
   key pairs mint a dual-label fixture (`merchant` via

@@ -60,6 +60,19 @@
  * with the hand-built no-`expires` signature's pinned
  * `MISSING_EXPIRES` result (code and reason) and that same
  * signature's acceptance without the option asserted
+ * outside timing, plus the application-tag-pinning verify
+ * path a receiver runs for cross-protocol replay
+ * protection: `verifyRequest` with `expectedTag` over one
+ * ed25519 fixture signed outside timing with `created`
+ * pinned and `tag` pinned to one application protocol
+ * (the verifier's `now` injected at the `created` instant —
+ * see EXPECTED_TAG_* below), self-checked on every
+ * measured pass (the result is ok and the returned `tag`
+ * equals the pinned value), with the same signature's
+ * pinned `TAG_MISMATCH` result (code and reason) under a
+ * different expectation, the no-`tag` signature's pinned
+ * `TAG_MISMATCH` (`got no tag`) result, and that same
+ * signature's acceptance without the option asserted
  * outside timing, plus the clock-skew verify path a
  * receiver runs to tolerate a signer clock running ahead:
  * `verifyRequest` with `clockSkewToleranceSec` over one
@@ -1438,6 +1451,128 @@ function benchmarkVerifyRequireExpires(): number {
   if (!defaulted.ok)
     throw new Error(
       `benchmark self-check failed: no-expires default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` expectedTag
+ * benchmark: one ed25519 key pair (generated once, outside
+ * timing), a fixture signed outside timing with `created`
+ * pinned and `tag` pinned to the application protocol
+ * `"payment-webhook-v1"`, and the verifier's injected `now`
+ * at the `created` instant — so the measured steady state
+ * is the accepting path.
+ */
+const EXPECTED_TAG_VALUE = "payment-webhook-v1";
+const EXPECTED_TAG_OTHER = "refund-webhook-v1";
+const EXPECTED_TAG_CREATED = 1_700_000_000;
+const EXPECTED_TAG_KID = "bench-expected-tag-key-1";
+
+/**
+ * `verifyRequest` with `expectedTag` steady state: the
+ * application-tag-pinning form a receiver uses for
+ * cross-protocol replay protection (RFC 9421 §2.3) — every
+ * measured call runs the post-cryptographic
+ * `tag === expectedTag` comparison the plain verify rows
+ * above never pay, because they set no expectation. One
+ * measured op verifies the one pinned tagged fixture with
+ * the matching `expectedTag` and re-pins that the result
+ * is ok and the returned `tag` equals the pinned value.
+ * Outside timing, the rejecting and default halves are
+ * pinned once: the same signature under a different
+ * `expectedTag` returns exactly
+ * `{ ok: false, code: "TAG_MISMATCH" }` with the pinned
+ * `tag mismatch: expected "<expected>", got "<actual>"`
+ * reason, a fixture signed with no `tag` at all under the
+ * same expectation returns `TAG_MISMATCH` with the pinned
+ * `got no tag` reason shape, and the same tagged signature
+ * still verifies with the option unset, because the
+ * requirement is opt-in. Zero network, zero randomness in
+ * the measured assertions, no wall clock (every verify
+ * instant is injected).
+ */
+function benchmarkVerifyExpectedTag(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: EXPECTED_TAG_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: EXPECTED_TAG_CREATED,
+    tag: EXPECTED_TAG_VALUE,
+  });
+  const verifyOpts = {
+    key: publicKey,
+    now: EXPECTED_TAG_CREATED,
+    expectedTag: EXPECTED_TAG_VALUE,
+  };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok || r.tag !== EXPECTED_TAG_VALUE)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with expectedTag (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the tagged fixture verifies under the
+  // matching expectation.
+  assertAccepted("outside timing");
+
+  // Outside timing: a different expectedTag is rejected
+  // with the pinned code and reason.
+  const mismatch = verifyRequest(signed, {
+    key: publicKey,
+    now: EXPECTED_TAG_CREATED,
+    expectedTag: EXPECTED_TAG_OTHER,
+  });
+  if (
+    mismatch.ok ||
+    mismatch.code !== "TAG_MISMATCH" ||
+    mismatch.reason !==
+      `tag mismatch: expected "${EXPECTED_TAG_OTHER}", got "${EXPECTED_TAG_VALUE}"`
+  )
+    throw new Error(
+      `benchmark self-check failed: tag-mismatch result ${JSON.stringify(mismatch)} ` +
+        `(expected TAG_MISMATCH)`,
+    );
+
+  // Outside timing: a signature with no tag at all is
+  // rejected with the pinned `no tag` reason shape.
+  const untagged = signRequest(fixture, {
+    keyId: EXPECTED_TAG_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: EXPECTED_TAG_CREATED,
+  });
+  const noTag = verifyRequest(untagged, {
+    key: publicKey,
+    now: EXPECTED_TAG_CREATED,
+    expectedTag: EXPECTED_TAG_VALUE,
+  });
+  if (
+    noTag.ok ||
+    noTag.code !== "TAG_MISMATCH" ||
+    noTag.reason !==
+      `tag mismatch: expected "${EXPECTED_TAG_VALUE}", got no tag`
+  )
+    throw new Error(
+      `benchmark self-check failed: no-tag result ${JSON.stringify(noTag)} ` +
+        `(expected TAG_MISMATCH)`,
+    );
+
+  // Outside timing: without the option the same tagged
+  // signature verifies — the requirement is opt-in and the
+  // default behaviour is unchanged.
+  const defaulted = verifyRequest(signed, {
+    key: publicKey,
+    now: EXPECTED_TAG_CREATED,
+  });
+  if (!defaulted.ok || defaulted.tag !== EXPECTED_TAG_VALUE)
+    throw new Error(
+      `benchmark self-check failed: tagged default gave ${JSON.stringify(defaulted)}`,
     );
 
   return measure(() => {
@@ -6177,6 +6312,11 @@ results.push({
   alg: "verifyRequest requireExpires",
   op: "verify",
   ops: benchmarkVerifyRequireExpires(),
+});
+results.push({
+  alg: "verifyRequest expectedTag",
+  op: "verify",
+  ops: benchmarkVerifyExpectedTag(),
 });
 results.push({
   alg: "verifyRequest clockSkewToleranceSec (120s)",
