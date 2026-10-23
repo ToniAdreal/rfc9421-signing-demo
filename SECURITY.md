@@ -86,6 +86,17 @@ Read this before using it anywhere that matters.
   reject as replay), or wrap its outcome in a `NonceStore`-shaped
   adapter. TTL expiry, cross-process clock skew, and crash recovery are
   the caller's responsibility.
+- **One nonce per label (fail-closed multi-party contract).** The
+  `NonceStore` is keyed by the bare nonce string with no per-label
+  partitioning. Inside one `verifyAllLabels` call, if two labels carry
+  the *same* nonce, the first label records it and every later label is
+  rejected with `NONCE_REPLAY` — even when both signatures are
+  cryptographically valid. This is the intentional fail-closed semantic
+  (pinned by `test/replay.test.ts`): the store key format is part of the
+  `NonceStore` interface contract, so keying by label is not an option
+  without silently breaking every existing custom store. Callers signing
+  multiple labels must generate one fresh nonce per label
+  (`generateNonce()` per label, not per request).
 - **Fixed, configurable tolerance windows.** `verifyRequest` accepts
   `created` timestamps up to `clockSkewToleranceSec` seconds in the future
   (default 60 — generous, shrink it if your clocks are trustworthy) and

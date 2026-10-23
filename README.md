@@ -673,8 +673,18 @@ with no trailers produces no `trailers` field at all.
   rejected instead: they then fail with `MISSING_NONCE` (an empty-string
   nonce counts as missing), checked after the cryptographic check and
   before the cache query. The cache itself is shared across
-  `verifyAllLabels` labels, while `requireNonce` is judged per label. The cache is in-memory, bounded (LRU + TTL), and per-process —
-  multi-verifier deployments still need a shared nonce store (see the
+  `verifyAllLabels` labels, while `requireNonce` is judged per label. The
+  store is keyed by the bare nonce string with no per-label partitioning,
+  so callers have a hard contract: **one nonce per label** — if two labels
+  on the same request carry the *same* nonce (e.g. a gateway reusing the
+  merchant's nonce while appending its own signature), the first label
+  records it and every later label is rejected with `NONCE_REPLAY`, even
+  though both signatures are cryptographically valid. This is the
+  intentional fail-closed semantic (pinned by
+  `test/replay.test.ts`), not a bug: changing the store key format would
+  silently break every existing custom `NonceStore` implementation.
+  Generate a fresh `generateNonce()` value for each label you sign.
+  Multi-verifier deployments still need a shared nonce store (see the
   Limitations and SECURITY.md). Call `cache.stats()` for observability:
   it returns a `{ size, hits, misses, evictions }` snapshot (expired-entry
   reclamation and LRU eviction both count as evictions); `cache.clear()`
