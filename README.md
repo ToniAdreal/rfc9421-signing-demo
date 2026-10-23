@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 762 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 778 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -247,7 +247,7 @@ const ok = verifyRequest(signed, { key: publicKey, expectedKeyId: "my-key" });
 Optional `keyid`→key resolution (key discovery / rotation): pass `keyResolver`
 and the verifier looks up the signing key from the `keyid` claimed in the
 signature-input, instead of using a fixed `key`. Mutually exclusive with
-`key` (passing both throws a configuration error).
+`key` and `candidateKeys` (passing more than one of the three throws a configuration error).
 
 ```ts
 const store = new Map([["my-key", publicKey], ["old-key", oldPublicKey]]);
@@ -276,6 +276,29 @@ const keyResolver = memoizeKeyResolver((keyId) => store.get(keyId), {
 });
 // pass `keyResolver` to every verifyRequest call
 ```
+
+Key rotation without `keyid` (Stripe-style webhook secret rollover): pass
+`candidateKeys` — an ordered list of keys — and the verifier tries each in
+turn, returning the first full pass. Only `SIGNATURE_MISMATCH` advances to
+the next candidate; policy verdicts (`EXPIRED`, `NONCE_REPLAY`,
+`MISSING_*`, ...) are about the signature itself, not the key, so they
+return immediately instead of widening the walk. When every candidate
+mismatches, the last candidate's `SIGNATURE_MISMATCH` is returned. Mutually
+exclusive with `key` and `keyResolver` (an empty list or a non-KeyObject
+entry throws a configuration error).
+
+```ts
+const result = verifyRequest(signed, {
+  candidateKeys: [newSecret, oldSecret], // in-flight webhooks still use the old one
+});
+```
+
+Timing honesty: the *number* of candidates tried is observable through
+verification latency — an observer can learn which secret (old vs new) a
+request used. If that must stay hidden, wrap the call so it always runs all
+candidates (or pad the latency) in your own layer. Failed attempts never
+touch `replayCache` (it is consulted only after a full pass), so rotation
+cannot pollute replay state.
 
 JWK public-key distribution (webhook / gateway deployments, where PEM is
 awkward to ship): export the ed25519 public key as a plain RFC 8037 object,
@@ -2470,7 +2493,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 762 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 778 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

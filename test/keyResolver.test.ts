@@ -126,12 +126,12 @@ test("keyResolver: key + keyResolver together throws a configuration error", () 
   );
 });
 
-test("keyResolver: neither key nor keyResolver throws a configuration error", () => {
+test("keyResolver: neither key nor keyResolver nor candidateKeys throws a configuration error", () => {
   const { k1 } = keystore();
   const signed = signAs("merchant-key-1", k1.privateKey);
   assert.throws(
     () => verifyRequest(signed, { now: CREATED }),
-    /either `key` or `keyResolver`/,
+    /one of `key`, `keyResolver`, or `candidateKeys`/,
   );
 });
 

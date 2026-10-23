@@ -209,6 +209,6 @@ test("keyResolvers: label missing from the map with no global keyResolver throws
         now: NOW,
         keyResolvers: { merchant: (id) => merchantStore.get(id) },
       }),
-    /either `key` or `keyResolver` must be provided/,
+    /one of `key`, `keyResolver`, or `candidateKeys` must be provided/,
   );
 });

@@ -122,7 +122,14 @@ Read this before using it anywhere that matters.
   responsibility: `JwksKeyStore` performs no TLS pinning and no
   response-signature verification, so whatever a compromised or
   misconfigured endpoint serves becomes a verification key — point it
-  only at trusted origins, over HTTPS.
+  only at trusted origins, over HTTPS. For `keyid`-less rotation windows
+  (e.g. HMAC webhook secret rollover), `VerifyOptions.candidateKeys`
+  tries an ordered key list and returns the first full pass; only
+  `SIGNATURE_MISMATCH` advances, policy verdicts return immediately, and
+  failed attempts never touch `replayCache`. Note the timing exposure:
+  the number of candidates tried is observable through latency, so an
+  observer can learn which secret (old vs new) a request used — pad or
+  fix the attempt count in your own layer if that must stay hidden.
 - **`hmac-sha256` / `hmac-sha512` are symmetric.** The "verifier" holds the same secret as
   the signer, so verification proves integrity but not origin — the
   verifying party could itself have forged the signature. Use `ed25519`

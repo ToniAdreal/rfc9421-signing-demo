@@ -13,6 +13,7 @@ import {
   listSignatureLabels,
   parseSignatureField,
   parseSignatureInput,
+  type ParsedSignatureInput,
   type RequestLike,
 } from "./components.js";
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
@@ -37,7 +38,8 @@ export interface VerifyOptions {
    * hmac-sha256: the shared secret KeyObject (≥ 32 bytes).
    * hmac-sha512: the shared secret KeyObject (≥ 64 bytes).
    *
-   * Required unless `keyResolver` is set; mutually exclusive with it.
+   * Required unless `keyResolver` or `candidateKeys` is set; mutually
+   * exclusive with both.
    */
   key?: KeyObject;
   /**
@@ -47,11 +49,45 @@ export interface VerifyOptions {
    * KeyObject is the key the signature is checked against. A signature
    * with no `keyid`, or a `keyid` the resolver cannot map, fails with
    * `KEY_RESOLUTION_FAILED` (never a silent fallback to another key).
-   * Mutually exclusive with `key`: passing both throws a configuration
-   * `Error`. Composes with `expectedKeyId` (checked after the crypto
+   * Mutually exclusive with `key` and `candidateKeys`: passing more
+   * than one of the three throws a configuration `Error`. Composes with
+   * `expectedKeyId` (checked after the crypto
    * step) and with `verifyAllLabels` (resolved independently per label).
    */
   keyResolver?: (keyId: string) => KeyObject | undefined;
+  /**
+   * Ordered candidate keys for key-rotation verification (a key ring).
+   * When set, the signature is tried against each key in order and the
+   * first full pass wins: only `SIGNATURE_MISMATCH` advances to the next
+   * candidate — policy verdicts (`EXPIRED`, `NONCE_REPLAY`, `MISSING_*`,
+   * ...) are about the signature itself, not the key, so they return
+   * immediately instead of widening the walk. When every candidate
+   * mismatches, the *last* candidate's `SIGNATURE_MISMATCH` result is
+   * returned.
+   *
+   * This covers rotation windows where a signature may have been minted
+   * by either the old or the new secret — e.g. HMAC webhook receivers
+   * (Stripe-style) where in-flight webhooks still carry the old secret.
+   * Mutually exclusive with `key` and `keyResolver`: passing more than
+   * one of the three throws a configuration `Error`. An empty array, or
+   * an entry that is not a KeyObject, is likewise a caller configuration
+   * error (throw).
+   *
+   * Failed cryptographic attempts never touch `replayCache`: the cache
+   * is consulted only after a full pass, so a rotating signature can
+   * never pollute it. Composes with `verifyAllLabels` (each label walks
+   * its own candidate list) and with `algFallback: "infer"` (each
+   * candidate infers from its own shape — the way to rotate *across*
+   * algorithms with an alg-less wire).
+   *
+   * Security note (timing): the *number* of candidates tried is
+   * observable through verification latency — an observer can learn
+   * which candidate (old vs new secret) a request used. If that must
+   * stay hidden, wrap the call so it always runs all candidates (or pad
+   * the latency) in your own layer; this library intentionally does the
+   * honest early-exit instead of pretending to be constant-time.
+   */
+  candidateKeys?: KeyObject[];
   /** Signature label to verify. Defaults to "sig1". */
   label?: string;
   /** Unix seconds. Defaults to now. */
@@ -246,17 +282,52 @@ export interface VerifyResult {
 }
 
 /**
- * Validate the `key` / `keyResolver` pairing of a verify call. This is a
- * caller configuration error, not a verification failure, so it throws
- * rather than returning `{ ok: false }`.
+ * Validate the `key` / `keyResolver` / `candidateKeys` selection of a
+ * verify call. This is a caller configuration error, not a verification
+ * failure, so it throws rather than returning `{ ok: false }`.
  */
 function assertKeyConfig(
-  opts: Pick<VerifyOptions, "key" | "keyResolver">,
+  opts: Pick<VerifyOptions, "key" | "keyResolver" | "candidateKeys">,
 ): void {
-  if (opts.key !== undefined && opts.keyResolver !== undefined)
+  const set =
+    (opts.key !== undefined ? 1 : 0) +
+    (opts.keyResolver !== undefined ? 1 : 0) +
+    (opts.candidateKeys !== undefined ? 1 : 0);
+  if (set > 1)
     throw new Error(
-      "verifyRequest: `key` and `keyResolver` are mutually exclusive — pass one or the other",
+      "verifyRequest: `key`, `keyResolver`, and `candidateKeys` are mutually exclusive — pass exactly one",
     );
+}
+
+/**
+ * Validate the `candidateKeys` rotation list. An empty list, a
+ * non-array, or an entry that is not a KeyObject is a caller
+ * configuration error (throw), not a verification failure.
+ */
+function assertCandidateKeys(keys: KeyObject[] | undefined): void {
+  if (keys === undefined) return;
+  if (!Array.isArray(keys) || keys.length === 0)
+    throw new Error(
+      "verifyRequest: `candidateKeys` must be a non-empty array of KeyObjects",
+    );
+  for (let i = 0; i < keys.length; i++) {
+    const entry = keys[i] as { type?: unknown } | null | undefined;
+    const kind = entry?.type;
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      (kind !== "secret" && kind !== "private" && kind !== "public")
+    )
+      throw new Error(
+        `verifyRequest: \`candidateKeys[${i}]\` must be a KeyObject, got ${
+          entry === null
+            ? "null"
+            : Array.isArray(entry)
+              ? "an array"
+              : typeof entry
+        }`,
+      );
+  }
 }
 
 /**
@@ -383,8 +454,9 @@ function assertRequiredComponents(
  * Never throws on verification failure: returns `{ ok: false, code, reason }`.
  * For a throwing variant, see `verifyRequestOrThrow`.
  *
- * Throws only on caller configuration errors (e.g. both `key` and
- * `keyResolver` set, or neither set — and a configured HMAC secret shorter
+ * Throws only on caller configuration errors (e.g. more than one of
+ * `key` / `keyResolver` / `candidateKeys` set, or none of them set —
+ * and a configured HMAC secret shorter
  * than the per-algorithm floor (≥ 32 bytes for `hmac-sha256`, ≥ 64 bytes
  * for `hmac-sha512`), which is rejected loudly on both the sign and verify
  * sides).
@@ -394,6 +466,7 @@ export function verifyRequest(
   opts: VerifyOptions,
 ): VerifyResult {
   assertKeyConfig(opts);
+  assertCandidateKeys(opts.candidateKeys);
   assertMaxSignatureAgeSec(opts.maxSignatureAgeSec);
   assertRequiredComponents(opts.requiredComponents);
   const label = opts.label ?? "sig1";
@@ -533,11 +606,82 @@ export function verifyRequest(
       };
     key = resolved;
   }
+
+  // Key rotation (ordered candidate list, e.g. the old and new
+  // webhook secrets during a rotation window): each candidate is
+  // tried in order and the first full pass wins. Only
+  // SIGNATURE_MISMATCH advances to the next candidate — policy
+  // verdicts (EXPIRED, NONCE_REPLAY, MISSING_*, ...) are about the
+  // signature itself, not the key, so they return immediately
+  // instead of widening the walk. When every candidate mismatches,
+  // the last candidate's SIGNATURE_MISMATCH is returned. A
+  // misconfigured candidate (sub-floor HMAC secret, unmappable key
+  // shape under algFallback "infer", ...) throws out of the walk —
+  // a broken candidate list is a caller bug, not a mismatch.
+  // Failed cryptographic attempts never reach the replay cache (it
+  // is consulted only after a full pass), so a rotating signature
+  // can never pollute it.
+  if (opts.candidateKeys !== undefined) {
+    let lastMismatch: VerifyResult | undefined;
+    for (const candidate of opts.candidateKeys) {
+      const res = verifyWithKey(
+        req,
+        opts,
+        parsed,
+        base,
+        sigBytes,
+        candidate,
+        label,
+        now,
+        skew,
+        expiredTolerance,
+      );
+      if (res.ok) return res;
+      if (res.code !== "SIGNATURE_MISMATCH") return res;
+      lastMismatch = res;
+    }
+    // assertCandidateKeys (top of this function) rejects empty lists,
+    // so a mismatch was always recorded above.
+    return lastMismatch as VerifyResult;
+  }
+
   if (key === undefined)
     throw new Error(
-      "verifyRequest: either `key` or `keyResolver` must be provided",
+      "verifyRequest: one of `key`, `keyResolver`, or `candidateKeys` must be provided",
     );
+  return verifyWithKey(
+    req,
+    opts,
+    parsed,
+    base,
+    sigBytes,
+    key,
+    label,
+    now,
+    skew,
+    expiredTolerance,
+  );
+}
 
+/**
+ * Verify a request against one already-resolved key: algorithm
+ * selection, the cryptographic check, and every post-crypto policy
+ * check (keyid/tag pinning, body binding, freshness, nonce replay).
+ * This is the unit the `candidateKeys` rotation walk repeats per
+ * candidate.
+ */
+function verifyWithKey(
+  req: RequestLike,
+  opts: VerifyOptions,
+  parsed: ParsedSignatureInput,
+  base: string,
+  sigBytes: Buffer,
+  key: KeyObject,
+  label: string,
+  now: number,
+  skew: number,
+  expiredTolerance: number,
+): VerifyResult {
   // Algorithm selection. RFC 9421 leaves `alg` optional, so a
   // spec-conformant foreign signature may not carry it (RFC 9421
   // Appendix B.2.5's hmac-sha256 vector omits it). The historical
@@ -547,6 +691,7 @@ export function verifyRequest(
   // Under the opt-in, a wire-carried `alg` that contradicts the key's
   // shape is a caller configuration error (throw), not a verification
   // failure; without the opt-in, that path stays exactly as before.
+  const alg = parsed.params.alg;
   const effectiveAlg: string =
     alg === undefined
       ? opts.algFallback === "infer"
