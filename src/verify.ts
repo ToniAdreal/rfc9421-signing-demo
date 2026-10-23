@@ -141,7 +141,8 @@ export interface VerifyOptions {
    * so a signature minted for a different protocol that happens to
    * share the same key cannot be replayed into it. Defaults to unset:
    * no check is made (backwards compatible). In `verifyAllLabels`
-   * the same expectation applies to every label.
+   * the same expectation applies to every label, unless overridden per
+   * label via `VerifyAllOptions.expectedTags`.
    */
   expectedTag?: string;
   /**
@@ -986,6 +987,18 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    */
   expectedKeyIds?: Record<string, string>;
   /**
+   * Per-label application-tag pinning for multi-party signatures: maps a
+   * signature label to the `tag` that label is expected to carry
+   * (cross-protocol replay defense when the merchant and the gateway
+   * sign for different application protocols — e.g. the merchant pins
+   * `"payment-initiation-v1"` while the gateway pins
+   * `"settlement-webhook-v1"`). A label absent from the map falls back
+   * to the global `expectedTag` (unset means no check for it). Values
+   * must be non-empty strings — any other value is a caller
+   * configuration error (throw).
+   */
+  expectedTags?: Record<string, string>;
+  /**
    * Per-label `keyid`→key resolvers for multi-party signatures (e.g.
    * the merchant's and the gateway's `keyid`s living in separate
    * keystores): maps a signature label to its own
@@ -1026,6 +1039,27 @@ function assertExpectedKeyIds(
  * caller configuration error, not a verification failure, so it throws
  * rather than returning `{ ok: false }`.
  */
+/**
+ * Validate the per-label application-tag pinning map. A malformed map
+ * is a caller configuration error, not a verification failure, so it
+ * throws rather than returning `{ ok: false }`.
+ */
+function assertExpectedTags(
+  map: Record<string, string> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `expectedTags` must be a label→tag object",
+    );
+  for (const [label, tag] of Object.entries(map)) {
+    if (typeof tag !== "string" || tag === "")
+      throw new Error(
+        `verifyAllLabels: \`expectedTags["${label}"]\` must be a non-empty string, got ${typeof tag === "string" ? '""' : typeof tag}`,
+      );
+  }
+}
+
 function assertKeyResolvers(
   map: Record<string, (keyId: string) => KeyObject | undefined> | undefined,
 ): void {
@@ -1062,6 +1096,7 @@ export function verifyAllLabels(
   const sigInput = getHeader(req.headers, "signature-input");
   if (sigInput === undefined) return [];
   assertExpectedKeyIds(opts.expectedKeyIds);
+  assertExpectedTags(opts.expectedTags);
   assertKeyResolvers(opts.keyResolvers);
   let labels: string[];
   try {
@@ -1089,6 +1124,10 @@ export function verifyAllLabels(
     // checked against its own expectation; every other label falls back
     // to the global `expectedKeyId` (unset means no pinning for it).
     const expectedKeyId = opts.expectedKeyIds?.[label] ?? opts.expectedKeyId;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId });
+    // Per-label tag pinning: a label pinned in `expectedTags` is checked
+    // against its own application protocol; every other label falls back
+    // to the global `expectedTag` (unset means no pinning for it).
+    const expectedTag = opts.expectedTags?.[label] ?? opts.expectedTag;
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag });
   });
 }

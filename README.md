@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 750 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 762 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -678,7 +678,10 @@ with no trailers produces no `trailers` field at all.
   checked after the cryptographic check so forgeries still report
   `SIGNATURE_MISMATCH`. `verifyRequest` returns the wire tag as
   `result.tag`; in `verifyAllLabels` the same expectation is judged
-  per label. An empty-string tag is rejected by `signRequest` as a
+  per label, and each label can pin its own protocol via the optional
+  `expectedTags` map (label→tag) — a label missing from it falls back
+  to the global `expectedTag` (unset means no check for it). An
+  empty-string tag is rejected by `signRequest` as a
   configuration error (it would bind nothing).
 - Minimal `Signature-Input` / `Signature` field parsing for verification.
 - **Node http server adapter**: `fromNodeRequest(req, body, opts?)`
@@ -695,7 +698,10 @@ with no trailers produces no `trailers` field at all.
   `keys` map; labels missing from it fall back to `key`. When each party
   signs with a different key id, pin them per label via the optional
   `expectedKeyIds` map (label→keyid); labels missing from it fall back to
-  the global `expectedKeyId`. For resolver-based verification, pass
+  the global `expectedKeyId`. When each party signs for a different
+  application protocol, pin the tags per label via the optional
+  `expectedTags` map (label→tag); labels missing from it fall back to
+  the global `expectedTag`. For resolver-based verification, pass
   per-label resolvers via the optional `keyResolvers` map
   (label→`(keyId) => KeyObject | undefined`) — handy when the parties'
   key ids live in separate keystores (merchant store vs gateway store);
@@ -2464,7 +2470,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 750 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 762 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
