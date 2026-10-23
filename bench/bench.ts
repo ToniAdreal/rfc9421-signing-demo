@@ -105,7 +105,19 @@
  * nonce-less signature's double acceptance under a
  * cache, and a forged signature's non-polluting
  * `SIGNATURE_MISMATCH` result asserted outside
- * timing, plus the clock-skew verify path a
+ * timing, plus the nonce-presence verify path a
+ * receiver runs to refuse nonce-less signatures before
+ * they ever reach the replay store: `verifyRequest` with
+ * `requireNonce` over one ed25519 fixture signed outside
+ * timing with `created` pinned and `nonce` pinned (the
+ * verifier's `now` injected at the `created` instant —
+ * see REQUIRE_NONCE_* below), self-checked on every
+ * measured pass (the result is ok and the returned
+ * `nonce` equals the pinned value), with a nonce-less
+ * signature's pinned `MISSING_NONCE` result (code and
+ * reason) and that same signature's acceptance without
+ * the option asserted outside timing, plus the clock-skew
+ * verify path a
  * receiver runs to tolerate a signer clock running ahead:
  * `verifyRequest` with `clockSkewToleranceSec` over one
  * ed25519 fixture signed outside timing with `created`
@@ -1222,7 +1234,7 @@ function benchmarkVerifyKeyResolver(): number {
   }
   if (
     conflict !==
-    "verifyRequest: `key` and `keyResolver` are mutually exclusive — pass one or the other"
+    "verifyRequest: `key`, `keyResolver`, and `candidateKeys` are mutually exclusive — pass exactly one"
   )
     throw new Error(
       `benchmark self-check failed: key+keyResolver conflict ${JSON.stringify(conflict)}`,
@@ -1919,6 +1931,112 @@ function benchmarkVerifyReplayCache(): number {
         `benchmark self-check failed: verifyRequest with replayCache (measured first pass) gave ${JSON.stringify(first)}`,
       );
     assertReplayed(cache, "measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` requireNonce
+ * benchmark: one ed25519 key pair (generated once,
+ * outside timing), a fixture signed outside timing
+ * with `created` pinned and `nonce` pinned, and the
+ * verifier's injected `now` at the `created` instant —
+ * so the measured steady state is the accepting path
+ * with the nonce-presence check included.
+ */
+const REQUIRE_NONCE_NOW = 1_700_000_000;
+const REQUIRE_NONCE_KID = "bench-require-nonce-key-1";
+const REQUIRE_NONCE_VALUE = "bench-require-nonce-1";
+const REQUIRE_NONCE_CODE = "MISSING_NONCE";
+const REQUIRE_NONCE_REASON =
+  "signature carries no `nonce` but requireNonce is set";
+
+/**
+ * `verifyRequest` with `requireNonce` steady state: the
+ * nonce-presence form a receiver runs to refuse signatures
+ * that carry no (non-empty) nonce before they ever reach
+ * the replay store — every measured call runs the
+ * post-cryptographic `nonce === undefined || nonce === ""`
+ * presence check the plain verify rows above never pay,
+ * because they set no requirement. One measured op
+ * verifies the one pinned nonced fixture with
+ * `requireNonce: true` and re-pins that the result is ok
+ * and the returned `nonce` equals the pinned value.
+ * Outside timing, the rejecting half is pinned once: a
+ * nonce-less signature under the option returns exactly
+ * `{ ok: false, code: "MISSING_NONCE" }` with the pinned
+ * reason — so the measured path cannot be an empty one —
+ * and the same nonce-less signature still verifies with
+ * the option unset, because the requirement is opt-in.
+ * (A forged nonce-less signature reports
+ * `SIGNATURE_MISMATCH`, not `MISSING_NONCE` — the
+ * cryptographic check runs first — pinned in
+ * `test/requireNonce.test.ts`, not repeated here.) Zero
+ * network, zero randomness in the measured assertions, no
+ * wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyRequireNonce(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: REQUIRE_NONCE_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: REQUIRE_NONCE_NOW,
+    nonce: REQUIRE_NONCE_VALUE,
+  });
+  const verifyOpts = {
+    key: publicKey,
+    now: REQUIRE_NONCE_NOW,
+    requireNonce: true,
+  };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok || r.nonce !== REQUIRE_NONCE_VALUE)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with requireNonce (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the nonced fixture verifies under the
+  // requirement and the returned nonce is the pinned value.
+  assertAccepted("outside timing");
+
+  // Outside timing: a nonce-less signature under the option
+  // is rejected with the pinned code and reason.
+  const nonceLess = signRequest(fixture, {
+    keyId: REQUIRE_NONCE_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: REQUIRE_NONCE_NOW,
+  });
+  const missing = verifyRequest(nonceLess, {
+    key: publicKey,
+    now: REQUIRE_NONCE_NOW,
+    requireNonce: true,
+  });
+  if (
+    missing.ok ||
+    missing.code !== REQUIRE_NONCE_CODE ||
+    missing.reason !== REQUIRE_NONCE_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: nonce-less result ${JSON.stringify(missing)} ` +
+        `(expected MISSING_NONCE)`,
+    );
+
+  // Outside timing: without the option the same
+  // nonce-less signature verifies — the requirement is
+  // opt-in and the default behaviour is unchanged.
+  const defaulted = verifyRequest(nonceLess, {
+    key: publicKey,
+    now: REQUIRE_NONCE_NOW,
+  });
+  if (!defaulted.ok)
+    throw new Error(
+      `benchmark self-check failed: nonce-less default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
   }, ITERATIONS);
 }
 
@@ -6824,6 +6942,11 @@ results.push({
   alg: "verifyRequest replayCache",
   op: "verify",
   ops: benchmarkVerifyReplayCache(),
+});
+results.push({
+  alg: "verifyRequest requireNonce",
+  op: "verify",
+  ops: benchmarkVerifyRequireNonce(),
 });
 results.push({
   alg: "verifyRequest clockSkewToleranceSec (120s)",

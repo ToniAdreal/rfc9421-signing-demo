@@ -1131,7 +1131,7 @@ see [SECURITY.md](SECURITY.md).
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
-algorithm plus the key-resolution, JWKS snapshot-export, JWKS snapshot-restore, resolver-based verification, maximum-signature-age verification, expiry-presence verification, created-presence verification, clock-skew verification, expiry-grace verification, key-id binding verification, per-label key-id binding verification, per-label key-resolution verification, algorithm-inference verification, application-tag-pinning verification, component-coverage verification, replay-cache verification, JWKS refresh, JWKS concurrent single-flight refresh, thumbprint-derivation, replay-check, replay snapshot-export, replay stats, replay snapshot-restore,
+algorithm plus the key-resolution, JWKS snapshot-export, JWKS snapshot-restore, resolver-based verification, maximum-signature-age verification, expiry-presence verification, created-presence verification, clock-skew verification, expiry-grace verification, key-id binding verification, per-label key-id binding verification, per-label key-resolution verification, algorithm-inference verification, application-tag-pinning verification, component-coverage verification, replay-cache verification, nonce-presence verification, JWKS refresh, JWKS concurrent single-flight refresh, thumbprint-derivation, replay-check, replay snapshot-export, replay stats, replay snapshot-restore,
 malformed-input rejection, standalone content-digest,
 inbound-normalization, per-curve JWK round-trip, ed25519 JWK round-trip, PEM round-trip,
 signature-base-building, end-to-end signing, standalone signature-parser,
@@ -1169,6 +1169,7 @@ All rows below are from one real run on 2026-10-23:
 | verifyRequest requireCreated | verify | ~4,973 ops/sec (201.09 µs/op) |
 | verifyRequest expectedTag | verify | ~3,396 ops/sec (294.46 µs/op) |
 | verifyRequest replayCache | verify | ~2,318 ops/sec (431.42 µs/op) |
+| verifyRequest requireNonce | verify | ~4,355 ops/sec (229.62 µs/op) |
 | verifyRequest expectedKeyId | verify | ~4,884 ops/sec (204.75 µs/op) |
 | verifyRequest algFallback (infer) | verify | ~38,945 ops/sec (25.68 µs/op) |
 | verifyRequest requiredComponents | verify | ~4,321 ops/sec (231.40 µs/op) |
@@ -2496,6 +2497,31 @@ replay-defense form has a checked steady-state number
 of its own. The bench performs zero network I/O and
 makes no wall-clock assertions (every verify instant
 is injected).
+
+The `verifyRequest requireNonce` row is new: it measures
+`verifyRequest` with the opt-in `requireNonce` — the
+nonce-presence form a receiver runs to refuse nonce-less
+signatures before they ever reach the replay store,
+which the existing verify rows never timed (they pass
+no such requirement, so the post-cryptographic
+presence check was never a measured cost). One
+measured op verifies one pinned ed25519 fixture
+(signed outside timing over the shared fixture with
+`created` pinned at 1700000000 and `nonce` pinned to
+`"bench-require-nonce-1"`) with `requireNonce: true`,
+self-checking that the result is ok and the returned
+`nonce` equals the pinned value. Outside timing the
+bench also pins the rejecting half of the contract: a
+nonce-less signature under the option returns exactly
+`MISSING_NONCE` with the pinned reason (so the measured
+path cannot be an empty one), and the same nonce-less
+signature still verifies with the option unset —
+the requirement is opt-in. In this run it measured
+~4,355 ops/sec (~229.62 µs/op), in the expected band
+just above the plain ed25519 verify row (one presence
+check on top of a full verification). The bench
+performs zero network I/O and makes no wall-clock
+assertions (every verify instant is injected).
 
 Environment: Node v24.22.1, linux/x64, AMD EPYC 9D25 (virtualized; shared
 host, so numbers vary run to run). Request fixture: POST with a 31-byte JSON
