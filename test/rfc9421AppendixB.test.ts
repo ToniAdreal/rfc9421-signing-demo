@@ -103,6 +103,72 @@ test("RFC 9421 B.2.5: a tampered base does not verify against the published sign
   assert.equal(B25_SIGNATURE_BASE.includes("example.com"), true);
 });
 
+test("RFC 9421 B.2.5: published signature verifies end-to-end via verifyRequest", () => {
+  const signed = {
+    ...B25_REQUEST,
+    headers: {
+      ...B25_REQUEST.headers,
+      "signature-input": B25_SIGNATURE_INPUT,
+      signature: `sig-b25=:${B25_SIGNATURE_B64}:`,
+    },
+  };
+  // B.2.5 is the only Appendix B vector whose signature-input omits `alg`
+  // (see the parse test above); `algFallback: "infer"` — the opt-in this
+  // vector motivated — recovers hmac-sha256 from the secret key's shape.
+  const res = verifyRequest(signed, {
+    key: secretKey(Buffer.from(B25_KEY_B64, "base64")),
+    label: "sig-b25",
+    algFallback: "infer",
+    now: 1618884473,
+  });
+  assert.equal(res.ok, true, `expected ok, got ${JSON.stringify(res)}`);
+  assert.equal(res.alg, "hmac-sha256");
+  assert.equal(res.keyId, "test-shared-secret");
+});
+
+test("RFC 9421 B.2.5: tampering @authority fails end-to-end verification", () => {
+  const signed = {
+    ...B25_REQUEST,
+    url: "http://attacker.com/foo?param=Value&Pet=dog",
+    headers: {
+      ...B25_REQUEST.headers,
+      "signature-input": B25_SIGNATURE_INPUT,
+      signature: `sig-b25=:${B25_SIGNATURE_B64}:`,
+    },
+  };
+  const res = verifyRequest(signed, {
+    key: secretKey(Buffer.from(B25_KEY_B64, "base64")),
+    label: "sig-b25",
+    algFallback: "infer",
+    now: 1618884473,
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "SIGNATURE_MISMATCH");
+});
+
+test("RFC 9421 B.2.5: without algFallback, the missing-alg legacy default applies and the vector does not verify", () => {
+  const signed = {
+    ...B25_REQUEST,
+    headers: {
+      ...B25_REQUEST.headers,
+      "signature-input": B25_SIGNATURE_INPUT,
+      signature: `sig-b25=:${B25_SIGNATURE_B64}:`,
+    },
+  };
+  // The historical default for a missing `alg` is "ed25519"; a symmetric
+  // key cannot verify as ed25519, so the crypto layer rejects the shape
+  // with VERIFICATION_ERROR instead of silently guessing hmac-sha256.
+  // This is exactly why `algFallback: "infer"` is opt-in: algorithm
+  // inference must be a deliberate caller decision, not a default.
+  const res = verifyRequest(signed, {
+    key: secretKey(Buffer.from(B25_KEY_B64, "base64")),
+    label: "sig-b25",
+    now: 1618884473,
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "VERIFICATION_ERROR");
+});
+
 // ---------------------------------------------------------------------------
 // Appendix B.2.6 (ed25519), B.2.4 (ecdsa-p256-sha256), and B.2.3
 // (rsa-pss-sha512) — added later.

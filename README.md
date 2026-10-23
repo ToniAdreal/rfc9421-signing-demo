@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 778 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 781 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -953,7 +953,11 @@ What *has* been verified beyond the sign→verify round-trip tests:
   skipped (never silently passed) and only the hardcoded
   openssl-derived vectors run — the live cross-check itself was done
   locally.
-- RFC 9421 Appendix B.2.5 (hmac-sha256), B.2.6 (ed25519), B.2.4
+- RFC 9421 Appendix B.2.5 (hmac-sha256 — the only Appendix B vector
+  whose signature-input omits `alg`, so it verifies end-to-end through
+  `verifyRequest` with the `algFallback: "infer"` opt-in; without the
+  opt-in the historical ed25519 default fails as `VERIFICATION_ERROR`),
+  B.2.6 (ed25519), B.2.4
   (ecdsa-p256-sha256), B.2.3 (rsa-pss-sha512, full coverage),
   B.2.2 (rsa-pss-sha512, selective coverage — `@authority`,
   `content-digest`, and a single named query parameter via
@@ -2493,7 +2497,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 778 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 781 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

@@ -1908,6 +1908,17 @@ change type; no entry describes a feature that is not in the history.
   on the corpus median against the same 50ms budget, plus a 1000ms
   catastrophic single-case bound, so a systematic slowdown still
   fails while scheduler/GC pauses no longer do.
+- The Appendix B.2.5 (hmac-sha256) vector is now verified end-to-end
+  through `verifyRequest` — the last Appendix B vector without a
+  published-signature end-to-end case. The test assembles the
+  published request, `signature-input`, and signature wire values
+  and verifies them with `algFallback: "infer"` (B.2.5 is the only
+  Appendix B vector whose signature-input omits `alg`, which is the
+  case that opt-in exists for), asserting `ok` and the inferred
+  `hmac-sha256` algorithm; a tampered `@authority` fails with
+  `SIGNATURE_MISMATCH`; and the same vector without the opt-in
+  fails with `VERIFICATION_ERROR` (the historical ed25519 default),
+  pinning why the fallback stays opt-in.
 
 ### Documentation
 
