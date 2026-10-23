@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 793 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 806 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -290,6 +290,25 @@ entry throws a configuration error).
 ```ts
 const result = verifyRequest(signed, {
   candidateKeys: [newSecret, oldSecret], // in-flight webhooks still use the old one
+});
+```
+
+Multi-party rotation without `keyid` (merchant and gateway rolling their
+webhook secrets on independent schedules): `verifyAllLabels` accepts a
+per-label `candidateKeysByLabel` map. Each label's list is tried in
+order with the same first-full-pass semantics as the global
+`candidateKeys`; a label missing from the map falls back to the global
+`candidateKeys`, and a per-label list is never tried against another
+label — the merchant's candidates cannot widen the gateway's rotation
+surface. Mutually exclusive with that label's `key`/`keys` and
+`keyResolver`/`keyResolvers`.
+
+```ts
+const results = verifyAllLabels(dualSigned, {
+  candidateKeysByLabel: {
+    merchant: [merchantPublicKey], // fixed key
+    gateway: [gatewayNewSecret, gatewayOldSecret], // mid-rollover
+  },
 });
 ```
 
@@ -786,8 +805,16 @@ example above calls the adapter.
   (label→`(keyId) => KeyObject | undefined`) — handy when the parties'
   key ids live in separate keystores (merchant store vs gateway store);
   labels missing from it fall back to the global `keyResolver`.
-  `keys`/`key` cannot be combined with either resolver (configuration
-  error). Duplicate labels are verified once (first occurrence); a
+  When each party rotates its own HMAC secret independently (merchant
+  fixed ed25519 key, gateway mid-rollover with old and new secrets), pass
+  per-label rotation lists via the optional `candidateKeysByLabel` map
+  (label→`KeyObject[]`) — each label's list is tried in order with
+  first-full-pass semantics, exactly like the global `candidateKeys`,
+  and labels missing from it fall back to the global `candidateKeys`.
+  A per-label list is never tried against another label, so a stale
+  merchant candidate cannot widen the gateway's rotation surface.
+  `keys`/`key` cannot be combined with either resolver or with any
+  candidate list (configuration error). Duplicate labels are verified once (first occurrence); a
   request with no `Signature-Input` header yields an empty array.
   A repeated signature-input parameter (e.g. two `created=` values, case
   variants included) is ambiguous authenticated input and is rejected as
@@ -2580,7 +2607,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 793 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 806 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

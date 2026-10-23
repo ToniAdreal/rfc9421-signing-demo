@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifyAllLabels` now accepts a per-label `candidateKeysByLabel` map
+  (label→`KeyObject[]`) for multi-party key rotation: the merchant and
+  the payment gateway rotate their webhook HMAC secrets on independent
+  schedules, so each label gets its own ordered rotation list, tried in
+  order with the same first-full-pass semantics as the global
+  `candidateKeys`. A label missing from the map falls back to the global
+  `candidateKeys`; a per-label list is never tried against another
+  label, so a merchant candidate cannot widen the gateway's rotation
+  surface. Each list is validated per label with the same rules as the
+  global option (non-empty array of KeyObjects; a malformed map or list
+  throws a configuration error naming the label), and it is mutually
+  exclusive with that label's `key`/`keys` and
+  `keyResolver`/`keyResolvers` — combining them throws. The README
+  multi-label and key-rotation sections document the pattern with a
+  merchant-fixed-key + gateway-mid-rollover example.
+
 - The benchmark (`npm run bench`) now also measures
   `verifyRequest` with `requiredComponents` — the
   component-coverage policy form a receiver runs to refuse a

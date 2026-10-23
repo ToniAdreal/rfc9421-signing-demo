@@ -1118,8 +1118,9 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * Per-label verification keys for multi-party signatures (e.g. a
    * merchant signature plus a payment-gateway signature on the same
    * request). A label absent from the map falls back to `key`.
-   * Mutually exclusive with `keyResolver`: passing `keys` (or `key`)
-   * together with `keyResolver` throws a configuration `Error`.
+   * Mutually exclusive with `keyResolver`/`keyResolvers` and with
+   * `candidateKeys`/`candidateKeysByLabel` on the same label: combining
+   * them throws a configuration `Error`.
    */
   keys?: Record<string, KeyObject>;
   /**
@@ -1156,6 +1157,19 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * the fallback.
    */
   keyResolvers?: Record<string, (keyId: string) => KeyObject | undefined>;
+  /**
+   * Per-label key rotation candidate lists for multi-party signatures
+   * (e.g. the merchant and the payment gateway rotating their webhook
+   * HMAC secrets independently): maps a signature label to that label's
+   * own ordered `candidateKeys` list, tried in order with first-full-pass
+   * semantics. A label absent from the map falls back to the global
+   * `candidateKeys`. Each list is validated per label with the same rules
+   * as the global one (non-empty array of KeyObjects); a malformed map or
+   * malformed list is a caller configuration error (throw). Mutually
+   * exclusive with that label's `key`/`keys` and `keyResolver`/
+   * `keyResolvers` — combining them throws.
+   */
+  candidateKeysByLabel?: Record<string, KeyObject[]>;
 }
 
 /**
@@ -1222,6 +1236,32 @@ function assertKeyResolvers(
 }
 
 /**
+ * Validate the per-label candidate-keys map. Each list is validated with
+ * the same rules as the global `candidateKeys` (reusing
+ * `assertCandidateKeys`); a malformed map or list is a caller
+ * configuration error, so it throws rather than returning
+ * `{ ok: false }`.
+ */
+function assertCandidateKeysByLabel(
+  map: Record<string, KeyObject[]> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `candidateKeysByLabel` must be a label→candidate-keys object",
+    );
+  for (const [label, keys] of Object.entries(map)) {
+    try {
+      assertCandidateKeys(keys);
+    } catch (e) {
+      throw new Error(
+        `verifyAllLabels: \`candidateKeysByLabel["${label}"]\` is invalid: ${(e as Error).message}`,
+      );
+    }
+  }
+}
+
+/**
  * Verify every signature carried by the request. Parses all labels from
  * the `Signature-Input` header and verifies each one with
  * `verifyRequest`, returning one `VerifyResult` per label in wire order.
@@ -1243,6 +1283,7 @@ export function verifyAllLabels(
   assertExpectedKeyIds(opts.expectedKeyIds);
   assertExpectedTags(opts.expectedTags);
   assertKeyResolvers(opts.keyResolvers);
+  assertCandidateKeysByLabel(opts.candidateKeysByLabel);
   let labels: string[];
   try {
     labels = listSignatureLabels(sigInput);
@@ -1265,6 +1306,19 @@ export function verifyAllLabels(
       throw new Error(
         "verifyAllLabels: `keys`/`key` is mutually exclusive with `keyResolver`/`keyResolvers` — pass one or the other",
       );
+    // Per-label rotation candidates: the label's dedicated list wins;
+    // any other label falls back to the global `candidateKeys`. Like
+    // the global option, exactly one of key / resolver / candidates may
+    // be in play per label.
+    const candidateKeys =
+      opts.candidateKeysByLabel?.[label] ?? opts.candidateKeys;
+    if (
+      candidateKeys !== undefined &&
+      (key !== undefined || keyResolver !== undefined)
+    )
+      throw new Error(
+        "verifyAllLabels: `candidateKeysByLabel`/`candidateKeys` is mutually exclusive with `keys`/`key` and `keyResolver`/`keyResolvers` — pass one or the other",
+      );
     // Per-label keyid pinning: a label pinned in `expectedKeyIds` is
     // checked against its own expectation; every other label falls back
     // to the global `expectedKeyId` (unset means no pinning for it).
@@ -1273,6 +1327,6 @@ export function verifyAllLabels(
     // against its own application protocol; every other label falls back
     // to the global `expectedTag` (unset means no pinning for it).
     const expectedTag = opts.expectedTags?.[label] ?? opts.expectedTag;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag });
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys });
   });
 }
