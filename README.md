@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 815 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 823 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -402,6 +402,17 @@ an unknown keyid, any keyid before the first successful refresh, or an invalid
 keyid), so `hits + misses` is the total number of resolutions. The counters
 run for the store's lifetime and are not part of a snapshot: exporting or
 restoring one does not reset them.
+
+Fetch timeout (opt-in): `new JwksKeyStore(url, { fetchTimeoutMs: 10_000 })`
+bounds each fetch of the default fetch implementation — a hung JWKS endpoint
+would otherwise leave `refresh()` unsettled forever (and stall every waiter
+merged by the single-flight mechanism). On expiry `refresh()` throws
+`JwksKeyStore: JWKS fetch timed out after 10000ms`, the previous snapshot and
+`lastRefreshedAt` are untouched (fail-closed, counted as a refresh failure).
+The option takes a positive integer (milliseconds) and is unset by default, so
+no configuration change is zero behavior change; it applies to the default
+fetch only — a custom `fetchImpl` never receives an abort signal and must
+implement its own timeout if it needs one.
 
 A failed `refresh()` (HTTP error, non-JSON body, a malformed JWKS
 document, or an entry carrying private `"d"` material) throws and leaves
@@ -2609,7 +2620,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 815 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 823 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

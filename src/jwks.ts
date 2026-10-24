@@ -61,6 +61,26 @@ export interface JwksKeyStoreOptions {
    * tests can pin time deterministically. Defaults to the wall clock.
    */
   now?: () => number;
+  /**
+   * Opt-in fetch timeout in milliseconds, so a hung JWKS endpoint
+   * cannot leave `refresh()` unsettled forever: key rotation is the
+   * path that must keep working precisely during an outage, and under
+   * the single-flight mechanism every waiter shares the in-flight
+   * fetch, so one hang stalls them all.
+   *
+   * Must be a positive integer. When set, the default fetch performs
+   * `globalThis.fetch(url, { signal })` with an `AbortController`
+   * that aborts at the deadline; the timeout throws
+   * `JwksKeyStore: JWKS fetch timed out after Nms` from `refresh()`
+   * with the previous snapshot and freshness timestamp untouched
+   * (fail-closed, counted as a refresh failure).
+   *
+   * Applies to the DEFAULT fetch only. The `JwksFetchImpl` signature
+   * takes no signal, so a custom `fetchImpl` never receives one —
+   * custom implementations must implement their own timeout if they
+   * need one. Unset by default (zero behavior change).
+   */
+  fetchTimeoutMs?: number;
 }
 
 /**
@@ -326,6 +346,14 @@ export class JwksKeyStore {
   private readonly fetchImpl: JwksFetchImpl;
   private readonly ttlSec: number;
   private readonly clock: () => number;
+  /**
+   * Whether the store uses the default fetch. The timeout only applies
+   * to the default fetch (see `fetchTimeoutMs`): a custom `fetchImpl`
+   * never receives an abort signal, so it is never wrapped in one.
+   */
+  private readonly usingDefaultFetch: boolean;
+  /** Opt-in fetch timeout in milliseconds, or undefined when unset. */
+  private readonly fetchTimeoutMs?: number;
   /** kid -> imported public key, from the last successful refresh. */
   private keysByKid = new Map<string, KeyObject>();
   /** Unix seconds of the last successful refresh, or null if none. */
@@ -364,7 +392,7 @@ export class JwksKeyStore {
       throw new Error(
         `JwksKeyStore: \`url\` must use http: or https:, got ${JSON.stringify(parsed.protocol)}`,
       );
-    const { fetchImpl, ttlSec = 300, now } = opts;
+    const { fetchImpl, ttlSec = 300, now, fetchTimeoutMs } = opts;
     if (fetchImpl !== undefined && typeof fetchImpl !== "function")
       throw new Error("JwksKeyStore: `fetchImpl` must be a function");
     if (typeof ttlSec !== "number" || !Number.isFinite(ttlSec) || ttlSec <= 0)
@@ -375,9 +403,19 @@ export class JwksKeyStore {
       throw new Error(
         "JwksKeyStore: `now` must be a function returning unix seconds",
       );
+    if (
+      fetchTimeoutMs !== undefined &&
+      (typeof fetchTimeoutMs !== "number" ||
+        !Number.isInteger(fetchTimeoutMs) ||
+        fetchTimeoutMs <= 0)
+    )
+      throw new Error(
+        `JwksKeyStore: \`fetchTimeoutMs\` must be a positive integer (milliseconds), got ${String(fetchTimeoutMs)}`,
+      );
     this.url = url;
-    this.fetchImpl =
-      fetchImpl ?? ((u: string) => globalThis.fetch(u));
+    this.usingDefaultFetch = fetchImpl === undefined;
+    this.fetchImpl = fetchImpl ?? ((u: string) => globalThis.fetch(u));
+    this.fetchTimeoutMs = fetchTimeoutMs;
     this.ttlSec = ttlSec;
     this.clock = now ?? (() => Math.floor(Date.now() / 1000));
   }
@@ -501,14 +539,18 @@ export class JwksKeyStore {
   /** Fetch the JWKS document and build/swap the next snapshot. */
   private async fetchAndSwap(): Promise<void> {
     let res: JwksFetchResponse;
-    try {
-      res = await this.fetchImpl(this.url);
-    } catch (err) {
-      throw new Error(
-        `JwksKeyStore: failed to fetch JWKS from ${this.url}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+    if (this.usingDefaultFetch && this.fetchTimeoutMs !== undefined) {
+      res = await this.fetchWithTimeout();
+    } else {
+      try {
+        res = await this.fetchImpl(this.url);
+      } catch (err) {
+        throw new Error(
+          `JwksKeyStore: failed to fetch JWKS from ${this.url}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
     if (
       typeof res !== "object" ||
@@ -566,6 +608,48 @@ export class JwksKeyStore {
     }
     this.keysByKid = next;
     this.lastRefreshAtSec = this.clock();
+  }
+
+  /**
+   * The default fetch with an abort deadline applied: an
+   * `AbortController` aborts the request when `fetchTimeoutMs`
+   * elapses, and the resulting abort rejection becomes a descriptive
+   * timeout `Error` (not the generic fetch-failure wrap), so callers
+   * can tell a hung endpoint apart from any other fetch failure.
+   *
+   * Any other failure — network error, DNS failure, non-2xx handled
+   * later in `fetchAndSwap` — keeps the existing error shapes, so the
+   * timeout is purely additive. The timer is always cleared.
+   *
+   * Deliberately separate from `fetchImpl`: only the default fetch is
+   * constructed here with a `signal`, and only the default-fetch path
+   * calls this method, so a custom `fetchImpl` is never timed out —
+   * the timeout only applies to the default fetch, as documented on
+   * {@link JwksKeyStoreOptions.fetchTimeoutMs}.
+   */
+  private async fetchWithTimeout(): Promise<JwksFetchResponse> {
+    const timeoutMs = this.fetchTimeoutMs as number;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await globalThis.fetch(this.url, {
+        signal: controller.signal,
+      });
+      return res as unknown as JwksFetchResponse;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        throw new Error(
+          `JwksKeyStore: JWKS fetch timed out after ${timeoutMs}ms`,
+        );
+      }
+      throw new Error(
+        `JwksKeyStore: failed to fetch JWKS from ${this.url}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**

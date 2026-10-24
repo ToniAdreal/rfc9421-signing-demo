@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore` accepts an opt-in `fetchTimeoutMs` (positive integer,
+  milliseconds): the default fetch is performed as
+  `globalThis.fetch(url, { signal })` with an `AbortController` that
+  aborts at the deadline, so a hung JWKS endpoint can no longer leave
+  `refresh()` unsettled forever (and stall every waiter merged by the
+  single-flight mechanism — key rotation is the path that must keep
+  working during an outage). On expiry `refresh()` throws
+  `JwksKeyStore: JWKS fetch timed out after Nms`; the previous snapshot
+  and `lastRefreshedAt` are untouched (fail-closed) and the failure is
+  counted in `stats().refreshFailures`. Non-integer/zero/negative/NaN
+  values throw at construction. The timeout applies to the default
+  fetch only — a custom `fetchImpl` never receives an abort signal and
+  must implement its own timeout if it needs one (documented honestly
+  on the option and in the README JWKS section). Unset by default, so
+  no configuration change is zero behavior change.
+
 - `JwksKeyStore` now imports NIST P-384 and P-521 JWKs: the EC branch of
   JWKS/snapshot import dispatches by `crv` (`P-256` / `P-384` / `P-521`,
   via the pre-existing `importPublicKeyJwkP384` / `importPublicKeyJwkP521`
