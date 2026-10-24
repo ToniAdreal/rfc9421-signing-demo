@@ -96,6 +96,18 @@ export type VerifyFailureCode =
    */
   | "MISSING_NONCE"
   /**
+   * `VerifyOptions.requireTag` is set but the signature carries no
+   * `tag` parameter, or carries an empty-string one (treated as
+   * missing: the signing side rejects empty tags, so one on the wire
+   * can only come from a third party). Only possible when the caller
+   * opted in. Checked only *after* the cryptographic check and
+   * alongside `requireCreated`/`requireExpires` (before the window
+   * checks), so forgeries still report `SIGNATURE_MISMATCH`. A
+   * signature that also fails a pinned `expectedTag` still reports
+   * `TAG_MISMATCH`: the pinning check runs first.
+   */
+  | "MISSING_TAG"
+  /**
    * The signature did not cover one or more components demanded by
    * `VerifyOptions.requiredComponents` (e.g. a payment-gateway verifier
    * requiring `content-digest` or `@path`). Only possible when the

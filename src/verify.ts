@@ -138,6 +138,26 @@ export interface VerifyOptions {
    */
   requireNonce?: boolean;
   /**
+   * Reject signatures that carry no (non-empty) `tag` parameter.
+   * Same rationale as `requireCreated`, but for cross-protocol replay
+   * protection: a verifier that binds signatures to one application
+   * protocol (via `expectedTag`) still accepts a tag-less signature
+   * when no tag is pinned — a tag-less signature is protocol-agnostic
+   * by construction and can be replayed into any verifier that shares
+   * the key. Defaults to false (backwards compatible): no check is
+   * made unless you opt in. An empty-string tag counts as missing
+   * (the signing side rejects empty tags, so one on the wire can only
+   * come from a third party). Fails with `MISSING_TAG`, checked only
+   * *after* the cryptographic check and alongside
+   * `requireCreated`/`requireExpires` (before the window checks), so
+   * forgeries are still reported as `SIGNATURE_MISMATCH`. In
+   * `verifyAllLabels` the check applies independently per label
+   * (the option is passed through with the rest of `VerifyOptions`).
+   * A signature that also fails a pinned `expectedTag` reports
+   * `TAG_MISMATCH` instead: the pinning check runs first.
+   */
+  requireTag?: boolean;
+  /**
    * Maximum acceptable signature age, in seconds (opt-in). When set, a
    * signature whose `created` timestamp is older than this is rejected
    * with `SIGNATURE_TOO_OLD` — even when it carries no `expires` (an old
@@ -1010,10 +1030,11 @@ function verifyWithKey(
 
   // Freshness: the `created`/`expires` parameters are optional on the
   // wire, so the window checks below only apply when the signer sent
-  // them. `requireCreated`/`requireExpires` let a verifier demand their
-  // presence; the check happens here, after the cryptographic check, so
-  // a forged undated signature is still reported as SIGNATURE_MISMATCH
-  // rather than being mistaken for a mere policy violation.
+  // them. `requireCreated`/`requireExpires`/`requireTag` let a verifier
+  // demand their presence; the check happens here, after the
+  // cryptographic check, so a forged undated or untagged signature is
+  // still reported as SIGNATURE_MISMATCH rather than being mistaken
+  // for a mere policy violation.
   if (opts.requireCreated === true && parsed.params.created === undefined)
     return {
       ok: false,
@@ -1033,6 +1054,23 @@ function verifyWithKey(
       ok: false,
       code: "MISSING_EXPIRES",
       reason: "signature carries no `expires` timestamp but requireExpires is set",
+      label,
+      keyId: parsed.params.keyid,
+      alg: effectiveAlg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
+  if (
+    opts.requireTag === true &&
+    (parsed.params.tag === undefined || parsed.params.tag === "")
+  )
+    return {
+      ok: false,
+      code: "MISSING_TAG",
+      reason: "signature carries no `tag` but requireTag is set",
       label,
       keyId: parsed.params.keyid,
       alg: effectiveAlg,

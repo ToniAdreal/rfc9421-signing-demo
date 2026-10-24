@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 886 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 896 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -849,7 +849,15 @@ example above calls the adapter.
   `expectedTags` map (label→tag) — a label missing from it falls back
   to the global `expectedTag` (unset means no check for it). An
   empty-string tag is rejected by `signRequest` as a
-  configuration error (it would bind nothing).
+  configuration error (it would bind nothing). Separately,
+  `requireTag: true` rejects tag-less signatures outright with
+  `MISSING_TAG` (an empty-string tag counts as missing) when no tag
+  is pinned — for verifiers that must refuse protocol-agnostic
+  signatures rather than merely pinning one protocol. It is checked
+  alongside `requireCreated`/`requireExpires`, after the
+  cryptographic check, and per label in `verifyAllLabels`; a
+  signature that also fails a pinned `expectedTag` still reports
+  `TAG_MISMATCH`.
 - Minimal `Signature-Input` / `Signature` field parsing for verification.
 - **Node http server adapter**: `fromNodeRequest(req, body, opts?)`
   normalizes an `http.IncomingMessage` into a `RequestLike` (absolute URL
@@ -2665,6 +2673,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `INVALID_TIME_WINDOW` | both timestamps present but `expires` is earlier than `created` (signature already expired at birth; `expires === created` is allowed) |
 | `NONCE_REPLAY` | nonce already seen within the replay-cache TTL (`VerifyOptions.replayCache`) |
 | `MISSING_NONCE` | `requireNonce` is set but the signature carries no `nonce` (or an empty-string one) |
+| `MISSING_TAG` | `requireTag` is set but the signature carries no `tag` (or an empty-string one) |
 | `MISSING_REQUIRED_COMPONENT` | the signature omits a component required by `VerifyOptions.requiredComponents` |
 
 ```ts
@@ -2684,7 +2693,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 886 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 896 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

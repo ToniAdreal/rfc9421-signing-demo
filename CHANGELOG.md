@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `VerifyOptions.requireTag` (default `false`, backwards compatible):
+  a signature carrying no `tag` — or an empty-string one, treated as
+  missing since `signRequest` refuses to mint one — fails with the new
+  error code `MISSING_TAG`. Checked alongside
+  `requireCreated`/`requireExpires`, after the cryptographic check and
+  before the window checks, so forgeries still report
+  `SIGNATURE_MISMATCH`; in `verifyAllLabels` it applies independently
+  per label, and a signature that also fails a pinned `expectedTag`
+  still reports `TAG_MISMATCH`. 10 new tests in
+  `test/requireTag.test.ts`.
+
 - `VerifyResult` now carries `coveredComponents`: the covered component
   identifiers parsed from `signature-input`, in signature-input order,
   as seen on the wire — reported on every `verifyRequest` /
