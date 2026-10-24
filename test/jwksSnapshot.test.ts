@@ -216,7 +216,11 @@ test("JwksKeyStore snapshot: unknown kty and unsupported curve are rejected", as
         },
         URL,
       ),
-    /expected crv "P-256"/,
+    // Since #543 the EC branch dispatches by crv: a crv "P-384" entry now
+    // reaches the P-384 importer (which rejects the P-256 coordinates at
+    // the crypto layer), rather than the P-256 importer's crv-mismatch
+    // error.
+    /importPublicKeyJwkP384: node:crypto rejected the JWK/,
   );
 });
 

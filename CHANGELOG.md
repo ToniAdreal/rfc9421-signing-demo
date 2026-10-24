@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore` now imports NIST P-384 and P-521 JWKs: the EC branch of
+  JWKS/snapshot import dispatches by `crv` (`P-256` / `P-384` / `P-521`,
+  via the pre-existing `importPublicKeyJwkP384` / `importPublicKeyJwkP521`
+  helpers), so a gateway publishing `ecdsa-p384-sha384` /
+  `ecdsa-p521-sha512` keys no longer makes `refresh()` throw. Unsupported
+  or missing `crv` values fail `refresh()` with an explicit
+  `unsupported EC crv ...` error and leave the previous snapshot
+  untouched. `exportSnapshot()` likewise dispatches EC keys by their
+  node:crypto named curve (`prime256v1` / `secp384r1` / `secp521r1`), so
+  fetched P-384/P-521 keys survive a snapshot round-trip (previously
+  export of a store holding them threw); snapshots carrying them restore
+  back onto the right importers. The class JSDoc and README JWKS
+  sections now document the five supported JWK shapes.
+
 - `verifyAllLabels` now accepts a per-label `candidateKeysByLabel` map
   (label→`KeyObject[]`) for multi-party key rotation: the merchant and
   the payment gateway rotate their webhook HMAC secrets on independent

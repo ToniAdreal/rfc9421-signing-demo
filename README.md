@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 806 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 815 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -371,7 +371,7 @@ public key can compute it.
 Network key discovery (JWKS): when a signer's keys live behind a JWKS
 endpoint — the gateway/webhook standard for public-key distribution and
 rotation — `JwksKeyStore` fetches the document, imports every key by
-`kid` (ed25519 / P-256 / RSA, the three JWK shapes above), and exposes a
+`kid` (ed25519 / P-256 / P-384 / P-521 / RSA, the five JWK shapes above), and exposes a
 synchronous `resolve` that drops straight into `keyResolver`:
 
 ```ts
@@ -1290,8 +1290,9 @@ verify until its first successful refresh — isolated from the
 `resolve` rows above, which read the store, and from the
 snapshot-persistence CLI demo segment, which walks the same
 path once for readability. One measured op is one export of a
-fixed three-key store (one key per supported shape: ed25519,
-P-256 and RSA, generated once outside timing and restored
+fixed three-key store (ed25519, P-256 and RSA — the historical
+fixture predates P-384/P-521 JWKS support; the store now imports
+all five shapes), generated once outside timing and restored
 offline under hand-pinned kids at a pinned `fetchedAtSec` of
 1700000000 — the bench performs zero network I/O). Every
 measured pass re-pins the whole exported envelope against
@@ -1319,8 +1320,9 @@ from the static `JwksKeyStore.restore` construction behind
 the `resolve` rows, which was never itself a measured op,
 and from the snapshot-persistence CLI demo segment, which
 walks the same restore once for readability. One measured
-op is one restore of a pinned three-key envelope (one key
-per supported shape: ed25519, P-256 and RSA, generated once
+op is one restore of a pinned three-key envelope (ed25519, P-256
+and RSA — the historical fixture predates P-384/P-521 JWKS
+support; the store now imports all five shapes), generated once
 outside timing and exported outside timing from a source
 store refreshed once through a counting fake fetch at a
 pinned `fetchedAtSec` of 1700000000 under a 120-second TTL)
@@ -2607,7 +2609,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 806 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 815 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

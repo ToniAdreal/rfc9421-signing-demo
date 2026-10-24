@@ -2,12 +2,18 @@ import type { KeyObject } from "node:crypto";
 import {
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
+  exportPublicKeyJwkP384,
+  exportPublicKeyJwkP521,
   exportPublicKeyJwkRsa,
   importPublicKeyJwk,
   importPublicKeyJwkP256,
+  importPublicKeyJwkP384,
+  importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
   type Ed25519PublicJwk,
   type P256PublicJwk,
+  type P384PublicJwk,
+  type P521PublicJwk,
   type RsaPublicJwk,
 } from "./keys.js";
 
@@ -90,15 +96,46 @@ export interface JwksKeyStoreStats {
 
 /**
  * One key in a {@link JwksKeyStoreSnapshot}: a public-key-only JWK in
- * exactly one of the three shapes this library's JWK importers accept
- * (ed25519 / P-256 / RSA), tagged with the `kid` it resolves under.
+ * exactly one of the five shapes this library's JWK importers accept
+ * (ed25519 / P-256 / P-384 / P-521 / RSA), tagged with the `kid` it
+ * resolves under.
  * Private material never appears here — the store only ever holds
  * imported *public* keys, and the exporters refuse anything else.
  */
 export type JwksSnapshotKey =
   | (Ed25519PublicJwk & { kid: string })
   | (P256PublicJwk & { kid: string })
+  | (P384PublicJwk & { kid: string })
+  | (P521PublicJwk & { kid: string })
   | (RsaPublicJwk & { kid: string });
+
+/**
+ * Import one JWK object from a JWKS document or a persisted snapshot.
+ * The verify side supports all three NIST curves, so EC entries are
+ * dispatched by `crv` (`P-256` / `P-384` / `P-521`); any other curve —
+ * or a missing `crv` — is an explicit `Error`, never a silent skip:
+ * dropping a key the publisher expects verifiers to use would be a
+ * nastier surprise than a loud setup error. Callers wrap the thrown
+ * error with their own document/kid context.
+ */
+function importJwkEntry(entry: unknown): KeyObject {
+  const o = entry as Record<string, unknown>;
+  const kty = o["kty"];
+  if (kty === "OKP") return importPublicKeyJwk(entry);
+  if (kty === "RSA") return importPublicKeyJwkRsa(entry);
+  if (kty === "EC") {
+    const crv = o["crv"];
+    if (crv === "P-256") return importPublicKeyJwkP256(entry);
+    if (crv === "P-384") return importPublicKeyJwkP384(entry);
+    if (crv === "P-521") return importPublicKeyJwkP521(entry);
+    throw new Error(
+      `unsupported EC crv ${JSON.stringify(crv)} (supported: "P-256", "P-384", "P-521")`,
+    );
+  }
+  throw new Error(
+    `unsupported kty ${JSON.stringify(kty)} (supported: "OKP", "EC", "RSA")`,
+  );
+}
 
 /**
  * Serializable snapshot of a {@link JwksKeyStore}, produced by
@@ -191,13 +228,7 @@ function parseJwksSnapshot(snapshot: unknown): {
       );
     let key: KeyObject;
     try {
-      if (o["kty"] === "OKP") key = importPublicKeyJwk(entry);
-      else if (o["kty"] === "EC") key = importPublicKeyJwkP256(entry);
-      else if (o["kty"] === "RSA") key = importPublicKeyJwkRsa(entry);
-      else
-        throw new Error(
-          `unsupported kty ${JSON.stringify(o["kty"])} (supported: "OKP", "EC", "RSA")`,
-        );
+      key = importJwkEntry(entry);
     } catch (err) {
       throw new Error(
         `JwksKeyStore: invalid snapshot: keys[${i}] for kid ${JSON.stringify(kid)}: ${
@@ -218,6 +249,7 @@ function parseJwksSnapshot(snapshot: unknown): {
  *
  * This is the layer that was missing between the JWK importers
  * (`importPublicKeyJwk` / `importPublicKeyJwkP256` /
+ * `importPublicKeyJwkP384` / `importPublicKeyJwkP521` /
  * `importPublicKeyJwkRsa` in `keys.ts`, which convert one JWK each) and
  * `VerifyOptions.keyResolver` (which maps a claimed `keyid` to a key,
  * synchronously, in-process). Gateways and webhook receivers publish
@@ -252,10 +284,11 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   simply cannot be selected by `keyid`, so they are ignored while
  *   their well-formed siblings still import.
  * - **Supported key types** are exactly the ones the importers support:
- *   `kty: "OKP"` (ed25519), `kty: "EC"` with `crv: "P-256"`, and
- *   `kty: "RSA"`. Any other `kty` makes `refresh()` throw — silently
- *   dropping a key the publisher expects verifiers to use would be a
- *   nastier surprise than a loud setup error.
+ *   `kty: "OKP"` (ed25519), `kty: "EC"` with `crv: "P-256"`, `"P-384"`,
+ *   or `"P-521"`, and `kty: "RSA"`. Any other `kty` — or an `EC` entry
+ *   with an unsupported or missing `crv` — makes `refresh()` throw:
+ *   silently dropping a key the publisher expects verifiers to use
+ *   would be a nastier surprise than a loud setup error.
  * - **Duplicate `kid`s** within one document: the later entry wins
  *   (ordinary dictionary semantics).
  * - **Refreshes are single-flight.** Concurrent `refresh()` calls —
@@ -521,13 +554,7 @@ export class JwksKeyStore {
       if (typeof kid !== "string" || kid.length === 0) continue; // skipped, not fatal
       let key: KeyObject;
       try {
-        if (o["kty"] === "OKP") key = importPublicKeyJwk(entry);
-        else if (o["kty"] === "EC") key = importPublicKeyJwkP256(entry);
-        else if (o["kty"] === "RSA") key = importPublicKeyJwkRsa(entry);
-        else
-          throw new Error(
-            `unsupported kty ${JSON.stringify(o["kty"])} (supported: "OKP", "EC", "RSA")`,
-          );
+        key = importJwkEntry(entry);
       } catch (err) {
         throw new Error(
           `JwksKeyStore: invalid JWKS from ${this.url}: entry for kid ${JSON.stringify(kid)}: ${
@@ -571,12 +598,26 @@ export class JwksKeyStore {
     for (const [kid, key] of this.keysByKid) {
       if (key.asymmetricKeyType === "ed25519")
         keys.push({ ...exportPublicKeyJwk(key), kid });
-      else if (key.asymmetricKeyType === "ec")
-        keys.push({ ...exportPublicKeyJwkP256(key), kid });
-      else if (key.asymmetricKeyType === "rsa")
+      else if (key.asymmetricKeyType === "ec") {
+        // The store imports P-256/P-384/P-521 by crv; export by the same
+        // rule so a fetched P-384/P-521 key survives a snapshot round-trip.
+        const curve = key.asymmetricKeyDetails?.namedCurve;
+        if (curve === "prime256v1")
+          keys.push({ ...exportPublicKeyJwkP256(key), kid });
+        else if (curve === "secp384r1")
+          keys.push({ ...exportPublicKeyJwkP384(key), kid });
+        else if (curve === "secp521r1")
+          keys.push({ ...exportPublicKeyJwkP521(key), kid });
+        else
+          throw new Error(
+            `JwksKeyStore: cannot export key for kid ${JSON.stringify(kid)}: ` +
+              `unsupported EC curve ${String(curve)} ` +
+              `(expected one of prime256v1, secp384r1, secp521r1)`,
+          );
+      } else if (key.asymmetricKeyType === "rsa")
         keys.push({ ...exportPublicKeyJwkRsa(key), kid });
       else
-        // Unreachable: refresh()/restore only import the three types
+        // Unreachable: refresh()/restore only import the five types
         // above. Fail loudly rather than silently dropping a key.
         throw new Error(
           `JwksKeyStore: cannot export key for kid ${JSON.stringify(kid)}: ` +
