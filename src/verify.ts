@@ -302,6 +302,21 @@ export interface VerifyResult {
    * about what was sent.
    */
   expires?: number;
+  /**
+   * The covered component identifiers parsed from the request's
+   * `signature-input` header, as seen on the wire (i.e. *before*
+   * signature verification establishes their authenticity), in
+   * signature-input order — the same order the signer declared them.
+   * Like `nonce` / `tag` / `created` / `expires`, it is the wire
+   * value even on failure results, so a webhook receiver can audit
+   * exactly which components a (possibly tampered) signature claimed
+   * to cover without re-parsing the header — a second parse could
+   * disagree with this library's parsing. Absent when the component
+   * list could not be parsed at all (missing or malformed
+   * `signature-input`): this field is never fabricated. Always a
+   * detached copy: mutating it never affects a later verification.
+   */
+  coveredComponents?: string[];
 }
 
 /**
@@ -555,6 +570,7 @@ export function verifyRequest(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
       };
   }
   try {
@@ -583,6 +599,7 @@ export function verifyRequest(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
   }
 
@@ -606,6 +623,7 @@ export function verifyRequest(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
       };
     let resolved: KeyObject | undefined;
     try {
@@ -622,6 +640,7 @@ export function verifyRequest(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
       };
     }
     if (resolved === undefined)
@@ -636,6 +655,7 @@ export function verifyRequest(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
       };
     key = resolved;
   }
@@ -854,6 +874,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
       };
     }
   } catch (e) {
@@ -866,6 +887,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
   }
   if (!cryptoOk)
@@ -880,6 +902,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
 
   // Key-id pinning (key-confusion defense): the signature is already
@@ -903,6 +926,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
 
   // Application-tag pinning (cross-protocol replay defense, RFC 9421
@@ -926,6 +950,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
 
   // Body binding (RFC 9530): the signature only covers the *value* of the
@@ -961,6 +986,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
       };
     const expected = createHash(dm === dm512 ? "sha512" : "sha256")
       .update(bodyBytes)
@@ -978,6 +1004,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
       };
   }
 
@@ -999,6 +1026,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
   if (opts.requireExpires === true && parsed.params.expires === undefined)
     return {
@@ -1012,6 +1040,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
 
   // Self-contradictory window: `expires` earlier than `created` means the
@@ -1040,6 +1069,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
 
   if (
@@ -1057,6 +1087,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
   if (
     parsed.params.created !== undefined &&
@@ -1073,6 +1104,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
 
   // Maximum signature age (opt-in webhook-timestamp window): an old
@@ -1098,6 +1130,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
 
   // Required nonce (opt-in): the replay store below is only consulted
@@ -1123,6 +1156,7 @@ function verifyWithKey(
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
     };
 
   // Nonce replay detection: consulted only *after* the signature has
@@ -1143,6 +1177,7 @@ function verifyWithKey(
         tag: parsed.params.tag,
         created: parsed.params.created,
         expires: parsed.params.expires,
+        coveredComponents: [...parsed.componentIds],
       };
   }
 
@@ -1155,6 +1190,7 @@ function verifyWithKey(
     tag: parsed.params.tag,
     created: parsed.params.created,
     expires: parsed.params.expires,
+    coveredComponents: [...parsed.componentIds],
   };
 }
 
@@ -1167,10 +1203,10 @@ function verifyWithKey(
 export function verifyRequestOrThrow(
   req: RequestLike,
   opts: VerifyOptions,
-): { label: string; keyId?: string; alg?: string; nonce?: string; tag?: string; created?: number; expires?: number } {
+): { label: string; keyId?: string; alg?: string; nonce?: string; tag?: string; created?: number; expires?: number; coveredComponents?: string[] } {
   const res = verifyRequest(req, opts);
   if (res.ok)
-    return { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce, tag: res.tag, created: res.created, expires: res.expires };
+    return { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce, tag: res.tag, created: res.created, expires: res.expires, coveredComponents: res.coveredComponents };
   throw new VerifyError(
     res.code ?? "VERIFICATION_ERROR",
     res.reason ?? "verification failed",

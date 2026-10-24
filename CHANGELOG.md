@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `VerifyResult` now carries `coveredComponents`: the covered component
+  identifiers parsed from `signature-input`, in signature-input order,
+  as seen on the wire — reported on every `verifyRequest` /
+  `verifyWithKey` return point that already carries the wire fields
+  (success and failure alike), so a webhook receiver can audit exactly
+  which components a signature claimed to cover without re-parsing the
+  header. Absent (`undefined`) only when the component list could not
+  be parsed at all (missing or malformed `signature-input`); never
+  fabricated, and always a detached copy. `verifyRequestOrThrow`
+  returns the same field on success; `verifyAllLabels` reports each
+  label's own list. 11 new tests in
+  `test/verifyResultCoveredComponents.test.ts` (plus the updated
+  `demo.test.ts` shape assertion for the throwing-verification
+  segment).
+
 - `JwksKeyStore` accepts opt-in fetch retries: `fetchRetries`
   (default `0`, single attempt as before), `fetchBackoffMs` (default
   `1000`, fixed delay between attempts), and `sleepImpl` (default

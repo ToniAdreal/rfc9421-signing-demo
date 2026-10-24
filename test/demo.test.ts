@@ -1191,7 +1191,8 @@ test("demo throwing-verification segment returns the identity on success and thr
 
   // Success returns the verified identity directly, no result object.
   // Since #557 it also carries the wire timestamps (the main request
-  // sends `created` but no `expires`).
+  // sends `created` but no `expires`); since #566 it also carries the
+  // wire covered-component list, in signature-input order.
   assert.deepEqual(throwVerification, {
     label: "sig1",
     keyId: DEMO_KEY_ID,
@@ -1200,6 +1201,7 @@ test("demo throwing-verification segment returns the identity on success and thr
     tag: undefined,
     created: DEMO_CREATED,
     expires: undefined,
+    coveredComponents: [...DEMO_COVERED_COMPONENTS],
   });
 
   // The tampered-body call threw, the caught error passes the
