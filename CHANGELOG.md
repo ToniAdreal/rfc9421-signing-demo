@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `VerifyResult` now carries the wire timestamps `created` / `expires`
+  (Unix seconds, `undefined` when the signer omitted them), in the same
+  "as seen on the wire" spirit as `nonce` / `tag`: every `verifyRequest`
+  and `verifyWithKey` return point (success and failure alike) reports
+  the parsed values, so a webhook receiver can log the claimed signing
+  instant or run a custom age window without re-parsing
+  `signature-input`. A tampered timestamp is reported as tampered
+  (`SIGNATURE_MISMATCH` with the tampered value), because the failure is
+  about authenticity, not about what was sent. `verifyRequestOrThrow`
+  returns the same two fields on success and carries them on the thrown
+  `VerifyError`; `verifyAllLabels` reports each label's own pair.
+  12 new tests in `test/verifyResultTimestamps.test.ts` (plus the
+  updated `demo.test.ts` shape assertion for the throwing-verification
+  segment).
+
 - `JwksKeyStore` accepts an opt-in `requireHttps: true`: a plaintext `http:`
   endpoint URL is then rejected at construction with
   `JwksKeyStore: \`requireHttps\` requires https: for the JWKS endpoint,

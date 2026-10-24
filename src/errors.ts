@@ -110,6 +110,8 @@ export interface VerifyErrorOptions {
   alg?: string;
   nonce?: string;
   tag?: string;
+  created?: number;
+  expires?: number;
 }
 
 /**
@@ -125,6 +127,8 @@ export class VerifyError extends Error {
   readonly alg?: string;
   readonly nonce?: string;
   readonly tag?: string;
+  readonly created?: number;
+  readonly expires?: number;
 
   constructor(
     code: VerifyFailureCode,
@@ -140,6 +144,8 @@ export class VerifyError extends Error {
     this.alg = opts.alg;
     this.nonce = opts.nonce;
     this.tag = opts.tag;
+    this.created = opts.created;
+    this.expires = opts.expires;
   }
 }
 

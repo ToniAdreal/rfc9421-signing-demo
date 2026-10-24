@@ -1190,12 +1190,16 @@ test("demo throwing-verification segment returns the identity on success and thr
   assert.equal(DEMO_THROW_TAMPERED_CODE, "BODY_DIGEST_MISMATCH");
 
   // Success returns the verified identity directly, no result object.
+  // Since #557 it also carries the wire timestamps (the main request
+  // sends `created` but no `expires`).
   assert.deepEqual(throwVerification, {
     label: "sig1",
     keyId: DEMO_KEY_ID,
     alg: "ed25519",
     nonce: DEMO_NONCE,
     tag: undefined,
+    created: DEMO_CREATED,
+    expires: undefined,
   });
 
   // The tampered-body call threw, the caught error passes the
@@ -1209,6 +1213,8 @@ test("demo throwing-verification segment returns the identity on success and thr
   assert.equal(throwTamperedError.keyId, DEMO_KEY_ID);
   assert.equal(throwTamperedError.alg, "ed25519");
   assert.equal(throwTamperedError.nonce, DEMO_NONCE);
+  assert.equal(throwTamperedError.created, DEMO_CREATED);
+  assert.equal(throwTamperedError.expires, undefined);
 });
 
 test("demo lines contain the throwing-verification segment (identity returned, VerifyError thrown, followed by the nonce-generation segment)", async () => {

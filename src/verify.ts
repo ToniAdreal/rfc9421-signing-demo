@@ -279,6 +279,26 @@ export interface VerifyResult {
    * its authenticity). Absent when the signer did not send one.
    */
   tag?: string;
+  /**
+   * The `created` signature-input parameter parsed from the request,
+   * as seen on the wire (i.e. *before* signature verification
+   * establishes its authenticity), in Unix seconds. Absent when the
+   * signer did not send one. Callers that need the raw signing
+   * instant for logging, metrics, or a custom age window read it
+   * here instead of re-parsing the `signature-input` header — a
+   * second parse could disagree with this library's parsing.
+   */
+  created?: number;
+  /**
+   * The `expires` signature-input parameter parsed from the request,
+   * as seen on the wire (i.e. *before* signature verification
+   * establishes its authenticity), in Unix seconds. Absent when the
+   * signer did not send one. Like `created`, it is the wire value
+   * even on failure results: a tampered timestamp still reports the
+   * tampered value, because the failure is about authenticity, not
+   * about what was sent.
+   */
+  expires?: number;
 }
 
 /**
@@ -530,6 +550,8 @@ export function verifyRequest(
         alg: parsed.params.alg,
         nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
       };
   }
   try {
@@ -556,6 +578,8 @@ export function verifyRequest(
       alg: parsed.params.alg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
   }
 
@@ -577,6 +601,8 @@ export function verifyRequest(
         alg: parsed.params.alg,
         nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
       };
     let resolved: KeyObject | undefined;
     try {
@@ -591,6 +617,8 @@ export function verifyRequest(
         alg: parsed.params.alg,
         nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
       };
     }
     if (resolved === undefined)
@@ -603,6 +631,8 @@ export function verifyRequest(
         alg: parsed.params.alg,
         nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
       };
     key = resolved;
   }
@@ -819,6 +849,8 @@ function verifyWithKey(
         label,
         nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
       };
     }
   } catch (e) {
@@ -829,6 +861,8 @@ function verifyWithKey(
       label,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
   }
   if (!cryptoOk)
@@ -841,6 +875,8 @@ function verifyWithKey(
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
 
   // Key-id pinning (key-confusion defense): the signature is already
@@ -862,6 +898,8 @@ function verifyWithKey(
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
 
   // Application-tag pinning (cross-protocol replay defense, RFC 9421
@@ -883,6 +921,8 @@ function verifyWithKey(
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
 
   // Body binding (RFC 9530): the signature only covers the *value* of the
@@ -916,6 +956,8 @@ function verifyWithKey(
         alg: effectiveAlg,
         nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
       };
     const expected = createHash(dm === dm512 ? "sha512" : "sha256")
       .update(bodyBytes)
@@ -931,6 +973,8 @@ function verifyWithKey(
         alg: effectiveAlg,
         nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
       };
   }
 
@@ -950,6 +994,8 @@ function verifyWithKey(
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
   if (opts.requireExpires === true && parsed.params.expires === undefined)
     return {
@@ -961,6 +1007,8 @@ function verifyWithKey(
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
 
   // Self-contradictory window: `expires` earlier than `created` means the
@@ -987,6 +1035,8 @@ function verifyWithKey(
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
 
   if (
@@ -1002,6 +1052,8 @@ function verifyWithKey(
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
   if (
     parsed.params.created !== undefined &&
@@ -1016,6 +1068,8 @@ function verifyWithKey(
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
 
   // Maximum signature age (opt-in webhook-timestamp window): an old
@@ -1039,6 +1093,8 @@ function verifyWithKey(
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
 
   // Required nonce (opt-in): the replay store below is only consulted
@@ -1062,6 +1118,8 @@ function verifyWithKey(
       alg: effectiveAlg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
     };
 
   // Nonce replay detection: consulted only *after* the signature has
@@ -1080,6 +1138,8 @@ function verifyWithKey(
         alg: effectiveAlg,
         nonce,
         tag: parsed.params.tag,
+        created: parsed.params.created,
+        expires: parsed.params.expires,
       };
   }
 
@@ -1090,6 +1150,8 @@ function verifyWithKey(
     alg: effectiveAlg,
     nonce,
     tag: parsed.params.tag,
+    created: parsed.params.created,
+    expires: parsed.params.expires,
   };
 }
 
@@ -1102,14 +1164,14 @@ function verifyWithKey(
 export function verifyRequestOrThrow(
   req: RequestLike,
   opts: VerifyOptions,
-): { label: string; keyId?: string; alg?: string; nonce?: string; tag?: string } {
+): { label: string; keyId?: string; alg?: string; nonce?: string; tag?: string; created?: number; expires?: number } {
   const res = verifyRequest(req, opts);
   if (res.ok)
-    return { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce, tag: res.tag };
+    return { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce, tag: res.tag, created: res.created, expires: res.expires };
   throw new VerifyError(
     res.code ?? "VERIFICATION_ERROR",
     res.reason ?? "verification failed",
-    { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce, tag: res.tag },
+    { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce, tag: res.tag, created: res.created, expires: res.expires },
   );
 }
 
