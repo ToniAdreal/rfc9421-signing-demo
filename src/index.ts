@@ -18,6 +18,7 @@ export type {
   JwksKeyStoreOptions,
   JwksKeyStoreSnapshot,
   JwksKeyStoreStats,
+  JwksSleepImpl,
   JwksSnapshotKey,
 } from "./jwks.js";
 export { assertContentDigestAlg, contentDigest, contentDigestAlgOf } from "./digest.js";

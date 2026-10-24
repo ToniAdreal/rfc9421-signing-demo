@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore` accepts opt-in fetch retries: `fetchRetries`
+  (default `0`, single attempt as before), `fetchBackoffMs` (default
+  `1000`, fixed delay between attempts), and `sleepImpl` (default
+  `setTimeout`-based, injectable so tests can record delays without
+  waiting). Only transient failures are retried — network errors and
+  HTTP 5xx; a 4xx response, a malformed JWKS document, and a
+  `fetchTimeoutMs` abort are terminal, and on exhaustion `refresh()`
+  throws the last attempt's error unchanged. The previous snapshot
+  and `lastRefreshedAt` stay untouched until an attempt fully
+  succeeds, and `stats()` counts one `refresh()` call once however
+  many attempts it made. 9 new tests in
+  `test/jwksFetchRetry.test.ts`.
+
 - `verifyAllLabels` accepts a per-label freshness-window map
   `maxSignatureAgeSecByLabel`: a label in the map is checked against
   its own window, any other label falls back to the global

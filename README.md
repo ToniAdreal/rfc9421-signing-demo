@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 866 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 875 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -425,8 +425,9 @@ never cached.
 
 Observability: `store.stats()` returns a detached `{ refreshes,
 refreshFailures, hits, misses }` snapshot (mirroring `ReplayCache.stats()`).
-Refresh counts are once per actual fetch — a single-flight refresh shared by
-many waiters counts once, as a success or as a failure — and every `resolve()`
+Refresh counts are once per `refresh()` call — a single-flight refresh shared by
+many waiters counts once, as a success or as a failure, and retry attempts
+inside one `refresh()` do not multiply the count — and every `resolve()`
 call counts as exactly one hit (returned a key) or miss (returned `undefined`:
 an unknown keyid, any keyid before the first successful refresh, or an invalid
 keyid), so `hits + misses` is the total number of resolutions. The counters
@@ -443,6 +444,20 @@ The option takes a positive integer (milliseconds) and is unset by default, so
 no configuration change is zero behavior change; it applies to the default
 fetch only — a custom `fetchImpl` never receives an abort signal and must
 implement its own timeout if it needs one.
+
+Fetch retries (opt-in): `new JwksKeyStore(url, { fetchRetries: 2,
+fetchBackoffMs: 1000 })` re-attempts a failed `refresh()` up to the
+configured retry count, sleeping a fixed `fetchBackoffMs` between
+attempts. Only transient failures are retried — network errors and
+HTTP 5xx responses. A 4xx response, a malformed JWKS document, and a
+`fetchTimeoutMs` abort are terminal on the first attempt that sees
+them, and on exhaustion `refresh()` throws the last attempt's error
+unchanged. The previous snapshot and `lastRefreshedAt` are untouched
+until an attempt fully succeeds, and the `stats()` counters count one
+`refresh()` call once however many attempts it made. `fetchRetries`
+defaults to `0` (single attempt, the previous behavior); the sleep is
+injectable (`sleepImpl`, default `setTimeout`) so tests can record the
+requested delays without waiting for them.
 
 HTTPS-only endpoints (opt-in): `new JwksKeyStore(url, { requireHttps: true })`
 rejects a plaintext `http:` endpoint URL at construction with
@@ -2660,7 +2675,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 866 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 875 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

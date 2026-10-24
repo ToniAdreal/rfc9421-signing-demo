@@ -37,6 +37,14 @@ export interface JwksFetchResponse {
 export type JwksFetchImpl = (url: string) => Promise<JwksFetchResponse>;
 
 /**
+ * Sleep implementation used between JWKS fetch retries (see
+ * {@link JwksKeyStoreOptions.sleepImpl}). Receives the delay in
+ * milliseconds and resolves when it has elapsed. Defaults to a
+ * `setTimeout`-based sleep.
+ */
+export type JwksSleepImpl = (ms: number) => Promise<void>;
+
+/**
  * Options for {@link JwksKeyStore}.
  */
 export interface JwksKeyStoreOptions {
@@ -96,6 +104,38 @@ export interface JwksKeyStoreOptions {
    * that is later redirected from https to http.
    */
   requireHttps?: boolean;
+  /**
+   * Opt-in fetch retries: how many times `refresh()` re-attempts a
+   * failed fetch before giving up. Defaults to `0` — the current
+   * single-attempt behavior, so no configuration change is zero
+   * behavior change. Must be a non-negative integer.
+   *
+   * Only transient failures are retried: network errors from the
+   * fetch itself, and HTTP 5xx responses. A 4xx response, a malformed
+   * JWKS document, and a `fetchTimeoutMs` abort are terminal — a
+   * bad document will not heal by re-fetching, a 4xx says the
+   * request itself is wrong, and re-hanging a hung endpoint per
+   * attempt gains nothing (the caller re-calls `refresh()` when
+   * ready). Retries never multiply the `stats()` counters: one
+   * `refresh()` call counts once, however many attempts it made.
+   */
+  fetchRetries?: number;
+  /**
+   * Fixed delay in milliseconds between fetch retry attempts (see
+   * {@link JwksKeyStoreOptions.fetchRetries}). Defaults to `1000`.
+   * Must be a finite number >= 0; `0` means retry immediately. The
+   * delay is fixed, not exponential — a JWKS refresh is
+   * caller-driven and infrequent, so one predictable pause per
+   * retry is enough, and it keeps the worst-case refresh latency
+   * bounded and easy to reason about.
+   */
+  fetchBackoffMs?: number;
+  /**
+   * Sleep implementation used between fetch retries. Defaults to a
+   * `setTimeout`-based sleep. Inject a stub in tests to record the
+   * requested delays without waiting for them.
+   */
+  sleepImpl?: JwksSleepImpl;
 }
 
 /**
@@ -103,11 +143,15 @@ export interface JwksKeyStoreOptions {
  * returned by {@link JwksKeyStore.stats} (mirroring `ReplayCache`'s
  * `stats()`).
  *
- * - `refreshes`: successful fetches — one per actual fetch performed,
- *   so concurrent calls merged by the single-flight mechanism count
- *   once, not once per waiter.
- * - `refreshFailures`: failed fetches, under the same once-per-actual-
- *   fetch counting (a failed refresh shared by N waiters counts once).
+ * - `refreshes`: successful refreshes — one per `refresh()` call
+ *   that fetched and swapped a snapshot, so concurrent calls merged
+ *   by the single-flight mechanism count once, not once per waiter,
+ *   and retry attempts inside one `refresh()` do not multiply the
+ *   count either.
+ * - `refreshFailures`: failed refreshes, under the same once-per-
+ *   `refresh()`-call counting (a failed refresh shared by N waiters
+ *   counts once, and a refresh that exhausted its retries counts
+ *   once, not once per attempt).
  * - `hits`: `resolve()` calls that returned a key.
  * - `misses`: `resolve()` calls that returned `undefined` — an unknown
  *   keyid, any keyid before the first successful refresh, or an
@@ -337,7 +381,15 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   {@link JwksKeyStoreStats} for the exact counting rules, including
  *   the single-flight rule that merged calls count once), so an
  *   operator can tell whether rotation is taking effect and whether
- *   misses look like misconfiguration or retired keys.
+ *   misses look like misconfiguration or retired keys. Retry
+ *   attempts inside one `refresh()` do not multiply the counters.
+ * - **Opt-in fetch retries.** With `fetchRetries` set, a `refresh()`
+ *   re-attempts transient failures (network errors, HTTP 5xx) after
+ *   a fixed `fetchBackoffMs` pause, up to the configured retry
+ *   count; 4xx responses, malformed documents, and fetch timeouts
+ *   are terminal. The previous snapshot is untouched until an
+ *   attempt fully succeeds, so retries can never install a partial
+ *   key set.
  *
  * Honest limits: trusting the endpoint is the caller's responsibility —
  * this store performs no TLS pinning, no response-signature check, and
@@ -369,6 +421,12 @@ export class JwksKeyStore {
   private readonly usingDefaultFetch: boolean;
   /** Opt-in fetch timeout in milliseconds, or undefined when unset. */
   private readonly fetchTimeoutMs?: number;
+  /** Opt-in fetch retry count (0 = single attempt, the default). */
+  private readonly fetchRetries: number;
+  /** Fixed delay in milliseconds between fetch retry attempts. */
+  private readonly fetchBackoffMs: number;
+  /** Sleep implementation used between fetch retry attempts. */
+  private readonly sleepImpl: JwksSleepImpl;
   /** kid -> imported public key, from the last successful refresh. */
   private keysByKid = new Map<string, KeyObject>();
   /** Unix seconds of the last successful refresh, or null if none. */
@@ -407,8 +465,16 @@ export class JwksKeyStore {
       throw new Error(
         `JwksKeyStore: \`url\` must use http: or https:, got ${JSON.stringify(parsed.protocol)}`,
       );
-    const { fetchImpl, ttlSec = 300, now, fetchTimeoutMs, requireHttps } =
-      opts;
+    const {
+      fetchImpl,
+      ttlSec = 300,
+      now,
+      fetchTimeoutMs,
+      requireHttps,
+      fetchRetries = 0,
+      fetchBackoffMs = 1000,
+      sleepImpl,
+    } = opts;
     if (requireHttps !== undefined && typeof requireHttps !== "boolean")
       throw new Error(
         `JwksKeyStore: \`requireHttps\` must be a boolean, got ${String(requireHttps)}`,
@@ -436,10 +502,32 @@ export class JwksKeyStore {
       throw new Error(
         `JwksKeyStore: \`fetchTimeoutMs\` must be a positive integer (milliseconds), got ${String(fetchTimeoutMs)}`,
       );
+    if (
+      typeof fetchRetries !== "number" ||
+      !Number.isInteger(fetchRetries) ||
+      fetchRetries < 0
+    )
+      throw new Error(
+        `JwksKeyStore: \`fetchRetries\` must be a non-negative integer, got ${String(fetchRetries)}`,
+      );
+    if (
+      typeof fetchBackoffMs !== "number" ||
+      !Number.isFinite(fetchBackoffMs) ||
+      fetchBackoffMs < 0
+    )
+      throw new Error(
+        `JwksKeyStore: \`fetchBackoffMs\` must be a finite number >= 0 (milliseconds), got ${String(fetchBackoffMs)}`,
+      );
+    if (sleepImpl !== undefined && typeof sleepImpl !== "function")
+      throw new Error("JwksKeyStore: `sleepImpl` must be a function");
     this.url = url;
     this.usingDefaultFetch = fetchImpl === undefined;
     this.fetchImpl = fetchImpl ?? ((u: string) => globalThis.fetch(u));
     this.fetchTimeoutMs = fetchTimeoutMs;
+    this.fetchRetries = fetchRetries;
+    this.fetchBackoffMs = fetchBackoffMs;
+    this.sleepImpl =
+      sleepImpl ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     this.ttlSec = ttlSec;
     this.clock = now ?? (() => Math.floor(Date.now() / 1000));
   }
@@ -560,22 +648,95 @@ export class JwksKeyStore {
     }
   }
 
-  /** Fetch the JWKS document and build/swap the next snapshot. */
-  private async fetchAndSwap(): Promise<void> {
-    let res: JwksFetchResponse;
+  /**
+   * Whether an error is a `fetchTimeoutMs` abort. Timeout aborts are
+   * terminal for retries (see {@link JwksKeyStoreOptions.fetchRetries}),
+   * so the retry loop needs to tell them apart from ordinary network
+   * failures. The timeout error carries no distinct type — it is
+   * matched by its pinned message (see `fetchWithTimeout`), which the
+   * timeout tests nail down verbatim.
+   */
+  private isFetchTimeoutError(err: unknown): boolean {
+    return (
+      err instanceof Error &&
+      err.message.startsWith("JwksKeyStore: JWKS fetch timed out after ")
+    );
+  }
+
+  /** A single fetch attempt: no retry, no status handling. */
+  private async fetchOnce(): Promise<JwksFetchResponse> {
     if (this.usingDefaultFetch && this.fetchTimeoutMs !== undefined) {
-      res = await this.fetchWithTimeout();
-    } else {
+      return this.fetchWithTimeout();
+    }
+    try {
+      return await this.fetchImpl(this.url);
+    } catch (err) {
+      throw new Error(
+        `JwksKeyStore: failed to fetch JWKS from ${this.url}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Fetch with the opt-in retry policy: up to `fetchRetries + 1`
+   * attempts in total, sleeping a fixed `fetchBackoffMs` between
+   * attempts. Only network errors and HTTP 5xx responses are
+   * retried; a 4xx response, a malformed response shape, and a
+   * `fetchTimeoutMs` abort are terminal on the first attempt that
+   * sees them. A response that is not `ok` but carries no `json()`
+   * method is passed through untouched — `fetchAndSwap`'s shape
+   * check, not this loop, owns that contract violation, so the
+   * error ordering for malformed responses is unchanged.
+   *
+   * On exhaustion the last attempt's error is thrown unchanged, so
+   * a caller that distinguishes "HTTP 500" from "network down" from
+   * "timed out" keeps seeing exactly the error the final attempt
+   * produced. The old snapshot and freshness timestamp are
+   * untouched throughout — this method only ever returns a
+   * response (or throws); swapping happens in `fetchAndSwap`.
+   */
+  private async fetchWithRetries(): Promise<JwksFetchResponse> {
+    const maxAttempts = this.fetchRetries + 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      let res: JwksFetchResponse;
       try {
-        res = await this.fetchImpl(this.url);
+        res = await this.fetchOnce();
       } catch (err) {
+        if (this.isFetchTimeoutError(err) || attempt === maxAttempts - 1)
+          throw err;
+        await this.sleepImpl(this.fetchBackoffMs);
+        continue;
+      }
+      if (
+        typeof res === "object" &&
+        res !== null &&
+        typeof res.json === "function" &&
+        !res.ok
+      ) {
+        if (
+          typeof res.status === "number" &&
+          res.status >= 500 &&
+          attempt < maxAttempts - 1
+        ) {
+          await this.sleepImpl(this.fetchBackoffMs);
+          continue;
+        }
         throw new Error(
-          `JwksKeyStore: failed to fetch JWKS from ${this.url}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `JwksKeyStore: JWKS fetch failed: HTTP ${String(res.status)} from ${this.url}`,
         );
       }
+      return res;
     }
+    // Unreachable: every iteration returns, throws, or continues to
+    // the next attempt, and the last attempt always returns or throws.
+    throw new Error("JwksKeyStore: unreachable fetch retry state");
+  }
+
+  /** Fetch the JWKS document and build/swap the next snapshot. */
+  private async fetchAndSwap(): Promise<void> {
+    const res = await this.fetchWithRetries();
     if (
       typeof res !== "object" ||
       res === null ||
@@ -583,10 +744,6 @@ export class JwksKeyStore {
     )
       throw new Error(
         `JwksKeyStore: fetch for ${this.url} did not return a response with a json() method`,
-      );
-    if (!res.ok)
-      throw new Error(
-        `JwksKeyStore: JWKS fetch failed: HTTP ${String(res.status)} from ${this.url}`,
       );
     let doc: unknown;
     try {
