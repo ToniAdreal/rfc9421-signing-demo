@@ -154,6 +154,9 @@ export interface VerifyOptions {
    * `created` parameter never triggers this check — orthogonal to
    * `requireCreated`: combine the two when an undated signature must be
    * rejected rather than passed through.
+   * In `verifyAllLabels` the same window applies to every label,
+   * unless overridden per label via
+   * `VerifyAllOptions.maxSignatureAgeSecByLabel`.
    */
   maxSignatureAgeSec?: number;
   /**
@@ -1232,6 +1235,20 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * `keyResolvers` — combining them throws.
    */
   candidateKeysByLabel?: Record<string, KeyObject[]>;
+  /**
+   * Per-label freshness windows for multi-party signatures (e.g. a
+   * merchant signature with a short acceptance window plus a payment-
+   * gateway signature with a longer one on the same request): maps a
+   * signature label to that label's own `maxSignatureAgeSec`. A label
+   * absent from the map falls back to the global `maxSignatureAgeSec`
+   * (unset means no age check for it). Each value is validated per
+   * label with the same rules as the global one (a non-negative finite
+   * number); a malformed map or value is a caller configuration error
+   * (throw). A freshness window is not key selection: it does not
+   * participate in the `keys`/`keyResolver`/`candidateKeys` mutual
+   * exclusion rules.
+   */
+  maxSignatureAgeSecByLabel?: Record<string, number>;
 }
 
 /**
@@ -1324,6 +1341,32 @@ function assertCandidateKeysByLabel(
 }
 
 /**
+ * Validate the per-label freshness-window map. Each value is validated
+ * with the same rules as the global `maxSignatureAgeSec` (reusing
+ * `assertMaxSignatureAgeSec`); a malformed map or value is a caller
+ * configuration error, so it throws rather than returning
+ * `{ ok: false }`.
+ */
+function assertMaxSignatureAgeSecByLabel(
+  map: Record<string, number> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `maxSignatureAgeSecByLabel` must be a label→window object",
+    );
+  for (const [label, window] of Object.entries(map)) {
+    try {
+      assertMaxSignatureAgeSec(window);
+    } catch (e) {
+      throw new Error(
+        `verifyAllLabels: \`maxSignatureAgeSecByLabel["${label}"]\` is invalid: ${(e as Error).message}`,
+      );
+    }
+  }
+}
+
+/**
  * Verify every signature carried by the request. Parses all labels from
  * the `Signature-Input` header and verifies each one with
  * `verifyRequest`, returning one `VerifyResult` per label in wire order.
@@ -1346,6 +1389,7 @@ export function verifyAllLabels(
   assertExpectedTags(opts.expectedTags);
   assertKeyResolvers(opts.keyResolvers);
   assertCandidateKeysByLabel(opts.candidateKeysByLabel);
+  assertMaxSignatureAgeSecByLabel(opts.maxSignatureAgeSecByLabel);
   let labels: string[];
   try {
     labels = listSignatureLabels(sigInput);
@@ -1389,6 +1433,13 @@ export function verifyAllLabels(
     // against its own application protocol; every other label falls back
     // to the global `expectedTag` (unset means no pinning for it).
     const expectedTag = opts.expectedTags?.[label] ?? opts.expectedTag;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys });
+    // Per-label freshness window: a label pinned in
+    // `maxSignatureAgeSecByLabel` is checked against its own window;
+    // every other label falls back to the global `maxSignatureAgeSec`
+    // (unset means no age check for it). A window is not key selection,
+    // so it never joins the mutual-exclusion checks above.
+    const maxSignatureAgeSec =
+      opts.maxSignatureAgeSecByLabel?.[label] ?? opts.maxSignatureAgeSec;
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec });
   });
 }

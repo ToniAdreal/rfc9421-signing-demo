@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifyAllLabels` accepts a per-label freshness-window map
+  `maxSignatureAgeSecByLabel`: a label in the map is checked against
+  its own window, any other label falls back to the global
+  `maxSignatureAgeSec` (unset means no age check for it) — so a
+  merchant signature with a short window and a gateway signature with
+  a long one can share one request. Each value is validated per label
+  with the global window's rules (non-negative finite number, else a
+  configuration error naming the label); a window is not key
+  selection, so it never joins the `keys`/`keyResolver`/`candidateKeys`
+  mutual-exclusion rules. 9 new tests in
+  `test/maxSignatureAgeSecByLabel.test.ts`.
+
 - `VerifyResult` now carries the wire timestamps `created` / `expires`
   (Unix seconds, `undefined` when the signer omitted them), in the same
   "as seen on the wire" spirit as `nonce` / `tag`: every `verifyRequest`
