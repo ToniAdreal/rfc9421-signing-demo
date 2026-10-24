@@ -81,6 +81,21 @@ export interface JwksKeyStoreOptions {
    * need one. Unset by default (zero behavior change).
    */
   fetchTimeoutMs?: number;
+  /**
+   * Opt-in transport-layer enforcement: when `true`, the JWKS
+   * endpoint URL must use `https:` — a plaintext `http:` endpoint is
+   * rejected at construction with a configuration error, before any
+   * fetch happens. Whatever the endpoint serves becomes a
+   * verification key, so over plaintext a path attacker can
+   * substitute the entire key set; the plain-HTTP allowance exists
+   * only for loopback development and tests.
+   *
+   * Defaults to `false` (an `http:` endpoint is allowed, so no
+   * configuration change is zero behavior change). This is a
+   * construction-time check only: it does not intercept a fetch
+   * that is later redirected from https to http.
+   */
+  requireHttps?: boolean;
 }
 
 /**
@@ -392,7 +407,16 @@ export class JwksKeyStore {
       throw new Error(
         `JwksKeyStore: \`url\` must use http: or https:, got ${JSON.stringify(parsed.protocol)}`,
       );
-    const { fetchImpl, ttlSec = 300, now, fetchTimeoutMs } = opts;
+    const { fetchImpl, ttlSec = 300, now, fetchTimeoutMs, requireHttps } =
+      opts;
+    if (requireHttps !== undefined && typeof requireHttps !== "boolean")
+      throw new Error(
+        `JwksKeyStore: \`requireHttps\` must be a boolean, got ${String(requireHttps)}`,
+      );
+    if (requireHttps === true && parsed.protocol !== "https:")
+      throw new Error(
+        `JwksKeyStore: \`requireHttps\` requires https: for the JWKS endpoint, got ${JSON.stringify(parsed.protocol)}`,
+      );
     if (fetchImpl !== undefined && typeof fetchImpl !== "function")
       throw new Error("JwksKeyStore: `fetchImpl` must be a function");
     if (typeof ttlSec !== "number" || !Number.isFinite(ttlSec) || ttlSec <= 0)

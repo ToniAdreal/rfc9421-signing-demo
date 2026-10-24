@@ -133,7 +133,11 @@ Read this before using it anywhere that matters.
   responsibility: `JwksKeyStore` performs no TLS pinning and no
   response-signature verification, so whatever a compromised or
   misconfigured endpoint serves becomes a verification key — point it
-  only at trusted origins, over HTTPS. For `keyid`-less rotation windows
+  only at trusted origins, over HTTPS. The opt-in `requireHttps: true`
+  construction option makes that HTTPS expectation a fail-fast error
+  for plaintext `http:` endpoints (before any fetch is attempted), but
+  it is construction-time only and does not intercept a fetch that is
+  later redirected from https to http. For `keyid`-less rotation windows
   (e.g. HMAC webhook secret rollover), `VerifyOptions.candidateKeys`
   tries an ordered key list and returns the first full pass; only
   `SIGNATURE_MISMATCH` advances, policy verdicts return immediately, and

@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore` accepts an opt-in `requireHttps: true`: a plaintext `http:`
+  endpoint URL is then rejected at construction with
+  `JwksKeyStore: \`requireHttps\` requires https: for the JWKS endpoint,
+  got "http:"` — before any fetch is attempted (proved by a counting
+  `fetchImpl` that sees zero calls). Whatever the endpoint serves becomes
+  a verification key, and over plaintext a path attacker could substitute
+  the entire key set, so this is the production posture when the endpoint
+  is on the public internet. Non-boolean values throw a configuration
+  error; `http:` stays allowed by default (loopback development, tests),
+  and the check is construction-time only — it does not intercept a fetch
+  that is later redirected from https to http (documented honestly on the
+  option, in the README JWKS section and in SECURITY.md). Check order is
+  URL validity → protocol whitelist → https enforcement. 8 new tests in
+  `test/jwksHttps.test.ts`.
+
 - CLI demo closes with a signed-response segment: a real loopback `http`
   server plays the payment gateway, signing its settlement response's
   `@status` with a gateway ed25519 key, and the client's `http.get`
