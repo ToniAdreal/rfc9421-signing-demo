@@ -59,6 +59,13 @@ import {
   DEMO_DIGEST_GUARD_ERRORS,
   DEMO_DIGEST_GUARD_REJECTED,
   DEMO_GATEWAY_KEY_ID,
+  DEMO_GATEWAY_RESPONSE_BODY,
+  DEMO_GATEWAY_RESPONSE_KEY_ID,
+  DEMO_GATEWAY_RESPONSE_NONCE,
+  DEMO_GATEWAY_RESPONSE_PATH,
+  DEMO_GATEWAY_RESPONSE_STATUS,
+  DEMO_GATEWAY_RESPONSE_TAMPER_CODE,
+  DEMO_GATEWAY_RESPONSE_TAMPERED_STATUS,
   DEMO_INBOUND_COVERED_COMPONENTS,
   DEMO_INBOUND_HOST,
   DEMO_INBOUND_NONCE,
@@ -4704,7 +4711,7 @@ test("demo per-label key resolver segment pins keyResolvers (each label through 
   assert.throws(() => verifyAllLabels(dual, { now: DEMO_CREATED + 60, keyResolvers: { merchant: "not-a-function" as never } }), (e: unknown) => e instanceof Error && e.message === DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR);
 });
 
-test("demo lines contain the per-label key resolver segment (own keystores, unresolved, fallback, non-function value, closing the demo)", async () => {
+test("demo lines contain the per-label key resolver segment (own keystores, unresolved, fallback, non-function value, followed by the signed-response segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Per-label key resolvers: verifyAllLabels' keyResolvers option maps/);
@@ -4719,8 +4726,102 @@ test("demo lines contain the per-label key resolver segment (own keystores, unre
     `Non-function resolver value: the same request verified with keyResolvers merchant set to a string: rejected with configuration error "${DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR}"`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
-  assert.equal(lines[lines.length - 1], expectedLines[expectedLines.length - 1]);
+  // The key-resolvers block is no longer the demo's last segment: the
+  // signed-response segment closes the demo.
+  const signedIdx = lines.findIndex((l) =>
+    l.startsWith("Signed response verification:"),
+  );
+  assert.ok(signedIdx !== -1 && signedIdx > headerIdx + 5);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Per-label key resolvers:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
+});
+
+test("demo signed-response segment verifies a gateway-signed @status response over loopback and rejects a 200->500 status flip", async () => {
+  const {
+    lines,
+    gatewayResponseRequest,
+    gatewayResponseVerification,
+    gatewayResponseTamperedVerification,
+  } = await runDemo();
+
+  // Structure: the adapted response carries the pinned status/body, the
+  // bound request, and the lowercased wire headers.
+  assert.equal(gatewayResponseRequest.status, DEMO_GATEWAY_RESPONSE_STATUS);
+  assert.equal(gatewayResponseRequest.method, "GET");
+  assert.match(
+    gatewayResponseRequest.url,
+    new RegExp(
+      `^http://127\\.0\\.0\\.1:\\d+${DEMO_GATEWAY_RESPONSE_PATH}$`,
+    ),
+  );
+  assert.equal(
+    gatewayResponseRequest.body?.toString(),
+    DEMO_GATEWAY_RESPONSE_BODY,
+  );
+  assert.equal(
+    gatewayResponseRequest.headers["content-type"],
+    "application/json",
+  );
+  assert.equal(gatewayResponseRequest.trailers, undefined);
+  assert.equal(gatewayResponseRequest.request?.method, "GET");
+  assert.equal(gatewayResponseRequest.request?.url, gatewayResponseRequest.url);
+
+  // Verification identity is the pinned gateway keyid/alg/nonce.
+  assert.equal(gatewayResponseVerification.ok, true);
+  assert.equal(gatewayResponseVerification.label, "sig1");
+  assert.equal(gatewayResponseVerification.keyId, DEMO_GATEWAY_RESPONSE_KEY_ID);
+  assert.equal(gatewayResponseVerification.alg, "ed25519");
+  assert.equal(gatewayResponseVerification.nonce, DEMO_GATEWAY_RESPONSE_NONCE);
+  // The 200 -> 500 flip is rejected with the pinned code.
+  assert.equal(gatewayResponseTamperedVerification.ok, false);
+  assert.equal(
+    gatewayResponseTamperedVerification.code,
+    DEMO_GATEWAY_RESPONSE_TAMPER_CODE,
+  );
+
+  // Cross-check with direct library calls: the same adapted message
+  // verified under an unrelated key is rejected (the struct is a real
+  // verifiable message, not a demo stub), and the pinned body is what
+  // the loopback gateway served.
+  const { publicKey: otherKey } = generateEd25519KeyPair();
+  const crossCheck = verifyRequest(gatewayResponseRequest, {
+    key: otherKey,
+    now: DEMO_CREATED + 60,
+    requiredComponents: ["@status"],
+  });
+  assert.equal(crossCheck.ok, false);
+  assert.equal(crossCheck.code, "SIGNATURE_MISMATCH");
+
+  // Printed lines: header + three pinned lines (status / ok / @status
+  // value) + the tamper rejection — byte-exact, closing the demo.
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Signed response verification: the demo closes as a gateway client/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Signed response verification:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 5), [
+    `Gateway response status: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
+    `Gateway response verification: OK (label sig1, keyid="${DEMO_GATEWAY_RESPONSE_KEY_ID}", alg="ed25519", nonce="${DEMO_GATEWAY_RESPONSE_NONCE}")`,
+    `Signed @status value: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
+    `Gateway response verification after status tampering (200 -> 500): FAILED (code ${DEMO_GATEWAY_RESPONSE_TAMPER_CODE}: ${gatewayResponseTamperedVerification.reason})`,
+  ]);
+  assert.equal(headerIdx + 5, lines.length);
+});
+
+test("demo signed-response segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Signed response verification:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  assert.ok(a !== -1 && b !== -1);
+  // Only the loopback port (never printed) and the key pair are fresh
+  // per run, so the segment's printed tail is identical.
+  assert.deepEqual(second.lines.slice(b), first.lines.slice(a));
 });

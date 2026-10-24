@@ -779,6 +779,20 @@
  * Every clock is injected and the segment's key pairs
  * are fresh per run, so the printed lines are identical
  * between runs.
+ * The demo closes with a signed-response segment: the client-side
+ * mirror of the inbound `fromNodeRequest` segment. A real loopback
+ * `http` server plays the payment gateway, signing its settlement
+ * response's `@status` with a gateway ed25519 key; the client's
+ * `http.get` callback buffers the body, normalizes the response with
+ * `fromNodeResponse(res, body, { request })` and verifies with
+ * `requiredComponents: ["@status"]`. A second pass flips the adapted
+ * status 200 -> 500 — the way a downgraded settlement would look on
+ * the wire — and is printed rejected with `SIGNATURE_MISMATCH`.
+ * Outside the printed lines the demo asserts the adapted status and
+ * body, the verification identity (label/keyid/alg/nonce) and the
+ * tamper rejection code equal the hand-pinned expectations below.
+ * Only the loopback port (never printed) and the key pair are fresh
+ * per run, so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -807,6 +821,8 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { createServer, get, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
 import {
   createSecretKey,
   generateKeyPairSync,
@@ -829,6 +845,7 @@ import {
   exportPublicKeyJwkRsa,
   exportPublicKeyPem,
   fromNodeRequest,
+  fromNodeResponse,
   generateEd25519KeyPair,
   generateNonce,
   generateP256KeyPair,
@@ -2759,6 +2776,34 @@ export const DEMO_KEY_RESOLVERS_UNRESOLVED_REASON =
 export const DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR =
   'verifyAllLabels: `keyResolvers["merchant"]` must be a function, got string';
 
+/** Key id the closing signed-response segment's gateway signature carries. */
+export const DEMO_GATEWAY_RESPONSE_KEY_ID = "demo-gateway-response-1";
+/** Nonce the closing signed-response segment's gateway signature carries. */
+export const DEMO_GATEWAY_RESPONSE_NONCE = "demo-gateway-response-nonce-1";
+/** Path the closing signed-response segment's loopback settlement endpoint serves. */
+export const DEMO_GATEWAY_RESPONSE_PATH = "/v1/settlements";
+/**
+ * Settlement response body the closing signed-response segment's loopback
+ * gateway serves (a fixed literal — the client buffers these exact bytes).
+ */
+export const DEMO_GATEWAY_RESPONSE_BODY =
+  '{"settled":true,"amount":10000,"currency":"USD"}';
+/** Status the closing signed-response segment's loopback gateway signs and sends. */
+export const DEMO_GATEWAY_RESPONSE_STATUS = 200;
+/**
+ * Status the closing signed-response segment flips the adapted response
+ * to (the way a downgraded settlement would look on the wire) —
+ * verification must reject it with
+ * `DEMO_GATEWAY_RESPONSE_TAMPER_CODE`.
+ */
+export const DEMO_GATEWAY_RESPONSE_TAMPERED_STATUS = 500;
+/**
+ * Hand-pinned failure code for the closing signed-response segment's
+ * 200 -> 500 status flip (`SIGNATURE_MISMATCH`).
+ */
+export const DEMO_GATEWAY_RESPONSE_TAMPER_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
+
 export interface DemoResult {
   signed: SignedHttpRequest;
   tamperedBody: string;
@@ -3880,6 +3925,19 @@ export interface DemoResult {
    * `DEMO_KEY_RESOLVERS_NON_FUNCTION_ERROR`).
    */
   keyResolversNonFunctionError: string;
+  /**
+   * The client's adapted `RequestLike` for the gateway's signed `@status`
+   * settlement response in the closing signed-response segment (the
+   * client-side mirror of the inbound `fromNodeRequest` demo).
+   */
+  gatewayResponseRequest: RequestLike;
+  /** Verification of the gateway's signed `@status` response (ok). */
+  gatewayResponseVerification: VerifyResult;
+  /**
+   * Verification after the adapted response status is flipped 200 ->
+   * 500 (rejected with `SIGNATURE_MISMATCH`).
+   */
+  gatewayResponseTamperedVerification: VerifyResult;
   lines: string[];
 }
 
@@ -3969,6 +4027,139 @@ function formatLabelResult(prefix: string, result: VerifyResult): string {
  * both verification results, and the exact lines `main()` prints — so
  * tests can assert on the demo itself, not just on the library.
  */
+/**
+ * The closing signed-response segment's loopback fixture: a real `http`
+ * server on 127.0.0.1 plays the payment gateway, signing its settlement
+ * response's `@status` with a fresh gateway ed25519 key (pinned keyid,
+ * nonce and `created`; the verify instant is injected), and the client
+ * fetches it with `http.get`, buffers the body in the callback, adapts
+ * the response with `fromNodeResponse(res, body, { request })` and
+ * verifies with `requiredComponents: ["@status"]`.
+ *
+ * A second verification flips the adapted status
+ * `DEMO_GATEWAY_RESPONSE_STATUS` -> `DEMO_GATEWAY_RESPONSE_TAMPERED_STATUS`
+ * (the way a downgraded settlement would look on the wire) and must be
+ * rejected with `DEMO_GATEWAY_RESPONSE_TAMPER_CODE`. Nothing about the
+ * wire form is printed except through fixed literals, so the printed
+ * segment is byte-identical between runs even though the port and the
+ * key pair are fresh per run.
+ */
+interface GatewaySignedResponseFixture {
+  /** The client's adapted `RequestLike` for the gateway's signed response. */
+  requestLike: RequestLike;
+  /** Verification of the gateway's signed `@status` response (ok). */
+  verification: VerifyResult;
+  /**
+   * Verification after the adapted status is flipped 200 -> 500
+   * (rejected with `DEMO_GATEWAY_RESPONSE_TAMPER_CODE`).
+   */
+  tamperedVerification: VerifyResult;
+}
+
+async function fetchGatewaySignedResponse(): Promise<GatewaySignedResponseFixture> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const server = createServer((req, res) => {
+    const port = (server.address() as AddressInfo).port;
+    const signed = signRequest(
+      {
+        method: "GET",
+        url: `http://127.0.0.1:${port}${DEMO_GATEWAY_RESPONSE_PATH}`,
+        headers: {},
+        body: DEMO_GATEWAY_RESPONSE_BODY,
+        status: DEMO_GATEWAY_RESPONSE_STATUS,
+      },
+      {
+        keyId: DEMO_GATEWAY_RESPONSE_KEY_ID,
+        alg: "ed25519",
+        key: privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_GATEWAY_RESPONSE_NONCE,
+        coveredComponents: ["@status"],
+      },
+    );
+    res.writeHead(DEMO_GATEWAY_RESPONSE_STATUS, {
+      "content-type": "application/json",
+      "signature-input": signed.headers["signature-input"] as string,
+      signature: signed.headers["signature"] as string,
+    });
+    res.end(DEMO_GATEWAY_RESPONSE_BODY);
+  });
+  try {
+    const { port } = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    });
+    const url = `http://127.0.0.1:${port}${DEMO_GATEWAY_RESPONSE_PATH}`;
+    const request: RequestLike = {
+      method: "GET",
+      url,
+      headers: { host: `127.0.0.1:${port}` },
+    };
+    const { res, body } = await new Promise<{
+      res: IncomingMessage;
+      body: Buffer;
+    }>((resolve, reject) => {
+      get(url, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => resolve({ res, body: Buffer.concat(chunks) }));
+        res.on("error", reject);
+      }).on("error", reject);
+    });
+    const requestLike = fromNodeResponse(res, body, { request });
+    const verifyOptions = {
+      key: publicKey,
+      now: DEMO_CREATED + 60,
+      requiredComponents: ["@status"],
+    };
+    const verification = verifyRequest(requestLike, verifyOptions);
+    // The wire said 200; the tampered view claims 500 — a status the
+    // gateway never signed.
+    const tamperedVerification = verifyRequest(
+      { ...requestLike, status: DEMO_GATEWAY_RESPONSE_TAMPERED_STATUS },
+      verifyOptions,
+    );
+    if (
+      requestLike.status !== DEMO_GATEWAY_RESPONSE_STATUS ||
+      body.toString() !== DEMO_GATEWAY_RESPONSE_BODY
+    ) {
+      throw new Error(
+        `demo fixture broken: gateway signed-response segment adapted status ` +
+          `${requestLike.status} / body ${JSON.stringify(body.toString())} ` +
+          `instead of ${DEMO_GATEWAY_RESPONSE_STATUS} / the pinned settlement body`,
+      );
+    }
+    if (
+      !verification.ok ||
+      verification.label !== "sig1" ||
+      verification.keyId !== DEMO_GATEWAY_RESPONSE_KEY_ID ||
+      verification.alg !== "ed25519" ||
+      verification.nonce !== DEMO_GATEWAY_RESPONSE_NONCE
+    ) {
+      throw new Error(
+        `demo fixture broken: gateway signed-response segment verification gave ` +
+          `${JSON.stringify(verification)} instead of ok with the pinned ` +
+          `label/keyid/alg/nonce`,
+      );
+    }
+    if (
+      tamperedVerification.ok !== false ||
+      tamperedVerification.code !== DEMO_GATEWAY_RESPONSE_TAMPER_CODE
+    ) {
+      throw new Error(
+        `demo fixture broken: gateway signed-response segment status flip gave ` +
+          `${JSON.stringify(tamperedVerification)} instead of ` +
+          `${DEMO_GATEWAY_RESPONSE_TAMPER_CODE}`,
+      );
+    }
+    return { requestLike, verification, tamperedVerification };
+  } finally {
+    server.close();
+  }
+}
+
 export async function runDemo(): Promise<DemoResult> {
   const { publicKey, privateKey } = generateEd25519KeyPair();
 
@@ -7449,6 +7640,21 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Signed-response segment (client direction): the demo closes as a
+  // gateway client. A real loopback `http` server plays the payment
+  // gateway: it signs its settlement response's `@status` with a
+  // gateway ed25519 key, and the client's `http.get` callback buffers
+  // the body, normalizes the response with `fromNodeResponse` and
+  // verifies with `requiredComponents: ["@status"]` — the client-side
+  // mirror of the inbound `fromNodeRequest` segment above. A second
+  // pass flips the adapted status 200 -> 500 (the way a downgraded
+  // settlement would look on the wire) and is rejected with
+  // `SIGNATURE_MISMATCH`. The helper's fail-fast asserts already
+  // pinned every outcome outside the printed lines; only the port
+  // (never printed) and the key pair are fresh per run, so the
+  // segment's printed lines are byte-identical between runs.
+  const gatewayResponse = await fetchGatewaySignedResponse();
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -7889,6 +8095,16 @@ export async function runDemo(): Promise<DemoResult> {
       ? `Missing label falls back: the same request verified with keyResolvers naming only merchant and a global keyResolver holding the gateway key: merchant OK (label ${keyResolversFallbackVerification[0].label}, keyid="${keyResolversFallbackVerification[0].keyId}", alg="${keyResolversFallbackVerification[0].alg}") via its own resolver, gateway OK (label ${keyResolversFallbackVerification[1].label}, keyid="${keyResolversFallbackVerification[1].keyId}", alg="${keyResolversFallbackVerification[1].alg}") via the global fallback`
       : `Missing label falls back: the same request verified with keyResolvers naming only merchant and a global keyResolver holding the gateway key: FAILED (merchant ${keyResolversFallbackVerification[0].ok ? "OK" : `code ${keyResolversFallbackVerification[0].code}: ${keyResolversFallbackVerification[0].reason}`}, gateway ${keyResolversFallbackVerification[1].ok ? "OK" : `code ${keyResolversFallbackVerification[1].code}: ${keyResolversFallbackVerification[1].reason}`})`,
     `Non-function resolver value: the same request verified with keyResolvers merchant set to a string: rejected with configuration error "${keyResolversNonFunctionError}"`,
+    "",
+    "Signed response verification: the demo closes as a gateway client — a real loopback http server signs its settlement response's @status with a gateway ed25519 key, the http.get callback normalizes the response with fromNodeResponse and verifies with requiredComponents [\"@status\"] — the client-side mirror of the inbound fromNodeRequest segment",
+    `Gateway response status: ${gatewayResponse.requestLike.status}`,
+    gatewayResponse.verification.ok
+      ? `Gateway response verification: OK (label ${gatewayResponse.verification.label}, keyid="${gatewayResponse.verification.keyId}", alg="${gatewayResponse.verification.alg}", nonce="${gatewayResponse.verification.nonce}")`
+      : `Gateway response verification: FAILED (code ${gatewayResponse.verification.code}: ${gatewayResponse.verification.reason})`,
+    `Signed @status value: ${gatewayResponse.requestLike.status}`,
+    gatewayResponse.tamperedVerification.ok
+      ? "Gateway response verification after status tampering (200 -> 500): OK (unexpected — tampering was not detected)"
+      : `Gateway response verification after status tampering (200 -> 500): FAILED (code ${gatewayResponse.tamperedVerification.code}: ${gatewayResponse.tamperedVerification.reason})`,
   ];
 
   return {
@@ -8099,6 +8315,9 @@ export async function runDemo(): Promise<DemoResult> {
     keyResolversUnresolvedVerification,
     keyResolversFallbackVerification,
     keyResolversNonFunctionError,
+    gatewayResponseRequest: gatewayResponse.requestLike,
+    gatewayResponseVerification: gatewayResponse.verification,
+    gatewayResponseTamperedVerification: gatewayResponse.tamperedVerification,
     lines,
   };
 }

@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo closes with a signed-response segment: a real loopback `http`
+  server plays the payment gateway, signing its settlement response's
+  `@status` with a gateway ed25519 key, and the client's `http.get`
+  callback buffers the body, normalizes the response with
+  `fromNodeResponse(res, body, { request })` and verifies with
+  `requiredComponents: ["@status"]` — the client-side mirror of the
+  inbound `fromNodeRequest` demo. A second pass flips the adapted status
+  200 -> 500 (the way a downgraded settlement would look on the wire)
+  and is rejected with `SIGNATURE_MISMATCH`. All outcomes are asserted
+  outside the printed lines against hand-pinned constants; only the
+  loopback port (never printed) and the key pair are fresh per run, so
+  the segment's printed lines are byte-identical between runs.
+
 - `JwksKeyStore` accepts an opt-in `fetchTimeoutMs` (positive integer,
   milliseconds): the default fetch is performed as
   `globalThis.fetch(url, { signal })` with an `AbortController` that
