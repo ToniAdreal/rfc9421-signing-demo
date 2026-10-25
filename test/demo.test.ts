@@ -292,6 +292,13 @@ import {
   DEMO_REQUIRE_NONCE_BY_LABEL_MISSING_REASON,
   DEMO_REQUIRE_NONCE_BY_LABEL_NONCE,
   DEMO_REQUIRE_NONCE_BY_LABEL_URL,
+  DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID,
+  DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL,
+  DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_NEW_SECRET,
+  DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_OLD_SECRET,
+  DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID,
+  DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL,
+  DEMO_CANDIDATE_KEYS_BY_LABEL_URL,
   DEMO_REQUIRE_NONCE_URL,
   DEMO_REQUIRE_TAG,
   DEMO_REQUIRE_TAG_BODY,
@@ -5264,7 +5271,7 @@ test("demo per-label nonce requirement segment pins requireNonceByLabel (merchan
   );
 });
 
-test("demo lines contain the per-label nonce requirement segment (merchant rejected, gateway fallback, nonce passes, closing the demo)", async () => {
+test("demo lines contain the per-label nonce requirement segment (merchant rejected, gateway fallback, nonce passes, followed by the candidate keys segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Per-label nonce requirement: verifyAllLabels' requireNonceByLabel map demands/);
@@ -5278,10 +5285,163 @@ test("demo lines contain the per-label nonce requirement segment (merchant rejec
     `Gateway without nonce: the same call: OK (label gateway, keyid="${DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") (unmapped label falls back to the unset global requireNonce — no check is made)`,
     `Merchant with nonce: merchant re-signed with nonce "${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}" verified with the same map: OK (label merchant, nonce="${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}"; label gateway still verifies without one)`,
   ]);
-  assert.equal(headerIdx + 4, lines.length);
+  assert.ok(lines[headerIdx + 4] === "");
+  assert.ok(
+    lines[headerIdx + 5].startsWith("Per-label candidate keys:"),
+  );
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Per-label nonce requirement:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo per-label candidate keys segment pins candidateKeysByLabel (new secret, old secret, isolation)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL, "gateway");
+  assert.equal(
+    DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID,
+    "demo-candidate-keys-by-label-merchant-1",
+  );
+  assert.equal(
+    DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID,
+    "demo-candidate-keys-by-label-gateway-9",
+  );
+  assert.equal(
+    DEMO_CANDIDATE_KEYS_BY_LABEL_URL,
+    "https://api.example.com/v1/payments",
+  );
+  assert.equal(
+    DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_OLD_SECRET,
+    "demo-candidate-keys-gateway-old-secret-0123456789",
+  );
+  assert.equal(
+    DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_NEW_SECRET,
+    "demo-candidate-keys-gateway-new-secret-0123456789",
+  );
+  const byLabel = (results: VerifyResult[]) =>
+    Object.fromEntries(results.map((x) => [x.label, x]));
+  assert.equal(r.candidateKeysByLabelVerification.length, 2);
+  const rotation = byLabel(r.candidateKeysByLabelVerification);
+  assert.equal(rotation.merchant.ok, true);
+  assert.equal(
+    rotation.merchant.keyId,
+    DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(rotation.merchant.alg, "ed25519");
+  assert.equal(rotation.gateway.ok, true);
+  assert.equal(
+    rotation.gateway.keyId,
+    DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  assert.equal(rotation.gateway.alg, "hmac-sha256");
+  assert.equal(r.candidateKeysByLabelOldVerification.length, 2);
+  const old = byLabel(r.candidateKeysByLabelOldVerification);
+  assert.equal(old.merchant.ok, true);
+  assert.equal(old.gateway.ok, true);
+  assert.equal(old.gateway.alg, "hmac-sha256");
+  assert.equal(r.candidateKeysByLabelIsolationVerification.length, 2);
+  const isolation = byLabel(r.candidateKeysByLabelIsolationVerification);
+  assert.equal(isolation.merchant.ok, false);
+  assert.equal(isolation.merchant.code, "SIGNATURE_MISMATCH");
+  assert.equal(isolation.merchant.reason, "signature mismatch");
+  assert.equal(isolation.gateway.ok, true);
+  // Independent reproduction of the same three verdicts, outside
+  // runDemo() (the same per-label semantics
+  // test/candidateKeysByLabel.test.ts pins): a fresh dual-label
+  // fixture, gateway signed with the new secret verifying via its
+  // second candidate, gateway signed with the old secret verifying
+  // via its first candidate, and a wrong merchant list failing only
+  // the merchant label.
+  const merchant = generateEd25519KeyPair();
+  const wrong = generateEd25519KeyPair();
+  const oldSecret = secretKey(DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_OLD_SECRET);
+  const newSecret = secretKey(DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_NEW_SECRET);
+  const req = {
+    method: "POST",
+    url: DEMO_CANDIDATE_KEYS_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const options = {
+    now: DEMO_CREATED + 60,
+    candidateKeysByLabel: {
+      merchant: [merchant.publicKey],
+      gateway: [oldSecret, newSecret],
+    },
+  };
+  const merchantSigned = signRequest(req, {
+    keyId: DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID,
+    alg: "ed25519",
+    key: merchant.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL,
+  });
+  const dualNew = addSignature(merchantSigned, {
+    keyId: DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID,
+    alg: "hmac-sha256",
+    key: newSecret,
+    created: DEMO_CREATED,
+    label: DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL,
+  });
+  const directNew = byLabel(verifyAllLabels(dualNew, options));
+  assert.equal(directNew.merchant.ok, true);
+  assert.equal(directNew.gateway.ok, true);
+  const merchantSignedOld = signRequest(req, {
+    keyId: DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID,
+    alg: "ed25519",
+    key: merchant.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL,
+  });
+  const dualOld = addSignature(merchantSignedOld, {
+    keyId: DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID,
+    alg: "hmac-sha256",
+    key: oldSecret,
+    created: DEMO_CREATED,
+    label: DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL,
+  });
+  const directOld = byLabel(verifyAllLabels(dualOld, options));
+  assert.equal(directOld.merchant.ok, true);
+  assert.equal(directOld.gateway.ok, true);
+  const directIsolation = byLabel(
+    verifyAllLabels(dualNew, {
+      now: DEMO_CREATED + 60,
+      candidateKeysByLabel: {
+        merchant: [wrong.publicKey],
+        gateway: [oldSecret, newSecret],
+      },
+    }),
+  );
+  assert.equal(directIsolation.merchant.ok, false);
+  assert.equal(directIsolation.merchant.code, "SIGNATURE_MISMATCH");
+  assert.equal(directIsolation.gateway.ok, true);
+});
+
+test("demo lines contain the per-label candidate keys segment (rotation window, old secret, isolation, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Per-label candidate keys: verifyAllLabels' candidateKeysByLabel map gives/);
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label candidate keys:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "Per-label candidate keys: verifyAllLabels' candidateKeysByLabel map gives each label its own rotation-candidate list — the merchant keeps a single fixed ed25519 key while the gateway rotates HMAC secrets independently (Stripe-style rollover), a label missing from the map falls back to the global candidateKeys, and a label's list is never tried against another label",
+    `Rotation window: dual-label request (merchant ed25519, gateway signed with the new HMAC secret) verified with candidateKeysByLabel merchant=[merchant key], gateway=[old secret, new secret]: merchant OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID}", alg="hmac-sha256") — the new secret is the second candidate, tried after the old one`,
+    `Old secret still accepted: the same request re-signed with the gateway old secret verified with the same map: merchant OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID}", alg="hmac-sha256") — the old secret is the first candidate, still live during rotation`,
+    `Isolation: the same new-secret request verified with the merchant list replaced by an unrelated ed25519 key: merchant FAILED (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL}, code SIGNATURE_MISMATCH: signature mismatch), gateway still OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID}", alg="hmac-sha256") — each label tries only its own list, so the merchant's key is never tried against the gateway label`,
+  ]);
+  // The header plus its three lines are the demo's closing lines,
+  // with nothing after them.
+  assert.equal(headerIdx + 4, lines.length);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Per-label candidate keys:"),
   );
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),

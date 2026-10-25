@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) gains a per-label candidate keys
+  segment: a dual-label request carries a merchant ed25519 signature
+  and a gateway hmac-sha256 signature, verified with
+  `candidateKeysByLabel: { merchant: [merchant key], gateway:
+  [old secret, new secret] }` — the gateway label verifies via the
+  second candidate when signed with the new secret and via the first
+  when signed with the old secret, and swapping the merchant list
+  for an unrelated key fails only the merchant label with
+  `SIGNATURE_MISMATCH` while the gateway label still verifies,
+  proving each label tries only its own candidate list. The segment
+  asserts every outcome, label, keyid, alg, code and reason against
+  hand-pinned expectations, so a broken fixture fails the demo with
+  a non-zero exit.
 - The CLI demo (`npm run demo`) gains a per-label nonce
   requirement segment: a dual-label request carries a merchant
   signature that must carry a nonce and a gateway signature that

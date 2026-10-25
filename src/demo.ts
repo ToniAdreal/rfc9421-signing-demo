@@ -853,7 +853,7 @@
  * construction-time rule `test/jwks.test.ts` pins). Only the
  * loopback port (never printed) and the key pair are fresh per
  * run, so the segment is byte-identical between runs.
- * The demo closes with a per-label nonce requirement segment: a
+ * The demo then runs a per-label nonce requirement segment: a
  * dual-label request carries a merchant signature that must carry
  * a nonce and a gateway signature that historically carries none,
  * verified with `requireNonceByLabel: { merchant: true }` and the
@@ -867,6 +867,19 @@
  * every outcome, label, code, reason and reported nonce equals
  * the hand-pinned expectations below. Only the key pairs are
  * fresh per run, so the segment is byte-identical between runs.
+ * The demo closes with a per-label candidate keys segment: a
+ * dual-label request carries a merchant ed25519 signature and a
+ * gateway hmac-sha256 signature, verified with
+ * `candidateKeysByLabel: { merchant: [merchant key], gateway:
+ * [old secret, new secret] }` — the gateway label verifies via
+ * the second candidate when signed with the new secret and via
+ * the first when signed with the old secret, and swapping the
+ * merchant list for an unrelated key fails only the merchant
+ * label, proving each label tries only its own list. Outside
+ * the printed lines the demo asserts every outcome, label,
+ * keyid, alg, code and reason equals the hand-pinned
+ * expectations below. Only the key pairs are fresh per run, so
+ * the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2875,6 +2888,35 @@ export const DEMO_REQUIRE_NONCE_BY_LABEL_URL =
 export const DEMO_REQUIRE_NONCE_BY_LABEL_MISSING_REASON =
   "signature carries no `nonce` but requireNonce is set";
 
+/** Label of the closing per-label candidate keys segment's merchant signature. */
+export const DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL = "merchant";
+/** Label of the closing per-label candidate keys segment's gateway signature. */
+export const DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL = "gateway";
+/** Key id the closing per-label candidate keys segment's merchant signature carries. */
+export const DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID =
+  "demo-candidate-keys-by-label-merchant-1";
+/** Key id the closing per-label candidate keys segment's gateway signature carries. */
+export const DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID =
+  "demo-candidate-keys-by-label-gateway-9";
+/** Absolute URL the closing per-label candidate keys segment signs. */
+export const DEMO_CANDIDATE_KEYS_BY_LABEL_URL =
+  "https://api.example.com/v1/payments";
+/**
+ * Demo-only gateway HMAC secret still accepted during rotation: 49
+ * bytes (the hmac-sha256 floor is 32), fixed so the old-secret
+ * signature is deterministic, and labelled as a demo value — it must
+ * never be used outside this demo.
+ */
+export const DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_OLD_SECRET =
+  "demo-candidate-keys-gateway-old-secret-0123456789";
+/**
+ * Demo-only gateway HMAC secret the rotation has moved to: 49 bytes,
+ * fixed so the new-secret signature is deterministic, and labelled
+ * as a demo value — it must never be used outside this demo.
+ */
+export const DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_NEW_SECRET =
+  "demo-candidate-keys-gateway-new-secret-0123456789";
+
 /** Label of the closing per-label keyid pinning segment's merchant signature. */
 export const DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL = "merchant";
 /** Label of the closing per-label keyid pinning segment's gateway signature. */
@@ -3889,6 +3931,38 @@ export interface DemoResult {
    * both labels verify, the merchant label reporting its nonce.
    */
   requireNonceByLabelWithNonceVerification: VerifyResult[];
+  /**
+   * The dual-label request of the closing per-label candidate
+   * keys segment, merchant signature ed25519 and gateway
+   * signature hmac-sha256 under the new rotation secret.
+   */
+  candidateKeysByLabelSigned: SignedHttpRequest;
+  /**
+   * Per-label verdicts for that request under
+   * `candidateKeysByLabel: { merchant: [merchant key],
+   * gateway: [old secret, new secret] }`: both labels verify,
+   * the gateway label via the second candidate in its list.
+   */
+  candidateKeysByLabelVerification: VerifyResult[];
+  /**
+   * The same dual-label request re-signed with the gateway
+   * old secret (the rotation window's still-accepted secret).
+   */
+  candidateKeysByLabelOldSigned: SignedHttpRequest;
+  /**
+   * Per-label verdicts for that request under the same map:
+   * both labels verify, the gateway label via the first
+   * candidate in its list.
+   */
+  candidateKeysByLabelOldVerification: VerifyResult[];
+  /**
+   * Per-label verdicts for the new-secret request under a map
+   * whose merchant list is replaced by an unrelated ed25519
+   * key: the merchant label fails with `SIGNATURE_MISMATCH`
+   * while the gateway label still verifies — each label tries
+   * only its own candidate list.
+   */
+  candidateKeysByLabelIsolationVerification: VerifyResult[];
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -8387,6 +8461,185 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Per-label candidate keys segment: `candidateKeysByLabel`
+  // is the per-label form of the rotation-candidate segment's
+  // global `candidateKeys` — where the global list is one
+  // rotation window shared by every label, this map gives each
+  // label its own list, tried in order with first-full-pass
+  // semantics. A merchant signature with a single fixed
+  // ed25519 key and a gateway signature mid-rollover (old
+  // HMAC secret still accepted, new secret already live) ride
+  // on the same request: the merchant pair is fresh, the two
+  // gateway secrets are fixed demo values, and every verify
+  // call injects the same fixed `now`. The first verification
+  // runs with `candidateKeysByLabel: { merchant:
+  // [merchant key], gateway: [old secret, new secret] }` over
+  // a gateway signature made with the new secret, so the
+  // gateway label verifies via the second candidate; the
+  // second verification re-signs the gateway label with the
+  // old secret and the same map still verifies it via the
+  // first candidate. The third verification swaps the
+  // merchant list for an unrelated ed25519 key: the merchant
+  // label fails with `SIGNATURE_MISMATCH` while the gateway
+  // label still verifies — a label never borrows another
+  // label's candidates, so the merchant's key is never tried
+  // against the gateway label. Outside the printed lines the
+  // demo asserts every outcome, label, keyid, alg, code and
+  // reason equals the hand-pinned expectations.
+  const candidateKeysByLabelMerchantPair = generateEd25519KeyPair();
+  const candidateKeysByLabelWrongPair = generateEd25519KeyPair();
+  const candidateKeysByLabelGatewayOld = secretKey(
+    DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_OLD_SECRET,
+  );
+  const candidateKeysByLabelGatewayNew = secretKey(
+    DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_NEW_SECRET,
+  );
+  const candidateKeysByLabelRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_CANDIDATE_KEYS_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const candidateKeysByLabelMerchantSigned = signRequest(
+    candidateKeysByLabelRequest,
+    {
+      keyId: DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID,
+      alg: "ed25519",
+      key: candidateKeysByLabelMerchantPair.privateKey,
+      created: DEMO_CREATED,
+      label: DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL,
+    },
+  );
+  const candidateKeysByLabelSigned = addSignature(
+    candidateKeysByLabelMerchantSigned,
+    {
+      keyId: DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID,
+      alg: "hmac-sha256",
+      key: candidateKeysByLabelGatewayNew,
+      created: DEMO_CREATED,
+      label: DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL,
+    },
+  );
+  const candidateKeysByLabelOptions = {
+    now: DEMO_CREATED + 60,
+    candidateKeysByLabel: {
+      [DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]: [
+        candidateKeysByLabelMerchantPair.publicKey,
+      ],
+      [DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL]: [
+        candidateKeysByLabelGatewayOld,
+        candidateKeysByLabelGatewayNew,
+      ],
+    },
+  };
+  const candidateKeysByLabelVerification = verifyAllLabels(
+    candidateKeysByLabelSigned,
+    candidateKeysByLabelOptions,
+  );
+  const candidateKeysByLabelOldMerchantSigned = signRequest(
+    candidateKeysByLabelRequest,
+    {
+      keyId: DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID,
+      alg: "ed25519",
+      key: candidateKeysByLabelMerchantPair.privateKey,
+      created: DEMO_CREATED,
+      label: DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL,
+    },
+  );
+  const candidateKeysByLabelOldSigned = addSignature(
+    candidateKeysByLabelOldMerchantSigned,
+    {
+      keyId: DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID,
+      alg: "hmac-sha256",
+      key: candidateKeysByLabelGatewayOld,
+      created: DEMO_CREATED,
+      label: DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL,
+    },
+  );
+  const candidateKeysByLabelOldVerification = verifyAllLabels(
+    candidateKeysByLabelOldSigned,
+    candidateKeysByLabelOptions,
+  );
+  const candidateKeysByLabelIsolationVerification = verifyAllLabels(
+    candidateKeysByLabelSigned,
+    {
+      now: DEMO_CREATED + 60,
+      candidateKeysByLabel: {
+        [DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]: [
+          candidateKeysByLabelWrongPair.publicKey,
+        ],
+        [DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL]: [
+          candidateKeysByLabelGatewayOld,
+          candidateKeysByLabelGatewayNew,
+        ],
+      },
+    },
+  );
+  const candidateKeysByLabelByLabel = (
+    results: VerifyResult[],
+  ): Record<string, VerifyResult> =>
+    Object.fromEntries(results.map((r) => [r.label, r]));
+  const candidateKeysByLabelByLabelMap =
+    candidateKeysByLabelByLabel(candidateKeysByLabelVerification);
+  const candidateKeysByLabelOldByLabel =
+    candidateKeysByLabelByLabel(candidateKeysByLabelOldVerification);
+  const candidateKeysByLabelIsolationByLabel = candidateKeysByLabelByLabel(
+    candidateKeysByLabelIsolationVerification,
+  );
+  if (
+    candidateKeysByLabelVerification.length !== 2 ||
+    candidateKeysByLabelByLabelMap[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL
+    ]?.ok !== true ||
+    candidateKeysByLabelByLabelMap[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL
+    ]?.keyId !== DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID ||
+    candidateKeysByLabelByLabelMap[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL
+    ]?.alg !== "ed25519" ||
+    candidateKeysByLabelByLabelMap[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL
+    ]?.ok !== true ||
+    candidateKeysByLabelByLabelMap[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL
+    ]?.keyId !== DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID ||
+    candidateKeysByLabelByLabelMap[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL
+    ]?.alg !== "hmac-sha256" ||
+    candidateKeysByLabelOldVerification.length !== 2 ||
+    candidateKeysByLabelOldByLabel[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL
+    ]?.ok !== true ||
+    candidateKeysByLabelOldByLabel[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL
+    ]?.ok !== true ||
+    candidateKeysByLabelIsolationVerification.length !== 2 ||
+    candidateKeysByLabelIsolationByLabel[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL
+    ]?.ok !== false ||
+    candidateKeysByLabelIsolationByLabel[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL
+    ]?.code !== "SIGNATURE_MISMATCH" ||
+    candidateKeysByLabelIsolationByLabel[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL
+    ]?.reason !== "signature mismatch" ||
+    candidateKeysByLabelIsolationByLabel[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL
+    ]?.ok !== true
+  ) {
+    throw new Error(
+      `demo fixture broken: candidateKeysByLabel gave new-secret ` +
+        `${JSON.stringify(candidateKeysByLabelVerification)}, old-secret ` +
+        `${JSON.stringify(candidateKeysByLabelOldVerification)} and isolation ` +
+        `${JSON.stringify(candidateKeysByLabelIsolationVerification)}, instead of ` +
+        `both labels verifying for the new secret (gateway via its second ` +
+        `candidate) and for the old secret (gateway via its first candidate), ` +
+        `and the merchant label failing with SIGNATURE_MISMATCH while the ` +
+        `gateway label still verifies when the merchant list is swapped for ` +
+        `an unrelated key`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -8877,6 +9130,32 @@ export async function runDemo(): Promise<DemoResult> {
     ]!.ok
       ? `Merchant with nonce: merchant re-signed with nonce "${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}" verified with the same map: OK (label ${DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL}, nonce="${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}"; label ${DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL} still verifies without one)`
       : `Merchant with nonce: merchant re-signed with nonce "${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}" verified with the same map: FAILED (merchant code ${requireNonceByLabelWithNonceByLabel[DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL]!.code}, gateway code ${requireNonceByLabelWithNonceByLabel[DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL]!.code})`,
+    "",
+    "Per-label candidate keys: verifyAllLabels' candidateKeysByLabel map gives each label its own rotation-candidate list — the merchant keeps a single fixed ed25519 key while the gateway rotates HMAC secrets independently (Stripe-style rollover), a label missing from the map falls back to the global candidateKeys, and a label's list is never tried against another label",
+    candidateKeysByLabelByLabelMap[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL
+    ]!.ok &&
+    candidateKeysByLabelByLabelMap[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL
+    ]!.ok
+      ? `Rotation window: dual-label request (merchant ed25519, gateway signed with the new HMAC secret) verified with candidateKeysByLabel merchant=[merchant key], gateway=[old secret, new secret]: merchant OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID}", alg="hmac-sha256") — the new secret is the second candidate, tried after the old one`
+      : `Rotation window: dual-label request (merchant ed25519, gateway signed with the new HMAC secret) verified with candidateKeysByLabel merchant=[merchant key], gateway=[old secret, new secret]: FAILED (merchant code ${candidateKeysByLabelByLabelMap[DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]!.code}, gateway code ${candidateKeysByLabelByLabelMap[DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL]!.code})`,
+    candidateKeysByLabelOldByLabel[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL
+    ]!.ok &&
+    candidateKeysByLabelOldByLabel[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL
+    ]!.ok
+      ? `Old secret still accepted: the same request re-signed with the gateway old secret verified with the same map: merchant OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID}", alg="hmac-sha256") — the old secret is the first candidate, still live during rotation`
+      : `Old secret still accepted: the same request re-signed with the gateway old secret verified with the same map: FAILED (merchant code ${candidateKeysByLabelOldByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]!.code}, gateway code ${candidateKeysByLabelOldByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL]!.code})`,
+    !candidateKeysByLabelIsolationByLabel[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL
+    ]!.ok &&
+    candidateKeysByLabelIsolationByLabel[
+      DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL
+    ]!.ok
+      ? `Isolation: the same new-secret request verified with the merchant list replaced by an unrelated ed25519 key: merchant FAILED (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL}, code ${candidateKeysByLabelIsolationByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]!.code}: ${candidateKeysByLabelIsolationByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]!.reason}), gateway still OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID}", alg="hmac-sha256") — each label tries only its own list, so the merchant's key is never tried against the gateway label`
+      : `Isolation: the same new-secret request verified with the merchant list replaced by an unrelated ed25519 key: merchant ${candidateKeysByLabelIsolationByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]!.ok ? "OK (unexpected — the wrong merchant key was not rejected)" : `code ${candidateKeysByLabelIsolationByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]!.code}`}, gateway ${candidateKeysByLabelIsolationByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL]!.ok ? "OK" : "FAILED (unexpected — the gateway label was dragged down by the merchant list)"}`,
   ];
 
   return {
@@ -9112,6 +9391,11 @@ export async function runDemo(): Promise<DemoResult> {
     requireNonceByLabelMissingVerification,
     requireNonceByLabelWithNonceSigned,
     requireNonceByLabelWithNonceVerification,
+    candidateKeysByLabelSigned,
+    candidateKeysByLabelVerification,
+    candidateKeysByLabelOldSigned,
+    candidateKeysByLabelOldVerification,
+    candidateKeysByLabelIsolationVerification,
     lines,
   };
 }
