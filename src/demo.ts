@@ -676,6 +676,26 @@
  * `test/tag.test.ts` pins). Every clock is injected and
  * the segment's key pair is fresh per run, so the
  * printed lines are identical between runs.
+ * The demo then closes with a required-tag segment:
+ * `VerifyOptions.requireTag` (`src/verify.ts`) is the
+ * presence counterpart to `expectedTag`'s value pin —
+ * it demands that a signature carry a tag at all, with
+ * no opinion on which tag, so a verifier that accepts
+ * several protocols can still refuse tag-less signatures
+ * outright (the per-label form is
+ * `VerifyAllOptions.requireTagByLabel`). One fresh key
+ * pair signs the same fixed request twice — with no tag
+ * and with the payment webhook tag — and the printed
+ * shapes are the untagged signature rejected with
+ * `MISSING_TAG` under the option, the same untagged
+ * signature verifying with no option set, and the tagged
+ * signature verifying under the option. Outside the
+ * printed lines the demo asserts every outcome, code,
+ * reason and reported tag equals the hand-pinned
+ * expectations below (the same require-tag semantics
+ * `test/requireTag.test.ts` pins). Every clock is
+ * injected and the segment's key pair is fresh per run,
+ * so the printed lines are identical between runs.
  * The demo then closes with an alg-fallback segment:
  * `VerifyOptions.algFallback: "infer"` (`src/verify.ts`)
  * is the explicit opt-in for foreign signers that omit
@@ -2574,6 +2594,30 @@ export const DEMO_EXPECTED_TAG_MISMATCH_REASON =
 export const DEMO_EXPECTED_TAG_MISSING_REASON =
   'tag mismatch: expected "payment-webhook-v1", got no tag';
 
+/** Key id of the required-tag segment's signed requests. */
+export const DEMO_REQUIRE_TAG_KEY_ID = "demo-require-tag-key-1";
+/** Nonce of the required-tag segment's signed requests. */
+export const DEMO_REQUIRE_TAG_NONCE = "demo-nonce-require-tag-001";
+/** Absolute URL the required-tag segment signs. */
+export const DEMO_REQUIRE_TAG_URL = "https://api.example.com/v1/webhooks";
+/** Body of the required-tag segment's requests. */
+export const DEMO_REQUIRE_TAG_BODY = "{}";
+/**
+ * Application tag the required-tag segment's tagged request
+ * carries — the same payment webhook protocol tag the
+ * application-tag segment pins, reused here only as a
+ * present tag: `requireTag` checks presence, never value,
+ * so any non-empty tag passes.
+ */
+export const DEMO_REQUIRE_TAG = "payment-webhook-v1";
+/**
+ * Hand-pinned `MISSING_TAG` reason when the signature
+ * carries no tag at all (the exact wording `src/verify.ts`
+ * returns and `test/requireTag.test.ts` pins).
+ */
+export const DEMO_REQUIRE_TAG_MISSING_REASON =
+  "signature carries no `tag` but requireTag is set";
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -3866,6 +3910,27 @@ export interface DemoResult {
    * `expectedTag` pinned (ok — no check is made).
    */
   expectedTagUnsetVerification: VerifyResult;
+  /** The request signed in the required-tag segment with no tag at all. */
+  requireTagMissingSigned: SignedHttpRequest;
+  /**
+   * Verification of `requireTagMissingSigned` with
+   * `requireTag: true` (fails with `MISSING_TAG` and
+   * `DEMO_REQUIRE_TAG_MISSING_REASON`).
+   */
+  requireTagMissingVerification: VerifyResult;
+  /**
+   * Verification of `requireTagMissingSigned` with no
+   * `requireTag` set (ok — the default leaves tag-less
+   * signatures alone).
+   */
+  requireTagUnsetVerification: VerifyResult;
+  /** The request signed in the required-tag segment with `DEMO_REQUIRE_TAG`. */
+  requireTagTaggedSigned: SignedHttpRequest;
+  /**
+   * Verification of `requireTagTaggedSigned` with
+   * `requireTag: true` (ok, tag reported).
+   */
+  requireTagTaggedVerification: VerifyResult;
   /** The closing alg-fallback segment's wire request: the RFC 9421 Appendix B.2.5 request, whose signature-input carries no `alg`. */
   algFallbackWire: RequestLike;
   /**
@@ -7211,6 +7276,83 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Required-tag segment: `requireTag` is the presence
+  // counterpart to `expectedTag`'s value pin — where the
+  // application-tag segment pins one exact protocol tag,
+  // this segment only demands that a tag be present at
+  // all, so a verifier that accepts several protocols can
+  // still refuse tag-less signatures outright. The check
+  // runs after the cryptographic check, like the
+  // application-tag pin, and the per-label form
+  // (`VerifyAllOptions.requireTagByLabel`) is the same
+  // existence check scoped to one label. One fresh key
+  // pair signs the same fixed request twice — with no
+  // tag and with `DEMO_REQUIRE_TAG` — and the three
+  // verifications print the untagged rejection, the
+  // untagged default pass, and the tagged pass. Outside
+  // the printed lines the demo asserts every outcome,
+  // code, reason and reported tag equals the hand-pinned
+  // expectations.
+  const requireTagPair = generateEd25519KeyPair();
+  const requireTagRequest = {
+    method: "POST",
+    url: DEMO_REQUIRE_TAG_URL,
+    headers: {},
+    body: DEMO_REQUIRE_TAG_BODY,
+  };
+  const requireTagMissingSigned = signRequest(requireTagRequest, {
+    keyId: DEMO_REQUIRE_TAG_KEY_ID,
+    alg: "ed25519",
+    key: requireTagPair.privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_REQUIRE_TAG_NONCE,
+  });
+  const requireTagTaggedSigned = signRequest(requireTagRequest, {
+    keyId: DEMO_REQUIRE_TAG_KEY_ID,
+    alg: "ed25519",
+    key: requireTagPair.privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_REQUIRE_TAG_NONCE,
+    tag: DEMO_REQUIRE_TAG,
+  });
+  const requireTagMissingVerification = verifyRequest(requireTagMissingSigned, {
+    key: requireTagPair.publicKey,
+    now: DEMO_CREATED + 60,
+    requireTag: true,
+  });
+  const requireTagUnsetVerification = verifyRequest(requireTagMissingSigned, {
+    key: requireTagPair.publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  const requireTagTaggedVerification = verifyRequest(requireTagTaggedSigned, {
+    key: requireTagPair.publicKey,
+    now: DEMO_CREATED + 60,
+    requireTag: true,
+  });
+  if (
+    requireTagMissingVerification.ok !== false ||
+    requireTagMissingVerification.code !== "MISSING_TAG" ||
+    requireTagMissingVerification.reason !==
+      DEMO_REQUIRE_TAG_MISSING_REASON ||
+    requireTagMissingVerification.tag !== undefined ||
+    requireTagUnsetVerification.ok !== true ||
+    requireTagUnsetVerification.tag !== undefined ||
+    requireTagTaggedVerification.ok !== true ||
+    requireTagTaggedVerification.tag !== DEMO_REQUIRE_TAG
+  ) {
+    throw new Error(
+      `demo fixture broken: requireTag gave missing ` +
+        `${JSON.stringify(requireTagMissingVerification)}, unset ` +
+        `${JSON.stringify(requireTagUnsetVerification)} and tagged ` +
+        `${JSON.stringify(requireTagTaggedVerification)}, instead of a ` +
+        `missing tag rejected with MISSING_TAG ` +
+        `(${DEMO_REQUIRE_TAG_MISSING_REASON}), the same untagged ` +
+        `signature verifying with no option set, and the tagged ` +
+        `signature verifying with requireTag set reporting tag ` +
+        `"${DEMO_REQUIRE_TAG}"`,
+    );
+  }
+
   // Alg-fallback segment: `algFallback: "infer"` is the
   // explicit opt-in for foreign signers that omit the
   // optional `alg` parameter. The wire request is the
@@ -8236,6 +8378,17 @@ export async function runDemo(): Promise<DemoResult> {
       ? `No expectedTag pinned: the same signature with tag "${DEMO_EXPECTED_TAG}" verified without the option: OK (label ${expectedTagUnsetVerification.label}, keyid="${expectedTagUnsetVerification.keyId}", alg="${expectedTagUnsetVerification.alg}", nonce="${expectedTagUnsetVerification.nonce}", tag="${expectedTagUnsetVerification.tag}") (no check is made — backwards compatible)`
       : `No expectedTag pinned: the same signature with tag "${DEMO_EXPECTED_TAG}" verified without the option: FAILED (code ${expectedTagUnsetVerification.code}: ${expectedTagUnsetVerification.reason})`,
     "",
+    "Required tag: verifyRequest's requireTag option demands that a signature carry a tag at all, without pinning its value — the presence counterpart to expectedTag's value pin (RFC 9421 §2.3), with requireTagByLabel as the per-label form — the check runs after the cryptographic check passes, so a forged tag-less signature is still reported as a signature failure rather than a policy violation",
+    requireTagMissingVerification.ok
+      ? `Tag missing: signature with no tag verified with requireTag: OK (unexpected — the tag-less signature was not rejected)`
+      : `Tag missing: signature with no tag verified with requireTag: FAILED (code ${requireTagMissingVerification.code}: ${requireTagMissingVerification.reason})`,
+    requireTagUnsetVerification.ok
+      ? `No requireTag set: the same tag-less signature verified without the option: OK (label ${requireTagUnsetVerification.label}, keyid="${requireTagUnsetVerification.keyId}", alg="${requireTagUnsetVerification.alg}", nonce="${requireTagUnsetVerification.nonce}") (no check is made — backwards compatible)`
+      : `No requireTag set: the same tag-less signature verified without the option: FAILED (code ${requireTagUnsetVerification.code}: ${requireTagUnsetVerification.reason})`,
+    requireTagTaggedVerification.ok
+      ? `Tag present: signature with tag "${DEMO_REQUIRE_TAG}" verified with requireTag: OK (label ${requireTagTaggedVerification.label}, keyid="${requireTagTaggedVerification.keyId}", alg="${requireTagTaggedVerification.alg}", nonce="${requireTagTaggedVerification.nonce}", tag="${requireTagTaggedVerification.tag}") (presence only — any non-empty tag passes, the value pin is expectedTag's job)`
+      : `Tag present: signature with tag "${DEMO_REQUIRE_TAG}" verified with requireTag: FAILED (code ${requireTagTaggedVerification.code}: ${requireTagTaggedVerification.reason})`,
+    "",
     "Alg fallback inference: verifyRequest's algFallback \"infer\" opt-in infers the algorithm from the verifying key's shape when a foreign signature omits the optional alg parameter (RFC 9421 §2.3) — inference is never automatic: without the opt-in a missing alg keeps the legacy ed25519 default, a wire alg that contradicts the key's shape throws a configuration error, and so does a key shape with no supported mapping",
     algFallbackInferVerification.ok
       ? `Inferred alg: RFC 9421 B.2.5 signature with no alg parameter verified with algFallback "infer" against its shared secret: OK (label ${algFallbackInferVerification.label}, keyid="${algFallbackInferVerification.keyId}", alg="${algFallbackInferVerification.alg}")`
@@ -8498,6 +8651,11 @@ export async function runDemo(): Promise<DemoResult> {
     expectedTagMissingSigned,
     expectedTagMissingVerification,
     expectedTagUnsetVerification,
+    requireTagMissingSigned,
+    requireTagMissingVerification,
+    requireTagUnsetVerification,
+    requireTagTaggedSigned,
+    requireTagTaggedVerification,
     algFallbackWire,
     algFallbackInferVerification,
     algFallbackDefaultVerification,

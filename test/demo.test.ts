@@ -278,6 +278,12 @@ import {
   DEMO_REQUIRE_NONCE_MISSING_REASON,
   DEMO_REQUIRE_NONCE_NONCE,
   DEMO_REQUIRE_NONCE_URL,
+  DEMO_REQUIRE_TAG,
+  DEMO_REQUIRE_TAG_BODY,
+  DEMO_REQUIRE_TAG_KEY_ID,
+  DEMO_REQUIRE_TAG_MISSING_REASON,
+  DEMO_REQUIRE_TAG_NONCE,
+  DEMO_REQUIRE_TAG_URL,
   DEMO_NODE_TRAILERS_BODY,
   DEMO_NODE_TRAILERS_COVERED_COMPONENTS,
   DEMO_NODE_TRAILERS_HOST,
@@ -4522,10 +4528,66 @@ test("demo lines contain the application-tag segment (match, mismatch, missing, 
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
   assert.equal(lines[headerIdx + 5], "");
-  assert.ok(lines[headerIdx + 6].startsWith("Alg fallback inference:"));
+  assert.ok(lines[headerIdx + 6].startsWith("Required tag:"));
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Application tag binding:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
+});
+
+test("demo required-tag segment pins requireTag (missing rejected, unset unchanged, tagged passes)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_REQUIRE_TAG_KEY_ID, "demo-require-tag-key-1");
+  assert.equal(DEMO_REQUIRE_TAG_NONCE, "demo-nonce-require-tag-001");
+  assert.equal(DEMO_REQUIRE_TAG_URL, "https://api.example.com/v1/webhooks");
+  assert.equal(DEMO_REQUIRE_TAG_BODY, "{}");
+  assert.equal(DEMO_REQUIRE_TAG, "payment-webhook-v1");
+  assert.equal(DEMO_REQUIRE_TAG_MISSING_REASON, "signature carries no `tag` but requireTag is set");
+  assert.ok(!/;tag=/.test(r.requireTagMissingSigned.headers["signature-input"]));
+  assert.match(r.requireTagTaggedSigned.headers["signature-input"], /;tag="payment-webhook-v1"/);
+  assert.equal(r.requireTagMissingVerification.ok, false);
+  assert.equal(r.requireTagMissingVerification.code, "MISSING_TAG");
+  assert.equal(r.requireTagMissingVerification.reason, DEMO_REQUIRE_TAG_MISSING_REASON);
+  assert.equal(r.requireTagMissingVerification.tag, undefined);
+  assert.equal(r.requireTagUnsetVerification.ok, true);
+  assert.equal(r.requireTagUnsetVerification.tag, undefined);
+  assert.equal(r.requireTagTaggedVerification.ok, true);
+  assert.equal(r.requireTagTaggedVerification.tag, DEMO_REQUIRE_TAG);
+  // Independent checks driven directly (the same require-tag
+  // semantics test/requireTag.test.ts pins): a fresh key pair,
+  // the untagged signature is rejected with the pinned code
+  // and reason, verifies with no option set, and the tagged
+  // one passes with the option set.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const req = { method: "POST", url: DEMO_REQUIRE_TAG_URL, headers: {}, body: DEMO_REQUIRE_TAG_BODY };
+  const directUntagged = signRequest(req, { keyId: DEMO_REQUIRE_TAG_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_REQUIRE_TAG_NONCE });
+  const directTagged = signRequest(req, { keyId: DEMO_REQUIRE_TAG_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_REQUIRE_TAG_NONCE, tag: DEMO_REQUIRE_TAG });
+  const directMissing = verifyRequest(directUntagged, { key: publicKey, now: DEMO_CREATED + 60, requireTag: true });
+  assert.equal(directMissing.ok, false);
+  assert.equal(directMissing.code, "MISSING_TAG");
+  assert.equal(directMissing.reason, DEMO_REQUIRE_TAG_MISSING_REASON);
+  assert.equal(verifyRequest(directUntagged, { key: publicKey, now: DEMO_CREATED + 60 }).ok, true);
+  assert.equal(verifyRequest(directTagged, { key: publicKey, now: DEMO_CREATED + 60, requireTag: true }).ok, true);
+});
+
+test("demo lines contain the required-tag segment (missing, unset, tagged, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Required tag: verifyRequest's requireTag option demands/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Required tag:"));
+  const tagIdx = lines.findIndex((l) => l.startsWith("Application tag binding:"));
+  assert.ok(tagIdx !== -1 && headerIdx !== -1 && tagIdx < headerIdx);
+  const expectedLines = [
+    "Required tag: verifyRequest's requireTag option demands that a signature carry a tag at all, without pinning its value — the presence counterpart to expectedTag's value pin (RFC 9421 §2.3), with requireTagByLabel as the per-label form — the check runs after the cryptographic check passes, so a forged tag-less signature is still reported as a signature failure rather than a policy violation",
+    `Tag missing: signature with no tag verified with requireTag: FAILED (code MISSING_TAG: ${DEMO_REQUIRE_TAG_MISSING_REASON})`,
+    `No requireTag set: the same tag-less signature verified without the option: OK (label sig1, keyid="${DEMO_REQUIRE_TAG_KEY_ID}", alg="ed25519", nonce="${DEMO_REQUIRE_TAG_NONCE}") (no check is made — backwards compatible)`,
+    `Tag present: signature with tag "${DEMO_REQUIRE_TAG}" verified with requireTag: OK (label sig1, keyid="${DEMO_REQUIRE_TAG_KEY_ID}", alg="ed25519", nonce="${DEMO_REQUIRE_TAG_NONCE}", tag="${DEMO_REQUIRE_TAG}") (presence only — any non-empty tag passes, the value pin is expectedTag's job)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), expectedLines);
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(lines[headerIdx + 5].startsWith("Alg fallback inference:"));
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Required tag:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 4), lines.slice(headerIdx, headerIdx + 4));
 });
 
 test("demo alg-fallback segment pins algFallback infer (inferred passes, legacy default fails, incompatible and uninferrable throw)", async () => {
