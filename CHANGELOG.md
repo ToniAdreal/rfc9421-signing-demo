@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifyAllLabels` accepts per-label freshness-existence maps
+  `requireCreatedByLabel` and `requireExpiresByLabel`: a label in a map
+  is checked against its own boolean, any other label falls back to
+  the global `requireCreated` / `requireExpires` (unset means no
+  existence check for it), and a mapped value overrides the global
+  flag in both directions. Missing parameters reuse the global error
+  codes (`MISSING_CREATED` / `MISSING_EXPIRES`); no new codes, and the
+  check position matches the global one (after the cryptographic
+  check, before the window checks), so forgeries still report
+  `SIGNATURE_MISMATCH`. A non-boolean map value is a caller
+  configuration error naming the label, and like the freshness window
+  an existence requirement never joins the key-selection
+  mutual-exclusion rules. 12 new tests in
+  `test/requireFreshnessByLabel.test.ts`.
+
 - `VerifyOptions.requireTag` (default `false`, backwards compatible):
   a signature carrying no `tag` — or an empty-string one, treated as
   missing since `signRequest` refuses to mint one — fails with the new

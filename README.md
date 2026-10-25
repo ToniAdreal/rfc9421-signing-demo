@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 896 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 908 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -349,6 +349,32 @@ const results = verifyAllLabels(dualSigned, {
 });
 // results[0] (merchant, 1 hour old) → { ok: false, code: "SIGNATURE_TOO_OLD" }
 // results[1] (gateway, 1 hour old) → { ok: true }
+```
+
+Per-label freshness-existence requirements (a merchant signature that
+must carry `created` and `expires`, plus a gateway signature that
+historically carries only `created`, on the same request):
+`verifyAllLabels` accepts `requireCreatedByLabel` and
+`requireExpiresByLabel` maps. A label in a map is checked against its
+own boolean; any other label falls back to the global `requireCreated`
+/ `requireExpires` (unset means no existence check for it). A mapped
+value overrides the global flag in both directions (`true` tightens,
+`false` relaxes for that label only). Missing parameters reuse the
+global error codes (`MISSING_CREATED` / `MISSING_EXPIRES`); no new
+codes are introduced, and the check position is the same as the global
+one (after the cryptographic check, before the window checks), so
+forgeries still report `SIGNATURE_MISMATCH`. A non-boolean map value is
+a caller configuration error. Like the freshness window, an existence
+requirement is not key selection, so it never joins the
+`keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+
+```ts
+const results = verifyAllLabels(dualSigned, {
+  requireCreatedByLabel: { merchant: true }, // gateway may omit created
+  requireExpiresByLabel: { merchant: true }, // gateway may omit expires
+});
+// merchant without created → { ok: false, code: "MISSING_CREATED" }
+// gateway without created/expires → { ok: true } (falls back to global, unset)
 ```
 
 Timing honesty: the *number* of candidates tried is observable through
@@ -2693,7 +2719,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 896 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 908 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

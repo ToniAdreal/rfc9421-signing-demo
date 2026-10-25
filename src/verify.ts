@@ -112,14 +112,18 @@ export interface VerifyOptions {
    * must not accept. Defaults to false (backwards compatible): no check
    * is made unless you opt in. Fails with `MISSING_CREATED`, checked
    * only *after* the cryptographic check, so forgeries are still
-   * reported as `SIGNATURE_MISMATCH`.
+   * reported as `SIGNATURE_MISMATCH`. In `verifyAllLabels` a label in
+   * `VerifyAllOptions.requireCreatedByLabel` overrides this value for
+   * that label; any other label falls back to it.
    */
   requireCreated?: boolean;
   /**
    * Reject signatures that carry no `expires` parameter. Same rationale
    * as `requireCreated`, but for bounded lifetimes. Defaults to false.
    * Fails with `MISSING_EXPIRES`, checked only *after* the cryptographic
-   * check.
+   * check. In `verifyAllLabels` a label in
+   * `VerifyAllOptions.requireExpiresByLabel` overrides this value for
+   * that label; any other label falls back to it.
    */
   requireExpires?: boolean;
   /**
@@ -1323,6 +1327,26 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * exclusion rules.
    */
   maxSignatureAgeSecByLabel?: Record<string, number>;
+  /**
+   * Per-label freshness-existence requirements for multi-party
+   * signatures (e.g. a merchant signature that must carry `created`
+   * and `expires`, plus a gateway signature that historically carries
+   * only `created`, on the same request): maps a signature label to
+   * that label's own `requireCreated` / `requireExpires` value. A
+   * label in the map is checked against its own value; any other
+   * label falls back to the global `requireCreated` /
+   * `requireExpires` (unset means no existence check for it). Each
+   * value must be a boolean — any other value is a caller
+   * configuration error (throw). Missing parameters reuse the
+   * global error codes (`MISSING_CREATED` / `MISSING_EXPIRES`); no
+   * new codes are introduced, and the check position is the same as
+   * the global one (after the cryptographic check, before the window
+   * checks), so forgeries still report `SIGNATURE_MISMATCH`. An
+   * existence requirement is not key selection, so it never joins
+   * the `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+   */
+  requireCreatedByLabel?: Record<string, boolean>;
+  requireExpiresByLabel?: Record<string, boolean>;
 }
 
 /**
@@ -1441,6 +1465,28 @@ function assertMaxSignatureAgeSecByLabel(
 }
 
 /**
+ * Validate a per-label freshness-existence map. Each value must be a
+ * boolean; a malformed map or value is a caller configuration error,
+ * so it throws rather than returning `{ ok: false }`.
+ */
+function assertRequireFlagByLabel(
+  field: "requireCreatedByLabel" | "requireExpiresByLabel",
+  map: Record<string, boolean> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      `verifyAllLabels: \`${field}\` must be a label→boolean object`,
+    );
+  for (const [label, value] of Object.entries(map)) {
+    if (typeof value !== "boolean")
+      throw new Error(
+        `verifyAllLabels: \`${field}["${label}"]\` must be a boolean, got ${value === null ? "null" : typeof value}`,
+      );
+  }
+}
+
+/**
  * Verify every signature carried by the request. Parses all labels from
  * the `Signature-Input` header and verifies each one with
  * `verifyRequest`, returning one `VerifyResult` per label in wire order.
@@ -1464,6 +1510,8 @@ export function verifyAllLabels(
   assertKeyResolvers(opts.keyResolvers);
   assertCandidateKeysByLabel(opts.candidateKeysByLabel);
   assertMaxSignatureAgeSecByLabel(opts.maxSignatureAgeSecByLabel);
+  assertRequireFlagByLabel("requireCreatedByLabel", opts.requireCreatedByLabel);
+  assertRequireFlagByLabel("requireExpiresByLabel", opts.requireExpiresByLabel);
   let labels: string[];
   try {
     labels = listSignatureLabels(sigInput);
@@ -1514,6 +1562,15 @@ export function verifyAllLabels(
     // so it never joins the mutual-exclusion checks above.
     const maxSignatureAgeSec =
       opts.maxSignatureAgeSecByLabel?.[label] ?? opts.maxSignatureAgeSec;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec });
+    // Per-label freshness-existence requirements: a label in the map
+    // is checked against its own flag; every other label falls back
+    // to the global flag (unset means no existence check for it).
+    // Like the window above, a requirement is not key selection, so
+    // it never joins the mutual-exclusion checks.
+    const requireCreated =
+      opts.requireCreatedByLabel?.[label] ?? opts.requireCreated;
+    const requireExpires =
+      opts.requireExpiresByLabel?.[label] ?? opts.requireExpires;
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, requireCreated, requireExpires });
   });
 }
