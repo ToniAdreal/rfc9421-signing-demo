@@ -11,6 +11,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `SignedHttpRequest` echoes `coveredComponents`: exactly the list
+  `signRequest` wrote into `signature-input` (the explicit option, or
+  the default set when omitted), in signature order, as a detached
+  copy — the sign-side mirror of `VerifyResult.coveredComponents`, so
+  the two sides compare item for item without a second header parse.
+  `addSignature` echoes the appended signature's own list, not a merge
+  with the first signature's. 11 new tests in
+  `test/signedCoveredComponents.test.ts`.
+
 - The CLI demo gains a JWKS fetch retries segment: a `JwksKeyStore`
   with `fetchRetries: 2` over a counting fake fetch scripted 500, 500,
   200 succeeds on the third attempt with two recorded sleeps and a

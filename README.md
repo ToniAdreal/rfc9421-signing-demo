@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 910 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 921 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -236,6 +236,16 @@ re-parsing the header. It is absent (`undefined`) only when the component
 list could not be parsed at all (missing or malformed `signature-input`);
 it is never fabricated. `verifyRequestOrThrow` returns the same field on
 success; `verifyAllLabels` reports each label's own list.
+
+The sign side mirrors it: `SignedHttpRequest` also carries
+`coveredComponents` — exactly the list `signRequest` wrote into
+`signature-input` (the explicit `coveredComponents` option, or the
+default set when omitted), in signature order, as a detached copy, so a
+caller can audit what a signature covers without parsing the header a
+second time. It compares item for item with the verify side's list.
+`addSignature` echoes the appended signature's own list, not a merge
+with the first signature's, so each label's audit record stays
+attributable to the party that minted it.
 
 HMAC variant:
 
@@ -2719,7 +2729,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 910 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 921 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

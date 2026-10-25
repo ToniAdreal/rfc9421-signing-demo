@@ -139,6 +139,20 @@ export interface SignedHttpRequest {
    * re-attaching the trailers by hand.
    */
   trailers?: Record<string, string | string[] | undefined>;
+  /**
+   * Covered components this signature actually covers, in signature
+   * order — the wire value, not a re-derivation: it is exactly the
+   * `SignOptions.coveredComponents` list (or the default set when the
+   * caller omitted one) that `signRequest` wrote into
+   * `signature-input`. A caller auditing "what did this signature
+   * cover?" reads this field instead of parsing the header a second
+   * time — the sign-side mirror of `VerifyResult.coveredComponents`
+   * (#566), so the two sides can be compared item for item. Always a
+   * detached copy: mutating it never affects a later signature or
+   * verification. For `addSignature`, this is the appended
+   * signature's own list, not the merged list of both labels.
+   */
+  coveredComponents?: string[];
 }
 
 function defaultCoveredComponents(hasBody: boolean): string[] {
@@ -365,6 +379,11 @@ export function signRequest(
     ...(req.status !== undefined ? { status: req.status } : {}),
     ...(req.request !== undefined ? { request: req.request } : {}),
     ...(req.trailers !== undefined ? { trailers: req.trailers } : {}),
+    // Detached copy of the list actually written to signature-input:
+    // the caller must not be able to rewrite the signer's record of
+    // what was covered by mutating the returned array, and the
+    // returned array must not alias the caller's options array.
+    coveredComponents: [...covered],
   };
 }
 
@@ -508,5 +527,11 @@ export function addSignature(
     ...(signedReq.status !== undefined ? { status: signedReq.status } : {}),
     ...(signedReq.request !== undefined ? { request: signedReq.request } : {}),
     ...(signedReq.trailers !== undefined ? { trailers: signedReq.trailers } : {}),
+    // The appended signature's own covered list (from `fresh`), not a
+    // merge with the first signature's: each label's audit record
+    // stays attributable to the party that minted it.
+    ...(fresh.coveredComponents !== undefined
+      ? { coveredComponents: [...fresh.coveredComponents] }
+      : {}),
   };
 }
