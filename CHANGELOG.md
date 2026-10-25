@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifyAllLabels` accepts a per-label nonce-existence map
+  `requireNonceByLabel`: a label in the map is checked against its
+  own boolean, any other label falls back to the global `requireNonce`
+  (unset means no existence check for it), and a mapped value overrides
+  the global flag in both directions. A missing nonce reuses the global
+  error code (`MISSING_NONCE`); no new code, and the check position
+  matches the global one (after the cryptographic check, before the
+  replay cache), so forgeries still report `SIGNATURE_MISMATCH` and a
+  nonce-less label never reaches the cache. A non-boolean map value is
+  a caller configuration error naming the label, and like the freshness
+  requirements an existence requirement never joins the key-selection
+  mutual-exclusion rules. The map only overrides the existence
+  requirement: the replay cache stays shared across labels (one nonce
+  per label). 12 new tests in `test/requireNonceByLabel.test.ts`.
+
 - `SignedHttpRequest` echoes `coveredComponents`: exactly the list
   `signRequest` wrote into `signature-input` (the explicit option, or
   the default set when omitted), in signature order, as a detached

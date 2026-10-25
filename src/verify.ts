@@ -139,6 +139,9 @@ export interface VerifyOptions {
    * third party). Fails with `MISSING_NONCE`, checked only *after*
    * the cryptographic check and *before* the replay store, so
    * forgeries are still reported as `SIGNATURE_MISMATCH`.
+   * In `verifyAllLabels` a label in
+   * `VerifyAllOptions.requireNonceByLabel` overrides this value for
+   * that label; any other label falls back to it.
    */
   requireNonce?: boolean;
   /**
@@ -1347,6 +1350,29 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    */
   requireCreatedByLabel?: Record<string, boolean>;
   requireExpiresByLabel?: Record<string, boolean>;
+  /**
+   * Per-label nonce-existence requirements for multi-party
+   * signatures (e.g. a merchant signature that must carry a `nonce`
+   * for replay protection, plus a gateway signature that
+   * historically carries none, on the same request): maps a
+   * signature label to that label's own `requireNonce` value. A
+   * label in the map is checked against its own boolean; any other
+   * label falls back to the global `requireNonce` (unset means no
+   * existence check for it). Each value must be a boolean — any
+   * other value is a caller configuration error (throw). A missing
+   * nonce reuses the global error code (`MISSING_NONCE`); no new
+   * code is introduced, and the check position is the same as the
+   * global one (after the cryptographic check, before the replay
+   * cache), so forgeries still report `SIGNATURE_MISMATCH` and a
+   * nonce-less label never reaches — or pollutes — the cache. An
+   * existence requirement is not key selection, so it never joins
+   * the `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+   * This map only overrides the existence requirement: the replay
+   * cache itself stays shared across labels, keyed by the bare nonce
+   * string with no per-label partitioning (see the `replayCache`
+   * documentation for the one-nonce-per-label contract).
+   */
+  requireNonceByLabel?: Record<string, boolean>;
 }
 
 /**
@@ -1470,7 +1496,7 @@ function assertMaxSignatureAgeSecByLabel(
  * so it throws rather than returning `{ ok: false }`.
  */
 function assertRequireFlagByLabel(
-  field: "requireCreatedByLabel" | "requireExpiresByLabel",
+  field: "requireCreatedByLabel" | "requireExpiresByLabel" | "requireNonceByLabel",
   map: Record<string, boolean> | undefined,
 ): void {
   if (map === undefined) return;
@@ -1512,6 +1538,7 @@ export function verifyAllLabels(
   assertMaxSignatureAgeSecByLabel(opts.maxSignatureAgeSecByLabel);
   assertRequireFlagByLabel("requireCreatedByLabel", opts.requireCreatedByLabel);
   assertRequireFlagByLabel("requireExpiresByLabel", opts.requireExpiresByLabel);
+  assertRequireFlagByLabel("requireNonceByLabel", opts.requireNonceByLabel);
   let labels: string[];
   try {
     labels = listSignatureLabels(sigInput);
@@ -1571,6 +1598,13 @@ export function verifyAllLabels(
       opts.requireCreatedByLabel?.[label] ?? opts.requireCreated;
     const requireExpires =
       opts.requireExpiresByLabel?.[label] ?? opts.requireExpires;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, requireCreated, requireExpires });
+    // Per-label nonce-existence requirement: a label in the map
+    // is checked against its own flag; every other label falls back
+    // to the global flag (unset means no existence check for it).
+    // Like the freshness requirements above, a requirement is not
+    // key selection, so it never joins the mutual-exclusion checks.
+    const requireNonce =
+      opts.requireNonceByLabel?.[label] ?? opts.requireNonce;
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, requireCreated, requireExpires, requireNonce });
   });
 }
