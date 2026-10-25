@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
+import type { AddressInfo, Socket } from "node:net";
 import { createSecretKey, generateKeyPairSync, sign as edSign } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -159,6 +161,11 @@ import {
   DEMO_JWKS_FETCH_RETRY_RETRIES,
   DEMO_JWKS_FETCH_RETRY_SIZE,
   DEMO_JWKS_FETCH_RETRY_SLEEP_CALLS,
+  DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS,
+  DEMO_JWKS_REQUIRE_HTTPS_ERROR,
+  DEMO_JWKS_REQUIRE_HTTPS_KEY_ID,
+  DEMO_JWKS_REQUIRE_HTTPS_REJECTED_FETCH_CALLS,
+  DEMO_JWKS_REQUIRE_HTTPS_SIZE,
   DEMO_JWK_TAMPERED_CODE,
   DEMO_JOIN_COVERED_COMPONENTS,
   DEMO_JOIN_EXPECTED,
@@ -4993,7 +5000,8 @@ test("demo signed-response segment verifies a gateway-signed @status response ov
   assert.equal(crossCheck.code, "SIGNATURE_MISMATCH");
 
   // Printed lines: header + three pinned lines (status / ok / @status
-  // value) + the tamper rejection — byte-exact, closing the demo.
+  // value) + the tamper rejection — byte-exact, followed by the
+  // JWKS requireHttps segment.
   const out = lines.join("\n");
   assert.match(
     out,
@@ -5009,7 +5017,9 @@ test("demo signed-response segment verifies a gateway-signed @status response ov
     `Signed @status value: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
     `Gateway response verification after status tampering (200 -> 500): FAILED (code ${DEMO_GATEWAY_RESPONSE_TAMPER_CODE}: ${gatewayResponseTamperedVerification.reason})`,
   ]);
-  assert.equal(headerIdx + 5, lines.length);
+  // The JWKS requireHttps segment follows the signed-response segment.
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(lines[headerIdx + 6]!.startsWith("JWKS requireHttps:"));
 });
 
 test("demo signed-response segment prints byte-identical lines across runs", async () => {
@@ -5023,4 +5033,116 @@ test("demo signed-response segment prints byte-identical lines across runs", asy
   // Only the loopback port (never printed) and the key pair are fresh
   // per run, so the segment's printed tail is identical.
   assert.deepEqual(second.lines.slice(b), first.lines.slice(a));
+});
+
+test("demo JWKS requireHttps segment rejects a plaintext endpoint at construction and fetches it with the option off", async () => {
+  const {
+    jwksRequireHttpsError,
+    jwksRequireHttpsRejectedFetchCalls,
+    jwksRequireHttpsHttpsConstruction,
+    jwksRequireHttpsResolved,
+    jwksRequireHttpsSize,
+    jwksRequireHttpsDefaultFetchCalls,
+  } = await runDemo();
+  assert.equal(DEMO_JWKS_REQUIRE_HTTPS_KEY_ID, "demo-jwks-require-https-1");
+  assert.equal(
+    DEMO_JWKS_REQUIRE_HTTPS_ERROR,
+    "JwksKeyStore: `requireHttps` requires https: for the JWKS endpoint, got \"http:\"",
+  );
+  assert.equal(DEMO_JWKS_REQUIRE_HTTPS_REJECTED_FETCH_CALLS, 0);
+  assert.equal(DEMO_JWKS_REQUIRE_HTTPS_SIZE, 1);
+  assert.equal(DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS, 1);
+  assert.equal(jwksRequireHttpsError, DEMO_JWKS_REQUIRE_HTTPS_ERROR);
+  assert.equal(
+    jwksRequireHttpsRejectedFetchCalls,
+    DEMO_JWKS_REQUIRE_HTTPS_REJECTED_FETCH_CALLS,
+  );
+  assert.equal(jwksRequireHttpsHttpsConstruction, true);
+  assert.equal(jwksRequireHttpsResolved, true);
+  assert.equal(jwksRequireHttpsSize, DEMO_JWKS_REQUIRE_HTTPS_SIZE);
+  assert.equal(
+    jwksRequireHttpsDefaultFetchCalls,
+    DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS,
+  );
+  // Independent reproduction of the same three steps, outside runDemo(),
+  // over a real loopback server (zero external network).
+  const { publicKey } = generateEd25519KeyPair();
+  let directHits = 0;
+  const directSockets = new Set<Socket>();
+  const directServer = createServer((req, res) => {
+    directHits++;
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        keys: [
+          {
+            ...exportPublicKeyJwk(publicKey),
+            kid: DEMO_JWKS_REQUIRE_HTTPS_KEY_ID,
+          },
+        ],
+      }),
+    );
+  });
+  directServer.on("connection", (socket) => {
+    directSockets.add(socket);
+    socket.on("close", () => {
+      directSockets.delete(socket);
+    });
+  });
+  try {
+    const directPort = await new Promise<AddressInfo>((resolve, reject) => {
+      directServer.on("error", reject);
+      directServer.listen(0, "127.0.0.1", () => {
+        resolve(directServer.address() as AddressInfo);
+      });
+    }).then((info) => info.port);
+    const directUrl = `http://127.0.0.1:${directPort}/.well-known/jwks.json`;
+    assert.throws(
+      () => new JwksKeyStore(directUrl, { requireHttps: true }),
+      (err: unknown) =>
+        err instanceof Error &&
+        err.message === DEMO_JWKS_REQUIRE_HTTPS_ERROR,
+    );
+    assert.equal(directHits, jwksRequireHttpsRejectedFetchCalls);
+    assert.doesNotThrow(
+      () => new JwksKeyStore(DEMO_JWKS_URL, { requireHttps: true }),
+    );
+    assert.equal(directHits, jwksRequireHttpsRejectedFetchCalls);
+    const directStore = new JwksKeyStore(directUrl);
+    await directStore.refresh();
+    assert.equal(
+      directStore.resolve(DEMO_JWKS_REQUIRE_HTTPS_KEY_ID) !== undefined,
+      jwksRequireHttpsResolved,
+    );
+    assert.equal(directStore.size, jwksRequireHttpsSize);
+    assert.equal(directHits, jwksRequireHttpsDefaultFetchCalls);
+  } finally {
+    for (const socket of directSockets) socket.destroy();
+    await new Promise<void>((resolve) => {
+      directServer.close(() => resolve());
+    });
+  }
+});
+
+test("demo lines contain the JWKS requireHttps segment (rejection, https construction, loopback fetch, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /JWKS requireHttps: JwksKeyStore requireHttps is an opt-in transport rule/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("JWKS requireHttps:"));
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "JWKS requireHttps: JwksKeyStore requireHttps is an opt-in transport rule — a plaintext JWKS endpoint is rejected at construction, before any fetch, so a path attacker cannot substitute the key set",
+    `JWKS requireHttps over a loopback http: endpoint (requireHttps true): construction FAILED (${DEMO_JWKS_REQUIRE_HTTPS_ERROR}) after ${DEMO_JWKS_REQUIRE_HTTPS_REJECTED_FETCH_CALLS} fetches — the check runs before any network`,
+    "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule is a construction-time check only and does not intercept a later https-to-http redirect",
+    `JWKS requireHttps over the same loopback http: endpoint (default off): refresh() succeeded after ${DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS} fetch, the snapshot holds ${DEMO_JWKS_REQUIRE_HTTPS_SIZE} key and resolve("${DEMO_JWKS_REQUIRE_HTTPS_KEY_ID}") returned a key — plaintext is allowed only for loopback development and tests`,
+  ]);
+  assert.equal(headerIdx + 4, lines.length);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("JWKS requireHttps:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
+  );
 });

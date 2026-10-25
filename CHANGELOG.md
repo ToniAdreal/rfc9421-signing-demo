@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) gains a JWKS requireHttps segment:
+  a real loopback `http` server serves the scripted key's JWKS
+  document, and a `JwksKeyStore` built over that plaintext endpoint
+  with `requireHttps: true` is rejected at construction with the
+  pinned configuration error before any fetch is attempted (the
+  loopback server records zero requests). A store over an `https:`
+  endpoint URL with the same option constructs cleanly — the
+  construction check passes for `https:`, and no fetch is attempted
+  at construction, so no local TLS fixture is faked. A store over
+  the same loopback endpoint with the option off refreshes, resolves
+  the scripted keyid, and records exactly one fetch. The segment
+  asserts every outcome against hand-pinned expectations, so a
+  broken fixture fails the demo with a non-zero exit.
 - The CLI demo (`npm run demo`) gains a required-tag segment: the
   same request signed with no tag is rejected with `MISSING_TAG`
   under `requireTag: true` and verifies with the option unset, and

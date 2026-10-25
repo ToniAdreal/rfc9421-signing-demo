@@ -835,6 +835,24 @@
  * tamper rejection code equal the hand-pinned expectations below.
  * Only the loopback port (never printed) and the key pair are fresh
  * per run, so the segment is byte-identical between runs.
+ * The demo closes with a JWKS requireHttps segment: a real loopback
+ * `http` server serves the scripted key's JWKS document, and a
+ * `JwksKeyStore` built over that plaintext endpoint with
+ * `requireHttps: true` is rejected at construction with the pinned
+ * configuration error before any fetch is attempted (the loopback
+ * server records zero requests). A second store over an `https:`
+ * endpoint URL with the same option constructs cleanly — the
+ * construction check passes for `https:`, and no fetch is attempted
+ * at construction, so no local TLS fixture is faked. A third store
+ * over the same loopback endpoint with the option off refreshes,
+ * resolves the scripted keyid, and records exactly one fetch:
+ * plaintext stays allowed by default for loopback development and
+ * tests. Outside the printed lines the demo asserts the error
+ * message, the zero/one fetch counts, the snapshot size and the
+ * resolution equal the hand-pinned expectations below (the same
+ * construction-time rule `test/jwks.test.ts` pins). Only the
+ * loopback port (never printed) and the key pair are fresh per
+ * run, so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -864,7 +882,7 @@
 
 import { fileURLToPath } from "node:url";
 import { createServer, get, type IncomingMessage } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import {
   createSecretKey,
   generateKeyPairSync,
@@ -2197,6 +2215,31 @@ export const DEMO_JWKS_FETCH_RETRY_NOT_FOUND_SLEEP_CALLS = 0;
  */
 export const DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR =
   `JwksKeyStore: JWKS fetch failed: HTTP 404 from ${DEMO_JWKS_URL}`;
+
+/** Key id of the closing JWKS requireHttps segment's scripted key. */
+export const DEMO_JWKS_REQUIRE_HTTPS_KEY_ID = "demo-jwks-require-https-1";
+/**
+ * Hand-pinned construction rejection of a `JwksKeyStore` built over a
+ * plaintext `http:` endpoint with `requireHttps: true`: the same
+ * message `test/jwks.test.ts` pins for the construction-time rule.
+ */
+export const DEMO_JWKS_REQUIRE_HTTPS_ERROR =
+  "JwksKeyStore: `requireHttps` requires https: for the JWKS endpoint, got \"http:\"";
+/**
+ * Loopback request count recorded before the rejected construction:
+ * the check runs at construction, so no fetch is ever attempted.
+ */
+export const DEMO_JWKS_REQUIRE_HTTPS_REJECTED_FETCH_CALLS = 0;
+/**
+ * Snapshot size of the default-off store after its loopback refresh:
+ * exactly the one scripted key.
+ */
+export const DEMO_JWKS_REQUIRE_HTTPS_SIZE = 1;
+/**
+ * Loopback request count after the default-off store's refresh:
+ * exactly one fetch serves the scripted key.
+ */
+export const DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS = 1;
 
 /**
  * Fixed nonces of the closing ReplayCache observability
@@ -3744,6 +3787,44 @@ export interface DemoResult {
    * `DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR`).
    */
   jwksFetchRetryNotFoundError: string;
+  /**
+   * Construction rejection of the closing JWKS requireHttps
+   * segment's store built over the loopback `http:` endpoint with
+   * `requireHttps: true` (equals the hand-pinned
+   * `DEMO_JWKS_REQUIRE_HTTPS_ERROR`).
+   */
+  jwksRequireHttpsError: string;
+  /**
+   * Loopback request count recorded before that rejection (equals
+   * the hand-pinned
+   * `DEMO_JWKS_REQUIRE_HTTPS_REJECTED_FETCH_CALLS`: the check runs
+   * at construction, so no fetch is attempted).
+   */
+  jwksRequireHttpsRejectedFetchCalls: number;
+  /**
+   * Whether a store over an `https:` endpoint URL with
+   * `requireHttps: true` constructs cleanly (`true`: the
+   * construction check passes for `https:`, with no fetch
+   * attempted at construction).
+   */
+  jwksRequireHttpsHttpsConstruction: boolean;
+  /**
+   * Whether the default-off store's `resolve()` of the scripted
+   * keyid returned a key after its loopback refresh (`true`).
+   */
+  jwksRequireHttpsResolved: boolean;
+  /**
+   * Snapshot size of the default-off store after its loopback
+   * refresh (equals the hand-pinned
+   * `DEMO_JWKS_REQUIRE_HTTPS_SIZE`).
+   */
+  jwksRequireHttpsSize: number;
+  /**
+   * Loopback request count after the default-off store's refresh
+   * (equals the hand-pinned
+   * `DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS`).
+   */
+  jwksRequireHttpsDefaultFetchCalls: number;
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -7999,6 +8080,109 @@ export async function runDemo(): Promise<DemoResult> {
   // segment's printed lines are byte-identical between runs.
   const gatewayResponse = await fetchGatewaySignedResponse();
 
+  // JWKS requireHttps segment: the JWKS sections above fetch
+  // over fake endpoints or restored snapshots, so none shows
+  // the opt-in transport rule a production deployment turns
+  // on: `requireHttps: true` must reject a plaintext endpoint
+  // at construction, before any fetch is attempted. This
+  // segment serves the scripted key's JWKS document from a
+  // real loopback `http` server (zero external network) and
+  // counts its requests: a store built over that endpoint
+  // with `requireHttps: true` must throw the pinned
+  // configuration error with zero requests recorded; a store
+  // over an `https:` endpoint URL with the same option must
+  // construct cleanly (no fetch is attempted at
+  // construction, so no local TLS fixture is faked); and a
+  // store over the same loopback endpoint with the option
+  // off must refresh, resolve the scripted keyid, and record
+  // exactly one fetch. Outside the printed lines the demo
+  // asserts the error message, the fetch counts, the
+  // snapshot size and the resolution equal the hand-pinned
+  // DEMO_JWKS_REQUIRE_HTTPS_* expectations.
+  const jwksRequireHttpsPair = generateEd25519KeyPair();
+  let jwksRequireHttpsFetchCalls = 0;
+  const jwksRequireHttpsSockets = new Set<Socket>();
+  const jwksRequireHttpsServer = createServer((req, res) => {
+    jwksRequireHttpsFetchCalls++;
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        keys: [
+          {
+            ...exportPublicKeyJwk(jwksRequireHttpsPair.publicKey),
+            kid: DEMO_JWKS_REQUIRE_HTTPS_KEY_ID,
+          },
+        ],
+      }),
+    );
+  });
+  jwksRequireHttpsServer.on("connection", (socket) => {
+    jwksRequireHttpsSockets.add(socket);
+    socket.on("close", () => {
+      jwksRequireHttpsSockets.delete(socket);
+    });
+  });
+  let jwksRequireHttpsError = "";
+  let jwksRequireHttpsRejectedFetchCalls = -1;
+  let jwksRequireHttpsHttpsConstruction = false;
+  let jwksRequireHttpsResolved = false;
+  let jwksRequireHttpsSize = 0;
+  let jwksRequireHttpsDefaultFetchCalls = -1;
+  try {
+    const jwksRequireHttpsPort = await new Promise<AddressInfo>(
+      (resolve, reject) => {
+        jwksRequireHttpsServer.on("error", reject);
+        jwksRequireHttpsServer.listen(0, "127.0.0.1", () => {
+          resolve(jwksRequireHttpsServer.address() as AddressInfo);
+        });
+      },
+    ).then((info) => info.port);
+    const jwksRequireHttpsUrl = `http://127.0.0.1:${jwksRequireHttpsPort}/.well-known/jwks.json`;
+    try {
+      new JwksKeyStore(jwksRequireHttpsUrl, { requireHttps: true });
+    } catch (err) {
+      jwksRequireHttpsError =
+        err instanceof Error ? err.message : String(err);
+    }
+    jwksRequireHttpsRejectedFetchCalls = jwksRequireHttpsFetchCalls;
+    try {
+      new JwksKeyStore(DEMO_JWKS_URL, { requireHttps: true });
+      jwksRequireHttpsHttpsConstruction = true;
+    } catch {
+      jwksRequireHttpsHttpsConstruction = false;
+    }
+    const jwksRequireHttpsStore = new JwksKeyStore(jwksRequireHttpsUrl);
+    await jwksRequireHttpsStore.refresh();
+    jwksRequireHttpsResolved =
+      jwksRequireHttpsStore.resolve(DEMO_JWKS_REQUIRE_HTTPS_KEY_ID) !==
+      undefined;
+    jwksRequireHttpsSize = jwksRequireHttpsStore.size;
+    jwksRequireHttpsDefaultFetchCalls = jwksRequireHttpsFetchCalls;
+    if (
+      jwksRequireHttpsError !== DEMO_JWKS_REQUIRE_HTTPS_ERROR ||
+      jwksRequireHttpsRejectedFetchCalls !==
+        DEMO_JWKS_REQUIRE_HTTPS_REJECTED_FETCH_CALLS ||
+      jwksRequireHttpsHttpsConstruction !== true ||
+      jwksRequireHttpsResolved !== true ||
+      jwksRequireHttpsSize !== DEMO_JWKS_REQUIRE_HTTPS_SIZE ||
+      jwksRequireHttpsDefaultFetchCalls !==
+        DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS
+    ) {
+      throw new Error(
+        `demo fixture broken: JWKS requireHttps gave error ${jwksRequireHttpsError} with ` +
+          `${jwksRequireHttpsRejectedFetchCalls} fetches before the rejection, https construction ` +
+          `${jwksRequireHttpsHttpsConstruction}, resolved ${jwksRequireHttpsResolved} with size ` +
+          `${jwksRequireHttpsSize} after ${jwksRequireHttpsDefaultFetchCalls} fetches, instead of the pinned ` +
+          `${DEMO_JWKS_REQUIRE_HTTPS_ERROR} with ${DEMO_JWKS_REQUIRE_HTTPS_REJECTED_FETCH_CALLS} fetches, ` +
+          `https construction true, resolved true with size ${DEMO_JWKS_REQUIRE_HTTPS_SIZE} after ` +
+          `${DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS} fetch`,
+      );
+    }
+  } finally {
+    for (const socket of jwksRequireHttpsSockets) socket.destroy();
+    jwksRequireHttpsServer.close();
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -8464,6 +8648,11 @@ export async function runDemo(): Promise<DemoResult> {
     gatewayResponse.tamperedVerification.ok
       ? "Gateway response verification after status tampering (200 -> 500): OK (unexpected — tampering was not detected)"
       : `Gateway response verification after status tampering (200 -> 500): FAILED (code ${gatewayResponse.tamperedVerification.code}: ${gatewayResponse.tamperedVerification.reason})`,
+    "",
+    "JWKS requireHttps: JwksKeyStore requireHttps is an opt-in transport rule — a plaintext JWKS endpoint is rejected at construction, before any fetch, so a path attacker cannot substitute the key set",
+    `JWKS requireHttps over a loopback http: endpoint (requireHttps true): construction FAILED (${jwksRequireHttpsError}) after ${jwksRequireHttpsRejectedFetchCalls} fetches — the check runs before any network`,
+    "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule is a construction-time check only and does not intercept a later https-to-http redirect",
+    `JWKS requireHttps over the same loopback http: endpoint (default off): refresh() succeeded after ${jwksRequireHttpsDefaultFetchCalls} fetch, the snapshot holds ${jwksRequireHttpsSize} key and resolve("${DEMO_JWKS_REQUIRE_HTTPS_KEY_ID}") returned a key — plaintext is allowed only for loopback development and tests`,
   ];
 
   return {
@@ -8689,6 +8878,12 @@ export async function runDemo(): Promise<DemoResult> {
     gatewayResponseRequest: gatewayResponse.requestLike,
     gatewayResponseVerification: gatewayResponse.verification,
     gatewayResponseTamperedVerification: gatewayResponse.tamperedVerification,
+    jwksRequireHttpsError,
+    jwksRequireHttpsRejectedFetchCalls,
+    jwksRequireHttpsHttpsConstruction,
+    jwksRequireHttpsResolved,
+    jwksRequireHttpsSize,
+    jwksRequireHttpsDefaultFetchCalls,
     lines,
   };
 }
