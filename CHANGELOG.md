@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifyAllLabels` accepts a `requireTagByLabel` map: a label in the
+  map is checked against its own `requireTag` boolean, any other label
+  falls back to the global `requireTag` (unset means no existence
+  check for it). A missing tag reuses the global `MISSING_TAG` code —
+  no new code is introduced — and the check position is the same as
+  the global one (after the cryptographic check, before the window
+  checks), so forgeries still report `SIGNATURE_MISMATCH`. A
+  non-boolean map value is a caller configuration error (throw), and
+  the map never joins the key-selection mutual-exclusion rules. It is
+  orthogonal to `requireNonceByLabel`: each map drives only its own
+  existence check, so a merchant signature that must carry a tag and
+  a gateway signature that historically carries none can be verified
+  in one call with independent per-label verdicts.
 - The benchmark (`npm run bench`) now also measures
   `fromNodeResponse` + `verifyRequest` over a loopback-signed
   gateway settlement response: a real `http` server on loopback

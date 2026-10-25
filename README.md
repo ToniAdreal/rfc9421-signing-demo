@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 933 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 944 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -410,6 +410,30 @@ const results = verifyAllLabels(dualSigned, {
 });
 // merchant without nonce → { ok: false, code: "MISSING_NONCE" }
 // gateway without nonce → { ok: true } (falls back to global, unset)
+```
+
+Per-label tag-existence requirement (a merchant signature that must
+carry a `tag` binding it to the payment protocol, plus a gateway
+signature that historically carries none, on the same request):
+`verifyAllLabels` accepts a `requireTagByLabel` map with the same
+override/fallback semantics: a label in the map is checked against its
+own boolean; any other label falls back to the global `requireTag`
+(unset means no existence check for it). A missing tag reuses the
+global error code (`MISSING_TAG`); no new code is introduced, and the
+check position is the same as the global one (after the cryptographic
+check, before the window checks), so forgeries still report
+`SIGNATURE_MISMATCH`. A non-boolean map value is a caller
+configuration error, and like the other existence requirements it
+never joins the key-selection mutual-exclusion rules. It is
+orthogonal to `requireNonceByLabel`: each map drives only its own
+existence check.
+
+```ts
+const results = verifyAllLabels(dualSigned, {
+  requireTagByLabel: { merchant: true }, // gateway may omit tag
+});
+// merchant without tag → { ok: false, code: "MISSING_TAG" }
+// gateway without tag → { ok: true } (falls back to global, unset)
 ```
 
 Timing honesty: the *number* of candidates tried is observable through
@@ -2764,7 +2788,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 933 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 944 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
