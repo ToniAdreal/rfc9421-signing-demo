@@ -11,6 +11,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) gains a required-tag segment: the
+  same request signed with no tag is rejected with `MISSING_TAG`
+  under `requireTag: true` and verifies with the option unset, and
+  the same request signed with a tag verifies under the option —
+  the presence counterpart to the application-tag segment's
+  `expectedTag` value pin, with `requireTagByLabel` as the
+  per-label form. The segment asserts every outcome, code,
+  reason and reported tag against hand-pinned expectations, so a
+  broken fixture fails the demo with a non-zero exit.
 - `verifyAllLabels` accepts a `requireTagByLabel` map: a label in the
   map is checked against its own `requireTag` boolean, any other label
   falls back to the global `requireTag` (unset means no existence
