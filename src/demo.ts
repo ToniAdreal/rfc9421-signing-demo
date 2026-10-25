@@ -853,6 +853,20 @@
  * construction-time rule `test/jwks.test.ts` pins). Only the
  * loopback port (never printed) and the key pair are fresh per
  * run, so the segment is byte-identical between runs.
+ * The demo closes with a per-label nonce requirement segment: a
+ * dual-label request carries a merchant signature that must carry
+ * a nonce and a gateway signature that historically carries none,
+ * verified with `requireNonceByLabel: { merchant: true }` and the
+ * global `requireNonce` unset — the nonce-less merchant label is
+ * rejected with `MISSING_NONCE`, the unmapped gateway label falls
+ * back to the unset global and verifies, and the same merchant
+ * signature re-signed with a nonce verifies alongside it. The
+ * check runs after the cryptographic check like the global one,
+ * so a forged nonce-less merchant signature still reports a
+ * signature failure. Outside the printed lines the demo asserts
+ * every outcome, label, code, reason and reported nonce equals
+ * the hand-pinned expectations below. Only the key pairs are
+ * fresh per run, so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2835,6 +2849,32 @@ export const DEMO_REQUIRE_NONCE_MISSING_CODE: VerifyFailureCode =
 export const DEMO_REQUIRE_NONCE_MISSING_REASON =
   "signature carries no `nonce` but requireNonce is set";
 
+/** Label of the closing per-label nonce requirement segment's merchant signature. */
+export const DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL = "merchant";
+/** Label of the closing per-label nonce requirement segment's gateway signature. */
+export const DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL = "gateway";
+/** Key id the closing per-label nonce requirement segment's merchant signature carries. */
+export const DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_KEY_ID =
+  "demo-require-nonce-by-label-merchant-1";
+/** Key id the closing per-label nonce requirement segment's gateway signature carries. */
+export const DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_KEY_ID =
+  "demo-require-nonce-by-label-gateway-1";
+/** Nonce the closing per-label nonce requirement segment's merchant signature carries when it carries one. */
+export const DEMO_REQUIRE_NONCE_BY_LABEL_NONCE =
+  "demo-nonce-require-nonce-by-label-001";
+/** Absolute URL the closing per-label nonce requirement segment signs. */
+export const DEMO_REQUIRE_NONCE_BY_LABEL_URL =
+  "https://api.example.com/v1/payments";
+/**
+ * Hand-pinned `MISSING_NONCE` reason when a label mapped to
+ * true in `requireNonceByLabel` carries no (non-empty) nonce —
+ * the same wording `src/verify.ts` returns for the global
+ * `requireNonce` check, reused by the per-label map (the code
+ * is what `test/requireNonceByLabel.test.ts` pins).
+ */
+export const DEMO_REQUIRE_NONCE_BY_LABEL_MISSING_REASON =
+  "signature carries no `nonce` but requireNonce is set";
+
 /** Label of the closing per-label keyid pinning segment's merchant signature. */
 export const DEMO_EXPECTED_KEY_IDS_MERCHANT_LABEL = "merchant";
 /** Label of the closing per-label keyid pinning segment's gateway signature. */
@@ -3825,6 +3865,30 @@ export interface DemoResult {
    * `DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS`).
    */
   jwksRequireHttpsDefaultFetchCalls: number;
+  /**
+   * The dual-label request of the closing per-label nonce
+   * requirement segment, merchant signature without a nonce
+   * and gateway signature without one.
+   */
+  requireNonceByLabelSigned: SignedHttpRequest;
+  /**
+   * Per-label verdicts for that request under
+   * `requireNonceByLabel: { merchant: true }` with the global
+   * `requireNonce` unset: the merchant label fails with
+   * `MISSING_NONCE`, the unmapped gateway label verifies.
+   */
+  requireNonceByLabelMissingVerification: VerifyResult[];
+  /**
+   * The same dual-label request with the merchant signature
+   * re-signed carrying
+   * `DEMO_REQUIRE_NONCE_BY_LABEL_NONCE`.
+   */
+  requireNonceByLabelWithNonceSigned: SignedHttpRequest;
+  /**
+   * Per-label verdicts for that request under the same map:
+   * both labels verify, the merchant label reporting its nonce.
+   */
+  requireNonceByLabelWithNonceVerification: VerifyResult[];
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -8183,6 +8247,146 @@ export async function runDemo(): Promise<DemoResult> {
     jwksRequireHttpsServer.close();
   }
 
+  // Per-label nonce requirement segment: `requireNonceByLabel`
+  // is the per-label form of the required-nonce segment's
+  // global `requireNonce` — where the global check demands a
+  // nonce from every signature, this map demands one only
+  // from the labels it names. A merchant signature that must
+  // carry a nonce (replay protection) and a gateway signature
+  // that historically carries none ride on the same request:
+  // two fresh key pairs mint the dual-label fixture
+  // (`merchant` via `signRequest`, `gateway` appended via
+  // `addSignature`) at the pinned created instant, and every
+  // verify call injects the same fixed `now`. The first
+  // verification runs with `requireNonceByLabel:
+  // { merchant: true }` and the global unset, so the
+  // nonce-less merchant label is rejected with
+  // `MISSING_NONCE` while the unmapped gateway label falls
+  // back to the unset global and verifies; the second
+  // verification re-signs the merchant label with a nonce
+  // and both labels verify. Outside the printed lines the
+  // demo asserts every outcome, label, code, reason and
+  // reported nonce equals the hand-pinned expectations.
+  const requireNonceByLabelMerchantPair = generateEd25519KeyPair();
+  const requireNonceByLabelGatewayPair = generateEd25519KeyPair();
+  const requireNonceByLabelRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_REQUIRE_NONCE_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const requireNonceByLabelMerchantSigned = signRequest(
+    requireNonceByLabelRequest,
+    {
+      keyId: DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_KEY_ID,
+      alg: "ed25519",
+      key: requireNonceByLabelMerchantPair.privateKey,
+      created: DEMO_CREATED,
+      label: DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL,
+    },
+  );
+  const requireNonceByLabelSigned = addSignature(
+    requireNonceByLabelMerchantSigned,
+    {
+      keyId: DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_KEY_ID,
+      alg: "ed25519",
+      key: requireNonceByLabelGatewayPair.privateKey,
+      created: DEMO_CREATED,
+      label: DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL,
+    },
+  );
+  const requireNonceByLabelKeys = {
+    [DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL]:
+      requireNonceByLabelMerchantPair.publicKey,
+    [DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL]:
+      requireNonceByLabelGatewayPair.publicKey,
+  };
+  const requireNonceByLabelOptions = {
+    keys: requireNonceByLabelKeys,
+    now: DEMO_CREATED + 60,
+    requireNonceByLabel: {
+      [DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL]: true,
+    },
+  };
+  const requireNonceByLabelMissingVerification = verifyAllLabels(
+    requireNonceByLabelSigned,
+    requireNonceByLabelOptions,
+  );
+  const requireNonceByLabelMerchantWithNonceSigned = signRequest(
+    requireNonceByLabelRequest,
+    {
+      keyId: DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_KEY_ID,
+      alg: "ed25519",
+      key: requireNonceByLabelMerchantPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_REQUIRE_NONCE_BY_LABEL_NONCE,
+      label: DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL,
+    },
+  );
+  const requireNonceByLabelWithNonceSigned = addSignature(
+    requireNonceByLabelMerchantWithNonceSigned,
+    {
+      keyId: DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_KEY_ID,
+      alg: "ed25519",
+      key: requireNonceByLabelGatewayPair.privateKey,
+      created: DEMO_CREATED,
+      label: DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL,
+    },
+  );
+  const requireNonceByLabelWithNonceVerification = verifyAllLabels(
+    requireNonceByLabelWithNonceSigned,
+    requireNonceByLabelOptions,
+  );
+  const requireNonceByLabelByLabel = (
+    results: VerifyResult[],
+  ): Record<string, VerifyResult> =>
+    Object.fromEntries(results.map((r) => [r.label, r]));
+  const requireNonceByLabelMissingByLabel =
+    requireNonceByLabelByLabel(requireNonceByLabelMissingVerification);
+  const requireNonceByLabelWithNonceByLabel =
+    requireNonceByLabelByLabel(requireNonceByLabelWithNonceVerification);
+  if (
+    requireNonceByLabelMissingVerification.length !== 2 ||
+    requireNonceByLabelMissingByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL
+    ]?.ok !== false ||
+    requireNonceByLabelMissingByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL
+    ]?.code !== "MISSING_NONCE" ||
+    requireNonceByLabelMissingByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL
+    ]?.reason !== DEMO_REQUIRE_NONCE_BY_LABEL_MISSING_REASON ||
+    requireNonceByLabelMissingByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL
+    ]?.nonce !== undefined ||
+    requireNonceByLabelMissingByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL
+    ]?.ok !== true ||
+    requireNonceByLabelMissingByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL
+    ]?.nonce !== undefined ||
+    requireNonceByLabelWithNonceVerification.length !== 2 ||
+    requireNonceByLabelWithNonceByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL
+    ]?.ok !== true ||
+    requireNonceByLabelWithNonceByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL
+    ]?.nonce !== DEMO_REQUIRE_NONCE_BY_LABEL_NONCE ||
+    requireNonceByLabelWithNonceByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL
+    ]?.ok !== true
+  ) {
+    throw new Error(
+      `demo fixture broken: requireNonceByLabel gave missing ` +
+        `${JSON.stringify(requireNonceByLabelMissingVerification)} and with-nonce ` +
+        `${JSON.stringify(requireNonceByLabelWithNonceVerification)}, instead of a ` +
+        `merchant label rejected with MISSING_NONCE ` +
+        `(${DEMO_REQUIRE_NONCE_BY_LABEL_MISSING_REASON}), an unmapped gateway label ` +
+        `verifying, and both labels verifying once the merchant signature carries ` +
+        `nonce "${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}"`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -8653,6 +8857,26 @@ export async function runDemo(): Promise<DemoResult> {
     `JWKS requireHttps over a loopback http: endpoint (requireHttps true): construction FAILED (${jwksRequireHttpsError}) after ${jwksRequireHttpsRejectedFetchCalls} fetches — the check runs before any network`,
     "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule is a construction-time check only and does not intercept a later https-to-http redirect",
     `JWKS requireHttps over the same loopback http: endpoint (default off): refresh() succeeded after ${jwksRequireHttpsDefaultFetchCalls} fetch, the snapshot holds ${jwksRequireHttpsSize} key and resolve("${DEMO_JWKS_REQUIRE_HTTPS_KEY_ID}") returned a key — plaintext is allowed only for loopback development and tests`,
+    "",
+    "Per-label nonce requirement: verifyAllLabels' requireNonceByLabel map demands a nonce only from the merchant signature — the gateway signature historically carries none, so it falls back to the unset global requireNonce — the per-label form of the required-nonce segment's global check, checked after the cryptographic check like the global one, so a forged nonce-less merchant signature still reports a signature failure rather than a policy violation",
+    requireNonceByLabelMissingByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL
+    ]!.ok
+      ? `Merchant without nonce: dual-label request verified with requireNonceByLabel { merchant: true }: OK (unexpected — the nonce-less merchant signature was not rejected)`
+      : `Merchant without nonce: dual-label request verified with requireNonceByLabel { merchant: true }: FAILED (label ${DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL}, code ${requireNonceByLabelMissingByLabel[DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL]!.code}: ${requireNonceByLabelMissingByLabel[DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL]!.reason})`,
+    requireNonceByLabelMissingByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL
+    ]!.ok
+      ? `Gateway without nonce: the same call: OK (label ${DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") (unmapped label falls back to the unset global requireNonce — no check is made)`
+      : `Gateway without nonce: the same call: FAILED (code ${requireNonceByLabelMissingByLabel[DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL]!.code}: ${requireNonceByLabelMissingByLabel[DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL]!.reason})`,
+    requireNonceByLabelWithNonceByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL
+    ]!.ok &&
+    requireNonceByLabelWithNonceByLabel[
+      DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL
+    ]!.ok
+      ? `Merchant with nonce: merchant re-signed with nonce "${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}" verified with the same map: OK (label ${DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL}, nonce="${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}"; label ${DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL} still verifies without one)`
+      : `Merchant with nonce: merchant re-signed with nonce "${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}" verified with the same map: FAILED (merchant code ${requireNonceByLabelWithNonceByLabel[DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL]!.code}, gateway code ${requireNonceByLabelWithNonceByLabel[DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL]!.code})`,
   ];
 
   return {
@@ -8884,6 +9108,10 @@ export async function runDemo(): Promise<DemoResult> {
     jwksRequireHttpsResolved,
     jwksRequireHttpsSize,
     jwksRequireHttpsDefaultFetchCalls,
+    requireNonceByLabelSigned,
+    requireNonceByLabelMissingVerification,
+    requireNonceByLabelWithNonceSigned,
+    requireNonceByLabelWithNonceVerification,
     lines,
   };
 }

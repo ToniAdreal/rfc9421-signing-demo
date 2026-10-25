@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) gains a per-label nonce
+  requirement segment: a dual-label request carries a merchant
+  signature that must carry a nonce and a gateway signature that
+  historically carries none, verified with
+  `requireNonceByLabel: { merchant: true }` and the global
+  `requireNonce` unset — the nonce-less merchant label is
+  rejected with `MISSING_NONCE`, the unmapped gateway label
+  falls back to the unset global and verifies, and the same
+  merchant signature re-signed with a nonce verifies alongside
+  it. The segment asserts every outcome, label, code, reason and
+  reported nonce against hand-pinned expectations, so a broken
+  fixture fails the demo with a non-zero exit.
 - The CLI demo (`npm run demo`) gains a JWKS requireHttps segment:
   a real loopback `http` server serves the scripted key's JWKS
   document, and a `JwksKeyStore` built over that plaintext endpoint

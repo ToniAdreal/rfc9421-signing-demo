@@ -41,6 +41,7 @@ import {
   signatureInputValue,
   verifyRequest,
   verifyAllLabels,
+  type VerifyResult,
 } from "../src/index.js";
 import {
   DEMO_ALG_FALLBACK_DATE,
@@ -284,6 +285,13 @@ import {
   DEMO_REQUIRE_NONCE_MISSING_CODE,
   DEMO_REQUIRE_NONCE_MISSING_REASON,
   DEMO_REQUIRE_NONCE_NONCE,
+  DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_KEY_ID,
+  DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL,
+  DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_KEY_ID,
+  DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL,
+  DEMO_REQUIRE_NONCE_BY_LABEL_MISSING_REASON,
+  DEMO_REQUIRE_NONCE_BY_LABEL_NONCE,
+  DEMO_REQUIRE_NONCE_BY_LABEL_URL,
   DEMO_REQUIRE_NONCE_URL,
   DEMO_REQUIRE_TAG,
   DEMO_REQUIRE_TAG_BODY,
@@ -5124,7 +5132,7 @@ test("demo JWKS requireHttps segment rejects a plaintext endpoint at constructio
   }
 });
 
-test("demo lines contain the JWKS requireHttps segment (rejection, https construction, loopback fetch, closing the demo)", async () => {
+test("demo lines contain the JWKS requireHttps segment (rejection, https construction, loopback fetch, followed by the per-label nonce requirement segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /JWKS requireHttps: JwksKeyStore requireHttps is an opt-in transport rule/);
@@ -5136,10 +5144,144 @@ test("demo lines contain the JWKS requireHttps segment (rejection, https constru
     "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule is a construction-time check only and does not intercept a later https-to-http redirect",
     `JWKS requireHttps over the same loopback http: endpoint (default off): refresh() succeeded after ${DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS} fetch, the snapshot holds ${DEMO_JWKS_REQUIRE_HTTPS_SIZE} key and resolve("${DEMO_JWKS_REQUIRE_HTTPS_KEY_ID}") returned a key — plaintext is allowed only for loopback development and tests`,
   ]);
-  assert.equal(headerIdx + 4, lines.length);
+  // The per-label nonce requirement segment now closes the demo.
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(lines[headerIdx + 5]!.startsWith("Per-label nonce requirement:"));
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("JWKS requireHttps:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo per-label nonce requirement segment pins requireNonceByLabel (merchant rejected, gateway fallback, nonce passes)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL, "gateway");
+  assert.equal(
+    DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_KEY_ID,
+    "demo-require-nonce-by-label-merchant-1",
+  );
+  assert.equal(
+    DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_KEY_ID,
+    "demo-require-nonce-by-label-gateway-1",
+  );
+  assert.equal(
+    DEMO_REQUIRE_NONCE_BY_LABEL_NONCE,
+    "demo-nonce-require-nonce-by-label-001",
+  );
+  assert.equal(
+    DEMO_REQUIRE_NONCE_BY_LABEL_URL,
+    "https://api.example.com/v1/payments",
+  );
+  assert.equal(
+    DEMO_REQUIRE_NONCE_BY_LABEL_MISSING_REASON,
+    "signature carries no `nonce` but requireNonce is set",
+  );
+  assert.ok(!/;nonce=/.test(r.requireNonceByLabelSigned.headers["signature-input"]));
+  assert.match(
+    r.requireNonceByLabelWithNonceSigned.headers["signature-input"],
+    /;nonce="demo-nonce-require-nonce-by-label-001"/,
+  );
+  const byLabel = (results: VerifyResult[]) =>
+    Object.fromEntries(results.map((x) => [x.label, x]));
+  const missing = byLabel(r.requireNonceByLabelMissingVerification);
+  assert.equal(r.requireNonceByLabelMissingVerification.length, 2);
+  assert.equal(missing.merchant.ok, false);
+  assert.equal(missing.merchant.code, "MISSING_NONCE");
+  assert.equal(missing.merchant.reason, DEMO_REQUIRE_NONCE_BY_LABEL_MISSING_REASON);
+  assert.equal(missing.merchant.nonce, undefined);
+  assert.equal(missing.gateway.ok, true);
+  assert.equal(missing.gateway.nonce, undefined);
+  const withNonce = byLabel(r.requireNonceByLabelWithNonceVerification);
+  assert.equal(r.requireNonceByLabelWithNonceVerification.length, 2);
+  assert.equal(withNonce.merchant.ok, true);
+  assert.equal(withNonce.merchant.nonce, DEMO_REQUIRE_NONCE_BY_LABEL_NONCE);
+  assert.equal(withNonce.gateway.ok, true);
+  // Independent reproduction of the same three verdicts, outside
+  // runDemo() (the same per-label semantics
+  // test/requireNonceByLabel.test.ts pins): a fresh dual-label
+  // fixture, merchant without a nonce rejected under the map,
+  // gateway unmapped and verifying, merchant with a nonce
+  // verifying alongside it.
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const req = {
+    method: "POST",
+    url: DEMO_REQUIRE_NONCE_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const keys = { merchant: merchant.publicKey, gateway: gateway.publicKey };
+  const options = {
+    keys,
+    now: DEMO_CREATED + 60,
+    requireNonceByLabel: { merchant: true },
+  };
+  const merchantSigned = signRequest(req, {
+    keyId: DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_KEY_ID,
+    alg: "ed25519",
+    key: merchant.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_KEY_ID,
+    alg: "ed25519",
+    key: gateway.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL,
+  });
+  const direct = byLabel(verifyAllLabels(dual, options));
+  assert.equal(direct.merchant.ok, false);
+  assert.equal(direct.merchant.code, "MISSING_NONCE");
+  assert.equal(direct.merchant.reason, DEMO_REQUIRE_NONCE_BY_LABEL_MISSING_REASON);
+  assert.equal(direct.gateway.ok, true);
+  const merchantWithNonce = signRequest(req, {
+    keyId: DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_KEY_ID,
+    alg: "ed25519",
+    key: merchant.privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_REQUIRE_NONCE_BY_LABEL_NONCE,
+    label: DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL,
+  });
+  const dualWithNonce = addSignature(merchantWithNonce, {
+    keyId: DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_KEY_ID,
+    alg: "ed25519",
+    key: gateway.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_LABEL,
+  });
+  const directWithNonce = verifyAllLabels(dualWithNonce, options);
+  assert.equal(directWithNonce.length, 2);
+  assert.equal(directWithNonce.every((x) => x.ok), true);
+  assert.equal(
+    byLabel(directWithNonce).merchant.nonce,
+    DEMO_REQUIRE_NONCE_BY_LABEL_NONCE,
+  );
+});
+
+test("demo lines contain the per-label nonce requirement segment (merchant rejected, gateway fallback, nonce passes, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Per-label nonce requirement: verifyAllLabels' requireNonceByLabel map demands/);
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label nonce requirement:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "Per-label nonce requirement: verifyAllLabels' requireNonceByLabel map demands a nonce only from the merchant signature — the gateway signature historically carries none, so it falls back to the unset global requireNonce — the per-label form of the required-nonce segment's global check, checked after the cryptographic check like the global one, so a forged nonce-less merchant signature still reports a signature failure rather than a policy violation",
+    `Merchant without nonce: dual-label request verified with requireNonceByLabel { merchant: true }: FAILED (label merchant, code MISSING_NONCE: ${DEMO_REQUIRE_NONCE_BY_LABEL_MISSING_REASON})`,
+    `Gateway without nonce: the same call: OK (label gateway, keyid="${DEMO_REQUIRE_NONCE_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") (unmapped label falls back to the unset global requireNonce — no check is made)`,
+    `Merchant with nonce: merchant re-signed with nonce "${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}" verified with the same map: OK (label merchant, nonce="${DEMO_REQUIRE_NONCE_BY_LABEL_NONCE}"; label gateway still verifies without one)`,
+  ]);
+  assert.equal(headerIdx + 4, lines.length);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Per-label nonce requirement:"),
   );
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),
