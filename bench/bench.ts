@@ -270,9 +270,17 @@
  * signing it is normally bundled into, plus the inbound
  * normalization every gateway request pays before verification even
  * starts: `fromNodeRequest` over a fixed mock `IncomingRequestLike`
- * (no real server, zero network), self-checked outside timing
+ * (no real server, zero network on this path), self-checked outside timing
  * against a hand-pinned expected `RequestLike` (see NODE_FIXTURE
- * below), plus the key-distribution round trip a JWKS publisher /
+ * below), plus the response-side normalization and verification a
+ * client pays on every gateway-signed settlement callback:
+ * `fromNodeResponse` over one real loopback `http` response signed
+ * by a live server (loopback only, no external network; see RESP_*
+ * below), self-checked on every measured pass (adapted `@status`
+ * pinned 200, settlement trailer pinned, verification ok), with the
+ * missing-status fail-fast and the transplanted-request
+ * `SIGNATURE_MISMATCH` asserted outside timing, plus the
+ * key-distribution round trip a JWKS publisher /
  * verifier pays for every key: `exportPublicKeyJwk*` →
  * JSON stringify/parse → `importPublicKeyJwk*` for each of P-256,
  * P-384, P-521 and RSA (one freshly generated key pair per shape,
@@ -496,6 +504,8 @@ import {
   type KeyObject,
 } from "node:crypto";
 import { cpus } from "node:os";
+import { createServer, get, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
 import {
   addSignature,
   assertContentDigestAlg,
@@ -513,6 +523,7 @@ import {
   exportPublicKeyJwkRsa,
   exportPublicKeyPem,
   fromNodeRequest,
+  fromNodeResponse,
   generateEd25519KeyPair,
   generateNonce,
   generateP256KeyPair,
@@ -4373,8 +4384,10 @@ function benchmarkContentDigest(alg: ContentDigestAlg): number {
 
 /**
  * Fixed mock inbound request for the `fromNodeRequest` path — a plain
- * `IncomingRequestLike` test double, NOT a real server (the bench
- * performs zero network I/O and never opens a socket). Composition,
+ * `IncomingRequestLike` test double, NOT a real server (this path
+ * performs zero network I/O and never opens a socket; the
+ * `fromNodeResponse` section below is the bench's one loopback
+ * exception). Composition,
  * item by item:
  * - method POST, origin-form url "/v1/payments?event=charge.succeeded";
  * - `socket.encrypted` true, so the rebuilt absolute URL is https;
@@ -4526,6 +4539,172 @@ function benchmarkFromNodeRequest(): number {
         "benchmark self-check failed: fromNodeRequest rebuilt an unexpected URL",
       );
   }, ITERATIONS);
+}
+
+/**
+ * Loopback-signed response for the `fromNodeResponse` path — the
+ * gateway-settlement shape a client verifies on every callback: a
+ * real `http` server (loopback only, no external network) signs a
+ * 200 response covering `@status`, the bound request's `@method`
+ * (`;req`), and a settlement trailer (`;tr`), and sends the trailer
+ * with `addTrailers` over a chunked response, exactly as the
+ * `nodeHttpResponse` test's loopback case does. The signature is
+ * created once, outside timing, when the server answers the bench's
+ * single client request; the timed loop then re-measures only the
+ * client-side work (`fromNodeResponse` + `verifyRequest`) over that
+ * captured live response — re-measuring the network per iteration
+ * would time TCP loopback, not the adapter, and a live
+ * `IncomingMessage` is inert after `end`, so reusing it across
+ * passes is sound (the adapter builds a fresh `RequestLike` per
+ * call and never mutates the message).
+ */
+const RESP_CREATED = 1_700_000_000;
+const RESP_NOW = RESP_CREATED + 60;
+const RESP_STATUS = 200;
+const RESP_BODY = JSON.stringify({ settled: true, amount: 100 });
+const RESP_TRAILER_NAME = "x-settlement-id";
+const RESP_TRAILER_VALUE = "stl_42";
+const RESP_COVERED_COMPONENTS: string[] = [
+  "@status",
+  "@method;req",
+  "x-settlement-id;tr",
+];
+
+/**
+ * `fromNodeResponse` + `verifyRequest` steady state: the
+ * response-side normalization and verification a client runs on
+ * every gateway-signed settlement callback. Self-checks on every
+ * measured pass pin the adapted `@status` (200), the carried-over
+ * trailer, and a successful verification requiring `@status`.
+ * Asserted outside timing: a response without `statusCode` fails
+ * fast with the adapter's pinned message, and transplanting the
+ * captured response onto a request with a different method breaks
+ * the `;req` binding with a pinned `SIGNATURE_MISMATCH` (the
+ * response cannot be replayed against another request).
+ */
+async function benchmarkFromNodeResponse(): Promise<number> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const server = createServer((req, res) => {
+    const port = (server.address() as AddressInfo).port;
+    const request: RequestLike = {
+      method: "GET",
+      url: `http://127.0.0.1:${port}/settle`,
+      headers: { host: `127.0.0.1:${port}` },
+    };
+    const signed = signRequest(
+      {
+        method: "GET",
+        url: `http://127.0.0.1:${port}/settle`,
+        headers: {},
+        trailers: { [RESP_TRAILER_NAME]: RESP_TRAILER_VALUE },
+        body: RESP_BODY,
+        status: RESP_STATUS,
+        request,
+      },
+      {
+        keyId: "gateway-key",
+        alg: "ed25519",
+        key: privateKey,
+        created: RESP_CREATED,
+        coveredComponents: RESP_COVERED_COMPONENTS,
+      },
+    );
+    res.writeHead(RESP_STATUS, {
+      "content-type": "application/json",
+      "signature-input": signed.headers["signature-input"] as string,
+      signature: signed.headers["signature"] as string,
+    });
+    res.addTrailers({ [RESP_TRAILER_NAME]: RESP_TRAILER_VALUE });
+    res.end(RESP_BODY);
+  });
+  try {
+    const captured = await new Promise<{
+      res: IncomingMessage;
+      body: Buffer;
+      request: RequestLike;
+    }>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => {
+        const port = (server.address() as AddressInfo).port;
+        const url = `http://127.0.0.1:${port}/settle`;
+        const request: RequestLike = {
+          method: "GET",
+          url,
+          headers: { host: `127.0.0.1:${port}` },
+        };
+        get(url, (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c: Buffer) => chunks.push(c));
+          res.on("end", () => {
+            try {
+              resolve({ res, body: Buffer.concat(chunks), request });
+            } catch (e) {
+              reject(e);
+            }
+          });
+          res.on("error", reject);
+        }).on("error", reject);
+      });
+      server.on("error", reject);
+    });
+    const { res, body, request } = captured;
+    const adapted = fromNodeResponse(res, body, { request });
+    if (adapted.status !== RESP_STATUS)
+      throw new Error(
+        `benchmark self-check failed: fromNodeResponse adapted status ${adapted.status}`,
+      );
+    if (adapted.trailers?.[RESP_TRAILER_NAME] !== RESP_TRAILER_VALUE)
+      throw new Error(
+        "benchmark self-check failed: fromNodeResponse dropped the settlement trailer",
+      );
+    if (adapted.request !== request)
+      throw new Error(
+        "benchmark self-check failed: fromNodeResponse did not attach the bound request",
+      );
+    let missingStatusThrew = false;
+    try {
+      fromNodeResponse({ headers: {} }, RESP_BODY, { request });
+    } catch (e) {
+      missingStatusThrew =
+        e instanceof Error &&
+        e.message.startsWith("fromNodeResponse: res.statusCode is missing");
+    }
+    if (!missingStatusThrew)
+      throw new Error(
+        "benchmark self-check failed: missing statusCode did not fail fast",
+      );
+    const transplanted = verifyRequest(
+      fromNodeResponse(res, body, {
+        request: { ...request, method: "POST" },
+      }),
+      { key: publicKey, now: RESP_NOW },
+    );
+    if (transplanted.ok || transplanted.code !== "SIGNATURE_MISMATCH")
+      throw new Error(
+        `benchmark self-check failed: transplanted response verified as ${JSON.stringify(transplanted)}`,
+      );
+    return measure(() => {
+      const r = fromNodeResponse(res, body, { request });
+      if (r.status !== RESP_STATUS)
+        throw new Error(
+          "benchmark self-check failed: fromNodeResponse adapted an unexpected status",
+        );
+      if (r.trailers?.[RESP_TRAILER_NAME] !== RESP_TRAILER_VALUE)
+        throw new Error(
+          "benchmark self-check failed: fromNodeResponse dropped the settlement trailer",
+        );
+      const result = verifyRequest(r, {
+        key: publicKey,
+        now: RESP_NOW,
+        requiredComponents: ["@status"],
+      });
+      if (!result.ok)
+        throw new Error(
+          `benchmark self-check failed: loopback response did not verify (${result.code})`,
+        );
+    }, ITERATIONS);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 }
 
 /**
@@ -7038,6 +7217,11 @@ results.push({
   alg: "fromNodeRequest (inbound, trailers)",
   op: "normalize",
   ops: benchmarkFromNodeRequest(),
+});
+results.push({
+  alg: "fromNodeResponse (@status, loopback)",
+  op: "adapt+verify",
+  ops: await benchmarkFromNodeResponse(),
 });
 results.push({
   alg: "JWK round-trip P-256",

@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `fromNodeResponse` + `verifyRequest` over a loopback-signed
+  gateway settlement response: a real `http` server on loopback
+  (no external network) signs a 200 response covering `@status`,
+  the bound request's `@method` (`;req`), and a settlement
+  trailer (`;tr`), and the measured op adapts that live response
+  and verifies it with `@status` required, re-pinning the
+  adapted status (200), the carried-over trailer, and a
+  successful verification on every pass. The timed loop
+  re-measures only the client-side adapt + verify work over the
+  one captured response — re-measuring the network per
+  iteration would time TCP loopback, not the adapter. Outside
+  timing, a missing `statusCode` fails fast with the adapter's
+  pinned message and transplanting the response onto a request
+  with a different method breaks the `;req` binding with a pinned
+  `SIGNATURE_MISMATCH`. On this run the new row measured
+  ~3,590 ops/sec (278.58 µs/op). The README Benchmarks table
+  was refreshed in full from this run (73 rows, 2026-10-25).
+
 - `verifyAllLabels` accepts a per-label nonce-existence map
   `requireNonceByLabel`: a label in the map is checked against its
   own boolean, any other label falls back to the global `requireNonce`
