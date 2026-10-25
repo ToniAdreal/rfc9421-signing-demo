@@ -150,6 +150,15 @@ import {
   DEMO_JWKS_OBSERVABILITY_STATS,
   DEMO_JWKS_OBSERVABILITY_TTL_SEC,
   DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID,
+  DEMO_JWKS_FETCH_RETRY_BACKOFF_MS,
+  DEMO_JWKS_FETCH_RETRY_FETCH_CALLS,
+  DEMO_JWKS_FETCH_RETRY_KEY_ID,
+  DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR,
+  DEMO_JWKS_FETCH_RETRY_NOT_FOUND_FETCH_CALLS,
+  DEMO_JWKS_FETCH_RETRY_NOT_FOUND_SLEEP_CALLS,
+  DEMO_JWKS_FETCH_RETRY_RETRIES,
+  DEMO_JWKS_FETCH_RETRY_SIZE,
+  DEMO_JWKS_FETCH_RETRY_SLEEP_CALLS,
   DEMO_JWK_TAMPERED_CODE,
   DEMO_JOIN_COVERED_COMPONENTS,
   DEMO_JOIN_EXPECTED,
@@ -3932,14 +3941,134 @@ test("demo lines contain the JWKS observability segment (before/after reads, TTL
     `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshFailures}, hits: ${DEMO_JWKS_OBSERVABILITY_STATS.hits}, misses: ${DEMO_JWKS_OBSERVABILITY_STATS.misses} } (hits + misses equals the total resolve() calls)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 7), expectedLines);
-  // The ReplayCache observability segment follows the JWKS observability segment.
+  // The JWKS fetch retries segment follows the JWKS observability segment.
+  const fetchRetryIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS fetch retries:"),
+  );
+  assert.ok(headerIdx !== -1 && fetchRetryIdx !== -1 && headerIdx < fetchRetryIdx);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS observability:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 7), lines.slice(headerIdx, headerIdx + 7));
+});
+
+test("demo JWKS fetch retries segment retries 500s to a 200 and never retries a 404", async () => {
+  const {
+    jwksFetchRetryFetchCalls,
+    jwksFetchRetrySleeps,
+    jwksFetchRetryResolved,
+    jwksFetchRetrySize,
+    jwksFetchRetryNotFoundFetchCalls,
+    jwksFetchRetryNotFoundSleeps,
+    jwksFetchRetryNotFoundError,
+  } = await runDemo();
+  assert.equal(DEMO_JWKS_FETCH_RETRY_KEY_ID, "demo-jwks-fetch-retry-1");
+  assert.equal(DEMO_JWKS_FETCH_RETRY_RETRIES, 2);
+  assert.equal(DEMO_JWKS_FETCH_RETRY_BACKOFF_MS, 250);
+  assert.equal(DEMO_JWKS_FETCH_RETRY_FETCH_CALLS, 3);
+  assert.equal(DEMO_JWKS_FETCH_RETRY_SLEEP_CALLS, 2);
+  assert.equal(DEMO_JWKS_FETCH_RETRY_SIZE, 1);
+  assert.equal(DEMO_JWKS_FETCH_RETRY_NOT_FOUND_FETCH_CALLS, 1);
+  assert.equal(DEMO_JWKS_FETCH_RETRY_NOT_FOUND_SLEEP_CALLS, 0);
+  assert.equal(
+    DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR,
+    `JwksKeyStore: JWKS fetch failed: HTTP 404 from ${DEMO_JWKS_URL}`,
+  );
+  assert.equal(jwksFetchRetryFetchCalls, DEMO_JWKS_FETCH_RETRY_FETCH_CALLS);
+  assert.deepEqual(jwksFetchRetrySleeps, [
+    DEMO_JWKS_FETCH_RETRY_BACKOFF_MS,
+    DEMO_JWKS_FETCH_RETRY_BACKOFF_MS,
+  ]);
+  assert.equal(jwksFetchRetryResolved, true);
+  assert.equal(jwksFetchRetrySize, DEMO_JWKS_FETCH_RETRY_SIZE);
+  assert.equal(
+    jwksFetchRetryNotFoundFetchCalls,
+    DEMO_JWKS_FETCH_RETRY_NOT_FOUND_FETCH_CALLS,
+  );
+  assert.deepEqual(jwksFetchRetryNotFoundSleeps, []);
+  assert.equal(
+    jwksFetchRetryNotFoundError,
+    DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR,
+  );
+  // Independent reproduction of the same two scripts, outside runDemo().
+  const { publicKey } = generateEd25519KeyPair();
+  let directCalls = 0;
+  const directSleeps: number[] = [];
+  const directStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      directCalls++;
+      if (directCalls <= 2)
+        return { ok: false, status: 500, json: async () => ({}) };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          keys: [
+            {
+              ...exportPublicKeyJwk(publicKey),
+              kid: DEMO_JWKS_FETCH_RETRY_KEY_ID,
+            },
+          ],
+        }),
+      };
+    },
+    fetchRetries: DEMO_JWKS_FETCH_RETRY_RETRIES,
+    fetchBackoffMs: DEMO_JWKS_FETCH_RETRY_BACKOFF_MS,
+    sleepImpl: async (ms: number) => {
+      directSleeps.push(ms);
+    },
+  });
+  await directStore.refresh();
+  assert.equal(directCalls, jwksFetchRetryFetchCalls);
+  assert.deepEqual(directSleeps, jwksFetchRetrySleeps);
+  assert.equal(
+    directStore.resolve(DEMO_JWKS_FETCH_RETRY_KEY_ID) !== undefined,
+    jwksFetchRetryResolved,
+  );
+  assert.equal(directStore.size, jwksFetchRetrySize);
+  let directNotFoundCalls = 0;
+  const directNotFoundSleeps: number[] = [];
+  const directNotFoundStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      directNotFoundCalls++;
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+    fetchRetries: DEMO_JWKS_FETCH_RETRY_RETRIES,
+    fetchBackoffMs: DEMO_JWKS_FETCH_RETRY_BACKOFF_MS,
+    sleepImpl: async (ms: number) => {
+      directNotFoundSleeps.push(ms);
+    },
+  });
+  await assert.rejects(
+    directNotFoundStore.refresh(),
+    (err: unknown) =>
+      err instanceof Error &&
+      err.message === DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR,
+  );
+  assert.equal(directNotFoundCalls, jwksFetchRetryNotFoundFetchCalls);
+  assert.deepEqual(directNotFoundSleeps, jwksFetchRetryNotFoundSleeps);
+});
+
+test("demo lines contain the JWKS fetch retries segment (500, 500, 200 retry success, terminal 404, followed by the ReplayCache observability segment)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /JWKS fetch retries: JwksKeyStore fetchRetries retries only transient/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("JWKS fetch retries:"));
+  const observabilityIdx = lines.findIndex((l) => l.startsWith("JWKS observability:"));
+  assert.ok(observabilityIdx !== -1 && headerIdx !== -1 && observabilityIdx < headerIdx);
+  const expectedLines = [
+    "JWKS fetch retries: JwksKeyStore fetchRetries retries only transient JWKS failures — a briefly sick endpoint heals on retry, a wrong request never does",
+    `JWKS fetch retries over a 500, 500, 200 script (fetchRetries ${DEMO_JWKS_FETCH_RETRY_RETRIES}, backoff ${DEMO_JWKS_FETCH_RETRY_BACKOFF_MS}ms): refresh() succeeded on attempt ${DEMO_JWKS_FETCH_RETRY_FETCH_CALLS} after ${DEMO_JWKS_FETCH_RETRY_SLEEP_CALLS} sleeps, the snapshot holds ${DEMO_JWKS_FETCH_RETRY_SIZE} key and resolve("${DEMO_JWKS_FETCH_RETRY_KEY_ID}") returned a key`,
+    `JWKS fetch retries over a 404 endpoint (same fetchRetries ${DEMO_JWKS_FETCH_RETRY_RETRIES}): refresh() FAILED (${DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR}) after exactly ${DEMO_JWKS_FETCH_RETRY_NOT_FOUND_FETCH_CALLS} fetch and ${DEMO_JWKS_FETCH_RETRY_NOT_FOUND_SLEEP_CALLS} sleeps — a 4xx response is terminal, never retried`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), expectedLines);
+  // The ReplayCache observability segment follows the JWKS fetch retries segment.
   const replayStatsIdx = lines.findIndex((l) =>
     l.startsWith("ReplayCache observability:"),
   );
   assert.ok(headerIdx !== -1 && replayStatsIdx !== -1 && headerIdx < replayStatsIdx);
   const again = await runDemo();
-  const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS observability:"));
-  assert.deepEqual(again.lines.slice(againIdx, againIdx + 7), lines.slice(headerIdx, headerIdx + 7));
+  const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS fetch retries:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 3), lines.slice(headerIdx, headerIdx + 3));
 });
 
 test("demo ReplayCache observability segment drives a pinned miss/hit/LRU/expiry script and pins stats() at every step", async () => {

@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo gains a JWKS fetch retries segment: a `JwksKeyStore`
+  with `fetchRetries: 2` over a counting fake fetch scripted 500, 500,
+  200 succeeds on the third attempt with two recorded sleeps and a
+  one-key snapshot, while a second store with the same retry budget
+  pointed at a 404 endpoint fails with the pinned HTTP 404 message
+  after exactly one fetch and zero sleeps — a 4xx response is
+  terminal, never retried. 2 new tests in `test/demo.test.ts`.
+
 - `verifyAllLabels` accepts per-label freshness-existence maps
   `requireCreatedByLabel` and `requireExpiresByLabel`: a label in a map
   is checked against its own boolean, any other label falls back to

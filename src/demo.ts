@@ -548,6 +548,28 @@
  * a fresh ed25519 pair (generation is not printed) and
  * every clock is injected, so the segment's printed
  * lines are identical between runs.
+ * The demo closes with a JWKS fetch retries segment:
+ * the observability segment above refreshes exactly once
+ * over a healthy fake endpoint, so it cannot show what
+ * `fetchRetries` does when the endpoint is briefly sick.
+ * A `JwksKeyStore` with `fetchRetries: 2` and an injected
+ * instant sleep is driven through a counting fake fetch
+ * scripted 500, 500, 200: `refresh()` succeeds only on
+ * the third attempt, the snapshot holds the scripted key,
+ * and exactly two sleeps were taken (one between each
+ * pair of attempts). A second store with the same retry
+ * budget is then pointed at a 404 endpoint: its
+ * `refresh()` fails with the pinned HTTP 404 message
+ * after exactly one fetch and zero sleeps — a 4xx says
+ * the request itself is wrong, so it is terminal and
+ * never retried. Outside the printed lines the demo
+ * asserts every fetch count, sleep count, snapshot size
+ * and error message equals the hand-pinned expectations
+ * below (the same retry rules `test/jwksFetchRetry.test.ts`
+ * pins). Both segment key pairs are fresh ed25519 pairs
+ * (generation is not printed) and every sleep is injected,
+ * so the segment's printed lines are identical between
+ * runs.
  * The demo closes with a ReplayCache observability segment:
  * a small `ReplayCache` (capacity 3, TTL 100s) under an
  * injected clock is driven through a pinned script — two
@@ -2123,6 +2145,39 @@ export const DEMO_JWKS_OBSERVABILITY_STATS: JwksKeyStoreStats = {
   misses: 1,
 };
 
+/** Key id of the closing JWKS fetch retries segment's scripted key. */
+export const DEMO_JWKS_FETCH_RETRY_KEY_ID = "demo-jwks-fetch-retry-1";
+/**
+ * Retry budget of both closing JWKS fetch retries segment stores:
+ * two retries on top of the first attempt, so a 500, 500, 200 script
+ * needs exactly three fetches and a 404 script needs exactly one.
+ */
+export const DEMO_JWKS_FETCH_RETRY_RETRIES = 2;
+/** Fixed backoff between fetch retry attempts in the demo segment. */
+export const DEMO_JWKS_FETCH_RETRY_BACKOFF_MS = 250;
+/**
+ * Fetch count of the retrying store: the scripted 500, 500, 200
+ * sequence, so `refresh()` succeeds on the third attempt.
+ */
+export const DEMO_JWKS_FETCH_RETRY_FETCH_CALLS = 3;
+/** Sleep count of the retrying store: one sleep between each attempt pair. */
+export const DEMO_JWKS_FETCH_RETRY_SLEEP_CALLS = 2;
+/** Snapshot size of the retrying store after its successful refresh. */
+export const DEMO_JWKS_FETCH_RETRY_SIZE = 1;
+/**
+ * Fetch count of the 404 store: a 4xx response is terminal, so the
+ * retry budget is never spent and no sleep is taken.
+ */
+export const DEMO_JWKS_FETCH_RETRY_NOT_FOUND_FETCH_CALLS = 1;
+/** Sleep count of the 404 store: zero — terminal failures do not sleep. */
+export const DEMO_JWKS_FETCH_RETRY_NOT_FOUND_SLEEP_CALLS = 0;
+/**
+ * Hand-pinned refresh failure of the 404 store: the same message
+ * `test/jwksFetchRetry.test.ts` pins for a terminal 4xx response.
+ */
+export const DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR =
+  `JwksKeyStore: JWKS fetch failed: HTTP 404 from ${DEMO_JWKS_URL}`;
+
 /**
  * Fixed nonces of the closing ReplayCache observability
  * segment, in first-check order: the segment checks the
@@ -3603,6 +3658,48 @@ export interface DemoResult {
    * hand-pinned `DEMO_JWKS_OBSERVABILITY_STATS`).
    */
   jwksObservabilityStats: JwksKeyStoreStats;
+  /**
+   * Fake-fetch count of the closing JWKS fetch retries
+   * segment's retrying store (equals the hand-pinned
+   * `DEMO_JWKS_FETCH_RETRY_FETCH_CALLS`: 500, 500, 200).
+   */
+  jwksFetchRetryFetchCalls: number;
+  /**
+   * Sleep delays the retrying store's injected `sleepImpl`
+   * recorded, one per retry (each equals
+   * `DEMO_JWKS_FETCH_RETRY_BACKOFF_MS`).
+   */
+  jwksFetchRetrySleeps: number[];
+  /**
+   * Whether the retrying store's `resolve()` of the
+   * scripted keyid returned a key after its successful
+   * refresh (`true`).
+   */
+  jwksFetchRetryResolved: boolean;
+  /**
+   * Snapshot size of the retrying store after its
+   * successful refresh (equals the hand-pinned
+   * `DEMO_JWKS_FETCH_RETRY_SIZE`).
+   */
+  jwksFetchRetrySize: number;
+  /**
+   * Fake-fetch count of the closing JWKS fetch retries
+   * segment's 404 store (equals the hand-pinned
+   * `DEMO_JWKS_FETCH_RETRY_NOT_FOUND_FETCH_CALLS`: a
+   * 4xx response is terminal, never retried).
+   */
+  jwksFetchRetryNotFoundFetchCalls: number;
+  /**
+   * Sleep delays the 404 store's injected `sleepImpl`
+   * recorded (empty — terminal failures do not sleep).
+   */
+  jwksFetchRetryNotFoundSleeps: number[];
+  /**
+   * Refresh failure message of the 404 store (equals the
+   * hand-pinned
+   * `DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR`).
+   */
+  jwksFetchRetryNotFoundError: string;
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -6467,6 +6564,111 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // JWKS fetch retries segment: the observability segment
+  // above refreshes exactly once over a healthy fake
+  // endpoint, so it cannot show what `fetchRetries` does
+  // when the endpoint is briefly sick. This segment drives
+  // a JwksKeyStore with `fetchRetries: 2` and an injected
+  // instant sleep through a counting fake fetch scripted
+  // 500, 500, 200: `refresh()` must succeed only on the
+  // third attempt, with one sleep between each pair of
+  // attempts, and the snapshot must hold the scripted
+  // key. A second store with the same retry budget is
+  // then pointed at a 404 endpoint: its `refresh()` must
+  // fail with the pinned HTTP 404 message after exactly
+  // one fetch and zero sleeps — a 4xx response is
+  // terminal, never retried. The segment key pairs are
+  // fresh ed25519 pairs (generation is not printed);
+  // outside the printed lines the demo asserts every
+  // count, size and error message equals the hand-pinned
+  // DEMO_JWKS_FETCH_RETRY_* expectations.
+  const jwksFetchRetryPair = generateEd25519KeyPair();
+  let jwksFetchRetryFetchCalls = 0;
+  const jwksFetchRetrySleeps: number[] = [];
+  const jwksFetchRetryStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      jwksFetchRetryFetchCalls++;
+      if (jwksFetchRetryFetchCalls <= 2) {
+        return { ok: false, status: 500, json: async () => ({}) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          keys: [
+            {
+              ...exportPublicKeyJwk(jwksFetchRetryPair.publicKey),
+              kid: DEMO_JWKS_FETCH_RETRY_KEY_ID,
+            },
+          ],
+        }),
+      };
+    },
+    fetchRetries: DEMO_JWKS_FETCH_RETRY_RETRIES,
+    fetchBackoffMs: DEMO_JWKS_FETCH_RETRY_BACKOFF_MS,
+    sleepImpl: async (ms: number) => {
+      jwksFetchRetrySleeps.push(ms);
+    },
+  });
+  await jwksFetchRetryStore.refresh();
+  const jwksFetchRetryResolved =
+    jwksFetchRetryStore.resolve(DEMO_JWKS_FETCH_RETRY_KEY_ID) !==
+    undefined;
+  const jwksFetchRetrySize = jwksFetchRetryStore.size;
+  let jwksFetchRetryNotFoundFetchCalls = 0;
+  const jwksFetchRetryNotFoundSleeps: number[] = [];
+  const jwksFetchRetryNotFoundStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      jwksFetchRetryNotFoundFetchCalls++;
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+    fetchRetries: DEMO_JWKS_FETCH_RETRY_RETRIES,
+    fetchBackoffMs: DEMO_JWKS_FETCH_RETRY_BACKOFF_MS,
+    sleepImpl: async (ms: number) => {
+      jwksFetchRetryNotFoundSleeps.push(ms);
+    },
+  });
+  let jwksFetchRetryNotFoundError = "";
+  try {
+    await jwksFetchRetryNotFoundStore.refresh();
+  } catch (err) {
+    jwksFetchRetryNotFoundError =
+      err instanceof Error ? err.message : String(err);
+  }
+  if (
+    jwksFetchRetryFetchCalls !== DEMO_JWKS_FETCH_RETRY_FETCH_CALLS ||
+    jwksFetchRetrySleeps.length !==
+      DEMO_JWKS_FETCH_RETRY_SLEEP_CALLS ||
+    jwksFetchRetrySleeps.some(
+      (ms) => ms !== DEMO_JWKS_FETCH_RETRY_BACKOFF_MS,
+    ) ||
+    jwksFetchRetryResolved !== true ||
+    jwksFetchRetrySize !== DEMO_JWKS_FETCH_RETRY_SIZE ||
+    jwksFetchRetryNotFoundFetchCalls !==
+      DEMO_JWKS_FETCH_RETRY_NOT_FOUND_FETCH_CALLS ||
+    jwksFetchRetryNotFoundSleeps.length !==
+      DEMO_JWKS_FETCH_RETRY_NOT_FOUND_SLEEP_CALLS ||
+    jwksFetchRetryNotFoundError !==
+      DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: JWKS fetch retries gave retry fetches ` +
+        `${jwksFetchRetryFetchCalls} with sleeps ` +
+        `${JSON.stringify(jwksFetchRetrySleeps)}, resolved ` +
+        `${jwksFetchRetryResolved} with size ${jwksFetchRetrySize}, and 404 fetches ` +
+        `${jwksFetchRetryNotFoundFetchCalls} with sleeps ` +
+        `${JSON.stringify(jwksFetchRetryNotFoundSleeps)} and error ` +
+        `${jwksFetchRetryNotFoundError}, instead of the pinned ` +
+        `${DEMO_JWKS_FETCH_RETRY_FETCH_CALLS} fetches with ` +
+        `${DEMO_JWKS_FETCH_RETRY_SLEEP_CALLS} sleeps of ` +
+        `${DEMO_JWKS_FETCH_RETRY_BACKOFF_MS}ms, resolved true with size ` +
+        `${DEMO_JWKS_FETCH_RETRY_SIZE}, and ` +
+        `${DEMO_JWKS_FETCH_RETRY_NOT_FOUND_FETCH_CALLS} fetch with ` +
+        `${DEMO_JWKS_FETCH_RETRY_NOT_FOUND_SLEEP_CALLS} sleeps and error ` +
+        `${DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR}`,
+    );
+  }
+
   // ReplayCache observability segment: the replay and
   // snapshot segments above each use a ReplayCache, but
   // neither shows the observability surface an operator
@@ -7955,6 +8157,10 @@ export async function runDemo(): Promise<DemoResult> {
     `JWKS observability resolves at the boundary: resolve("${DEMO_JWKS_OBSERVABILITY_KEY_ID}") returned a key (hit), resolve("${DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID}") returned undefined (miss)`,
     `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${jwksObservabilityStats.refreshes}, refreshFailures: ${jwksObservabilityStats.refreshFailures}, hits: ${jwksObservabilityStats.hits}, misses: ${jwksObservabilityStats.misses} } (hits + misses equals the total resolve() calls)`,
     "",
+    "JWKS fetch retries: JwksKeyStore fetchRetries retries only transient JWKS failures — a briefly sick endpoint heals on retry, a wrong request never does",
+    `JWKS fetch retries over a 500, 500, 200 script (fetchRetries ${DEMO_JWKS_FETCH_RETRY_RETRIES}, backoff ${DEMO_JWKS_FETCH_RETRY_BACKOFF_MS}ms): refresh() succeeded on attempt ${jwksFetchRetryFetchCalls} after ${jwksFetchRetrySleeps.length} sleeps, the snapshot holds ${jwksFetchRetrySize} key and resolve("${DEMO_JWKS_FETCH_RETRY_KEY_ID}") returned a key`,
+    `JWKS fetch retries over a 404 endpoint (same fetchRetries ${DEMO_JWKS_FETCH_RETRY_RETRIES}): refresh() FAILED (${jwksFetchRetryNotFoundError}) after exactly ${jwksFetchRetryNotFoundFetchCalls} fetch and ${jwksFetchRetryNotFoundSleeps.length} sleeps — a 4xx response is terminal, never retried`,
+    "",
     "ReplayCache observability: ReplayCache.stats() exposes { size, hits, misses, evictions } — the health view a gateway operator watches to judge whether its replay cache is absorbing replays, filling up, or churning entries",
     `ReplayCache observability on a fresh cache (capacity ${DEMO_REPLAY_STATS_MAX_ENTRIES}, TTL ${DEMO_REPLAY_STATS_TTL_SEC}s, injected clock pinned at ${DEMO_CREATED}): stats() = ${formatReplayStats(replayStatsSteps[0]!)} (nothing seen yet)`,
     `ReplayCache observability after check("${DEMO_REPLAY_STATS_NONCES[0]}"): returned ${replayStatsChecks[0]} (a fresh nonce, recorded — a miss), stats() = ${formatReplayStats(replayStatsSteps[1]!)}`,
@@ -8246,6 +8452,13 @@ export async function runDemo(): Promise<DemoResult> {
     jwksObservabilityHitResolved,
     jwksObservabilityUnknownResolved,
     jwksObservabilityStats,
+    jwksFetchRetryFetchCalls,
+    jwksFetchRetrySleeps,
+    jwksFetchRetryResolved,
+    jwksFetchRetrySize,
+    jwksFetchRetryNotFoundFetchCalls,
+    jwksFetchRetryNotFoundSleeps,
+    jwksFetchRetryNotFoundError,
     replayStatsChecks,
     replayStatsSteps,
     replayStatsAfterDetachedMutation,
