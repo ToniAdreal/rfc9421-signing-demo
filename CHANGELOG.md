@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal-combination tests for `verifyAllLabels` with
+  `candidateKeysByLabel` and the global `requireTag` (backlog #618):
+  `test/candidateKeysByLabelRequireTag.test.ts` pins a dual-label
+  gateway where the merchant label rotates ed25519 keys and the
+  gateway label uses one static key — the rotated merchant key with
+  a tag verifies while the tag-less gateway still passes (via an
+  explicit `requireTagByLabel: { gateway: false }` opt-out of the
+  global flag), a valid rotated merchant key without a tag fails
+  exactly `MISSING_TAG` (not a key error), the old merchant key
+  still verifies inside the rotation window, a key removed from
+  the list fails `SIGNATURE_MISMATCH`, a forged tag-less merchant
+  signature reports `SIGNATURE_MISMATCH` (crypto before tag
+  presence), and dropping the gateway opt-out makes the global
+  flag reject the tag-less gateway too — so the gateway pass is
+  the explicit override, not a silent exemption.
 - `RequestLike.requestTarget`: an explicit request-target override
   for the `@request-target` derived component (backlog #617). When
   set, that exact string — the absolute-form URI, the
