@@ -2092,6 +2092,118 @@ function benchmarkVerifyRequireNonce(): number {
 }
 
 /**
+ * Pinned shape of the `verifyRequest` requireTag
+ * benchmark: one ed25519 key pair (generated once, outside
+ * timing), a fixture signed outside timing carrying the
+ * pinned `tag`, and the measured presence check — every
+ * measured call verifies the tagged fixture with
+ * `requireTag: true` and re-pins that the result is ok
+ * and the returned tag is the pinned value. Outside
+ * timing, the rejecting and default halves are pinned
+ * once: the same request signed without a tag under the
+ * option returns exactly `{ ok: false, code: "MISSING_TAG" }`
+ * with the pinned reason, a differently-tagged fixture
+ * still verifies (requireTag checks presence, never
+ * value), and with no option passed the tag-less fixture
+ * verifies because the requirement is opt-in. Zero
+ * network, zero randomness in the measured assertions, no
+ * wall clock (every verify instant is injected).
+ */
+const REQUIRE_TAG_NOW = 1_700_000_000;
+const REQUIRE_TAG_KID = "bench-require-tag-key-1";
+const REQUIRE_TAG_VALUE = "bench-require-tag-1";
+const REQUIRE_TAG_OTHER_VALUE = "bench-require-tag-other";
+const REQUIRE_TAG_CODE = "MISSING_TAG";
+const REQUIRE_TAG_REASON =
+  "signature carries no `tag` but requireTag is set";
+
+function benchmarkVerifyRequireTag(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: REQUIRE_TAG_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: REQUIRE_TAG_NOW,
+    tag: REQUIRE_TAG_VALUE,
+  });
+  const verifyOpts = {
+    key: publicKey,
+    now: REQUIRE_TAG_NOW,
+    requireTag: true,
+  };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok || r.tag !== REQUIRE_TAG_VALUE)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with requireTag (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the tagged fixture verifies under the
+  // requirement and the returned tag is the pinned value.
+  assertAccepted("outside timing");
+
+  // Outside timing: a tag-less signature under the option
+  // is rejected with the pinned code and reason.
+  const tagLess = signRequest(fixture, {
+    keyId: REQUIRE_TAG_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: REQUIRE_TAG_NOW,
+  });
+  const missing = verifyRequest(tagLess, {
+    key: publicKey,
+    now: REQUIRE_TAG_NOW,
+    requireTag: true,
+  });
+  if (
+    missing.ok ||
+    missing.code !== REQUIRE_TAG_CODE ||
+    missing.reason !== REQUIRE_TAG_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: tag-less result ${JSON.stringify(missing)} ` +
+        `(expected MISSING_TAG)`,
+    );
+
+  // Outside timing: requireTag checks presence, never
+  // value — a differently-tagged fixture still verifies
+  // and echoes its own tag.
+  const otherTagged = signRequest(fixture, {
+    keyId: REQUIRE_TAG_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: REQUIRE_TAG_NOW,
+    tag: REQUIRE_TAG_OTHER_VALUE,
+  });
+  const other = verifyRequest(otherTagged, {
+    key: publicKey,
+    now: REQUIRE_TAG_NOW,
+    requireTag: true,
+  });
+  if (!other.ok || other.tag !== REQUIRE_TAG_OTHER_VALUE)
+    throw new Error(
+      `benchmark self-check failed: differently-tagged result ${JSON.stringify(other)}`,
+    );
+
+  // Outside timing: without the option the same
+  // tag-less signature verifies — the requirement is
+  // opt-in and the default behaviour is unchanged.
+  const defaulted = verifyRequest(tagLess, {
+    key: publicKey,
+    now: REQUIRE_TAG_NOW,
+  });
+  if (!defaulted.ok)
+    throw new Error(
+      `benchmark self-check failed: tag-less default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `verifyRequest` clockSkewToleranceSec
  * benchmark: one ed25519 key pair (generated once, outside
  * timing), a fixture signed outside timing with `created`
@@ -7707,6 +7819,11 @@ results.push({
   alg: "verifyRequest requireNonce",
   op: "verify",
   ops: benchmarkVerifyRequireNonce(),
+});
+results.push({
+  alg: "verifyRequest requireTag",
+  op: "verify",
+  ops: benchmarkVerifyRequireTag(),
 });
 results.push({
   alg: "verifyRequest clockSkewToleranceSec (120s)",

@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) gains a `verifyRequest requireTag`
+  row: one measured op verifies a pinned ed25519 fixture carrying the
+  pinned tag with `requireTag: true`, re-pinning that the result is ok
+  and the returned tag is the pinned value — with the tag-less fixture
+  under the option returning exactly `MISSING_TAG` with the pinned
+  reason, a differently-tagged fixture still verifying (requireTag
+  checks presence, never value), and the tag-less fixture verifying
+  with no option passed, all pinned outside timing. The README
+  Benchmarks table is refreshed from the same real run, including the
+  new row (~4,103 ops/sec).
 - The benchmark (`npm run bench`) gains a `JwksKeyStore.refresh
   (fetchRetries 2, 500/500/200)` row: one measured op is one `refresh()`
   with `fetchRetries: 2` over a counting fake fetch scripted 500, 500,
