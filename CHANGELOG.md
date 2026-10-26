@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal-combination tests for `verifyAllLabels` with
+  `candidateKeysByLabel` and `expectedKeyIds` (backlog #627):
+  `test/candidateKeysByLabelExpectedKeyIds.test.ts` pins a dual-label
+  gateway where the merchant label rotates ed25519 keys and the
+  gateway label uses one static key — the rotated merchant key
+  verifies with its keyid echoing the pinned value, the old merchant
+  key still verifies inside the rotation window when re-pinned to its
+  own keyid, a merchant or gateway keyid mismatch fails exactly
+  `KEYID_MISMATCH` (not a rotation error), a key removed from the
+  rotation list fails `SIGNATURE_MISMATCH` even when its keyid is
+  pinned, a label missing from the pin map falls back to the global
+  `expectedKeyId` (and a global mismatch fails only that label),
+  and with no pinning configured rotation alone does not pin.
 - Benchmark section for `verifyAllLabels` with `requireCreatedByLabel` /
   `requireExpiresByLabel` (backlog #622): `benchmarkVerifyAllRequireFreshnessByLabel`
   in `bench/bench.ts` verifies three hand-built dual-label fixtures per measured
