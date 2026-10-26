@@ -205,7 +205,21 @@
  * unmapped gateway label still verifies by falling
  * back to the unset global), with that same
  * nonce-less dual's acceptance with no option
- * passed asserted outside timing, plus the algorithm-inference verify path a
+ * passed asserted outside timing, plus the per-label candidate-keys verify
+ * path a multi-party receiver runs when each signer rotates keys on its
+ * own schedule: `verifyAllLabels` with `candidateKeysByLabel` over a dual
+ * fixture signed outside timing with `created` pinned (merchant ed25519
+ * fixed key, gateway hmac-sha256 rotation window — see
+ * CANDIDATE_KEYS_BY_LABEL_* below), self-checked on every measured pass
+ * (one measured op verifies three duals: the new-secret dual, both
+ * labels ok with the gateway found at the second candidate; the
+ * old-secret dual, both labels ok inside the rotation window; and the
+ * swapped-merchant-list dual, merchant exactly `SIGNATURE_MISMATCH`
+ * while the gateway label still verifies, proving each label tries only
+ * its own candidate list), with the unmapped gateway label falling back
+ * to the global `candidateKeys` and the `candidateKeysByLabel` + `keys`
+ * mutual-exclusion configuration error asserted outside timing, plus
+ * the algorithm-inference verify path a
  * receiver runs for foreign signers that omit the optional
  * `alg` parameter: `verifyRequest` with
  * `algFallback: "infer"` over the RFC 9421 Appendix B.2.5
@@ -3044,6 +3058,192 @@ function benchmarkVerifyAllRequireNonceByLabel(): number {
   if (optedOut.length !== 2 || optedOut.some((r) => !r.ok))
     throw new Error(
       `benchmark self-check failed: nonce-less merchant:false gave ${JSON.stringify(optedOut)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels` candidateKeysByLabel
+ * benchmark: one fixed ed25519 key pair for the merchant
+ * (generated once, outside timing), two 32-byte HMAC
+ * secrets for the gateway rotation window (old + new,
+ * fixed byte fills, no randomness), a third unrelated
+ * ed25519 key pair whose public key stands in for a
+ * swapped merchant list, and three dual-label fixtures
+ * signed outside timing with `created` pinned under
+ * two pinned keyids (merchant / gateway, the canonical
+ * multi-party labels) and the verifier's injected
+ * `now` at the `created` instant. The merchant label
+ * is mapped to its single fixed key and the gateway
+ * label to its `[old, new]` rotation list; no global
+ * `candidateKeys` is set for the measured pass, so
+ * every label resolves through the map alone.
+ */
+const CANDIDATE_KEYS_BY_LABEL_CREATED = 1_700_000_000;
+const CANDIDATE_KEYS_BY_LABEL_MERCHANT_KID =
+  "bench-candidate-keys-by-label-merchant-1";
+const CANDIDATE_KEYS_BY_LABEL_GATEWAY_KID =
+  "bench-candidate-keys-by-label-gateway-1";
+const CANDIDATE_KEYS_BY_LABEL_MISMATCH_CODE = "SIGNATURE_MISMATCH";
+
+/**
+ * `verifyAllLabels` with `candidateKeysByLabel` steady
+ * state: the per-label rotation form a multi-party
+ * receiver uses when each signer rotates keys on its
+ * own schedule (the merchant key is fixed while the
+ * gateway rolls its HMAC secret, the Stripe-style
+ * rollover scenario) — every measured call runs the
+ * per-label map resolution and the ordered candidate
+ * walk for both labels, which the plain
+ * `verifyAllLabels` row above never pays, because it
+ * passes a single fixed key per label. One measured
+ * op verifies three dual-label fixtures: the
+ * new-secret dual (both labels ok, the gateway found
+ * at the second candidate, proving the walk actually
+ * reaches past the stale entry); the old-secret dual
+ * (both labels ok, proving the rotation window still
+ * accepts the outgoing secret); and the
+ * swapped-merchant-list dual (merchant exactly
+ * `SIGNATURE_MISMATCH` while the gateway label still
+ * verifies, proving each label tries only its own
+ * candidate list — a pooled list would let the
+ * merchant failure leak, or the gateway success
+ * depend on the merchant's entry). Outside timing,
+ * the fallback and configuration halves are pinned
+ * once: the same new-secret dual verifies when the
+ * gateway label is missing from the map and the
+ * rotation list is passed as the global
+ * `candidateKeys` instead, and combining
+ * `candidateKeysByLabel` with `keys` throws the
+ * pinned mutual-exclusion configuration error. Zero
+ * network, zero randomness in the measured assertions,
+ * no wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyAllCandidateKeysByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: unrelatedPublic } = generateEd25519KeyPair();
+  const gatewayOld = secretKey(Buffer.alloc(32, 0xaa));
+  const gatewayNew = secretKey(Buffer.alloc(32, 0xbb));
+  const merchantSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_BY_LABEL_CREATED,
+  });
+  const dualNew = addSignature(merchantSigned, {
+    keyId: CANDIDATE_KEYS_BY_LABEL_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewayNew,
+    label: "gateway",
+    created: CANDIDATE_KEYS_BY_LABEL_CREATED,
+  });
+  const dualOld = addSignature(merchantSigned, {
+    keyId: CANDIDATE_KEYS_BY_LABEL_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewayOld,
+    label: "gateway",
+    created: CANDIDATE_KEYS_BY_LABEL_CREATED,
+  });
+  const verifyOpts = {
+    candidateKeysByLabel: {
+      merchant: [merchantPublic],
+      gateway: [gatewayOld, gatewayNew],
+    },
+    now: CANDIDATE_KEYS_BY_LABEL_CREATED,
+  };
+  const swappedOpts = {
+    candidateKeysByLabel: {
+      merchant: [unrelatedPublic],
+      gateway: [gatewayOld, gatewayNew],
+    },
+    now: CANDIDATE_KEYS_BY_LABEL_CREATED,
+  };
+  const assertDual = (where: string): void => {
+    const rotated = verifyAllLabels(dualNew, verifyOpts);
+    if (
+      rotated.length !== 2 ||
+      rotated[0].label !== "merchant" ||
+      !rotated[0].ok ||
+      rotated[1].label !== "gateway" ||
+      !rotated[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel (${where}, new-secret dual) gave ${JSON.stringify(rotated)}`,
+      );
+    const windowed = verifyAllLabels(dualOld, verifyOpts);
+    if (
+      windowed.length !== 2 ||
+      windowed[0].label !== "merchant" ||
+      !windowed[0].ok ||
+      windowed[1].label !== "gateway" ||
+      !windowed[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel (${where}, old-secret dual) gave ${JSON.stringify(windowed)}`,
+      );
+    const isolated = verifyAllLabels(dualNew, swappedOpts);
+    if (
+      isolated.length !== 2 ||
+      isolated[0].label !== "merchant" ||
+      isolated[0].ok ||
+      isolated[0].code !== CANDIDATE_KEYS_BY_LABEL_MISMATCH_CODE ||
+      isolated[1].label !== "gateway" ||
+      !isolated[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel (${where}, swapped-merchant-list dual) gave ${JSON.stringify(isolated)}`,
+      );
+  };
+
+  // Outside timing: all three fixtures self-check under
+  // the per-label map before any timing starts.
+  assertDual("outside timing");
+
+  // Outside timing: a label missing from the map falls
+  // back to the global `candidateKeys` — the gateway
+  // verifies off the global rotation list while the
+  // merchant still resolves through its map entry.
+  const fallback = verifyAllLabels(dualNew, {
+    candidateKeys: [gatewayOld, gatewayNew],
+    candidateKeysByLabel: { merchant: [merchantPublic] },
+    now: CANDIDATE_KEYS_BY_LABEL_CREATED,
+  });
+  if (fallback.length !== 2 || fallback.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: candidateKeysByLabel global fallback gave ${JSON.stringify(fallback)}`,
+    );
+
+  // Outside timing: combining `candidateKeysByLabel`
+  // with `keys` throws the pinned mutual-exclusion
+  // configuration error instead of silently picking
+  // one key source.
+  let exclusionError: unknown;
+  try {
+    verifyAllLabels(dualNew, {
+      keys: { merchant: merchantPublic },
+      candidateKeysByLabel: {
+        merchant: [merchantPublic],
+        gateway: [gatewayOld, gatewayNew],
+      },
+      now: CANDIDATE_KEYS_BY_LABEL_CREATED,
+    });
+  } catch (e) {
+    exclusionError = e;
+  }
+  if (
+    !(exclusionError instanceof Error) ||
+    exclusionError.message !==
+      "verifyAllLabels: `candidateKeysByLabel`/`candidateKeys` is mutually exclusive with `keys`/`key` and `keyResolver`/`keyResolvers` — pass one or the other"
+  )
+    throw new Error(
+      `benchmark self-check failed: candidateKeysByLabel + keys did not throw the pinned error, got ${exclusionError instanceof Error ? JSON.stringify(exclusionError.message) : String(exclusionError)}`,
     );
 
   return measure(() => {
@@ -7322,6 +7522,11 @@ results.push({
   alg: "verifyAllLabels requireNonceByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllRequireNonceByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels candidateKeysByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllCandidateKeysByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",

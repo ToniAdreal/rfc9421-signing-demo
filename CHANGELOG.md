@@ -12,6 +12,19 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) gains a `verifyAllLabels
+  candidateKeysByLabel (2 labels)` row: one measured op verifies three
+  dual-label fixtures with `candidateKeysByLabel: { merchant: [merchant
+  key], gateway: [old secret, new secret] }` and no global
+  `candidateKeys` — the new-secret dual (both labels ok, the gateway
+  found at the second candidate), the old-secret dual (both labels ok
+  inside the rotation window), and the swapped-merchant-list dual
+  (merchant exactly `SIGNATURE_MISMATCH` while the gateway label still
+  verifies, proving each label tries only its own candidate list) —
+  with the unmapped-label fallback to the global `candidateKeys` and
+  the `candidateKeysByLabel` + `keys` mutual-exclusion error pinned
+  outside timing. The README Benchmarks table is refreshed from the
+  same real run, including the new row (~1,406 ops/sec).
+- The benchmark (`npm run bench`) gains a `verifyAllLabels
   requireNonceByLabel (2 labels)` row: one measured op verifies two
   dual-label fixtures with `requireNonceByLabel: { merchant: true }`
   and the global `requireNonce` unset — the nonce-carrying dual (both
