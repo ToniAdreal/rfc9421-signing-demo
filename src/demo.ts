@@ -901,6 +901,27 @@
  * hand-pinned expectations below. Every clock is injected
  * and the segment's key pair is fresh per run, so the
  * segment is byte-identical between runs.
+ * The demo closes with a per-label required-freshness
+ * segment: `VerifyAllOptions.requireCreatedByLabel` /
+ * `requireExpiresByLabel` demand a `created` / `expires`
+ * timestamp only from the labels they name — the merchant
+ * signature must carry `created`, the gateway signature
+ * must carry `expires`, and the globals are left unset, so
+ * an unmapped label falls back to no check. Two dual-label
+ * fixtures prove the independence (a merchant signature
+ * with `expires` but no `created` fails exactly
+ * `MISSING_CREATED` while the dated gateway label still
+ * verifies, and a gateway signature with `created` but no
+ * `expires` fails exactly `MISSING_EXPIRES` while the
+ * dated merchant label still verifies), and re-verifying
+ * each fixture with its global explicitly false plus the
+ * map entry true proves a mapped true overrides a global
+ * false. The checks run after the cryptographic check,
+ * like the global ones. Outside the printed lines the
+ * demo asserts every outcome, label, code and reason
+ * equals the hand-pinned expectations below. Every clock
+ * is injected and the segment's key pairs are fresh per
+ * run, so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2760,6 +2781,20 @@ export const DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_CODE: VerifyFailureCode =
 export const DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON =
   "signature carries no `expires` timestamp but requireExpires is set";
 
+/** Label of the closing per-label required-freshness segment's merchant signature. */
+export const DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL = "merchant";
+/** Label of the closing per-label required-freshness segment's gateway signature. */
+export const DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL = "gateway";
+/** Key id the closing per-label required-freshness segment's merchant signature carries. */
+export const DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KEY_ID =
+  "demo-require-freshness-by-label-merchant-1";
+/** Key id the closing per-label required-freshness segment's gateway signature carries. */
+export const DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KEY_ID =
+  "demo-require-freshness-by-label-gateway-1";
+/** Absolute URL the closing per-label required-freshness segment signs. */
+export const DEMO_REQUIRE_FRESHNESS_BY_LABEL_URL =
+  "https://api.example.com/v1/payments";
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -4071,6 +4106,50 @@ export interface DemoResult {
    * undated signatures alone).
    */
   requireFreshnessNoExpiresUnsetVerification: VerifyResult;
+  /**
+   * The closing per-label required-freshness segment's
+   * dual-label request pairing a merchant signature carrying
+   * `expires` but no `created` with a fully dated gateway
+   * signature (both hand-built, as `signRequest` always emits
+   * both timestamps).
+   */
+  requireFreshnessByLabelMissingCreatedSigned: SignedHttpRequest;
+  /**
+   * Per-label results for that request with
+   * `requireCreatedByLabel: { merchant: true }` and the
+   * globals unset (merchant fails `MISSING_CREATED`, gateway
+   * verifies).
+   */
+  requireFreshnessByLabelMissingCreatedVerification: VerifyResult[];
+  /**
+   * The closing per-label required-freshness segment's
+   * dual-label request pairing a fully dated merchant
+   * signature with a gateway signature carrying `created`
+   * but no `expires`.
+   */
+  requireFreshnessByLabelMissingExpiresSigned: SignedHttpRequest;
+  /**
+   * Per-label results for that request with
+   * `requireExpiresByLabel: { gateway: true }` and the
+   * globals unset (gateway fails `MISSING_EXPIRES`, merchant
+   * verifies).
+   */
+  requireFreshnessByLabelMissingExpiresVerification: VerifyResult[];
+  /**
+   * Per-label results for the merchant-without-created
+   * request re-verified with `requireCreated: false` plus
+   * `requireCreatedByLabel: { merchant: true }` (a mapped
+   * true overrides a global false: merchant still fails
+   * `MISSING_CREATED`, gateway still verifies).
+   */
+  requireFreshnessByLabelOverrideCreatedVerification: VerifyResult[];
+  /**
+   * Per-label results for the gateway-without-expires
+   * request re-verified with `requireExpires: false` plus
+   * `requireExpiresByLabel: { gateway: true }` (gateway still
+   * fails `MISSING_EXPIRES`, merchant still verifies).
+   */
+  requireFreshnessByLabelOverrideExpiresVerification: VerifyResult[];
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -8889,6 +8968,260 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Per-label required-freshness segment:
+  // `requireCreatedByLabel` / `requireExpiresByLabel` are the
+  // per-label forms of the required-freshness segment's global
+  // options — where the global options demand a timestamp from
+  // every label, these maps demand one only from the labels
+  // they name. A merchant signature that must carry `created`
+  // and a gateway signature that must carry `expires` ride on
+  // the same request, but `signRequest` always emits both
+  // timestamps, so both undated shapes are hand-built here with
+  // the public signature-base primitives, exactly as the
+  // required-freshness segment builds its single-label shapes:
+  // one dual-label fixture pairs a merchant signature carrying
+  // `expires` but no `created` with a fully dated gateway
+  // signature, the other pairs a fully dated merchant signature
+  // with a gateway signature carrying `created` but no
+  // `expires`. Both fixtures are verified at the injected
+  // `DEMO_CREATED + 60` instant with the globals left unset,
+  // and each fixture is re-verified with its global explicitly
+  // false plus the map entry true, pinning that a mapped true
+  // overrides a global false. Outside the printed lines the
+  // demo asserts every outcome, label, code and reason equals
+  // the hand-pinned expectations.
+  const requireFreshnessByLabelMerchantPair = generateEd25519KeyPair();
+  const requireFreshnessByLabelGatewayPair = generateEd25519KeyPair();
+  const requireFreshnessByLabelRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_REQUIRE_FRESHNESS_BY_LABEL_URL,
+    headers: {},
+  };
+  const requireFreshnessByLabelBuild = (
+    params: SignatureParams,
+    label: string,
+    pair: { privateKey: KeyObject },
+  ): SignedHttpRequest => {
+    const base = buildSignatureBase(
+      [...DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS],
+      requireFreshnessByLabelRequest,
+      params,
+    );
+    const sig = edSign(null, Buffer.from(base, "utf8"), pair.privateKey);
+    return {
+      method: requireFreshnessByLabelRequest.method,
+      url: requireFreshnessByLabelRequest.url,
+      headers: {
+        "signature-input": signatureInputValue(
+          label,
+          [...DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS],
+          params,
+        ),
+        signature: `${label}=:${sig.toString("base64")}:`,
+      },
+    };
+  };
+  const requireFreshnessByLabelMerge = (
+    a: SignedHttpRequest,
+    b: SignedHttpRequest,
+  ): SignedHttpRequest => ({
+    ...a,
+    headers: {
+      ...a.headers,
+      "signature-input": `${a.headers["signature-input"]}, ${b.headers["signature-input"]}`,
+      signature: `${a.headers["signature"]}, ${b.headers["signature"]}`,
+    },
+  });
+  const requireFreshnessByLabelMerchantNoCreated =
+    requireFreshnessByLabelBuild(
+      {
+        keyid: DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KEY_ID,
+        alg: "ed25519",
+        expires: DEMO_REQUIRE_FRESHNESS_EXPIRES,
+      },
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL,
+      requireFreshnessByLabelMerchantPair,
+    );
+  const requireFreshnessByLabelGatewayDated =
+    requireFreshnessByLabelBuild(
+      {
+        keyid: DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KEY_ID,
+        alg: "ed25519",
+        created: DEMO_CREATED,
+        expires: DEMO_REQUIRE_FRESHNESS_EXPIRES,
+      },
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL,
+      requireFreshnessByLabelGatewayPair,
+    );
+  const requireFreshnessByLabelMerchantDated =
+    requireFreshnessByLabelBuild(
+      {
+        keyid: DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KEY_ID,
+        alg: "ed25519",
+        created: DEMO_CREATED,
+        expires: DEMO_REQUIRE_FRESHNESS_EXPIRES,
+      },
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL,
+      requireFreshnessByLabelMerchantPair,
+    );
+  const requireFreshnessByLabelGatewayNoExpires =
+    requireFreshnessByLabelBuild(
+      {
+        keyid: DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KEY_ID,
+        alg: "ed25519",
+        created: DEMO_CREATED,
+      },
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL,
+      requireFreshnessByLabelGatewayPair,
+    );
+  const requireFreshnessByLabelMissingCreatedSigned =
+    requireFreshnessByLabelMerge(
+      requireFreshnessByLabelMerchantNoCreated,
+      requireFreshnessByLabelGatewayDated,
+    );
+  const requireFreshnessByLabelMissingExpiresSigned =
+    requireFreshnessByLabelMerge(
+      requireFreshnessByLabelMerchantDated,
+      requireFreshnessByLabelGatewayNoExpires,
+    );
+  const requireFreshnessByLabelKeys = {
+    [DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]:
+      requireFreshnessByLabelMerchantPair.publicKey,
+    [DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]:
+      requireFreshnessByLabelGatewayPair.publicKey,
+  };
+  const requireFreshnessByLabelMissingCreatedVerification = verifyAllLabels(
+    requireFreshnessByLabelMissingCreatedSigned,
+    {
+      keys: requireFreshnessByLabelKeys,
+      now: DEMO_CREATED + 60,
+      requireCreatedByLabel: {
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]: true,
+      },
+    },
+  );
+  const requireFreshnessByLabelMissingExpiresVerification = verifyAllLabels(
+    requireFreshnessByLabelMissingExpiresSigned,
+    {
+      keys: requireFreshnessByLabelKeys,
+      now: DEMO_CREATED + 60,
+      requireExpiresByLabel: {
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]: true,
+      },
+    },
+  );
+  const requireFreshnessByLabelOverrideCreatedVerification = verifyAllLabels(
+    requireFreshnessByLabelMissingCreatedSigned,
+    {
+      keys: requireFreshnessByLabelKeys,
+      now: DEMO_CREATED + 60,
+      requireCreated: false,
+      requireCreatedByLabel: {
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]: true,
+      },
+    },
+  );
+  const requireFreshnessByLabelOverrideExpiresVerification = verifyAllLabels(
+    requireFreshnessByLabelMissingExpiresSigned,
+    {
+      keys: requireFreshnessByLabelKeys,
+      now: DEMO_CREATED + 60,
+      requireExpires: false,
+      requireExpiresByLabel: {
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]: true,
+      },
+    },
+  );
+  const requireFreshnessByLabelByLabel = (
+    results: VerifyResult[],
+  ): Record<string, VerifyResult> =>
+    Object.fromEntries(results.map((r) => [r.label, r]));
+  const requireFreshnessByLabelMissingCreatedByLabel =
+    requireFreshnessByLabelByLabel(
+      requireFreshnessByLabelMissingCreatedVerification,
+    );
+  const requireFreshnessByLabelMissingExpiresByLabel =
+    requireFreshnessByLabelByLabel(
+      requireFreshnessByLabelMissingExpiresVerification,
+    );
+  const requireFreshnessByLabelOverrideCreatedByLabel =
+    requireFreshnessByLabelByLabel(
+      requireFreshnessByLabelOverrideCreatedVerification,
+    );
+  const requireFreshnessByLabelOverrideExpiresByLabel =
+    requireFreshnessByLabelByLabel(
+      requireFreshnessByLabelOverrideExpiresVerification,
+    );
+  if (
+    requireFreshnessByLabelMissingCreatedVerification.length !== 2 ||
+    requireFreshnessByLabelMissingCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]?.ok !== false ||
+    requireFreshnessByLabelMissingCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]?.code !== DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_CODE ||
+    requireFreshnessByLabelMissingCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]?.reason !== DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON ||
+    requireFreshnessByLabelMissingCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]?.ok !== true ||
+    requireFreshnessByLabelMissingExpiresVerification.length !== 2 ||
+    requireFreshnessByLabelMissingExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]?.ok !== false ||
+    requireFreshnessByLabelMissingExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]?.code !== DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_CODE ||
+    requireFreshnessByLabelMissingExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]?.reason !== DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON ||
+    requireFreshnessByLabelMissingExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]?.ok !== true ||
+    requireFreshnessByLabelOverrideCreatedVerification.length !== 2 ||
+    requireFreshnessByLabelOverrideCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]?.ok !== false ||
+    requireFreshnessByLabelOverrideCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]?.code !== DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_CODE ||
+    requireFreshnessByLabelOverrideCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]?.reason !== DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON ||
+    requireFreshnessByLabelOverrideCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]?.ok !== true ||
+    requireFreshnessByLabelOverrideExpiresVerification.length !== 2 ||
+    requireFreshnessByLabelOverrideExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]?.ok !== false ||
+    requireFreshnessByLabelOverrideExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]?.code !== DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_CODE ||
+    requireFreshnessByLabelOverrideExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]?.reason !== DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON ||
+    requireFreshnessByLabelOverrideExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]?.ok !== true
+  ) {
+    throw new Error(
+      `demo fixture broken: requireCreatedByLabel/requireExpiresByLabel gave missing-created ` +
+        `${JSON.stringify(requireFreshnessByLabelMissingCreatedVerification)}, missing-expires ` +
+        `${JSON.stringify(requireFreshnessByLabelMissingExpiresVerification)}, override-created ` +
+        `${JSON.stringify(requireFreshnessByLabelOverrideCreatedVerification)} and override-expires ` +
+        `${JSON.stringify(requireFreshnessByLabelOverrideExpiresVerification)}, instead of ` +
+        `the no-created merchant label rejected with ` +
+        `${DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_CODE} ` +
+        `(${DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON}) while the dated gateway label ` +
+        `verifies, the no-expires gateway label rejected with ` +
+        `${DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_CODE} ` +
+        `(${DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON}) while the dated merchant label ` +
+        `verifies, and both rejections surviving an explicit global false`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -9419,6 +9752,40 @@ export async function runDemo(): Promise<DemoResult> {
     requireFreshnessNoExpiresUnsetVerification.ok
       ? `No requireExpires set: the same no-expires signature verified without the option: OK (label ${requireFreshnessNoExpiresUnsetVerification.label}, keyid="${requireFreshnessNoExpiresUnsetVerification.keyId}", alg="${requireFreshnessNoExpiresUnsetVerification.alg}") (no check is made — backwards compatible)`
       : `No requireExpires set: the same no-expires signature verified without the option: FAILED (code ${requireFreshnessNoExpiresUnsetVerification.code}: ${requireFreshnessNoExpiresUnsetVerification.reason})`,
+    "",
+    "Per-label required freshness: verifyAllLabels' requireCreatedByLabel / requireExpiresByLabel maps demand a created / expires timestamp only from the labels they name — the merchant signature must carry created, the gateway signature must carry expires, and the globals are left unset, so an unmapped label falls back to no check — the per-label form of the required-freshness segment's global check, checked after the cryptographic check like the global one, so a forged undated label still reports a signature failure rather than a policy violation",
+    requireFreshnessByLabelMissingCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]!.ok === false &&
+    requireFreshnessByLabelMissingCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]!.ok === true
+      ? `Merchant without created: dual-label request verified with requireCreatedByLabel { merchant: true }: FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}, code ${requireFreshnessByLabelMissingCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.code}: ${requireFreshnessByLabelMissingCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.reason}), gateway still OK (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}, keyid="${requireFreshnessByLabelMissingCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.keyId}", alg="ed25519") — only the mapped label is checked`
+      : `Merchant without created: dual-label request verified with requireCreatedByLabel { merchant: true }: merchant ${requireFreshnessByLabelMissingCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.ok ? "OK (unexpected — the no-created merchant signature was not rejected)" : `code ${requireFreshnessByLabelMissingCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.code}`}, gateway ${requireFreshnessByLabelMissingCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.ok ? "OK" : "FAILED (unexpected — the dated gateway label was dragged down by the merchant check)"}`,
+    requireFreshnessByLabelMissingExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]!.ok === false &&
+    requireFreshnessByLabelMissingExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]!.ok === true
+      ? `Gateway without expires: dual-label request verified with requireExpiresByLabel { gateway: true }: FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}, code ${requireFreshnessByLabelMissingExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.code}: ${requireFreshnessByLabelMissingExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.reason}), merchant still OK (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}, keyid="${requireFreshnessByLabelMissingExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.keyId}", alg="ed25519") — only the mapped label is checked`
+      : `Gateway without expires: dual-label request verified with requireExpiresByLabel { gateway: true }: gateway ${requireFreshnessByLabelMissingExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.ok ? "OK (unexpected — the no-expires gateway signature was not rejected)" : `code ${requireFreshnessByLabelMissingExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.code}`}, merchant ${requireFreshnessByLabelMissingExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.ok ? "OK" : "FAILED (unexpected — the dated merchant label was dragged down by the gateway check)"}`,
+    requireFreshnessByLabelOverrideCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]!.ok === false &&
+    requireFreshnessByLabelOverrideCreatedByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]!.ok === true
+      ? `Mapped true overrides global false (created): the merchant-without-created request verified with requireCreated: false plus requireCreatedByLabel { merchant: true }: merchant still FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}, code ${requireFreshnessByLabelOverrideCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.code}: ${requireFreshnessByLabelOverrideCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.reason}), gateway still OK — the map wins over the global, it does not fall back to it`
+      : `Mapped true overrides global false (created): the merchant-without-created request verified with requireCreated: false plus requireCreatedByLabel { merchant: true }: merchant ${requireFreshnessByLabelOverrideCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.ok ? "OK (unexpected — the global false overrode the map)" : `code ${requireFreshnessByLabelOverrideCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.code}`}, gateway ${requireFreshnessByLabelOverrideCreatedByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.ok ? "OK" : "FAILED (unexpected — the dated gateway label was dragged down)"}`,
+    requireFreshnessByLabelOverrideExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL
+    ]!.ok === false &&
+    requireFreshnessByLabelOverrideExpiresByLabel[
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL
+    ]!.ok === true
+      ? `Mapped true overrides global false (expires): the gateway-without-expires request verified with requireExpires: false plus requireExpiresByLabel { gateway: true }: gateway still FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}, code ${requireFreshnessByLabelOverrideExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.code}: ${requireFreshnessByLabelOverrideExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.reason}), merchant still OK — the map wins over the global, it does not fall back to it`
+      : `Mapped true overrides global false (expires): the gateway-without-expires request verified with requireExpires: false plus requireExpiresByLabel { gateway: true }: gateway ${requireFreshnessByLabelOverrideExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.ok ? "OK (unexpected — the global false overrode the map)" : `code ${requireFreshnessByLabelOverrideExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.code}`}, merchant ${requireFreshnessByLabelOverrideExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.ok ? "OK" : "FAILED (unexpected — the dated merchant label was dragged down)"}`,
   ];
 
   return {
@@ -9665,6 +10032,12 @@ export async function runDemo(): Promise<DemoResult> {
     requireFreshnessNoExpiresSigned,
     requireFreshnessNoExpiresRequiredVerification,
     requireFreshnessNoExpiresUnsetVerification,
+    requireFreshnessByLabelMissingCreatedSigned,
+    requireFreshnessByLabelMissingCreatedVerification,
+    requireFreshnessByLabelMissingExpiresSigned,
+    requireFreshnessByLabelMissingExpiresVerification,
+    requireFreshnessByLabelOverrideCreatedVerification,
+    requireFreshnessByLabelOverrideExpiresVerification,
     lines,
   };
 }

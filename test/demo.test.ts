@@ -314,6 +314,11 @@ import {
   DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_CODE,
   DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON,
   DEMO_REQUIRE_FRESHNESS_URL,
+  DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KEY_ID,
+  DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL,
+  DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KEY_ID,
+  DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL,
+  DEMO_REQUIRE_FRESHNESS_BY_LABEL_URL,
   DEMO_NODE_TRAILERS_BODY,
   DEMO_NODE_TRAILERS_COVERED_COMPONENTS,
   DEMO_NODE_TRAILERS_HOST,
@@ -5445,8 +5450,9 @@ test("demo lines contain the per-label candidate keys segment (rotation window, 
     `Isolation: the same new-secret request verified with the merchant list replaced by an unrelated ed25519 key: merchant FAILED (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL}, code SIGNATURE_MISMATCH: signature mismatch), gateway still OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID}", alg="hmac-sha256") — each label tries only its own list, so the merchant's key is never tried against the gateway label`,
   ]);
   // The header plus its three lines are followed by a blank
-  // line and the required-freshness segment, which now
-  // closes the demo.
+  // line and the required-freshness segment, which is in
+  // turn followed by the per-label required-freshness
+  // segment that now closes the demo.
   assert.equal(lines[headerIdx + 4], "");
   assert.ok(lines[headerIdx + 5].startsWith("Required freshness:"));
   const again = await runDemo();
@@ -5595,7 +5601,7 @@ test("demo required-freshness segment pins requireCreated/requireExpires (missin
   );
 });
 
-test("demo lines contain the required-freshness segment (missing rejected, unset unchanged, closing the demo)", async () => {
+test("demo lines contain the required-freshness segment (missing rejected, unset unchanged, followed by the per-label segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Required freshness: verifyRequest's requireCreated \/ requireExpires option/);
@@ -5610,12 +5616,316 @@ test("demo lines contain the required-freshness segment (missing rejected, unset
     `Expires missing: hand-built signature with created=${DEMO_CREATED} but no expires verified with requireExpires: FAILED (code MISSING_EXPIRES: ${DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON})`,
     `No requireExpires set: the same no-expires signature verified without the option: OK (label sig1, keyid="${DEMO_REQUIRE_FRESHNESS_KEY_ID}", alg="ed25519") (no check is made — backwards compatible)`,
   ]);
+  // The header plus its four lines are followed by a blank
+  // line and the per-label required-freshness segment, which
+  // now closes the demo.
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(lines[headerIdx + 6].startsWith("Per-label required freshness:"));
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Required freshness:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 5),
+    lines.slice(headerIdx, headerIdx + 5),
+  );
+});
+
+test("demo per-label required-freshness segment pins requireCreatedByLabel/requireExpiresByLabel (mapped label rejected, sibling verifies, mapped true overrides global false)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL, "gateway");
+  assert.equal(
+    DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KEY_ID,
+    "demo-require-freshness-by-label-merchant-1",
+  );
+  assert.equal(
+    DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KEY_ID,
+    "demo-require-freshness-by-label-gateway-1",
+  );
+  assert.equal(
+    DEMO_REQUIRE_FRESHNESS_BY_LABEL_URL,
+    "https://api.example.com/v1/payments",
+  );
+  // Wire shapes: signRequest always emits both timestamps, so the
+  // demo's dual-label fixtures are hand-built — split the merged
+  // Signature-Input on its label separator and pin each label's
+  // own parameters, not the merged string's.
+  const createdParts = (
+    r.requireFreshnessByLabelMissingCreatedSigned.headers["signature-input"]!
+  ).split(", ");
+  const createdMerchant = createdParts.find((p) =>
+    p.startsWith(`${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}=`),
+  )!;
+  const createdGateway = createdParts.find((p) =>
+    p.startsWith(`${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}=`),
+  )!;
+  assert.ok(!/;created=/.test(createdMerchant));
+  assert.match(createdMerchant, /;expires=1700000600/);
+  assert.match(createdGateway, /;created=1700000000/);
+  assert.match(createdGateway, /;expires=1700000600/);
+  const expiresParts = (
+    r.requireFreshnessByLabelMissingExpiresSigned.headers["signature-input"]!
+  ).split(", ");
+  const expiresMerchant = expiresParts.find((p) =>
+    p.startsWith(`${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}=`),
+  )!;
+  const expiresGateway = expiresParts.find((p) =>
+    p.startsWith(`${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}=`),
+  )!;
+  assert.match(expiresMerchant, /;created=1700000000/);
+  assert.match(expiresMerchant, /;expires=1700000600/);
+  assert.match(expiresGateway, /;created=1700000000/);
+  assert.ok(!/;expires=/.test(expiresGateway));
+  const byLabel = (results: VerifyResult[]) =>
+    Object.fromEntries(results.map((x) => [x.label, x]));
+  const missingCreated = byLabel(
+    r.requireFreshnessByLabelMissingCreatedVerification,
+  );
+  assert.equal(
+    r.requireFreshnessByLabelMissingCreatedVerification.length,
+    2,
+  );
+  assert.equal(
+    missingCreated[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL].ok,
+    false,
+  );
+  assert.equal(
+    missingCreated[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL].code,
+    "MISSING_CREATED",
+  );
+  assert.equal(
+    missingCreated[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL].reason,
+    DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON,
+  );
+  assert.equal(
+    missingCreated[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL].ok,
+    true,
+  );
+  const missingExpires = byLabel(
+    r.requireFreshnessByLabelMissingExpiresVerification,
+  );
+  assert.equal(
+    r.requireFreshnessByLabelMissingExpiresVerification.length,
+    2,
+  );
+  assert.equal(
+    missingExpires[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL].ok,
+    false,
+  );
+  assert.equal(
+    missingExpires[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL].code,
+    "MISSING_EXPIRES",
+  );
+  assert.equal(
+    missingExpires[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL].reason,
+    DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON,
+  );
+  assert.equal(
+    missingExpires[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL].ok,
+    true,
+  );
+  const overrideCreated = byLabel(
+    r.requireFreshnessByLabelOverrideCreatedVerification,
+  );
+  assert.equal(
+    overrideCreated[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL].code,
+    "MISSING_CREATED",
+  );
+  assert.equal(
+    overrideCreated[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL].ok,
+    true,
+  );
+  const overrideExpires = byLabel(
+    r.requireFreshnessByLabelOverrideExpiresVerification,
+  );
+  assert.equal(
+    overrideExpires[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL].code,
+    "MISSING_EXPIRES",
+  );
+  assert.equal(
+    overrideExpires[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL].ok,
+    true,
+  );
+  // Independent checks driven directly (the same hand-built
+  // technique test/requireFreshnessByLabel.test.ts pins): a fresh
+  // key pair per label, both undated shapes, mapped rejections
+  // with the sibling verifying, and mapped-true-over-global-false
+  // reproduced outside runDemo().
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const req = {
+    method: "POST",
+    url: DEMO_REQUIRE_FRESHNESS_BY_LABEL_URL,
+    headers: {},
+  };
+  const build = (
+    params: {
+      keyid: string;
+      alg: "ed25519";
+      created?: number;
+      expires?: number;
+    },
+    label: string,
+    pair: { privateKey: object },
+  ) => {
+    const base = buildSignatureBase(
+      [...DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS],
+      req,
+      params,
+    );
+    const sig = edSign(
+      null,
+      Buffer.from(base, "utf8"),
+      pair.privateKey as never,
+    );
+    return {
+      method: req.method,
+      url: req.url,
+      headers: {
+        "signature-input": signatureInputValue(
+          label,
+          [...DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS],
+          params,
+        ),
+        signature: `${label}=:${sig.toString("base64")}:`,
+      },
+    };
+  };
+  const merge = (a: ReturnType<typeof build>, b: ReturnType<typeof build>) => ({
+    ...a,
+    headers: {
+      ...a.headers,
+      "signature-input": `${a.headers["signature-input"]}, ${b.headers["signature-input"]}`,
+      signature: `${a.headers["signature"]}, ${b.headers["signature"]}`,
+    },
+  });
+  const directMissingCreated = merge(
+    build(
+      {
+        keyid: DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KEY_ID,
+        alg: "ed25519",
+        expires: DEMO_REQUIRE_FRESHNESS_EXPIRES,
+      },
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL,
+      merchant,
+    ),
+    build(
+      {
+        keyid: DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KEY_ID,
+        alg: "ed25519",
+        created: DEMO_CREATED,
+        expires: DEMO_REQUIRE_FRESHNESS_EXPIRES,
+      },
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL,
+      gateway,
+    ),
+  );
+  const directCreated = byLabel(
+    verifyAllLabels(directMissingCreated, {
+      keys: {
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]:
+          merchant.publicKey,
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]: gateway.publicKey,
+      },
+      now: DEMO_CREATED + 60,
+      requireCreatedByLabel: {
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]: true,
+      },
+    }),
+  );
+  assert.equal(
+    directCreated[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL].code,
+    "MISSING_CREATED",
+  );
+  assert.equal(
+    directCreated[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL].ok,
+    true,
+  );
+  const directOverrideCreated = byLabel(
+    verifyAllLabels(directMissingCreated, {
+      keys: {
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]:
+          merchant.publicKey,
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]: gateway.publicKey,
+      },
+      now: DEMO_CREATED + 60,
+      requireCreated: false,
+      requireCreatedByLabel: {
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]: true,
+      },
+    }),
+  );
+  assert.equal(
+    directOverrideCreated[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]
+      .code,
+    "MISSING_CREATED",
+  );
+  const directMissingExpires = merge(
+    build(
+      {
+        keyid: DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KEY_ID,
+        alg: "ed25519",
+        created: DEMO_CREATED,
+        expires: DEMO_REQUIRE_FRESHNESS_EXPIRES,
+      },
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL,
+      merchant,
+    ),
+    build(
+      {
+        keyid: DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KEY_ID,
+        alg: "ed25519",
+        created: DEMO_CREATED,
+      },
+      DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL,
+      gateway,
+    ),
+  );
+  const directExpires = byLabel(
+    verifyAllLabels(directMissingExpires, {
+      keys: {
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]:
+          merchant.publicKey,
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]: gateway.publicKey,
+      },
+      now: DEMO_CREATED + 60,
+      requireExpiresByLabel: {
+        [DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]: true,
+      },
+    }),
+  );
+  assert.equal(
+    directExpires[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL].code,
+    "MISSING_EXPIRES",
+  );
+  assert.equal(
+    directExpires[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL].ok,
+    true,
+  );
+});
+
+test("demo lines contain the per-label required-freshness segment (mapped label rejected, sibling verifies, override, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Per-label required freshness: verifyAllLabels' requireCreatedByLabel/);
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label required freshness:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), [
+    "Per-label required freshness: verifyAllLabels' requireCreatedByLabel / requireExpiresByLabel maps demand a created / expires timestamp only from the labels they name — the merchant signature must carry created, the gateway signature must carry expires, and the globals are left unset, so an unmapped label falls back to no check — the per-label form of the required-freshness segment's global check, checked after the cryptographic check like the global one, so a forged undated label still reports a signature failure rather than a policy violation",
+    `Merchant without created: dual-label request verified with requireCreatedByLabel { ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}: true }: FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}, code MISSING_CREATED: ${DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON}), gateway still OK (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — only the mapped label is checked`,
+    `Gateway without expires: dual-label request verified with requireExpiresByLabel { ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}: true }: FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}, code MISSING_EXPIRES: ${DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON}), merchant still OK (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519") — only the mapped label is checked`,
+    `Mapped true overrides global false (created): the merchant-without-created request verified with requireCreated: false plus requireCreatedByLabel { ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}: true }: merchant still FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}, code MISSING_CREATED: ${DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON}), gateway still OK — the map wins over the global, it does not fall back to it`,
+    `Mapped true overrides global false (expires): the gateway-without-expires request verified with requireExpires: false plus requireExpiresByLabel { ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}: true }: gateway still FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}, code MISSING_EXPIRES: ${DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON}), merchant still OK — the map wins over the global, it does not fall back to it`,
+  ]);
   // The header plus its four lines are the demo's closing lines,
   // with nothing after them.
   assert.equal(headerIdx + 5, lines.length);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
-    l.startsWith("Required freshness:"),
+    l.startsWith("Per-label required freshness:"),
   );
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 5),

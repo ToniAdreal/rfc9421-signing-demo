@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo (`npm run demo`) now closes with a per-label
+  required-freshness segment (backlog #621): two hand-built
+  dual-label fixtures (a merchant signature carrying `expires`
+  but no `created` paired with a fully dated gateway signature,
+  and a fully dated merchant signature paired with a gateway
+  signature carrying `created` but no `expires`) verified with
+  `requireCreatedByLabel: { merchant: true }` /
+  `requireExpiresByLabel: { gateway: true }` and the globals
+  left unset — the no-created merchant label fails exactly
+  `MISSING_CREATED` while the gateway label still verifies, the
+  no-expires gateway label fails exactly `MISSING_EXPIRES`
+  while the merchant label still verifies — and each fixture
+  re-verified with its global explicitly false plus the map
+  entry true, pinning that a mapped true overrides a global
+  false. `DemoResult` gains the segment's signed requests and
+  verification results, and the demo tests gain two cases
+  pinning the segment end-to-end (970 tests in total). Every
+  clock in the segment is injected, so the printed lines are
+  byte-identical between runs.
 - Orthogonal-combination tests for `verifyAllLabels` with
   `candidateKeysByLabel` and the global `requireTag` (backlog #618):
   `test/candidateKeysByLabelRequireTag.test.ts` pins a dual-label
