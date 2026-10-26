@@ -232,6 +232,23 @@
  * acceptance with no option passed, an explicit `merchant: false`
  * map entry letting it through, and a differently-tagged merchant
  * fixture still verifying asserted outside timing, plus
+ * the per-label required-freshness verify path a multi-party
+ * receiver runs when each signer must bound its own signature
+ * differently: `verifyAllLabels` with `requireCreatedByLabel`
+ * / `requireExpiresByLabel` over hand-built dual fixtures
+ * signed outside timing with `created` / `expires` pinned
+ * (merchant mapped created-required, gateway mapped
+ * expires-required, globals unset — see
+ * REQUIRE_FRESHNESS_BY_LABEL_* below), self-checked on every
+ * measured pass (one measured op verifies three duals: the
+ * fully dated dual, both labels ok; the no-created-merchant
+ * dual, merchant exactly `MISSING_CREATED` with the pinned
+ * reason while the gateway label still verifies; and the
+ * no-expires-gateway dual, gateway exactly `MISSING_EXPIRES`
+ * with the pinned reason while the merchant label still
+ * verifies), with both undated duals' acceptance with no
+ * option passed and explicit `false` map entries letting them
+ * through asserted outside timing, plus
  * the algorithm-inference verify path a
  * receiver runs for foreign signers that omit the optional
  * `alg` parameter: `verifyRequest` with
@@ -3568,6 +3585,264 @@ function benchmarkVerifyAllRequireTagByLabel(): number {
   )
     throw new Error(
       `benchmark self-check failed: differently-tagged dual gave ${JSON.stringify(otherTagged)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels` requireFreshnessByLabel
+ * benchmark: two ed25519 key pairs (generated once,
+ * outside timing), hand-built dual-label fixtures (built
+ * with `buildSignatureBase` + `signatureInputValue` + a
+ * raw ed25519 sign, the shape `test/requireFreshness.test.ts`
+ * uses, because `signRequest` always emits both timestamps),
+ * and the verifier's injected `now` at the `created`
+ * instant. The merchant label is mapped `true` in
+ * `requireCreatedByLabel` and the gateway label is mapped
+ * `true` in `requireExpiresByLabel`, and both globals are
+ * left unset, so each map entry drives only its own label.
+ */
+const REQUIRE_FRESHNESS_BY_LABEL_CREATED = 1_700_000_000;
+const REQUIRE_FRESHNESS_BY_LABEL_EXPIRES =
+  REQUIRE_FRESHNESS_BY_LABEL_CREATED + 600;
+const REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KID =
+  "bench-require-freshness-by-label-merchant-1";
+const REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KID =
+  "bench-require-freshness-by-label-gateway-1";
+const REQUIRE_FRESHNESS_BY_LABEL_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+];
+const REQUIRE_FRESHNESS_BY_LABEL_MISSING_CREATED_CODE = "MISSING_CREATED";
+const REQUIRE_FRESHNESS_BY_LABEL_MISSING_CREATED_REASON =
+  "signature carries no `created` timestamp but requireCreated is set";
+const REQUIRE_FRESHNESS_BY_LABEL_MISSING_EXPIRES_CODE = "MISSING_EXPIRES";
+const REQUIRE_FRESHNESS_BY_LABEL_MISSING_EXPIRES_REASON =
+  "signature carries no `expires` timestamp but requireExpires is set";
+
+/**
+ * `verifyAllLabels` with `requireCreatedByLabel` /
+ * `requireExpiresByLabel` steady state: the per-label
+ * freshness-existence form a multi-party receiver uses
+ * when each signer must bound its own signature differently
+ * (the merchant signature must carry a `created` timestamp
+ * so its age is auditable; the gateway signature must carry
+ * an `expires` timestamp so its lifetime is bounded) —
+ * every measured call runs the per-label map resolution and
+ * the post-cryptographic presence check for each mapped
+ * label, which the plain `verifyAllLabels` row above never
+ * pays, because it passes no requirement. One measured op
+ * verifies three dual-label fixtures: the fully dated dual
+ * (both labels ok); the no-created-merchant dual (merchant
+ * exactly `MISSING_CREATED` with the pinned reason while the
+ * fully dated gateway label still verifies, proving the
+ * merchant's map entry does not leak into the gateway); and
+ * the no-expires-gateway dual (gateway exactly
+ * `MISSING_EXPIRES` with the pinned reason while the fully
+ * dated merchant label still verifies, proving the
+ * gateway's map entry does not leak into the merchant).
+ * Outside timing, the opt-in halves are pinned once: both
+ * undated duals verify with no option passed, and explicit
+ * `merchant: false` / `gateway: false` map entries likewise
+ * let them through — the map entries, not the label names,
+ * drive the checks. Zero network, zero randomness in the
+ * measured assertions, no wall clock (every verify instant
+ * is injected).
+ */
+function benchmarkVerifyAllRequireFreshnessByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const buildLabel = (
+    params: SignatureParams,
+    label: string,
+    privateKey: KeyObject,
+  ): SignedHttpRequest => {
+    const base = buildSignatureBase(
+      REQUIRE_FRESHNESS_BY_LABEL_COVERED_COMPONENTS,
+      fixture,
+      params,
+    );
+    const sig = edSign(null, Buffer.from(base, "utf8"), privateKey);
+    return {
+      method: fixture.method,
+      url: fixture.url,
+      headers: {
+        "signature-input": signatureInputValue(
+          label,
+          REQUIRE_FRESHNESS_BY_LABEL_COVERED_COMPONENTS,
+          params,
+        ),
+        signature: `${label}=:${sig.toString("base64")}:`,
+      },
+    };
+  };
+  const merge = (
+    a: SignedHttpRequest,
+    b: SignedHttpRequest,
+  ): SignedHttpRequest => ({
+    ...a,
+    headers: {
+      ...a.headers,
+      "signature-input": `${a.headers["signature-input"]}, ${b.headers["signature-input"]}`,
+      signature: `${a.headers["signature"]}, ${b.headers["signature"]}`,
+    },
+  });
+  const merchantDated = buildLabel(
+    {
+      keyid: REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KID,
+      alg: "ed25519",
+      created: REQUIRE_FRESHNESS_BY_LABEL_CREATED,
+      expires: REQUIRE_FRESHNESS_BY_LABEL_EXPIRES,
+    },
+    "merchant",
+    merchantPrivate,
+  );
+  const gatewayDated = buildLabel(
+    {
+      keyid: REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KID,
+      alg: "ed25519",
+      created: REQUIRE_FRESHNESS_BY_LABEL_CREATED,
+      expires: REQUIRE_FRESHNESS_BY_LABEL_EXPIRES,
+    },
+    "gateway",
+    gatewayPrivate,
+  );
+  const merchantNoCreated = buildLabel(
+    {
+      keyid: REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KID,
+      alg: "ed25519",
+      expires: REQUIRE_FRESHNESS_BY_LABEL_EXPIRES,
+    },
+    "merchant",
+    merchantPrivate,
+  );
+  const gatewayNoExpires = buildLabel(
+    {
+      keyid: REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KID,
+      alg: "ed25519",
+      created: REQUIRE_FRESHNESS_BY_LABEL_CREATED,
+    },
+    "gateway",
+    gatewayPrivate,
+  );
+  const dualDated = merge(merchantDated, gatewayDated);
+  const dualNoCreated = merge(merchantNoCreated, gatewayDated);
+  const dualNoExpires = merge(merchantDated, gatewayNoExpires);
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: REQUIRE_FRESHNESS_BY_LABEL_CREATED,
+    requireCreatedByLabel: { merchant: true },
+    requireExpiresByLabel: { gateway: true },
+  };
+  const assertDual = (where: string): void => {
+    const dated = verifyAllLabels(dualDated, verifyOpts);
+    if (
+      dated.length !== 2 ||
+      dated[0].label !== "merchant" ||
+      !dated[0].ok ||
+      dated[1].label !== "gateway" ||
+      !dated[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with requireFreshnessByLabel (${where}, dated dual) gave ${JSON.stringify(dated)}`,
+      );
+    const noCreated = verifyAllLabels(dualNoCreated, verifyOpts);
+    if (
+      noCreated.length !== 2 ||
+      noCreated[0].label !== "merchant" ||
+      noCreated[0].ok ||
+      noCreated[0].code !==
+        REQUIRE_FRESHNESS_BY_LABEL_MISSING_CREATED_CODE ||
+      noCreated[0].reason !==
+        REQUIRE_FRESHNESS_BY_LABEL_MISSING_CREATED_REASON ||
+      noCreated[1].label !== "gateway" ||
+      !noCreated[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with requireFreshnessByLabel (${where}, no-created-merchant dual) gave ${JSON.stringify(noCreated)}`,
+      );
+    const noExpires = verifyAllLabels(dualNoExpires, verifyOpts);
+    if (
+      noExpires.length !== 2 ||
+      noExpires[0].label !== "merchant" ||
+      !noExpires[0].ok ||
+      noExpires[1].label !== "gateway" ||
+      noExpires[1].ok ||
+      noExpires[1].code !==
+        REQUIRE_FRESHNESS_BY_LABEL_MISSING_EXPIRES_CODE ||
+      noExpires[1].reason !==
+        REQUIRE_FRESHNESS_BY_LABEL_MISSING_EXPIRES_REASON
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with requireFreshnessByLabel (${where}, no-expires-gateway dual) gave ${JSON.stringify(noExpires)}`,
+      );
+  };
+
+  // Outside timing: all three fixtures self-check under
+  // the per-label requirements before any timing starts.
+  assertDual("outside timing");
+
+  // Outside timing: with no option both undated duals
+  // verify — the requirements are opt-in and the default
+  // behaviour is unchanged.
+  const defaultedNoCreated = verifyAllLabels(dualNoCreated, {
+    keys,
+    now: REQUIRE_FRESHNESS_BY_LABEL_CREATED,
+  });
+  if (
+    defaultedNoCreated.length !== 2 ||
+    defaultedNoCreated.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: no-created default gave ${JSON.stringify(defaultedNoCreated)}`,
+    );
+  const defaultedNoExpires = verifyAllLabels(dualNoExpires, {
+    keys,
+    now: REQUIRE_FRESHNESS_BY_LABEL_CREATED,
+  });
+  if (
+    defaultedNoExpires.length !== 2 ||
+    defaultedNoExpires.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: no-expires default gave ${JSON.stringify(defaultedNoExpires)}`,
+    );
+
+  // Outside timing: explicit `false` map entries likewise
+  // let both undated duals through — the map entries, not
+  // the label names, drive the checks.
+  const optedOutNoCreated = verifyAllLabels(dualNoCreated, {
+    keys,
+    now: REQUIRE_FRESHNESS_BY_LABEL_CREATED,
+    requireCreatedByLabel: { merchant: false },
+  });
+  if (
+    optedOutNoCreated.length !== 2 ||
+    optedOutNoCreated.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: no-created merchant:false gave ${JSON.stringify(optedOutNoCreated)}`,
+    );
+  const optedOutNoExpires = verifyAllLabels(dualNoExpires, {
+    keys,
+    now: REQUIRE_FRESHNESS_BY_LABEL_CREATED,
+    requireExpiresByLabel: { gateway: false },
+  });
+  if (
+    optedOutNoExpires.length !== 2 ||
+    optedOutNoExpires.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: no-expires gateway:false gave ${JSON.stringify(optedOutNoExpires)}`,
     );
 
   return measure(() => {
@@ -8065,6 +8340,11 @@ results.push({
   alg: "verifyAllLabels requireTagByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllRequireTagByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels requireFreshnessByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllRequireFreshnessByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",

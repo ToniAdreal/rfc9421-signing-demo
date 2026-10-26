@@ -11,6 +11,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark section for `verifyAllLabels` with `requireCreatedByLabel` /
+  `requireExpiresByLabel` (backlog #622): `benchmarkVerifyAllRequireFreshnessByLabel`
+  in `bench/bench.ts` verifies three hand-built dual-label fixtures per measured
+  op (fully dated dual both ok; no-created merchant exactly `MISSING_CREATED`
+  while the gateway still verifies; no-expires gateway exactly `MISSING_EXPIRES`
+  while the merchant still verifies) with the globals left unset, plus the
+  no-option and explicit-`false` opt-in halves outside timing. The README
+  Benchmarks table is refreshed from this run (new row: ~195.3 ops/sec,
+  5120.31 µs/op) with a matching prose paragraph.
 - The CLI demo (`npm run demo`) now closes with a per-label
   required-freshness segment (backlog #621): two hand-built
   dual-label fixtures (a merchant signature carrying `expires`
