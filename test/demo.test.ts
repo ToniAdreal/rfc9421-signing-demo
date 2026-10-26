@@ -306,6 +306,14 @@ import {
   DEMO_REQUIRE_TAG_MISSING_REASON,
   DEMO_REQUIRE_TAG_NONCE,
   DEMO_REQUIRE_TAG_URL,
+  DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS,
+  DEMO_REQUIRE_FRESHNESS_EXPIRES,
+  DEMO_REQUIRE_FRESHNESS_KEY_ID,
+  DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_CODE,
+  DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON,
+  DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_CODE,
+  DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON,
+  DEMO_REQUIRE_FRESHNESS_URL,
   DEMO_NODE_TRAILERS_BODY,
   DEMO_NODE_TRAILERS_COVERED_COMPONENTS,
   DEMO_NODE_TRAILERS_HOST,
@@ -5422,7 +5430,7 @@ test("demo per-label candidate keys segment pins candidateKeysByLabel (new secre
   assert.equal(directIsolation.gateway.ok, true);
 });
 
-test("demo lines contain the per-label candidate keys segment (rotation window, old secret, isolation, closing the demo)", async () => {
+test("demo lines contain the per-label candidate keys segment (rotation window, old secret, isolation, followed by the required-freshness segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Per-label candidate keys: verifyAllLabels' candidateKeysByLabel map gives/);
@@ -5436,9 +5444,11 @@ test("demo lines contain the per-label candidate keys segment (rotation window, 
     `Old secret still accepted: the same request re-signed with the gateway old secret verified with the same map: merchant OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID}", alg="hmac-sha256") — the old secret is the first candidate, still live during rotation`,
     `Isolation: the same new-secret request verified with the merchant list replaced by an unrelated ed25519 key: merchant FAILED (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL}, code SIGNATURE_MISMATCH: signature mismatch), gateway still OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID}", alg="hmac-sha256") — each label tries only its own list, so the merchant's key is never tried against the gateway label`,
   ]);
-  // The header plus its three lines are the demo's closing lines,
-  // with nothing after them.
-  assert.equal(headerIdx + 4, lines.length);
+  // The header plus its three lines are followed by a blank
+  // line and the required-freshness segment, which now
+  // closes the demo.
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(lines[headerIdx + 5].startsWith("Required freshness:"));
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Per-label candidate keys:"),
@@ -5446,5 +5456,169 @@ test("demo lines contain the per-label candidate keys segment (rotation window, 
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),
     lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo required-freshness segment pins requireCreated/requireExpires (missing rejected, unset unchanged)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_REQUIRE_FRESHNESS_KEY_ID, "demo-require-freshness-key-1");
+  assert.equal(DEMO_REQUIRE_FRESHNESS_URL, "https://api.example.com/v1/payments");
+  assert.deepEqual(DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS, [
+    "@method",
+    "@authority",
+    "@path",
+  ]);
+  assert.equal(DEMO_REQUIRE_FRESHNESS_EXPIRES, DEMO_CREATED + 600);
+  assert.equal(DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_CODE, "MISSING_CREATED");
+  assert.equal(
+    DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON,
+    "signature carries no `created` timestamp but requireCreated is set",
+  );
+  assert.equal(DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_CODE, "MISSING_EXPIRES");
+  assert.equal(
+    DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON,
+    "signature carries no `expires` timestamp but requireExpires is set",
+  );
+  // Wire shapes: signRequest always emits created, so both demo
+  // signatures are hand-built — the no-created one carries
+  // expires but no created, the no-expires one the reverse.
+  assert.ok(
+    !/;created=/.test(r.requireFreshnessNoCreatedSigned.headers["signature-input"]!),
+  );
+  assert.match(
+    r.requireFreshnessNoCreatedSigned.headers["signature-input"]!,
+    /;expires=1700000600/,
+  );
+  assert.ok(
+    !/;expires=/.test(r.requireFreshnessNoExpiresSigned.headers["signature-input"]!),
+  );
+  assert.match(
+    r.requireFreshnessNoExpiresSigned.headers["signature-input"]!,
+    /;created=1700000000/,
+  );
+  assert.equal(r.requireFreshnessNoCreatedRequiredVerification.ok, false);
+  assert.equal(
+    r.requireFreshnessNoCreatedRequiredVerification.code,
+    "MISSING_CREATED",
+  );
+  assert.equal(
+    r.requireFreshnessNoCreatedRequiredVerification.reason,
+    DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON,
+  );
+  assert.equal(r.requireFreshnessNoCreatedUnsetVerification.ok, true);
+  assert.equal(r.requireFreshnessNoExpiresRequiredVerification.ok, false);
+  assert.equal(
+    r.requireFreshnessNoExpiresRequiredVerification.code,
+    "MISSING_EXPIRES",
+  );
+  assert.equal(
+    r.requireFreshnessNoExpiresRequiredVerification.reason,
+    DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON,
+  );
+  assert.equal(r.requireFreshnessNoExpiresUnsetVerification.ok, true);
+  // Independent checks driven directly (the same hand-built
+  // technique test/requireFreshness.test.ts pins): a fresh
+  // key pair, both undated shapes, required rejections and
+  // unset passes reproduced outside runDemo().
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const req = {
+    method: "POST",
+    url: DEMO_REQUIRE_FRESHNESS_URL,
+    headers: {},
+  };
+  const build = (params: {
+    keyid: string;
+    alg: "ed25519";
+    created?: number;
+    expires?: number;
+  }) => {
+    const base = buildSignatureBase(
+      [...DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS],
+      req,
+      params,
+    );
+    const sig = edSign(null, Buffer.from(base, "utf8"), privateKey);
+    return {
+      method: req.method,
+      url: req.url,
+      headers: {
+        "signature-input": signatureInputValue(
+          "sig1",
+          [...DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS],
+          params,
+        ),
+        signature: `sig1=:${sig.toString("base64")}:`,
+      },
+    };
+  };
+  const directNoCreated = build({
+    keyid: DEMO_REQUIRE_FRESHNESS_KEY_ID,
+    alg: "ed25519",
+    expires: DEMO_REQUIRE_FRESHNESS_EXPIRES,
+  });
+  const directNoCreatedRequired = verifyRequest(directNoCreated, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    requireCreated: true,
+  });
+  assert.equal(directNoCreatedRequired.ok, false);
+  assert.equal(directNoCreatedRequired.code, "MISSING_CREATED");
+  assert.equal(
+    directNoCreatedRequired.reason,
+    DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON,
+  );
+  assert.equal(
+    verifyRequest(directNoCreated, { key: publicKey, now: DEMO_CREATED + 60 })
+      .ok,
+    true,
+  );
+  const directNoExpires = build({
+    keyid: DEMO_REQUIRE_FRESHNESS_KEY_ID,
+    alg: "ed25519",
+    created: DEMO_CREATED,
+  });
+  const directNoExpiresRequired = verifyRequest(directNoExpires, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    requireExpires: true,
+  });
+  assert.equal(directNoExpiresRequired.ok, false);
+  assert.equal(directNoExpiresRequired.code, "MISSING_EXPIRES");
+  assert.equal(
+    directNoExpiresRequired.reason,
+    DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON,
+  );
+  assert.equal(
+    verifyRequest(directNoExpires, { key: publicKey, now: DEMO_CREATED + 60 })
+      .ok,
+    true,
+  );
+});
+
+test("demo lines contain the required-freshness segment (missing rejected, unset unchanged, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Required freshness: verifyRequest's requireCreated \/ requireExpires option/);
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Required freshness:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), [
+    "Required freshness: verifyRequest's requireCreated / requireExpires options demand that a signature carry a created / expires timestamp at all — the presence counterpart to the freshness window checks, which only apply when the signer sent the timestamp, with requireCreatedByLabel / requireExpiresByLabel as the per-label forms — the checks run after the cryptographic check passes, so a forged undated signature is still reported as a signature failure rather than a policy violation",
+    `Created missing: hand-built signature with expires=${DEMO_REQUIRE_FRESHNESS_EXPIRES} but no created verified with requireCreated: FAILED (code MISSING_CREATED: ${DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON})`,
+    `No requireCreated set: the same no-created signature verified without the option: OK (label sig1, keyid="${DEMO_REQUIRE_FRESHNESS_KEY_ID}", alg="ed25519") (no check is made — backwards compatible)`,
+    `Expires missing: hand-built signature with created=${DEMO_CREATED} but no expires verified with requireExpires: FAILED (code MISSING_EXPIRES: ${DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON})`,
+    `No requireExpires set: the same no-expires signature verified without the option: OK (label sig1, keyid="${DEMO_REQUIRE_FRESHNESS_KEY_ID}", alg="ed25519") (no check is made — backwards compatible)`,
+  ]);
+  // The header plus its four lines are the demo's closing lines,
+  // with nothing after them.
+  assert.equal(headerIdx + 5, lines.length);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Required freshness:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 5),
+    lines.slice(headerIdx, headerIdx + 5),
   );
 });

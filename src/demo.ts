@@ -880,6 +880,27 @@
  * keyid, alg, code and reason equals the hand-pinned
  * expectations below. Only the key pairs are fresh per run, so
  * the segment is byte-identical between runs.
+ * The demo closes with a required-freshness segment:
+ * `VerifyOptions.requireCreated` / `requireExpires`
+ * (`src/verify.ts`) let a verifier refuse signatures that
+ * carry no `created` / `expires` at all — otherwise a
+ * signature with neither timestamp verifies forever, and
+ * `signRequest` always emits `created`, so the segment
+ * hand-builds both undated shapes with the public
+ * signature-base primitives (the same technique
+ * `test/requireFreshness.test.ts` uses): a signature with
+ * `expires` but no `created` is rejected with
+ * `MISSING_CREATED` under `requireCreated` and verifies
+ * with the option unset, and a signature with `created`
+ * but no `expires` is rejected with `MISSING_EXPIRES`
+ * under `requireExpires` and verifies with the option
+ * unset. The checks run after the cryptographic check, so
+ * a forged undated signature is still reported as a
+ * signature failure. Outside the printed lines the demo
+ * asserts every outcome, code and reason equals the
+ * hand-pinned expectations below. Every clock is injected
+ * and the segment's key pair is fresh per run, so the
+ * segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2688,6 +2709,57 @@ export const DEMO_REQUIRE_TAG = "payment-webhook-v1";
 export const DEMO_REQUIRE_TAG_MISSING_REASON =
   "signature carries no `tag` but requireTag is set";
 
+/** Key id of the closing required-freshness segment's hand-built signatures. */
+export const DEMO_REQUIRE_FRESHNESS_KEY_ID = "demo-require-freshness-key-1";
+/** Absolute URL the closing required-freshness segment signs. */
+export const DEMO_REQUIRE_FRESHNESS_URL = "https://api.example.com/v1/payments";
+/**
+ * Covered components of both required-freshness segment
+ * signatures — the derived trio, so the signatures differ
+ * only in their parameters.
+ */
+export const DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+];
+/**
+ * `expires` of the hand-built no-created signature: ten
+ * minutes after `DEMO_CREATED`, so at the segment's verify
+ * instant (`DEMO_CREATED + 60`) the signature is still
+ * inside its freshness window and only the missing
+ * `created` can reject it.
+ */
+export const DEMO_REQUIRE_FRESHNESS_EXPIRES = DEMO_CREATED + 600;
+/**
+ * Hand-pinned `MISSING_CREATED` code when the signature
+ * carries no `created` at all (the exact code
+ * `src/verify.ts` returns and
+ * `test/requireFreshness.test.ts` pins).
+ */
+export const DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_CODE: VerifyFailureCode =
+  "MISSING_CREATED";
+/**
+ * Hand-pinned `MISSING_CREATED` reason (the exact wording
+ * `src/verify.ts` returns).
+ */
+export const DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON =
+  "signature carries no `created` timestamp but requireCreated is set";
+/**
+ * Hand-pinned `MISSING_EXPIRES` code when the signature
+ * carries no `expires` at all (the exact code
+ * `src/verify.ts` returns and
+ * `test/requireFreshness.test.ts` pins).
+ */
+export const DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_CODE: VerifyFailureCode =
+  "MISSING_EXPIRES";
+/**
+ * Hand-pinned `MISSING_EXPIRES` reason (the exact wording
+ * `src/verify.ts` returns).
+ */
+export const DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON =
+  "signature carries no `expires` timestamp but requireExpires is set";
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -3963,6 +4035,42 @@ export interface DemoResult {
    * only its own candidate list.
    */
   candidateKeysByLabelIsolationVerification: VerifyResult[];
+  /**
+   * The closing required-freshness segment's hand-built
+   * signature carrying `expires` but no `created`
+   * (`signRequest` always emits `created`, so this shape
+   * is built with the signature-base primitives).
+   */
+  requireFreshnessNoCreatedSigned: SignedHttpRequest;
+  /**
+   * Verification of that signature with
+   * `requireCreated: true` (fails with `MISSING_CREATED`
+   * and `DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON`).
+   */
+  requireFreshnessNoCreatedRequiredVerification: VerifyResult;
+  /**
+   * Verification of the same signature with no
+   * `requireCreated` set (ok — the default leaves
+   * undated signatures alone).
+   */
+  requireFreshnessNoCreatedUnsetVerification: VerifyResult;
+  /**
+   * The closing required-freshness segment's hand-built
+   * signature carrying `created` but no `expires`.
+   */
+  requireFreshnessNoExpiresSigned: SignedHttpRequest;
+  /**
+   * Verification of that signature with
+   * `requireExpires: true` (fails with `MISSING_EXPIRES`
+   * and `DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON`).
+   */
+  requireFreshnessNoExpiresRequiredVerification: VerifyResult;
+  /**
+   * Verification of the same signature with no
+   * `requireExpires` set (ok — the default leaves
+   * undated signatures alone).
+   */
+  requireFreshnessNoExpiresUnsetVerification: VerifyResult;
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -8640,6 +8748,147 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Required-freshness segment: `requireCreated` /
+  // `requireExpires` are the presence counterparts to the
+  // freshness window checks — where the window checks only
+  // apply when the signer sent the timestamp, these options
+  // demand the timestamp be there at all, so a verifier
+  // that must bound a signature's lifetime can refuse an
+  // undated signature outright instead of verifying it
+  // forever. `signRequest` always emits `created`, so a
+  // foreign signer is the only source of these shapes:
+  // both are hand-built here with the public
+  // signature-base primitives, exactly as
+  // `test/requireFreshness.test.ts` builds them — one
+  // signature carrying `expires` but no `created`, one
+  // carrying `created` but no `expires` — over the same
+  // fixed request with one fresh key pair, all verified
+  // at the injected `DEMO_CREATED + 60` instant. The
+  // checks run after the cryptographic check, like the
+  // requireTag check, so a forged undated signature is
+  // still reported as a signature failure. Outside the
+  // printed lines the demo asserts every outcome, code
+  // and reason equals the hand-pinned expectations.
+  const requireFreshnessPair = generateEd25519KeyPair();
+  const requireFreshnessRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_REQUIRE_FRESHNESS_URL,
+    headers: {},
+  };
+  const requireFreshnessNoCreatedParams: SignatureParams = {
+    keyid: DEMO_REQUIRE_FRESHNESS_KEY_ID,
+    alg: "ed25519",
+    expires: DEMO_REQUIRE_FRESHNESS_EXPIRES,
+  };
+  const requireFreshnessNoCreatedBase = buildSignatureBase(
+    [...DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS],
+    requireFreshnessRequest,
+    requireFreshnessNoCreatedParams,
+  );
+  const requireFreshnessNoCreatedSig = edSign(
+    null,
+    Buffer.from(requireFreshnessNoCreatedBase, "utf8"),
+    requireFreshnessPair.privateKey,
+  );
+  const requireFreshnessNoCreatedSigned: SignedHttpRequest = {
+    method: requireFreshnessRequest.method,
+    url: requireFreshnessRequest.url,
+    headers: {
+      "signature-input": signatureInputValue(
+        "sig1",
+        [...DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS],
+        requireFreshnessNoCreatedParams,
+      ),
+      signature: `sig1=:${requireFreshnessNoCreatedSig.toString("base64")}:`,
+    },
+  };
+  const requireFreshnessNoExpiresParams: SignatureParams = {
+    keyid: DEMO_REQUIRE_FRESHNESS_KEY_ID,
+    alg: "ed25519",
+    created: DEMO_CREATED,
+  };
+  const requireFreshnessNoExpiresBase = buildSignatureBase(
+    [...DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS],
+    requireFreshnessRequest,
+    requireFreshnessNoExpiresParams,
+  );
+  const requireFreshnessNoExpiresSig = edSign(
+    null,
+    Buffer.from(requireFreshnessNoExpiresBase, "utf8"),
+    requireFreshnessPair.privateKey,
+  );
+  const requireFreshnessNoExpiresSigned: SignedHttpRequest = {
+    method: requireFreshnessRequest.method,
+    url: requireFreshnessRequest.url,
+    headers: {
+      "signature-input": signatureInputValue(
+        "sig1",
+        [...DEMO_REQUIRE_FRESHNESS_COVERED_COMPONENTS],
+        requireFreshnessNoExpiresParams,
+      ),
+      signature: `sig1=:${requireFreshnessNoExpiresSig.toString("base64")}:`,
+    },
+  };
+  const requireFreshnessNoCreatedRequiredVerification = verifyRequest(
+    requireFreshnessNoCreatedSigned,
+    {
+      key: requireFreshnessPair.publicKey,
+      now: DEMO_CREATED + 60,
+      requireCreated: true,
+    },
+  );
+  const requireFreshnessNoCreatedUnsetVerification = verifyRequest(
+    requireFreshnessNoCreatedSigned,
+    {
+      key: requireFreshnessPair.publicKey,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const requireFreshnessNoExpiresRequiredVerification = verifyRequest(
+    requireFreshnessNoExpiresSigned,
+    {
+      key: requireFreshnessPair.publicKey,
+      now: DEMO_CREATED + 60,
+      requireExpires: true,
+    },
+  );
+  const requireFreshnessNoExpiresUnsetVerification = verifyRequest(
+    requireFreshnessNoExpiresSigned,
+    {
+      key: requireFreshnessPair.publicKey,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  if (
+    requireFreshnessNoCreatedRequiredVerification.ok !== false ||
+    requireFreshnessNoCreatedRequiredVerification.code !==
+      DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_CODE ||
+    requireFreshnessNoCreatedRequiredVerification.reason !==
+      DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON ||
+    requireFreshnessNoCreatedUnsetVerification.ok !== true ||
+    requireFreshnessNoExpiresRequiredVerification.ok !== false ||
+    requireFreshnessNoExpiresRequiredVerification.code !==
+      DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_CODE ||
+    requireFreshnessNoExpiresRequiredVerification.reason !==
+      DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON ||
+    requireFreshnessNoExpiresUnsetVerification.ok !== true
+  ) {
+    throw new Error(
+      `demo fixture broken: requireCreated/requireExpires gave no-created ` +
+        `required ${JSON.stringify(requireFreshnessNoCreatedRequiredVerification)}, ` +
+        `no-created unset ${JSON.stringify(requireFreshnessNoCreatedUnsetVerification)}, ` +
+        `no-expires required ${JSON.stringify(requireFreshnessNoExpiresRequiredVerification)} ` +
+        `and no-expires unset ${JSON.stringify(requireFreshnessNoExpiresUnsetVerification)}, ` +
+        `instead of no-created rejected with ` +
+        `${DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_CODE} ` +
+        `(${DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON}) and verifying with ` +
+        `no option set, and no-expires rejected with ` +
+        `${DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_CODE} ` +
+        `(${DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON}) and verifying with ` +
+        `no option set`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -9156,6 +9405,20 @@ export async function runDemo(): Promise<DemoResult> {
     ]!.ok
       ? `Isolation: the same new-secret request verified with the merchant list replaced by an unrelated ed25519 key: merchant FAILED (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL}, code ${candidateKeysByLabelIsolationByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]!.code}: ${candidateKeysByLabelIsolationByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]!.reason}), gateway still OK (label ${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_KEY_ID}", alg="hmac-sha256") — each label tries only its own list, so the merchant's key is never tried against the gateway label`
       : `Isolation: the same new-secret request verified with the merchant list replaced by an unrelated ed25519 key: merchant ${candidateKeysByLabelIsolationByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]!.ok ? "OK (unexpected — the wrong merchant key was not rejected)" : `code ${candidateKeysByLabelIsolationByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_MERCHANT_LABEL]!.code}`}, gateway ${candidateKeysByLabelIsolationByLabel[DEMO_CANDIDATE_KEYS_BY_LABEL_GATEWAY_LABEL]!.ok ? "OK" : "FAILED (unexpected — the gateway label was dragged down by the merchant list)"}`,
+    "",
+    "Required freshness: verifyRequest's requireCreated / requireExpires options demand that a signature carry a created / expires timestamp at all — the presence counterpart to the freshness window checks, which only apply when the signer sent the timestamp, with requireCreatedByLabel / requireExpiresByLabel as the per-label forms — the checks run after the cryptographic check passes, so a forged undated signature is still reported as a signature failure rather than a policy violation",
+    requireFreshnessNoCreatedRequiredVerification.ok
+      ? `Created missing: hand-built signature with expires=${DEMO_REQUIRE_FRESHNESS_EXPIRES} but no created verified with requireCreated: OK (unexpected — the undated signature was not rejected)`
+      : `Created missing: hand-built signature with expires=${DEMO_REQUIRE_FRESHNESS_EXPIRES} but no created verified with requireCreated: FAILED (code ${requireFreshnessNoCreatedRequiredVerification.code}: ${requireFreshnessNoCreatedRequiredVerification.reason})`,
+    requireFreshnessNoCreatedUnsetVerification.ok
+      ? `No requireCreated set: the same no-created signature verified without the option: OK (label ${requireFreshnessNoCreatedUnsetVerification.label}, keyid="${requireFreshnessNoCreatedUnsetVerification.keyId}", alg="${requireFreshnessNoCreatedUnsetVerification.alg}") (no check is made — backwards compatible)`
+      : `No requireCreated set: the same no-created signature verified without the option: FAILED (code ${requireFreshnessNoCreatedUnsetVerification.code}: ${requireFreshnessNoCreatedUnsetVerification.reason})`,
+    requireFreshnessNoExpiresRequiredVerification.ok
+      ? `Expires missing: hand-built signature with created=${DEMO_CREATED} but no expires verified with requireExpires: OK (unexpected — the undated signature was not rejected)`
+      : `Expires missing: hand-built signature with created=${DEMO_CREATED} but no expires verified with requireExpires: FAILED (code ${requireFreshnessNoExpiresRequiredVerification.code}: ${requireFreshnessNoExpiresRequiredVerification.reason})`,
+    requireFreshnessNoExpiresUnsetVerification.ok
+      ? `No requireExpires set: the same no-expires signature verified without the option: OK (label ${requireFreshnessNoExpiresUnsetVerification.label}, keyid="${requireFreshnessNoExpiresUnsetVerification.keyId}", alg="${requireFreshnessNoExpiresUnsetVerification.alg}") (no check is made — backwards compatible)`
+      : `No requireExpires set: the same no-expires signature verified without the option: FAILED (code ${requireFreshnessNoExpiresUnsetVerification.code}: ${requireFreshnessNoExpiresUnsetVerification.reason})`,
   ];
 
   return {
@@ -9396,6 +9659,12 @@ export async function runDemo(): Promise<DemoResult> {
     candidateKeysByLabelOldSigned,
     candidateKeysByLabelOldVerification,
     candidateKeysByLabelIsolationVerification,
+    requireFreshnessNoCreatedSigned,
+    requireFreshnessNoCreatedRequiredVerification,
+    requireFreshnessNoCreatedUnsetVerification,
+    requireFreshnessNoExpiresSigned,
+    requireFreshnessNoExpiresRequiredVerification,
+    requireFreshnessNoExpiresUnsetVerification,
     lines,
   };
 }
