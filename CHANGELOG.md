@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Per-label clock-skew tolerances for `verifyAllLabels` (backlog
+  #631): `VerifyAllOptions.clockSkewToleranceSecByLabel` maps a
+  signature label to its own `clockSkewToleranceSec`, falling back to
+  the global tolerance (default 60s) for unmapped labels — a merchant
+  signer on a tight clock and a gateway signer on a drifting clock can
+  now be verified on the same request without one global window being
+  too lax or too strict. Each map value must be a positive finite
+  number, otherwise a caller configuration error (throw). The README
+  multi-party section documents the option with a 5s/300s example, and
+  `test/clockSkewToleranceSecByLabel.test.ts` covers the split
+  verdict (120s skew: merchant `CREATED_IN_FUTURE`, gateway ok), the
+  exact-boundary pass, fallback to the global tolerance and to the
+  60s default, and fail-fast on non-positive/non-finite/non-numeric
+  values.
 - Benchmark section for `verifyAllLabels` with `expectedKeyIds` plus the
   global `requireTag` (backlog #629): `benchmarkVerifyAllExpectedKeyIdsRequireTag`
   in `bench/bench.ts` verifies three dual-label fixtures per measured op
