@@ -250,7 +250,18 @@
  * by exactly one per batch of eight, and the pinned kid must
  * resolve afterwards), with a shared-failure batch (all eight
  * waiters receive the same rejection from exactly one fetch) and
- * the failure-not-cached retry asserted outside timing, plus the key-management
+ * the failure-not-cached retry asserted outside timing, plus the
+ * fetch-retry refresh path a gateway runs when its JWKS endpoint is
+ * briefly sick: `JwksKeyStore.refresh` with `fetchRetries: 2` over a
+ * counting fake fetch scripted 500, 500, 200 (a stub sleep records
+ * the two fixed backoffs without waiting — zero network, zero wall
+ * clock), self-checked on every measured pass (each refresh makes
+ * exactly three fetches, records exactly two sleeps of the pinned
+ * backoff, counts exactly one `stats().refreshes`, and the pinned
+ * kid resolves afterwards), with the terminal-4xx case (one fetch,
+ * zero sleeps, pinned HTTP 404 error) and the exhausted-retries
+ * case (three fetches, two sleeps, pinned HTTP 500 error, exactly
+ * one `stats().refreshFailures`) asserted outside timing, plus the key-management
  * derivation a JWKS publisher runs for every key at publish/rotation
  * time: `jwkThumbprint` (RFC 7638) over a fixed three-shape fixture
  * (ed25519 / P-256 / RSA public JWKs, one derivation per shape per
@@ -3806,6 +3817,210 @@ async function benchmarkJwksConcurrentRefresh(): Promise<number> {
   if (store.stats().refreshes !== fetchCalls || store.stats().refreshFailures !== 0)
     throw new Error(
       `benchmark self-check failed: stats() ${JSON.stringify(store.stats())} (expected refreshes ${fetchCalls}, refreshFailures 0)`,
+    );
+  return ops;
+}
+
+/**
+ * Pinned shape of the `JwksKeyStore.refresh` fetch-retry benchmark:
+ * one ed25519 key (generated once, outside timing) published under
+ * this kid, a retry budget of two (`fetchRetries: 2`) with a pinned
+ * fixed backoff, and a stub sleep that records each requested delay
+ * without waiting — so the measured cost is the retry loop itself
+ * (three fetch attempts, JWK import, snapshot swap), never a real
+ * wall-clock backoff, and zero network throughout.
+ *
+ * Outside timing, three halves of the retry contract are pinned
+ * once: the scripted 500, 500, 200 refresh succeeds on the third
+ * attempt with exactly two sleeps of the pinned backoff and the
+ * pinned kid resolving afterwards; the terminal-4xx refresh fails
+ * with the pinned HTTP 404 error after exactly one fetch and zero
+ * sleeps (a 4xx is never retried); and the always-500 refresh
+ * exhausts its budget with exactly three fetches, two sleeps, the
+ * pinned HTTP 500 error, and exactly one `stats().refreshFailures`
+ * (retries never multiply the counters). Every measured refresh
+ * then re-pays the full scripted cycle — the measured store's fake
+ * fetch answers 500, 500, 200 per refresh, keyed off the running
+ * fetch count modulo three — and self-checks that it made exactly
+ * three fetches, recorded exactly two sleeps of the pinned backoff,
+ * counted exactly one `stats().refreshes`, and resolves the pinned
+ * kid; after the measured run the totals must equal the scripted
+ * cycle times warmup plus timed calls exactly.
+ */
+const JWKS_FETCH_RETRIES_KID = "bench-fetch-retries-key";
+const JWKS_FETCH_RETRIES_RETRIES = 2;
+const JWKS_FETCH_RETRIES_BACKOFF_MS = 250;
+const JWKS_FETCH_RETRIES_URL =
+  "https://gateway.example.com/.well-known/jwks.json";
+const JWKS_FETCH_RETRIES_404_ERROR =
+  `JwksKeyStore: JWKS fetch failed: HTTP 404 from ${JWKS_FETCH_RETRIES_URL}`;
+const JWKS_FETCH_RETRIES_500_ERROR =
+  `JwksKeyStore: JWKS fetch failed: HTTP 500 from ${JWKS_FETCH_RETRIES_URL}`;
+
+async function benchmarkJwksFetchRetries(): Promise<number> {
+  const { publicKey } = generateEd25519KeyPair();
+  const doc = {
+    keys: [
+      { ...exportPublicKeyJwk(publicKey), kid: JWKS_FETCH_RETRIES_KID },
+    ],
+  };
+
+  // Outside timing: the scripted 500, 500, 200 refresh pins the retry
+  // count (three fetches, two sleeps) and the final snapshot.
+  let scriptedCalls = 0;
+  const scriptedSleeps: number[] = [];
+  const scriptedStore = new JwksKeyStore(JWKS_FETCH_RETRIES_URL, {
+    fetchImpl: async () => {
+      scriptedCalls++;
+      if (scriptedCalls <= 2)
+        return { ok: false, status: 500, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => doc };
+    },
+    fetchRetries: JWKS_FETCH_RETRIES_RETRIES,
+    fetchBackoffMs: JWKS_FETCH_RETRIES_BACKOFF_MS,
+    sleepImpl: async (ms: number) => {
+      scriptedSleeps.push(ms);
+    },
+  });
+  await scriptedStore.refresh();
+  if (
+    scriptedCalls !== 3 ||
+    scriptedSleeps.length !== 2 ||
+    scriptedSleeps.some((ms) => ms !== JWKS_FETCH_RETRIES_BACKOFF_MS) ||
+    scriptedStore.resolve(JWKS_FETCH_RETRIES_KID) === undefined ||
+    scriptedStore.stats().refreshes !== 1 ||
+    scriptedStore.stats().refreshFailures !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: scripted fetch-retries refresh gave ${scriptedCalls} fetches with sleeps ${JSON.stringify(scriptedSleeps)} and stats ${JSON.stringify(scriptedStore.stats())} (expected 3 fetches, 2 sleeps of ${JWKS_FETCH_RETRIES_BACKOFF_MS}ms, refreshes 1, refreshFailures 0)`,
+    );
+
+  // Outside timing: a 4xx response is terminal — one fetch, zero
+  // sleeps, the pinned HTTP 404 error, counted once as a failure.
+  let notFoundCalls = 0;
+  const notFoundSleeps: number[] = [];
+  const notFoundStore = new JwksKeyStore(JWKS_FETCH_RETRIES_URL, {
+    fetchImpl: async () => {
+      notFoundCalls++;
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+    fetchRetries: JWKS_FETCH_RETRIES_RETRIES,
+    fetchBackoffMs: JWKS_FETCH_RETRIES_BACKOFF_MS,
+    sleepImpl: async (ms: number) => {
+      notFoundSleeps.push(ms);
+    },
+  });
+  let notFoundError = "";
+  try {
+    await notFoundStore.refresh();
+  } catch (err) {
+    notFoundError = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    notFoundCalls !== 1 ||
+    notFoundSleeps.length !== 0 ||
+    notFoundError !== JWKS_FETCH_RETRIES_404_ERROR ||
+    notFoundStore.stats().refreshes !== 0 ||
+    notFoundStore.stats().refreshFailures !== 1 ||
+    notFoundStore.resolve(JWKS_FETCH_RETRIES_KID) !== undefined
+  )
+    throw new Error(
+      `benchmark self-check failed: terminal-4xx fetch-retries refresh gave ${notFoundCalls} fetches with sleeps ${JSON.stringify(notFoundSleeps)} and error ${JSON.stringify(notFoundError)} (expected 1 fetch, 0 sleeps, error ${JSON.stringify(JWKS_FETCH_RETRIES_404_ERROR)})`,
+    );
+
+  // Outside timing: an always-500 endpoint exhausts the budget —
+  // three fetches, two sleeps, the pinned HTTP 500 error, and the
+  // failure counted once, not once per attempt.
+  let exhaustedCalls = 0;
+  const exhaustedSleeps: number[] = [];
+  const exhaustedStore = new JwksKeyStore(JWKS_FETCH_RETRIES_URL, {
+    fetchImpl: async () => {
+      exhaustedCalls++;
+      return { ok: false, status: 500, json: async () => ({}) };
+    },
+    fetchRetries: JWKS_FETCH_RETRIES_RETRIES,
+    fetchBackoffMs: JWKS_FETCH_RETRIES_BACKOFF_MS,
+    sleepImpl: async (ms: number) => {
+      exhaustedSleeps.push(ms);
+    },
+  });
+  let exhaustedError = "";
+  try {
+    await exhaustedStore.refresh();
+  } catch (err) {
+    exhaustedError = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    exhaustedCalls !== 3 ||
+    exhaustedSleeps.length !== 2 ||
+    exhaustedSleeps.some((ms) => ms !== JWKS_FETCH_RETRIES_BACKOFF_MS) ||
+    exhaustedError !== JWKS_FETCH_RETRIES_500_ERROR ||
+    exhaustedStore.stats().refreshes !== 0 ||
+    exhaustedStore.stats().refreshFailures !== 1
+  )
+    throw new Error(
+      `benchmark self-check failed: exhausted fetch-retries refresh gave ${exhaustedCalls} fetches with sleeps ${JSON.stringify(exhaustedSleeps)} and error ${JSON.stringify(exhaustedError)} (expected 3 fetches, 2 sleeps of ${JWKS_FETCH_RETRIES_BACKOFF_MS}ms, error ${JSON.stringify(JWKS_FETCH_RETRIES_500_ERROR)})`,
+    );
+
+  // Measured store: the fake fetch cycles 500, 500, 200 per refresh,
+  // keyed off the running fetch count, so every measured refresh
+  // pays the full retry loop and re-proves the snapshot swap.
+  let fetchCalls = 0;
+  const sleeps: number[] = [];
+  const store = new JwksKeyStore(JWKS_FETCH_RETRIES_URL, {
+    fetchImpl: async () => {
+      fetchCalls++;
+      if ((fetchCalls - 1) % 3 < 2)
+        return { ok: false, status: 500, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => doc };
+    },
+    fetchRetries: JWKS_FETCH_RETRIES_RETRIES,
+    fetchBackoffMs: JWKS_FETCH_RETRIES_BACKOFF_MS,
+    sleepImpl: async (ms: number) => {
+      sleeps.push(ms);
+    },
+  });
+  const ops = await measureAsync(async () => {
+    const beforeFetches = fetchCalls;
+    const beforeSleeps = sleeps.length;
+    const beforeRefreshes = store.stats().refreshes;
+    await store.refresh();
+    if (fetchCalls !== beforeFetches + 3)
+      throw new Error(
+        `benchmark self-check failed: fetch-retries refresh made ${fetchCalls - beforeFetches} fetches (expected 3)`,
+      );
+    if (
+      sleeps.length !== beforeSleeps + 2 ||
+      sleeps
+        .slice(beforeSleeps)
+        .some((ms) => ms !== JWKS_FETCH_RETRIES_BACKOFF_MS)
+    )
+      throw new Error(
+        `benchmark self-check failed: fetch-retries refresh recorded sleeps ${JSON.stringify(sleeps.slice(beforeSleeps))} (expected 2 sleeps of ${JWKS_FETCH_RETRIES_BACKOFF_MS}ms)`,
+      );
+    if (store.stats().refreshes !== beforeRefreshes + 1)
+      throw new Error(
+        `benchmark self-check failed: fetch-retries refresh counted ${store.stats().refreshes - beforeRefreshes} refreshes (expected 1)`,
+      );
+    if (store.resolve(JWKS_FETCH_RETRIES_KID) === undefined)
+      throw new Error(
+        "benchmark self-check failed: fetch-retries refresh does not resolve the pinned kid",
+      );
+  }, ITERATIONS);
+  if (fetchCalls !== 3 * (WARMUP + ITERATIONS))
+    throw new Error(
+      `benchmark self-check failed: fetch-retries path made ${fetchCalls} fetches (expected ${3 * (WARMUP + ITERATIONS)})`,
+    );
+  if (sleeps.length !== 2 * (WARMUP + ITERATIONS))
+    throw new Error(
+      `benchmark self-check failed: fetch-retries path recorded ${sleeps.length} sleeps (expected ${2 * (WARMUP + ITERATIONS)})`,
+    );
+  if (
+    store.stats().refreshes !== WARMUP + ITERATIONS ||
+    store.stats().refreshFailures !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: stats() ${JSON.stringify(store.stats())} (expected refreshes ${WARMUP + ITERATIONS}, refreshFailures 0)`,
     );
   return ops;
 }
@@ -7547,6 +7762,11 @@ results.push({
   alg: "JwksKeyStore.refresh (8-way single-flight)",
   op: "refresh",
   ops: await benchmarkJwksConcurrentRefresh(),
+});
+results.push({
+  alg: "JwksKeyStore.refresh (fetchRetries 2, 500/500/200)",
+  op: "refresh",
+  ops: await benchmarkJwksFetchRetries(),
 });
 results.push({
   alg: "jwkThumbprint (3 JWK shapes)",

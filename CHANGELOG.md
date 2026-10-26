@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) gains a `JwksKeyStore.refresh
+  (fetchRetries 2, 500/500/200)` row: one measured op is one `refresh()`
+  with `fetchRetries: 2` over a counting fake fetch scripted 500, 500,
+  200 — exactly three fetches, exactly two recorded sleeps of the
+  pinned 250ms backoff (a stub sleep, so no wall-clock backoff is
+  measured), exactly one `stats().refreshes`, and the pinned kid
+  resolving afterwards — with the terminal-4xx case (one fetch, zero
+  sleeps, pinned HTTP 404 error) and the exhausted-retries case
+  (three fetches, two sleeps, pinned HTTP 500 error, exactly one
+  `stats().refreshFailures`) pinned outside timing. The README
+  Benchmarks table is refreshed from the same real run, including the
+  new row (~32,006 ops/sec).
 - The benchmark (`npm run bench`) gains a `verifyAllLabels
   candidateKeysByLabel (2 labels)` row: one measured op verifies three
   dual-label fixtures with `candidateKeysByLabel: { merchant: [merchant
