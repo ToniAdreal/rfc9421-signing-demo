@@ -242,7 +242,11 @@ function normalizeTrailers(
  * already-buffered body.
  *
  * The absolute URL is rebuilt as `<scheme>://<host><path>`; the `host`
- * header value (including any port) is preserved verbatim. Throws a
+ * header value (including any port) is preserved verbatim. This
+ * adapter never sets `RequestLike.requestTarget`: a server only ever
+ * sees the origin form, so an absolute-/authority-/asterisk-form
+ * override is always the caller's explicit choice, set on the
+ * `RequestLike` after this call. Throws a
  * descriptive `Error` on missing `method`, `url`, or `host` header —
  * those are caller configuration mistakes, never silently defaulted.
  */

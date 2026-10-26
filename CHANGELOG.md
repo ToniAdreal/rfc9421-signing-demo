@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `RequestLike.requestTarget`: an explicit request-target override
+  for the `@request-target` derived component (backlog #617). When
+  set, that exact string — the absolute-form URI, the
+  authority-form (`host[:port]`), or the asterisk-form (`*`) as a
+  proxy or gateway saw it on the request line — becomes the
+  component value instead of the origin-form reconstruction from
+  `url`; when unset, the origin form applies unchanged. An empty
+  string is a caller configuration error (fail-fast on the sign
+  side, `SIGNATURE_BASE_BUILD_FAILED` on the verify side). The
+  override is carried through `signRequest` and `addSignature` so a
+  signed message verifies without the caller re-attaching it, and
+  resolves against the associated request under `;req`;
+  `fromNodeRequest` never sets it — an override is always the
+  caller's explicit choice. Covered by 8 new tests in
+  `test/requestTargetOverride.test.ts` (three forms round-tripping,
+  tamper rejection, empty-string rejection on both sides, unset
+  origin-form behavior, `;req` override).
 - The benchmark (`npm run bench`) gains a `verifyAllLabels
   requireTagByLabel (2 labels)` row: one measured op verifies two
   dual-label fixtures with `requireTagByLabel: { merchant: true }` and

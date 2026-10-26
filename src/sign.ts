@@ -140,6 +140,17 @@ export interface SignedHttpRequest {
    */
   trailers?: Record<string, string | string[] | undefined>;
   /**
+   * Explicit request-target override, carried through from the
+   * signed `RequestLike` when present. Only consulted when
+   * `"@request-target"` is covered; preserved so the signed message
+   * can be verified (and `addSignature` can rebuild a second base)
+   * without the caller re-attaching the override by hand. Without
+   * this carry-through, a signature minted over an absolute-,
+   * authority-, or asterisk-form target would verify against the
+   * origin-form reconstruction and fail.
+   */
+  requestTarget?: string;
+  /**
    * Covered components this signature actually covers, in signature
    * order — the wire value, not a re-derivation: it is exactly the
    * `SignOptions.coveredComponents` list (or the default set when the
@@ -289,6 +300,11 @@ export function signRequest(
     status: req.status,
     request: req.request,
     trailers: req.trailers,
+    // Carried through so a covered "@request-target" signs the
+    // caller's explicit override, not the origin-form reconstruction:
+    // dropping it here would mint a signature the verifier (seeing
+    // the override) could never match.
+    requestTarget: req.requestTarget,
   };
   const base = buildSignatureBase(covered, signingInput, params);
 
@@ -379,6 +395,9 @@ export function signRequest(
     ...(req.status !== undefined ? { status: req.status } : {}),
     ...(req.request !== undefined ? { request: req.request } : {}),
     ...(req.trailers !== undefined ? { trailers: req.trailers } : {}),
+    ...(req.requestTarget !== undefined
+      ? { requestTarget: req.requestTarget }
+      : {}),
     // Detached copy of the list actually written to signature-input:
     // the caller must not be able to rewrite the signer's record of
     // what was covered by mutating the returned array, and the
@@ -501,6 +520,9 @@ export function addSignature(
       ...(signedReq.trailers !== undefined
         ? { trailers: signedReq.trailers }
         : {}),
+      ...(signedReq.requestTarget !== undefined
+        ? { requestTarget: signedReq.requestTarget }
+        : {}),
     },
     { ...opts, contentDigestAlg: digestAlg },
   );
@@ -527,6 +549,9 @@ export function addSignature(
     ...(signedReq.status !== undefined ? { status: signedReq.status } : {}),
     ...(signedReq.request !== undefined ? { request: signedReq.request } : {}),
     ...(signedReq.trailers !== undefined ? { trailers: signedReq.trailers } : {}),
+    ...(signedReq.requestTarget !== undefined
+      ? { requestTarget: signedReq.requestTarget }
+      : {}),
     // The appended signature's own covered list (from `fresh`), not a
     // merge with the first signature's: each label's audit record
     // stays attributable to the party that minted it.

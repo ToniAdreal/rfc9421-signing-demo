@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 952 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 960 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -703,12 +703,17 @@ example above calls the adapter.
   legacy gateway that signed the request line needs: unlike
   `@target-uri` it contains no scheme or authority, and unlike `@path`
   it does not drop the query, so any path or query change breaks the
-  signature while a scheme/authority change alone does not. The value
-  is reconstructed from `RequestLike.url`, so the absolute-form,
-  authority-form, and asterisk-form request targets cannot be
-  represented and are not produced, and a URL fragment never
+  signature while a scheme/authority change alone does not. A caller
+  that needs a non-origin form — the absolute-form URI, the
+  authority-form (`host[:port]`), or the asterisk-form (`*`) as a
+  proxy or gateway saw it on the request line — sets
+  `RequestLike.requestTarget` explicitly, and that exact string
+  becomes the component value instead of the reconstruction (an empty
+  string is a caller configuration error). `fromNodeRequest` never
+  sets it: a server only ever sees the origin form, so an override is
+  always the caller's explicit choice. A URL fragment never
   participates. It combines with `;req` like the other derived
-  components.
+  components (resolving against the associated request's override).
 - **Single query parameters (§2.2.8 `@query-param`)**: `"@query-param";name="amount"`
   binds one named query parameter instead of the whole query string —
   the payment-callback shape where only `amount` must be tamper-proof
@@ -1058,7 +1063,8 @@ const dual = addSignature(merchantSigned, {
   covers the RFC 8941 core types only, `;tr` reads caller-supplied
   `RequestLike.trailers` rather than parsing raw trailer sections
   off the wire, and `@request-target` is reconstructed in origin
-  form only. The full list is in [Limitations](#limitations-honest).
+  form unless the caller sets an explicit `RequestLike.requestTarget`
+  override. The full list is in [Limitations](#limitations-honest).
 
 - **Has this been tested against other RFC 9421 implementations?**
   No. No third-party RFC 9421 implementation has been exercised
@@ -1138,9 +1144,10 @@ const dual = addSignature(merchantSigned, {
   `RequestLike.trailers` — this library does not parse raw HTTP
   trailer sections off the wire). `@request-target` *is* implemented
   (§2.2.5), reconstructed from the absolute `RequestLike.url` in
-  origin form only (path + query): the absolute-form, authority-form,
-  and asterisk-form request targets cannot be expressed through that
-  URL and are not produced. Network key
+  origin form (path + query) by default, and a caller that needs
+  another form sets an explicit `RequestLike.requestTarget` override
+  (absolute-form URI, authority-form, or asterisk-form; an empty
+  string is a caller configuration error). Network key
   discovery *is* implemented for JWKS endpoints: `JwksKeyStore` fetches a
   JWKS document and resolves `keyid`s against the fetched snapshot.
   Response-to-request binding *is* implemented, via the §2.4 `;req`
@@ -2904,7 +2911,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 952 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 960 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

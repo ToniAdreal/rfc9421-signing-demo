@@ -78,11 +78,16 @@
  * full absolute URI, scheme and authority included) and from `@path`
  * (the path alone, query excluded): a signature covering only
  * `@request-target` is unaffected by a scheme/authority change, and
- * one covering it is broken by any path or query change. Because
- * `RequestLike` only carries an absolute URL, the absolute-form,
- * authority-form, and asterisk-form request targets of §2.2.5 cannot
- * be represented here and are not produced. Like the other derived
- * components it combines with `;req` and with nothing else.
+ * one covering it is broken by any path or query change. A caller
+ * that needs a non-origin form — the absolute-form, authority-form,
+ * or asterisk-form request target of §2.2.5, as a proxy or gateway
+ * sees it on the request line — sets `RequestLike.requestTarget`
+ * explicitly, and that exact string becomes the component value
+ * instead of the reconstruction (an empty string is a caller
+ * configuration error, fail-fast on the sign side). `fromNodeRequest`
+ * never sets it: the adapter only ever sees the origin form, so an
+ * override is always the caller's explicit choice. Like the other
+ * derived components it combines with `;req` and with nothing else.
  * Other component parameters are not supported and fail
  * closed.
  * Signature algorithms are handled by sign.ts / verify.ts; this module
@@ -123,6 +128,24 @@ export interface RequestLike {
    * Plain request flows leave it unset.
    */
   request?: RequestLike;
+  /**
+   * Explicit request-target override for the RFC 9421 §2.2.5
+   * `@request-target` derived component. Only consulted when
+   * `"@request-target"` is covered: when set, this exact string is
+   * the component value — the absolute-form URI, the authority-form
+   * (`host[:port]`), or the asterisk-form (`*`) as it appeared on
+   * the request line — instead of the origin-form reconstruction
+   * from `url`. When unset, the origin-form reconstruction applies
+   * unchanged. An empty string is a caller configuration error
+   * (fail-fast on the sign side, `SIGNATURE_BASE_BUILD_FAILED` on
+   * the verify side), never a silent empty component value. This
+   * field is never set by `fromNodeRequest`: only the caller sets
+   * it, explicitly. `url` stays required — it remains the fallback
+   * for the origin form and the source of the other derived
+   * components — so an override is an addition, not a replacement
+   * for the URL carrier.
+   */
+  requestTarget?: string;
 }
 
 export interface SignatureParams {
@@ -600,8 +623,26 @@ export function resolveComponent(
       // path and, when present, the query (url.search already carries
       // its leading "?", and is empty when there is no query, so no
       // trailing "?" is ever produced). Scheme, authority, and any
-      // fragment are not part of it (see the module header for the
-      // forms this URL-based reconstruction cannot represent).
+      // fragment are not part of it. An explicit `requestTarget`
+      // override wins over the reconstruction: a proxy/gateway caller
+      // signs the request-line target it actually saw (absolute-,
+      // authority-, or asterisk-form). The override is checked here,
+      // against the resolved target, so `;req` resolves against the
+      // associated request's override, like every other component.
+      // A non-string or empty override is a caller configuration
+      // error — sign: throw; verify: SIGNATURE_BASE_BUILD_FAILED —
+      // never a silent empty component value that distinct targets
+      // could collide onto.
+      if (target.requestTarget !== undefined) {
+        if (
+          typeof target.requestTarget !== "string" ||
+          target.requestTarget.length === 0
+        )
+          throw new Error(
+            '"@request-target" is covered but RequestLike.requestTarget must be a non-empty string',
+          );
+        return target.requestTarget;
+      }
       return (url.pathname || "/") + url.search;
     case "@created":
       if (params.created === undefined)
