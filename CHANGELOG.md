@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark section for `verifyAllLabels` with `expectedKeyIds` plus the
+  global `requireTag` (backlog #629): `benchmarkVerifyAllExpectedKeyIdsRequireTag`
+  in `bench/bench.ts` verifies three dual-label fixtures per measured op
+  (fully tagged dual both ok with pinned keyids echoed; merchant-untagged
+  dual merchant exactly `MISSING_TAG` while the gateway still verifies;
+  wrong-gateway-keyid dual gateway exactly `KEYID_MISMATCH` while the
+  merchant still verifies) with the opt-in halves pinned outside timing
+  (no-option and explicit `requireTag: false` let the untagged dual
+  through; no keyid pins let the wrong-keyid dual through). The README
+  Benchmarks table is refreshed from this run (new row: ~211.4 ops/sec,
+  4731.06 µs/op) with a matching prose paragraph. A scratch-copy mutation
+  run (pinned tag reason altered) fails exactly at this section's
+  outside-timing self-check, proving the guard bites.
 - Orthogonal-combination tests for `verifyAllLabels` with
   `candidateKeysByLabel` and `expectedKeyIds` (backlog #627):
   `test/candidateKeysByLabelExpectedKeyIds.test.ts` pins a dual-label

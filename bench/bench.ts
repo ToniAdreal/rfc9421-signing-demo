@@ -3592,6 +3592,219 @@ function benchmarkVerifyAllRequireTagByLabel(): number {
   }, ITERATIONS);
 }
 
+const EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED = 1_700_000_000;
+const EXPECTED_KEY_IDS_REQUIRE_TAG_MERCHANT_KID =
+  "bench-expected-keyids-require-tag-merchant-1";
+const EXPECTED_KEY_IDS_REQUIRE_TAG_GATEWAY_KID =
+  "bench-expected-keyids-require-tag-gateway-1";
+const EXPECTED_KEY_IDS_REQUIRE_TAG_GATEWAY_WRONG =
+  "bench-expected-keyids-require-tag-gateway-wrong";
+const EXPECTED_KEY_IDS_REQUIRE_TAG_VALUE =
+  "bench-expected-keyids-require-tag-1";
+const EXPECTED_KEY_IDS_REQUIRE_TAG_MISSING_CODE = "MISSING_TAG";
+const EXPECTED_KEY_IDS_REQUIRE_TAG_MISSING_REASON =
+  "signature carries no `tag` but requireTag is set";
+
+/**
+ * `verifyAllLabels` with `expectedKeyIds` plus the global
+ * `requireTag` steady state: the combined keyid-pinning
+ * and application-tag form a multi-party receiver uses
+ * when every signer must both be the expected key and
+ * bind its signature to the application protocol — the
+ * merchant and gateway labels are each pinned to their
+ * own keyid and the global tag requirement applies to
+ * both labels (there is no per-label tag map here, so
+ * the gateway cannot slip through untagged the way it
+ * does under `requireTagByLabel: { merchant: true }`).
+ * Every measured call runs both the per-label keyid
+ * resolution and the post-cryptographic tag-presence
+ * check for each label, which neither the plain
+ * `expectedKeyIds` row (no tag requirement) nor the
+ * `requireTagByLabel` row (gateway unmapped) ever
+ * pays. One measured op verifies three dual-label
+ * fixtures signed outside timing with `created`
+ * pinned: the fully tagged dual (both labels ok, each
+ * returned `keyId` equal to its pinned value and each
+ * tag echoed); the merchant-untagged dual (merchant
+ * exactly `MISSING_TAG` with the pinned reason and
+ * its keyid still echoed — the failure is the missing
+ * tag, not a keyid error — while the tagged gateway
+ * label still verifies); and the wrong-gateway-keyid
+ * dual (gateway exactly `KEYID_MISMATCH` with the
+ * pinned reason while the merchant label still
+ * verifies, proving the pin reads the carried keyid).
+ * Outside timing, the opt-in halves are pinned once:
+ * the merchant-untagged dual verifies with no option
+ * passed, an explicit global `requireTag: false`
+ * likewise lets it through, and the wrong-keyid dual
+ * verifies when no keyid pins are configured. Zero
+ * network, zero randomness in the measured assertions,
+ * no wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyAllExpectedKeyIdsRequireTag(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantTaggedSigned = signRequest(fixture, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_TAG_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED,
+    tag: EXPECTED_KEY_IDS_REQUIRE_TAG_VALUE,
+  });
+  const dualWithTag = addSignature(merchantTaggedSigned, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_TAG_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED,
+    tag: EXPECTED_KEY_IDS_REQUIRE_TAG_VALUE,
+  });
+  const merchantUntaggedSigned = signRequest(fixture, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_TAG_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED,
+  });
+  const dualMerchantUntagged = addSignature(merchantUntaggedSigned, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_TAG_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED,
+    tag: EXPECTED_KEY_IDS_REQUIRE_TAG_VALUE,
+  });
+  const merchantTaggedForWrongKid = signRequest(fixture, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_TAG_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED,
+    tag: EXPECTED_KEY_IDS_REQUIRE_TAG_VALUE,
+  });
+  const dualWrongGatewayKid = addSignature(merchantTaggedForWrongKid, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_TAG_GATEWAY_WRONG,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED,
+    tag: EXPECTED_KEY_IDS_REQUIRE_TAG_VALUE,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED,
+    expectedKeyIds: {
+      merchant: EXPECTED_KEY_IDS_REQUIRE_TAG_MERCHANT_KID,
+      gateway: EXPECTED_KEY_IDS_REQUIRE_TAG_GATEWAY_KID,
+    },
+    requireTag: true,
+  };
+  const assertTriple = (where: string): void => {
+    const accepted = verifyAllLabels(dualWithTag, verifyOpts);
+    if (
+      accepted.length !== 2 ||
+      accepted[0].label !== "merchant" ||
+      !accepted[0].ok ||
+      accepted[0].keyId !==
+        EXPECTED_KEY_IDS_REQUIRE_TAG_MERCHANT_KID ||
+      accepted[0].tag !== EXPECTED_KEY_IDS_REQUIRE_TAG_VALUE ||
+      accepted[1].label !== "gateway" ||
+      !accepted[1].ok ||
+      accepted[1].keyId !== EXPECTED_KEY_IDS_REQUIRE_TAG_GATEWAY_KID ||
+      accepted[1].tag !== EXPECTED_KEY_IDS_REQUIRE_TAG_VALUE
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with expectedKeyIds + requireTag (${where}, tagged dual) gave ${JSON.stringify(accepted)}`,
+      );
+    const untagged = verifyAllLabels(dualMerchantUntagged, verifyOpts);
+    if (
+      untagged.length !== 2 ||
+      untagged[0].label !== "merchant" ||
+      untagged[0].ok ||
+      untagged[0].code !== EXPECTED_KEY_IDS_REQUIRE_TAG_MISSING_CODE ||
+      untagged[0].reason !== EXPECTED_KEY_IDS_REQUIRE_TAG_MISSING_REASON ||
+      untagged[0].keyId !==
+        EXPECTED_KEY_IDS_REQUIRE_TAG_MERCHANT_KID ||
+      untagged[1].label !== "gateway" ||
+      !untagged[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with expectedKeyIds + requireTag (${where}, merchant-untagged dual) gave ${JSON.stringify(untagged)}`,
+      );
+    const mismatched = verifyAllLabels(dualWrongGatewayKid, verifyOpts);
+    if (
+      mismatched.length !== 2 ||
+      mismatched[0].label !== "merchant" ||
+      !mismatched[0].ok ||
+      mismatched[1].label !== "gateway" ||
+      mismatched[1].ok ||
+      mismatched[1].code !== "KEYID_MISMATCH" ||
+      mismatched[1].reason !==
+        `keyid mismatch: expected "${EXPECTED_KEY_IDS_REQUIRE_TAG_GATEWAY_KID}", got "${EXPECTED_KEY_IDS_REQUIRE_TAG_GATEWAY_WRONG}"` ||
+      mismatched[1].keyId !== EXPECTED_KEY_IDS_REQUIRE_TAG_GATEWAY_WRONG
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with expectedKeyIds + requireTag (${where}, wrong-gateway-keyid dual) gave ${JSON.stringify(mismatched)}`,
+      );
+  };
+
+  // Outside timing: all three fixtures self-check under
+  // the combined options before any timing starts.
+  assertTriple("outside timing");
+
+  // Outside timing: with no option the same
+  // merchant-untagged dual verifies — the global tag
+  // requirement is opt-in and the default behaviour is
+  // unchanged.
+  const defaulted = verifyAllLabels(dualMerchantUntagged, {
+    keys,
+    now: EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED,
+  });
+  if (defaulted.length !== 2 || defaulted.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: merchant-untagged default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  // Outside timing: an explicit global `requireTag:
+  // false` likewise lets the merchant-untagged dual
+  // through — the flag, not the label name, drives the
+  // check.
+  const optedOut = verifyAllLabels(dualMerchantUntagged, {
+    keys,
+    now: EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED,
+    requireTag: false,
+  });
+  if (optedOut.length !== 2 || optedOut.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: merchant-untagged requireTag:false gave ${JSON.stringify(optedOut)}`,
+    );
+
+  // Outside timing: with no keyid pins configured the
+  // wrong-gateway-keyid dual verifies under the global
+  // tag requirement (both labels carry a tag) — keyid
+  // pinning is opt-in, and the tag check alone does not
+  // reject a merely unexpected keyid.
+  const unpinned = verifyAllLabels(dualWrongGatewayKid, {
+    keys,
+    now: EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED,
+    requireTag: true,
+  });
+  if (unpinned.length !== 2 || unpinned.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: wrong-keyid unpinned gave ${JSON.stringify(unpinned)}`,
+    );
+
+  return measure(() => {
+    assertTriple("measured pass");
+  }, ITERATIONS);
+}
+
 /**
  * Pinned shape of the `verifyAllLabels` requireFreshnessByLabel
  * benchmark: two ed25519 key pairs (generated once,
@@ -8340,6 +8553,11 @@ results.push({
   alg: "verifyAllLabels requireTagByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllRequireTagByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels expectedKeyIds requireTag (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllExpectedKeyIdsRequireTag(),
 });
 results.push({
   alg: "verifyAllLabels requireFreshnessByLabel (2 labels)",
