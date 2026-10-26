@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) gains a `verifyAllLabels
+  requireNonceByLabel (2 labels)` row: one measured op verifies two
+  dual-label fixtures with `requireNonceByLabel: { merchant: true }`
+  and the global `requireNonce` unset — the nonce-carrying dual (both
+  labels ok, merchant nonce returned) and the nonce-less-merchant dual
+  (merchant exactly `MISSING_NONCE` with the pinned reason while the
+  unmapped gateway label still verifies by falling back to the unset
+  global) — with the no-option acceptance and an explicit
+  `merchant: false` map entry pinned outside timing. The README
+  Benchmarks table is refreshed from the same real run, including the
+  new row (~1,417 ops/sec).
 - The CLI demo (`npm run demo`) gains a per-label candidate keys
   segment: a dual-label request carries a merchant ed25519 signature
   and a gateway hmac-sha256 signature, verified with
