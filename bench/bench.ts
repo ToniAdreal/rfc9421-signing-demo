@@ -219,6 +219,19 @@
  * its own candidate list), with the unmapped gateway label falling back
  * to the global `candidateKeys` and the `candidateKeysByLabel` + `keys`
  * mutual-exclusion configuration error asserted outside timing, plus
+ * the per-label tag-presence verify path a multi-party receiver runs
+ * when only one signer must carry a tag: `verifyAllLabels` with
+ * `requireTagByLabel` over a dual ed25519 fixture signed outside timing
+ * with `created` pinned (merchant with a pinned tag, gateway without
+ * one — see REQUIRE_TAG_BY_LABEL_* below), self-checked on every
+ * measured pass (one measured op verifies both the tag-carrying dual,
+ * both labels ok with the merchant tag returned, and the
+ * tag-less-merchant dual, merchant exactly `MISSING_TAG` with the
+ * pinned reason while the unmapped gateway label still verifies by
+ * falling back to the unset global), with that same tag-less dual's
+ * acceptance with no option passed, an explicit `merchant: false`
+ * map entry letting it through, and a differently-tagged merchant
+ * fixture still verifying asserted outside timing, plus
  * the algorithm-inference verify path a
  * receiver runs for foreign signers that omit the optional
  * `alg` parameter: `verifyRequest` with
@@ -3367,6 +3380,194 @@ function benchmarkVerifyAllCandidateKeysByLabel(): number {
   )
     throw new Error(
       `benchmark self-check failed: candidateKeysByLabel + keys did not throw the pinned error, got ${exclusionError instanceof Error ? JSON.stringify(exclusionError.message) : String(exclusionError)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels` requireTagByLabel
+ * benchmark: two ed25519 key pairs (generated once,
+ * outside timing), two dual-label fixtures signed outside
+ * timing with `created` pinned under two pinned keyids
+ * (merchant / gateway, the canonical multi-party labels),
+ * and the verifier's injected `now` at the `created`
+ * instant. The merchant label is mapped `true` in
+ * `requireTagByLabel` and the global `requireTag`
+ * is left unset, so the gateway label — missing from
+ * the map — falls back to no requirement.
+ */
+const REQUIRE_TAG_BY_LABEL_CREATED = 1_700_000_000;
+const REQUIRE_TAG_BY_LABEL_MERCHANT_KID =
+  "bench-require-tag-by-label-merchant-1";
+const REQUIRE_TAG_BY_LABEL_GATEWAY_KID =
+  "bench-require-tag-by-label-gateway-1";
+const REQUIRE_TAG_BY_LABEL_VALUE = "bench-require-tag-by-label-1";
+const REQUIRE_TAG_BY_LABEL_OTHER_VALUE = "bench-require-tag-by-label-other";
+const REQUIRE_TAG_BY_LABEL_CODE = "MISSING_TAG";
+const REQUIRE_TAG_BY_LABEL_REASON =
+  "signature carries no `tag` but requireTag is set";
+
+/**
+ * `verifyAllLabels` with `requireTagByLabel` steady
+ * state: the per-label tag-presence form a multi-party
+ * receiver uses when only one signer must bind its
+ * signature to an application protocol (the merchant
+ * signature must carry a tag; the gateway signature
+ * historically carries none) — every measured call
+ * runs the per-label map resolution and the
+ * post-cryptographic presence check for the mapped
+ * label, which the plain `verifyAllLabels` row above
+ * never pays, because it passes no requirement. One
+ * measured op verifies two dual-label fixtures: the
+ * tag-carrying dual (both labels ok, merchant tag
+ * returned, gateway without a tag still ok because
+ * it falls back to the unset global) and the
+ * tag-less-merchant dual (merchant exactly
+ * `MISSING_TAG` with the pinned reason while the
+ * unmapped gateway label still verifies, proving
+ * the gateway falls back to the unset global rather
+ * than inheriting the merchant's map entry). Outside
+ * timing, the opt-in halves are pinned once: the same
+ * tag-less dual verifies with no option passed, an
+ * explicit `merchant: false` map entry likewise lets
+ * the tag-less merchant label through, and a
+ * differently-tagged merchant fixture still verifies
+ * (requireTag checks presence, never value). Zero
+ * network, zero randomness in the measured assertions,
+ * no wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyAllRequireTagByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantWithTagSigned = signRequest(fixture, {
+    keyId: REQUIRE_TAG_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: REQUIRE_TAG_BY_LABEL_CREATED,
+    tag: REQUIRE_TAG_BY_LABEL_VALUE,
+  });
+  const dualWithTag = addSignature(merchantWithTagSigned, {
+    keyId: REQUIRE_TAG_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: REQUIRE_TAG_BY_LABEL_CREATED,
+  });
+  const merchantWithoutTagSigned = signRequest(fixture, {
+    keyId: REQUIRE_TAG_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: REQUIRE_TAG_BY_LABEL_CREATED,
+  });
+  const dualWithoutTag = addSignature(merchantWithoutTagSigned, {
+    keyId: REQUIRE_TAG_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: REQUIRE_TAG_BY_LABEL_CREATED,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: REQUIRE_TAG_BY_LABEL_CREATED,
+    requireTagByLabel: { merchant: true },
+  };
+  const assertDual = (where: string): void => {
+    const accepted = verifyAllLabels(dualWithTag, verifyOpts);
+    if (
+      accepted.length !== 2 ||
+      accepted[0].label !== "merchant" ||
+      !accepted[0].ok ||
+      accepted[0].tag !== REQUIRE_TAG_BY_LABEL_VALUE ||
+      accepted[1].label !== "gateway" ||
+      !accepted[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with requireTagByLabel (${where}, tag-carrying dual) gave ${JSON.stringify(accepted)}`,
+      );
+    const rejected = verifyAllLabels(dualWithoutTag, verifyOpts);
+    if (
+      rejected.length !== 2 ||
+      rejected[0].label !== "merchant" ||
+      rejected[0].ok ||
+      rejected[0].code !== REQUIRE_TAG_BY_LABEL_CODE ||
+      rejected[0].reason !== REQUIRE_TAG_BY_LABEL_REASON ||
+      rejected[1].label !== "gateway" ||
+      !rejected[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with requireTagByLabel (${where}, tag-less-merchant dual) gave ${JSON.stringify(rejected)}`,
+      );
+  };
+
+  // Outside timing: both fixtures self-check under the
+  // per-label requirement before any timing starts.
+  assertDual("outside timing");
+
+  // Outside timing: with no option the same tag-less
+  // dual verifies — the requirement is opt-in and the
+  // default behaviour is unchanged.
+  const defaulted = verifyAllLabels(dualWithoutTag, {
+    keys,
+    now: REQUIRE_TAG_BY_LABEL_CREATED,
+  });
+  if (defaulted.length !== 2 || defaulted.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: tag-less default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  // Outside timing: an explicit `merchant: false` map
+  // entry likewise lets the tag-less merchant label
+  // through — the map entry, not the label name, drives
+  // the check.
+  const optedOut = verifyAllLabels(dualWithoutTag, {
+    keys,
+    now: REQUIRE_TAG_BY_LABEL_CREATED,
+    requireTagByLabel: { merchant: false },
+  });
+  if (optedOut.length !== 2 || optedOut.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: tag-less merchant:false gave ${JSON.stringify(optedOut)}`,
+    );
+
+  // Outside timing: requireTag checks presence, never
+  // value — a differently-tagged merchant fixture still
+  // verifies and echoes its own tag.
+  const merchantOtherTagSigned = signRequest(fixture, {
+    keyId: REQUIRE_TAG_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: REQUIRE_TAG_BY_LABEL_CREATED,
+    tag: REQUIRE_TAG_BY_LABEL_OTHER_VALUE,
+  });
+  const dualOtherTag = addSignature(merchantOtherTagSigned, {
+    keyId: REQUIRE_TAG_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: REQUIRE_TAG_BY_LABEL_CREATED,
+  });
+  const otherTagged = verifyAllLabels(dualOtherTag, verifyOpts);
+  if (
+    otherTagged.length !== 2 ||
+    otherTagged[0].label !== "merchant" ||
+    !otherTagged[0].ok ||
+    otherTagged[0].tag !== REQUIRE_TAG_BY_LABEL_OTHER_VALUE ||
+    otherTagged[1].label !== "gateway" ||
+    !otherTagged[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: differently-tagged dual gave ${JSON.stringify(otherTagged)}`,
     );
 
   return measure(() => {
@@ -7859,6 +8060,11 @@ results.push({
   alg: "verifyAllLabels candidateKeysByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllCandidateKeysByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels requireTagByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllRequireTagByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",

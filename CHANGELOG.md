@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) gains a `verifyAllLabels
+  requireTagByLabel (2 labels)` row: one measured op verifies two
+  dual-label fixtures with `requireTagByLabel: { merchant: true }` and
+  no global `requireTag` — the tag-carrying dual (both labels ok, the
+  merchant tag returned, the tag-less gateway still ok by falling back
+  to the unset global) and the tag-less-merchant dual (merchant exactly
+  `MISSING_TAG` with the pinned reason while the gateway label still
+  verifies) — with the tag-less dual verifying with no option passed,
+  an explicit `merchant: false` map entry letting it through, and a
+  differently-tagged merchant fixture still verifying (presence, never
+  value), all pinned outside timing. The README Benchmarks table is
+  refreshed from the same real run, including the new row (~565.4
+  ops/sec).
 - The benchmark (`npm run bench`) gains a `verifyRequest requireTag`
   row: one measured op verifies a pinned ed25519 fixture carrying the
   pinned tag with `requireTag: true`, re-pinning that the result is ok
