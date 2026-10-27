@@ -272,6 +272,24 @@
  * mismatching fallback halves) and the same dual's
  * acceptance with no option passed asserted outside
  * timing, plus
+ * the per-label clock-skew verify path a multi-party
+ * receiver runs when each signer clock may run ahead by
+ * a different amount: `verifyAllLabels` with
+ * `clockSkewToleranceSecByLabel` over a dual ed25519
+ * fixture signed outside timing with `created` pinned
+ * 120s ahead of the injected `now` (merchant tolerance
+ * 5s, gateway tolerance 300s — see
+ * CLOCK_SKEW_BY_LABEL_* below), self-checked on every
+ * measured pass (one measured op verifies the split
+ * dual, merchant exactly `CREATED_IN_FUTURE` with the
+ * pinned reason while the gateway label still verifies),
+ * with a label missing from the map falling back to the
+ * global `clockSkewToleranceSec` (both directions: the
+ * merchant-only map with a wide global, and the
+ * gateway-only map with a narrow global) and the same
+ * dual's rejection under no option passed (the 60s
+ * default covers neither 120s-ahead label) asserted
+ * outside timing, plus
  * the per-label required-freshness verify path a multi-party
  * receiver runs when each signer must bound its own signature
  * differently: `verifyAllLabels` with `requireCreatedByLabel`
@@ -3978,6 +3996,188 @@ function benchmarkVerifyAllMaxSignatureAgeSecByLabel(): number {
     now: MAX_AGE_BY_LABEL_NOW,
   });
   if (defaulted.length !== 2 || defaulted.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: split dual default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels`
+ * clockSkewToleranceSecByLabel benchmark: two ed25519 key
+ * pairs (generated once, outside timing), one dual-label
+ * fixture signed outside timing with `created` pinned
+ * 120s ahead of the verifier's injected `now` under two
+ * pinned keyids (merchant / gateway, the canonical
+ * multi-party labels), and per-label clock-skew
+ * tolerances (merchant 5s, gateway 300s) in
+ * `clockSkewToleranceSecByLabel`, so the same-ahead
+ * signatures split: the merchant signature is too far
+ * in the future under its own tolerance while the
+ * gateway signature is within its own.
+ */
+const CLOCK_SKEW_BY_LABEL_NOW = 1_700_000_000;
+const CLOCK_SKEW_BY_LABEL_CREATED = CLOCK_SKEW_BY_LABEL_NOW + 120;
+const CLOCK_SKEW_BY_LABEL_MERCHANT_KID =
+  "bench-clock-skew-by-label-merchant-1";
+const CLOCK_SKEW_BY_LABEL_GATEWAY_KID =
+  "bench-clock-skew-by-label-gateway-1";
+const CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE = 5;
+const CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE = 300;
+const CLOCK_SKEW_BY_LABEL_MISMATCH_CODE = "CREATED_IN_FUTURE";
+const CLOCK_SKEW_BY_LABEL_MISMATCH_REASON =
+  "signature created in the future (clock skew)";
+
+/**
+ * `verifyAllLabels` with `clockSkewToleranceSecByLabel`
+ * steady state: the per-label clock-skew form a
+ * multi-party receiver uses when each signer clock may
+ * run ahead by a different amount (the merchant clock
+ * is trusted to stay within seconds, the gateway clock
+ * may drift minutes) — every measured call runs the
+ * per-label map resolution and the post-cryptographic
+ * future-created comparison for each label, which the
+ * plain `verifyAllLabels` row above never pays, because
+ * it passes no tolerance map. One measured op verifies
+ * the split dual: the merchant label is exactly
+ * `CREATED_IN_FUTURE` with the pinned reason and the
+ * gateway label still verifies, proving one label's
+ * clock discipline never blocks the other label's
+ * verdict. Outside timing, the fallback halves are
+ * pinned once: a label missing from the map falls back
+ * to the global `clockSkewToleranceSec` (the
+ * merchant-only map under a wide global passes the
+ * unmapped gateway while failing the mapped merchant,
+ * and the gateway-only map under a narrow global fails
+ * the unmapped merchant while passing the mapped
+ * gateway), and the same dual under no option fails
+ * on both labels — the 60s default is narrower than
+ * the 120s skew, so the tolerance map is opt-in in
+ * effect even though the default itself is non-zero.
+ * Zero network, zero randomness in the measured
+ * assertions, no wall clock (every verify instant is
+ * injected).
+ */
+function benchmarkVerifyAllClockSkewToleranceSecByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantSigned = signRequest(fixture, {
+    keyId: CLOCK_SKEW_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: CLOCK_SKEW_BY_LABEL_CREATED,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: CLOCK_SKEW_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: CLOCK_SKEW_BY_LABEL_CREATED,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: CLOCK_SKEW_BY_LABEL_NOW,
+    clockSkewToleranceSecByLabel: {
+      merchant: CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE,
+      gateway: CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE,
+    },
+  };
+  const assertDual = (where: string): void => {
+    const split = verifyAllLabels(dual, verifyOpts);
+    if (
+      split.length !== 2 ||
+      split[0].label !== "merchant" ||
+      split[0].ok ||
+      split[0].code !== CLOCK_SKEW_BY_LABEL_MISMATCH_CODE ||
+      split[0].reason !== CLOCK_SKEW_BY_LABEL_MISMATCH_REASON ||
+      split[1].label !== "gateway" ||
+      !split[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with clockSkewToleranceSecByLabel (${where}, split dual) gave ${JSON.stringify(split)}`,
+      );
+  };
+
+  // Outside timing: the split dual self-checks under the
+  // per-label tolerances before any timing starts.
+  assertDual("outside timing");
+
+  // Outside timing: a label missing from the map falls
+  // back to the global `clockSkewToleranceSec` — the
+  // merchant-only map under a wide global fails exactly
+  // on the mapped merchant while the unmapped gateway
+  // passes on the global tolerance.
+  const fallbackMerchantOnly = verifyAllLabels(dual, {
+    keys,
+    now: CLOCK_SKEW_BY_LABEL_NOW,
+    clockSkewToleranceSecByLabel: {
+      merchant: CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE,
+    },
+    clockSkewToleranceSec: CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE,
+  });
+  if (
+    fallbackMerchantOnly.length !== 2 ||
+    fallbackMerchantOnly[0].label !== "merchant" ||
+    fallbackMerchantOnly[0].ok ||
+    fallbackMerchantOnly[0].code !==
+      CLOCK_SKEW_BY_LABEL_MISMATCH_CODE ||
+    fallbackMerchantOnly[0].reason !==
+      CLOCK_SKEW_BY_LABEL_MISMATCH_REASON ||
+    fallbackMerchantOnly[1].label !== "gateway" ||
+    !fallbackMerchantOnly[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback (merchant-only map) gave ${JSON.stringify(fallbackMerchantOnly)}`,
+    );
+
+  // Outside timing: the same fallback in the other
+  // direction — the gateway-only map under a narrow
+  // global fails exactly on the unmapped merchant while
+  // the mapped gateway passes on its own tolerance.
+  const fallbackGatewayOnly = verifyAllLabels(dual, {
+    keys,
+    now: CLOCK_SKEW_BY_LABEL_NOW,
+    clockSkewToleranceSecByLabel: {
+      gateway: CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE,
+    },
+    clockSkewToleranceSec: CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE,
+  });
+  if (
+    fallbackGatewayOnly.length !== 2 ||
+    fallbackGatewayOnly[0].label !== "merchant" ||
+    fallbackGatewayOnly[0].ok ||
+    fallbackGatewayOnly[0].code !==
+      CLOCK_SKEW_BY_LABEL_MISMATCH_CODE ||
+    fallbackGatewayOnly[0].reason !==
+      CLOCK_SKEW_BY_LABEL_MISMATCH_REASON ||
+    fallbackGatewayOnly[1].label !== "gateway" ||
+    !fallbackGatewayOnly[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback (gateway-only map) gave ${JSON.stringify(fallbackGatewayOnly)}`,
+    );
+
+  // Outside timing: with no option the same dual fails
+  // on both labels — the 60s default tolerance covers
+  // neither 120s-ahead signature.
+  const defaulted = verifyAllLabels(dual, {
+    keys,
+    now: CLOCK_SKEW_BY_LABEL_NOW,
+  });
+  if (
+    defaulted.length !== 2 ||
+    defaulted.some((r) => r.ok) ||
+    defaulted.some((r) => r.code !== CLOCK_SKEW_BY_LABEL_MISMATCH_CODE)
+  )
     throw new Error(
       `benchmark self-check failed: split dual default gave ${JSON.stringify(defaulted)}`,
     );
@@ -9081,6 +9281,11 @@ results.push({
   alg: "verifyAllLabels maxSignatureAgeSecByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllMaxSignatureAgeSecByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels clockSkewToleranceSecByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllClockSkewToleranceSecByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",

@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label clock-skew tolerances (backlog #644):
+  `bench` now measures `verifyAllLabels` with
+  `clockSkewToleranceSecByLabel` over a dual ed25519 fixture signed
+  outside timing with `created` pinned 120s ahead of the injected
+  `now` (merchant tolerance 5s, gateway tolerance 300s) — each
+  measured op verifies the split dual, merchant exactly
+  `CREATED_IN_FUTURE` with the pinned reason while the gateway
+  label still verifies, so the row pays the per-label map
+  resolution and the future-created comparison for each label.
+  The unmapped-label global fallback (merchant-only map under a
+  wide global, gateway-only map under a narrow global) and the
+  no-option default (both labels fail under the 60s default) are
+  asserted outside timing. The README Benchmarks table is
+  refreshed from this run, including the new row at ~1,700
+  ops/sec (588.41 µs/op), and the per-label clock-skew path is
+  documented there.
 - Per-label nonce replay stores for multi-party signatures (backlog
   #643): `VerifyAllOptions.replayCacheByLabel` maps a signature label
   to its own `NonceStore`, checked in `verifyAllLabels` in place of
