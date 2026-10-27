@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo section for per-label required components (backlog #657):
+  `src/demo.ts` now demonstrates `verifyAllLabels` with
+  `requiredComponentsByLabel` over a dual ed25519 fixture
+  (both signatures covering `@method` and `@path` only):
+  the merchant label verifies against its `@method`/`@path`
+  requirement while the gateway label alone fails with
+  `MISSING_REQUIRED_COMPONENT` against its
+  `@method`/`content-digest` requirement, with a segment note
+  that a coverage check runs before any crypto work, so a
+  missing component is a policy rejection, not an
+  authenticity verdict. The same fixture re-verified under a
+  global `content-digest` requirement plus a per-label map
+  (merchant to `@method`/`@path`, gateway to `[]`) verifies
+  both labels, proving a mapped list replaces the global list
+  rather than unioning with it, and that `[]` switches the
+  check off for that label outright. The demo asserts every
+  outcome, code, reason and keyid and fails (non-zero exit)
+  if any fixture breaks; `test/demo.test.ts` gains two tests
+  pinning the same shapes and the printed lines (the
+  per-label expired tolerance segment's closing-lines
+  assertion now points at the new closing segment). The
+  README test count moves 1041 → 1043.
 - CLI demo section for per-label expired tolerance (backlog #656):
   `src/demo.ts` now demonstrates `verifyAllLabels` with
   `expiredToleranceSecByLabel` over a dual ed25519 fixture

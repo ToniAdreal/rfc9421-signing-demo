@@ -354,6 +354,19 @@ import {
   DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE,
   DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_REASON,
   DEMO_EXPIRED_TOLERANCE_BY_LABEL_URL,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_COVERED,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KEY_ID,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_REQUIRED,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_GLOBAL_REQUIRED,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REQUIRED,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_NOW,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_CODE,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_REASON,
+  DEMO_REQUIRED_COMPONENTS_BY_LABEL_URL,
   DEMO_NODE_TRAILERS_BODY,
   DEMO_NODE_TRAILERS_COVERED_COMPONENTS,
   DEMO_NODE_TRAILERS_HOST,
@@ -6316,7 +6329,7 @@ test("demo per-label expired tolerance segment pins expiredToleranceSecByLabel (
   );
 });
 
-test("demo lines contain the per-label expired tolerance segment (strict merchant rejected, loose gateway verifies, closing the demo)", async () => {
+test("demo lines contain the per-label expired tolerance segment (strict merchant rejected, loose gateway verifies, followed by the required-components segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(
@@ -6331,9 +6344,13 @@ test("demo lines contain the per-label expired tolerance segment (strict merchan
     "Per-label expired tolerance: verifyAllLabels' expiredToleranceSecByLabel map gives each label its own expiry grace period — the merchant signer runs strict, the gateway signer tolerates clock lag, and a single global tolerance cannot split an already-expired dual signature — a grace period only widens the verifier-side past-expires window, it never changes the signature itself — and expired tolerance and clock-skew tolerance are two independent windows on the same verify chain (one widens the past-expires side, the other the future-created side)",
     `Expired dual: both signatures expired ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRED_AGO_SEC}s ago, verified with expiredToleranceSecByLabel { merchant: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant FAILED (label ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE}: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_REASON}), gateway still OK (label ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — only the strict label is rejected`,
   ]);
-  // The header plus its one line are the demo's closing lines,
-  // with nothing after them.
-  assert.equal(headerIdx + 2, lines.length);
+  // The header plus its one line are followed by a blank line
+  // and the per-label required components segment's header (the
+  // demo's new closing segment), not by the end of the demo.
+  assert.equal(lines[headerIdx + 2], "");
+  assert.ok(
+    lines[headerIdx + 3]!.startsWith("Per-label required components:"),
+  );
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Per-label expired tolerance:"),
@@ -6341,5 +6358,211 @@ test("demo lines contain the per-label expired tolerance segment (strict merchan
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 2),
     lines.slice(headerIdx, headerIdx + 2),
+  );
+});
+
+test("demo per-label required components segment pins requiredComponentsByLabel (merchant verifies, gateway rejected for the missing digest, map replaces global)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL, "gateway");
+  assert.equal(
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID,
+    "demo-required-components-by-label-merchant-1",
+  );
+  assert.equal(
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KEY_ID,
+    "demo-required-components-by-label-gateway-1",
+  );
+  assert.equal(
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_URL,
+    "https://api.example.com/v1/payments",
+  );
+  assert.equal(DEMO_REQUIRED_COMPONENTS_BY_LABEL_NOW, DEMO_CREATED);
+  assert.equal(DEMO_REQUIRED_COMPONENTS_BY_LABEL_CREATED, DEMO_CREATED);
+  assert.deepEqual(DEMO_REQUIRED_COMPONENTS_BY_LABEL_COVERED, [
+    "@method",
+    "@path",
+  ]);
+  assert.deepEqual(DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REQUIRED, [
+    "@method",
+    "@path",
+  ]);
+  assert.deepEqual(DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_REQUIRED, [
+    "@method",
+    "content-digest",
+  ]);
+  assert.deepEqual(DEMO_REQUIRED_COMPONENTS_BY_LABEL_GLOBAL_REQUIRED, [
+    "content-digest",
+  ]);
+  assert.equal(
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_CODE,
+    "MISSING_REQUIRED_COMPONENT",
+  );
+  assert.equal(
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_REASON,
+    'signature does not cover required component: "content-digest"',
+  );
+  // Wire shapes: both labels cover "@method" and "@path" only, at
+  // the pinned created instant.
+  const parts = (
+    r.requiredComponentsByLabelSigned.headers["signature-input"]!
+  ).split(", ");
+  const merchantPart = parts.find((p) =>
+    p.startsWith(`${DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL}=`),
+  )!;
+  const gatewayPart = parts.find((p) =>
+    p.startsWith(`${DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL}=`),
+  )!;
+  assert.match(merchantPart, /=\("@method" "@path"\);created=1700000000/);
+  assert.match(gatewayPart, /=\("@method" "@path"\);created=1700000000/);
+  assert.match(
+    merchantPart,
+    /;keyid="demo-required-components-by-label-merchant-1"/,
+  );
+  assert.match(
+    gatewayPart,
+    /;keyid="demo-required-components-by-label-gateway-1"/,
+  );
+  assert.equal(r.requiredComponentsByLabelVerification.length, 2);
+  assert.deepEqual(
+    r.requiredComponentsByLabelVerification.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL, true],
+      [DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL, false],
+    ],
+  );
+  assert.equal(
+    r.requiredComponentsByLabelVerification[1].code,
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_CODE,
+  );
+  assert.equal(
+    r.requiredComponentsByLabelVerification[1].reason,
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_REASON,
+  );
+  assert.equal(
+    r.requiredComponentsByLabelVerification[0].keyId,
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(
+    r.requiredComponentsByLabelVerification[1].keyId,
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  // The override re-verification: the global content-digest
+  // requirement is replaced per label, so both labels verify.
+  assert.equal(r.requiredComponentsByLabelOverrideVerification.length, 2);
+  assert.deepEqual(
+    r.requiredComponentsByLabelOverrideVerification.map((x) => [
+      x.label,
+      x.ok,
+    ]),
+    [
+      [DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL, true],
+      [DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL, true],
+    ],
+  );
+  assert.equal(
+    r.requiredComponentsByLabelOverrideVerification[0].keyId,
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(
+    r.requiredComponentsByLabelOverrideVerification[1].keyId,
+    DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  // Independent checks driven directly (the same per-label
+  // coverage semantics test/requiredComponentsByLabel.test.ts
+  // pins): two fresh key pairs, a dual-label fixture covering
+  // "@method" and "@path" only, the per-label map splitting it,
+  // then the global-plus-map override verifying both labels.
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const req = {
+    method: "POST",
+    url: DEMO_REQUIRED_COMPONENTS_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  };
+  const first = signRequest(req, {
+    keyId: DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID,
+    alg: "ed25519",
+    key: merchant.privateKey,
+    created: DEMO_REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+    label: DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL,
+    coveredComponents: [...DEMO_REQUIRED_COMPONENTS_BY_LABEL_COVERED],
+  });
+  const dual = addSignature(first, {
+    keyId: DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KEY_ID,
+    alg: "ed25519",
+    key: gateway.privateKey,
+    created: DEMO_REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+    label: DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL,
+    coveredComponents: [...DEMO_REQUIRED_COMPONENTS_BY_LABEL_COVERED],
+  });
+  const keys = {
+    merchant: merchant.publicKey,
+    gateway: gateway.publicKey,
+  };
+  const direct = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_REQUIRED_COMPONENTS_BY_LABEL_NOW,
+    requiredComponentsByLabel: {
+      merchant: [...DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REQUIRED],
+      gateway: [...DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_REQUIRED],
+    },
+  });
+  assert.deepEqual(
+    direct.map((x) => [x.label, x.ok, x.code]),
+    [
+      [DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL, true, undefined],
+      [
+        DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL,
+        false,
+        DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_CODE,
+      ],
+    ],
+  );
+  const directOverride = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_REQUIRED_COMPONENTS_BY_LABEL_NOW,
+    requiredComponents: [...DEMO_REQUIRED_COMPONENTS_BY_LABEL_GLOBAL_REQUIRED],
+    requiredComponentsByLabel: {
+      merchant: [...DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REQUIRED],
+      gateway: [],
+    },
+  });
+  assert.deepEqual(
+    directOverride.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL, true],
+      [DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL, true],
+    ],
+  );
+});
+
+test("demo lines contain the per-label required components segment (merchant verifies, gateway rejected, map replaces global, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Per-label required components: verifyAllLabels' requiredComponentsByLabel/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label required components:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), [
+    "Per-label required components: verifyAllLabels' requiredComponentsByLabel map gives each label its own coverage policy — the merchant signer must bind @method and @path, the gateway signer must bind @method and content-digest, and a single global list cannot split a dual signature whose labels cover different components — a coverage check runs before any crypto work, so a missing component is a policy rejection, not an authenticity verdict",
+    `Coverage split: both signatures cover "@method" and "@path" only, verified with requiredComponentsByLabel { merchant: ["@method", "@path"], gateway: ["@method", "content-digest"] }: merchant OK (label ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway FAILED (label ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL}, code ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_CODE}: ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_REASON}) — only the gateway label is rejected`,
+    `Map replaces global: the same fixture re-verified with requiredComponents ["content-digest"] plus requiredComponentsByLabel { merchant: ["@method", "@path"], gateway: [] }: merchant OK, gateway OK — each mapped list replaces the global list rather than unioning with it, and [] switches the check off for that label outright`,
+  ]);
+  // The header plus its two lines are the demo's closing lines,
+  // with nothing after them.
+  assert.equal(headerIdx + 3, lines.length);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Per-label required components:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 3),
+    lines.slice(headerIdx, headerIdx + 3),
   );
 });

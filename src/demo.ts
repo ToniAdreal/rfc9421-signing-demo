@@ -962,7 +962,7 @@
  * semantics `test/clockSkewToleranceSecByLabel.test.ts`
  * pins). Every clock is injected and the segment's key
  * pairs are fresh per run, so the segment is
- * byte-identical between runs. The demo then closes with a
+ * byte-identical between runs. The demo then continues with a
  * per-label expired tolerance segment:
  * `VerifyAllOptions.expiredToleranceSecByLabel` gives each
  * label its own expiry grace period — the merchant signer
@@ -986,7 +986,31 @@
  * `test/clockSkewExpiredToleranceByLabel.test.ts` pins).
  * Every clock is injected and the segment's key pairs are
  * fresh per run, so the segment is byte-identical between
- * runs.
+ * runs. The demo then closes with a per-label required
+ * components segment: `VerifyAllOptions.requiredComponentsByLabel`
+ * gives each label its own coverage policy — the merchant
+ * signer must bind `@method` and `@path` while the gateway
+ * signer must bind `@method` and `content-digest`. Two fresh
+ * ed25519 key pairs mint a dual-label fixture with both
+ * signatures covering `@method` and `@path` only, and the
+ * map splits them: the merchant label verifies while the
+ * gateway label is rejected with
+ * `MISSING_REQUIRED_COMPONENT`, because neither signature
+ * binds the body digest. A coverage check runs before any
+ * crypto work, so a missing component is a policy
+ * rejection, not an authenticity verdict. The segment then
+ * re-verifies the same fixture under a global
+ * `content-digest` requirement plus a map that replaces it
+ * per label (merchant to `@method`/`@path`, gateway to
+ * `[]`): both labels verify, proving a mapped list replaces
+ * the global list rather than unioning with it, and that
+ * `[]` switches the check off for that label outright.
+ * Outside the printed lines the demo asserts every outcome,
+ * label, code, reason and keyid equals the hand-pinned
+ * expectations below (the same per-label coverage semantics
+ * `test/requiredComponentsByLabel.test.ts` pins). Every
+ * clock is injected and the segment's key pairs are fresh
+ * per run, so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2937,6 +2961,55 @@ export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE: VerifyFailureCode =
 export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_REASON =
   "signature expired";
 
+/** Label of the per-label required-components segment's merchant signature. */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL = "merchant";
+/** Label of the per-label required-components segment's gateway signature. */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL = "gateway";
+/** Key id the per-label required-components segment's merchant signature carries. */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID =
+  "demo-required-components-by-label-merchant-1";
+/** Key id the per-label required-components segment's gateway signature carries. */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KEY_ID =
+  "demo-required-components-by-label-gateway-1";
+/** Absolute URL the per-label required-components segment signs. */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_URL =
+  "https://api.example.com/v1/payments";
+/** Verifier clock for the per-label required-components segment (the pinned `DEMO_CREATED` instant). */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_NOW = DEMO_CREATED;
+/** `created` both segment signatures carry (the pinned `DEMO_CREATED` instant). */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_CREATED = DEMO_CREATED;
+/** Components both segment signatures cover: method and path only, never the body digest. */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_COVERED: string[] = [
+  "@method",
+  "@path",
+];
+/** Merchant coverage requirement for the segment: the merchant label must bind method and path. */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REQUIRED: string[] = [
+  "@method",
+  "@path",
+];
+/** Gateway coverage requirement for the segment: the gateway label must bind method and the body digest. */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_REQUIRED: string[] = [
+  "@method",
+  "content-digest",
+];
+/** Global coverage requirement used only for the segment's replacement demonstration: the body digest. */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_GLOBAL_REQUIRED: string[] = [
+  "content-digest",
+];
+/**
+ * Hand-pinned failure code when a signature does not cover a
+ * label's required component (`MISSING_REQUIRED_COMPONENT`).
+ */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_CODE: VerifyFailureCode =
+  "MISSING_REQUIRED_COMPONENT";
+/**
+ * Hand-pinned `MISSING_REQUIRED_COMPONENT` reason (the exact wording
+ * `src/verify.ts` returns for the one missing component).
+ */
+export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_REASON =
+  'signature does not cover required component: "content-digest"';
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -4343,6 +4416,21 @@ export interface DemoResult {
    * (merchant fails `EXPIRED`, gateway verifies).
    */
   expiredToleranceByLabelVerification: VerifyResult[];
+  /** The per-label required-components segment's dual-label request (both labels cover `@method` and `@path` only). */
+  requiredComponentsByLabelSigned: SignedHttpRequest;
+  /**
+   * Per-label results for that request with
+   * `requiredComponentsByLabel: { merchant: ["@method", "@path"], gateway: ["@method", "content-digest"] }`
+   * (merchant verifies, gateway fails `MISSING_REQUIRED_COMPONENT`).
+   */
+  requiredComponentsByLabelVerification: VerifyResult[];
+  /**
+   * Per-label results for the same request re-verified with
+   * a global `requiredComponents: ["content-digest"]` plus
+   * `requiredComponentsByLabel: { merchant: ["@method", "@path"], gateway: [] }`
+   * (both labels verify: each mapped list replaces the global list, and `[]` switches the check off).
+   */
+  requiredComponentsByLabelOverrideVerification: VerifyResult[];
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -9759,6 +9847,140 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // The per-label required components segment, mirroring the
+  // tolerance segments above with a coverage policy instead of
+  // a time window: the merchant's label must bind `@method`
+  // and `@path` while the gateway's must bind `@method` and
+  // `content-digest`, so a single global list cannot express
+  // "this label binds the path, that one binds the body" —
+  // `verifyAllLabels`' `requiredComponentsByLabel` map gives
+  // each label its own list. Two fresh ed25519 key pairs mint
+  // the dual-label fixture (`merchant` via `signRequest`,
+  // `gateway` appended via `addSignature`) with both
+  // signatures covering `@method` and `@path` only, and the
+  // map splits them: the merchant label verifies, the gateway
+  // label fails with `MISSING_REQUIRED_COMPONENT` because
+  // neither signature binds the body digest. The coverage
+  // check runs before any crypto work, so the gateway
+  // rejection is a policy rejection of an otherwise
+  // cryptographically valid signature, not a signature
+  // failure. The segment then re-verifies the same fixture
+  // under a global `content-digest` requirement plus a map
+  // that replaces it per label (merchant to
+  // `@method`/`@path`, gateway to `[]`): both labels verify,
+  // proving a mapped list replaces the global list rather
+  // than unioning with it, and that `[]` switches the check
+  // off for that label outright — the same replacement
+  // semantics `test/requiredComponentsByLabel.test.ts` pins.
+  // Outside the printed lines the demo asserts every
+  // outcome, label, code, reason and keyid equals the
+  // hand-pinned expectations.
+  const requiredComponentsByLabelMerchantPair = generateEd25519KeyPair();
+  const requiredComponentsByLabelGatewayPair = generateEd25519KeyPair();
+  const requiredComponentsByLabelRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_REQUIRED_COMPONENTS_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const requiredComponentsByLabelMerchantSigned = signRequest(
+    requiredComponentsByLabelRequest,
+    {
+      keyId: DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID,
+      alg: "ed25519",
+      key: requiredComponentsByLabelMerchantPair.privateKey,
+      created: DEMO_REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+      label: DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL,
+      coveredComponents: [...DEMO_REQUIRED_COMPONENTS_BY_LABEL_COVERED],
+    },
+  );
+  const requiredComponentsByLabelSigned = addSignature(
+    requiredComponentsByLabelMerchantSigned,
+    {
+      keyId: DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KEY_ID,
+      alg: "ed25519",
+      key: requiredComponentsByLabelGatewayPair.privateKey,
+      created: DEMO_REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+      label: DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL,
+      coveredComponents: [...DEMO_REQUIRED_COMPONENTS_BY_LABEL_COVERED],
+    },
+  );
+  const requiredComponentsByLabelKeys = {
+    [DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL]:
+      requiredComponentsByLabelMerchantPair.publicKey,
+    [DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL]:
+      requiredComponentsByLabelGatewayPair.publicKey,
+  };
+  const requiredComponentsByLabelVerification = verifyAllLabels(
+    requiredComponentsByLabelSigned,
+    {
+      keys: requiredComponentsByLabelKeys,
+      now: DEMO_REQUIRED_COMPONENTS_BY_LABEL_NOW,
+      requiredComponentsByLabel: {
+        [DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL]: [
+          ...DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REQUIRED,
+        ],
+        [DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL]: [
+          ...DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_REQUIRED,
+        ],
+      },
+    },
+  );
+  const requiredComponentsByLabelOverrideVerification = verifyAllLabels(
+    requiredComponentsByLabelSigned,
+    {
+      keys: requiredComponentsByLabelKeys,
+      now: DEMO_REQUIRED_COMPONENTS_BY_LABEL_NOW,
+      requiredComponents: [
+        ...DEMO_REQUIRED_COMPONENTS_BY_LABEL_GLOBAL_REQUIRED,
+      ],
+      requiredComponentsByLabel: {
+        [DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL]: [
+          ...DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REQUIRED,
+        ],
+        [DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL]: [],
+      },
+    },
+  );
+  if (
+    requiredComponentsByLabelVerification.length !== 2 ||
+    requiredComponentsByLabelVerification[0].label !==
+      DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL ||
+    requiredComponentsByLabelVerification[0].ok !== true ||
+    requiredComponentsByLabelVerification[0].keyId !==
+      DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID ||
+    requiredComponentsByLabelVerification[1].label !==
+      DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL ||
+    requiredComponentsByLabelVerification[1].ok !== false ||
+    requiredComponentsByLabelVerification[1].code !==
+      DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_CODE ||
+    requiredComponentsByLabelVerification[1].reason !==
+      DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_REASON ||
+    requiredComponentsByLabelVerification[1].keyId !==
+      DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KEY_ID ||
+    requiredComponentsByLabelOverrideVerification.length !== 2 ||
+    requiredComponentsByLabelOverrideVerification[0].label !==
+      DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL ||
+    requiredComponentsByLabelOverrideVerification[0].ok !== true ||
+    requiredComponentsByLabelOverrideVerification[0].keyId !==
+      DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID ||
+    requiredComponentsByLabelOverrideVerification[1].label !==
+      DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL ||
+    requiredComponentsByLabelOverrideVerification[1].ok !== true ||
+    requiredComponentsByLabelOverrideVerification[1].keyId !==
+      DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KEY_ID
+  ) {
+    throw new Error(
+      `demo fixture broken: requiredComponentsByLabel gave ` +
+        `${JSON.stringify(requiredComponentsByLabelVerification)} and ` +
+        `${JSON.stringify(requiredComponentsByLabelOverrideVerification)}, instead of the merchant ` +
+        `label verifying and the gateway label rejected with ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_CODE} ` +
+        `(${DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_REASON}) under the per-label map, ` +
+        `with both labels verifying once the map replaces the global ` +
+        `${DEMO_REQUIRED_COMPONENTS_BY_LABEL_GLOBAL_REQUIRED.join(", ")} requirement`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -10346,6 +10568,16 @@ export async function runDemo(): Promise<DemoResult> {
     expiredToleranceByLabelVerification[1]!.ok === true
       ? `Expired dual: both signatures expired ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRED_AGO_SEC}s ago, verified with expiredToleranceSecByLabel { merchant: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant FAILED (label ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL}, code ${expiredToleranceByLabelVerification[0]!.code}: ${expiredToleranceByLabelVerification[0]!.reason}), gateway still OK (label ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL}, keyid="${expiredToleranceByLabelVerification[1]!.keyId}", alg="ed25519") — only the strict label is rejected`
       : `Expired dual: both signatures expired ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRED_AGO_SEC}s ago, verified with expiredToleranceSecByLabel { merchant: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant ${expiredToleranceByLabelVerification[0]!.ok ? "OK (unexpected — the already-expired merchant signature was not rejected)" : `code ${expiredToleranceByLabelVerification[0]!.code}`}, gateway ${expiredToleranceByLabelVerification[1]!.ok ? "OK" : "FAILED (unexpected — the within-grace gateway label was dragged down)"}`,
+    "",
+    "Per-label required components: verifyAllLabels' requiredComponentsByLabel map gives each label its own coverage policy — the merchant signer must bind @method and @path, the gateway signer must bind @method and content-digest, and a single global list cannot split a dual signature whose labels cover different components — a coverage check runs before any crypto work, so a missing component is a policy rejection, not an authenticity verdict",
+    requiredComponentsByLabelVerification[0]!.ok === true &&
+    requiredComponentsByLabelVerification[1]!.ok === false
+      ? `Coverage split: both signatures cover "@method" and "@path" only, verified with requiredComponentsByLabel { merchant: ["@method", "@path"], gateway: ["@method", "content-digest"] }: merchant OK (label ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL}, keyid="${requiredComponentsByLabelVerification[0]!.keyId}", alg="ed25519"), gateway FAILED (label ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL}, code ${requiredComponentsByLabelVerification[1]!.code}: ${requiredComponentsByLabelVerification[1]!.reason}) — only the gateway label is rejected`
+      : `Coverage split: both signatures cover "@method" and "@path" only, verified with requiredComponentsByLabel { merchant: ["@method", "@path"], gateway: ["@method", "content-digest"] }: merchant ${requiredComponentsByLabelVerification[0]!.ok ? "OK" : `FAILED (unexpected — the merchant label was dragged down)`}, gateway ${requiredComponentsByLabelVerification[1]!.ok ? "OK (unexpected — the gateway label was not rejected for the missing digest)" : `code ${requiredComponentsByLabelVerification[1]!.code}`}`,
+    requiredComponentsByLabelOverrideVerification[0]!.ok === true &&
+    requiredComponentsByLabelOverrideVerification[1]!.ok === true
+      ? `Map replaces global: the same fixture re-verified with requiredComponents ["content-digest"] plus requiredComponentsByLabel { merchant: ["@method", "@path"], gateway: [] }: merchant OK, gateway OK — each mapped list replaces the global list rather than unioning with it, and [] switches the check off for that label outright`
+      : `Map replaces global: the same fixture re-verified with requiredComponents ["content-digest"] plus requiredComponentsByLabel { merchant: ["@method", "@path"], gateway: [] }: merchant ${requiredComponentsByLabelOverrideVerification[0]!.ok ? "OK" : "FAILED (unexpected — the merchant map entry did not replace the global list)"}, gateway ${requiredComponentsByLabelOverrideVerification[1]!.ok ? "OK" : "FAILED (unexpected — the [] entry did not switch the check off)"}`,
   ];
 
   return {
@@ -10606,6 +10838,9 @@ export async function runDemo(): Promise<DemoResult> {
     clockSkewByLabelVerification,
     expiredToleranceByLabelSigned,
     expiredToleranceByLabelVerification,
+    requiredComponentsByLabelSigned,
+    requiredComponentsByLabelVerification,
+    requiredComponentsByLabelOverrideVerification,
     lines,
   };
 }
