@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal test coverage for per-label keyid pinning combined with
+  per-label tag presence (backlog #640):
+  `test/expectedKeyIdsRequireTagByLabel.test.ts` pins a dual-label
+  fixture (both keyids pinned, only the merchant label required to
+  carry a `tag`) and asserts the pinned dual passes with both keyids
+  echoed, a tag-less merchant with a correctly pinned keyid fails
+  `MISSING_TAG` (not a keyid error), a keyid mismatch on either
+  label fails `KEYID_MISMATCH` while the other label still passes,
+  and a label unmapped in the tag map falls back to the global
+  (unset) tag rule. The README test count moves 1004 → 1009.
 - Benchmark row for the JWKS https-only endpoint rule (backlog #639):
   `bench` now measures `JwksKeyStore` with `requireHttps: true`
   over an https endpoint restored offline — each measured op
