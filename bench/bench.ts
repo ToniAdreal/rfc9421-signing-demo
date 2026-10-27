@@ -10,7 +10,14 @@
  * hmac-sha256 dual labels via verifyAllLabels) and the key-resolution
  * hot path a gateway verifier hits on every request: `JwksKeyStore.resolve`
  * (Map hit on an offline-restored snapshot, zero network) and
- * `memoizeKeyResolver` cache hits / misses, plus the snapshot-export
+ * `memoizeKeyResolver` cache hits / misses, plus the endpoint-rule
+ * path a gateway runs when it hardens its JWKS endpoint against
+ * plaintext downgrade: `JwksKeyStore` with `requireHttps: true` over
+ * an https endpoint restored offline (the http-endpoint construction
+ * rejection with its pinned error and zero fetches, and the
+ * https-endpoint construction performing no fetch, both asserted
+ * outside timing), self-checked on every measured pass (the pinned
+ * kid resolves), plus the snapshot-export
  * path a gateway runs to persist its key store for a cold start:
  * `JwksKeyStore.exportSnapshot` over an offline-restored store holding
  * the three supported key shapes (ed25519 / P-256 / RSA, pinned kids
@@ -5223,6 +5230,114 @@ function benchmarkJwksResolve(store: JwksKeyStore): number {
 }
 
 /**
+ * Pinned shape of the `JwksKeyStore` requireHttps benchmark:
+ * the endpoint-rule form a gateway runs when it hardens its
+ * JWKS endpoint against plaintext downgrade — a store built
+ * over an https endpoint with `requireHttps: true`, restored
+ * offline from a snapshot of one freshly generated ed25519
+ * key (its fetch implementation throws if it is ever called,
+ * so the measured path performs zero network I/O), plus the
+ * construction-time rules asserted outside timing: an http
+ * endpoint with `requireHttps: true` throws the pinned
+ * error before any fetch, and an https endpoint with
+ * `requireHttps: true` constructs without fetching.
+ */
+const JWKS_REQUIRE_HTTPS_HTTP_URL =
+  "http://gateway.example.com/.well-known/jwks.json";
+const JWKS_REQUIRE_HTTPS_HTTPS_URL =
+  "https://gateway.example.com/.well-known/jwks.json";
+const JWKS_REQUIRE_HTTPS_ERROR =
+  'JwksKeyStore: `requireHttps` requires https: for the JWKS endpoint, got "http:"';
+
+/**
+ * `JwksKeyStore` with `requireHttps: true` steady state:
+ * every measured call resolves the pinned kid against the
+ * https-endpoint store, which is exactly the per-request
+ * cost a hardened gateway pays — the endpoint rule itself
+ * is construction-time only (the constructor rejects a
+ * non-https endpoint; `resolve` never consults it), so the
+ * measured path runs the identical resolve code as the
+ * plain `resolve` row above. Both rows are sub-microsecond
+ * Map lookups, so any gap between them is measurement
+ * noise at this scale, not a construction artefact.
+ * Outside timing,
+ * the http-endpoint rejection (pinned error, zero fetches)
+ * and the https-endpoint construction (zero fetches) are
+ * pinned, and the measured store's pinned kid resolves
+ * before any timing starts. Zero network, zero wall clock
+ * (the store's clock is injected).
+ */
+function benchmarkJwksRequireHttps(): number {
+  let fetches = 0;
+  const countingFetch: JwksFetchImpl = async () => {
+    fetches++;
+    throw new Error("benchmark must not fetch (requireHttps store)");
+  };
+
+  // Outside timing: an http endpoint with `requireHttps: true`
+  // throws the pinned error and fetches zero times.
+  try {
+    new JwksKeyStore(JWKS_REQUIRE_HTTPS_HTTP_URL, {
+      requireHttps: true,
+      fetchImpl: countingFetch,
+    });
+    throw new Error(
+      "benchmark self-check failed: http endpoint with requireHttps did not throw",
+    );
+  } catch (err) {
+    if (!(err instanceof Error) || err.message !== JWKS_REQUIRE_HTTPS_ERROR)
+      throw new Error(
+        `benchmark self-check failed: http endpoint with requireHttps gave ${err instanceof Error ? JSON.stringify(err.message) : String(err)}`,
+      );
+  }
+  if (fetches !== 0)
+    throw new Error(
+      `benchmark self-check failed: rejected http endpoint fetched ${fetches} times (expected 0)`,
+    );
+
+  // Outside timing: an https endpoint with `requireHttps: true`
+  // constructs, and construction itself performs no fetch.
+  new JwksKeyStore(JWKS_REQUIRE_HTTPS_HTTPS_URL, {
+    requireHttps: true,
+    fetchImpl: countingFetch,
+  });
+  if (fetches !== 0)
+    throw new Error(
+      `benchmark self-check failed: https endpoint construction fetched ${fetches} times (expected 0)`,
+    );
+
+  // The measured store: the same https endpoint, hardened
+  // with `requireHttps: true`, restored offline like
+  // {@link offlineJwksStore} so no fetch can ever fire.
+  const { publicKey } = generateEd25519KeyPair();
+  const store = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: 1_700_000_000,
+      keys: [{ ...exportPublicKeyJwk(publicKey), kid: "bench-key" }],
+    },
+    JWKS_REQUIRE_HTTPS_HTTPS_URL,
+    {
+      requireHttps: true,
+      fetchImpl: async () => {
+        throw new Error("benchmark must not fetch (offline store)");
+      },
+      now: () => 1_700_000_000,
+    },
+  );
+  if (store.resolve("bench-key") === undefined)
+    throw new Error(
+      "benchmark self-check failed: requireHttps store missed bench-key",
+    );
+  return measure(() => {
+    if (store.resolve("bench-key") === undefined)
+      throw new Error(
+        "benchmark self-check failed: requireHttps resolve missed bench-key",
+      );
+  }, ITERATIONS);
+}
+
+/**
  * `memoizeKeyResolver` cache hit: the wrapper is primed once, then every
  * measured call must be served from the cache — the self-check asserts
  * the counting underlying resolver was still called exactly once after
@@ -8841,6 +8956,11 @@ results.push({
   alg: "JwksKeyStore.resolve (hit)",
   op: "resolve",
   ops: benchmarkJwksResolve(benchStore),
+});
+results.push({
+  alg: "JwksKeyStore.requireHttps (resolve)",
+  op: "resolve",
+  ops: benchmarkJwksRequireHttps(),
 });
 results.push({
   alg: "memoizeKeyResolver (hit)",

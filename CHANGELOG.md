@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for the JWKS https-only endpoint rule (backlog #639):
+  `bench` now measures `JwksKeyStore` with `requireHttps: true`
+  over an https endpoint restored offline — each measured op
+  resolves the pinned kid against that store, so the row measures
+  the same per-request resolve cost as the plain `resolve` row
+  (the rule is construction-time only and `resolve` never
+  consults it). The http-endpoint rejection (pinned error,
+  zero fetches) and the https-endpoint construction (zero
+  fetches) are asserted outside timing. The README Benchmarks
+  table is refreshed from this run, including the new row,
+  and the endpoint-rule path is documented there.
 - Benchmark row for per-label freshness windows (backlog #638):
   `bench` now measures `verifyAllLabels` with
   `maxSignatureAgeSecByLabel` over a dual ed25519 fixture signed
