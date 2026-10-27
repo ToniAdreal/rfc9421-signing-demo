@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label component-coverage lists (backlog #646):
+  `bench` now measures `verifyAllLabels` with
+  `requiredComponentsByLabel` over a dual ed25519 fixture signed
+  outside timing with `created` pinned and the verifier's `now`
+  injected (merchant must cover `content-digest`, gateway must cover
+  `@query`, request carrying `?ref=abc`) — each measured op verifies
+  the split dual, merchant exactly `MISSING_REQUIRED_COMPONENT`
+  with the pinned reason while the gateway label still verifies, so
+  the row pays the per-label map resolution and the
+  pre-cryptographic coverage check for each label. The reverse split,
+  the replace-not-union half (a mapped list replaces the global list,
+  including a mapped `[]` disabling the check for that label while
+  the unmapped label still falls back to the global list), the
+  gateway-only-map fallback in the other direction, and the no-option
+  default (both labels verify, since the check is opt-in) are
+  asserted outside timing. The README Benchmarks table is refreshed
+  from this run, including the new row at 3,731 ops/sec
+  (268.01 µs/op), and the per-label component-coverage path is
+  documented there.
 - Benchmark row for per-label expiry-grace tolerances (backlog #645):
   `bench` now measures `verifyAllLabels` with
   `expiredToleranceSecByLabel` over a dual ed25519 fixture signed

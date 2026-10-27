@@ -4412,6 +4412,289 @@ function benchmarkVerifyAllExpiredToleranceSecByLabel(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Pinned shape of the `verifyAllLabels`
+ * requiredComponentsByLabel benchmark: two ed25519 key
+ * pairs (generated once, outside timing), one request
+ * with a query string (`?ref=abc`, so `@query` resolves
+ * to a non-empty value), and a per-label component
+ * list (merchant must cover `content-digest`, gateway
+ * must cover `@query`) in
+ * `requiredComponentsByLabel`, so the same dual-label
+ * fixture splits: the merchant signature covering only
+ * `@method` and `@path` fails its own list while the
+ * gateway signature covering `@method`, `@path` and
+ * `@query` still verifies. The request and both
+ * signatures are built outside timing with `created`
+ * pinned, and every verify instant is injected, so the
+ * measured op is pure per-label coverage policy plus
+ * verification — no wall clock, no network.
+ */
+const REQUIRED_COMPONENTS_BY_LABEL_CREATED = 1_700_000_000;
+const REQUIRED_COMPONENTS_BY_LABEL_NOW = 1_700_000_000;
+const REQUIRED_COMPONENTS_BY_LABEL_REQUEST = {
+  ...fixture,
+  url: "https://api.example.com/v1/payments?ref=abc",
+};
+const REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KID =
+  "bench-required-components-by-label-merchant-1";
+const REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KID =
+  "bench-required-components-by-label-gateway-1";
+const REQUIRED_COMPONENTS_BY_LABEL_MAP = {
+  merchant: ["content-digest"],
+  gateway: ["@query"],
+};
+const REQUIRED_COMPONENTS_BY_LABEL_MISMATCH_CODE =
+  "MISSING_REQUIRED_COMPONENT";
+const REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REASON =
+  'signature does not cover required component: "content-digest"';
+const REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_REASON =
+  'signature does not cover required component: "@query"';
+
+/**
+ * `verifyAllLabels` with `requiredComponentsByLabel`
+ * steady state: the per-label component-coverage form
+ * a multi-party receiver uses when each signer must
+ * bind a different part of the request (the merchant
+ * must bind the body digest, the gateway must bind
+ * the query string) — every measured call runs the
+ * per-label map resolution and the pre-cryptographic
+ * coverage check for each label, which the plain
+ * `verifyRequest requiredComponents` row never pays,
+ * because it checks one signature against one global
+ * list. One measured op verifies the split dual: the
+ * merchant label is exactly
+ * `MISSING_REQUIRED_COMPONENT` with the pinned reason
+ * and the gateway label still verifies, proving one
+ * label's missing coverage never blocks the other
+ * label's verdict. Outside timing, the reverse split
+ * (merchant covering the digest, gateway missing
+ * `@query`), the replace-not-union half (a mapped
+ * list replaces the global list, so the merchant
+ * mapped to `["@method"]` passes under a global
+ * `content-digest` requirement while the unmapped
+ * gateway falls back to that global list and fails),
+ * the empty-list half (a mapped `[]` disables the
+ * check for that label even under the same global
+ * list, while the unmapped gateway still fails on
+ * it), the gateway-only-map fallback in the other
+ * direction, and the no-option default (both labels
+ * verify, since the coverage check is opt-in) are
+ * pinned once. Zero network, zero randomness in the
+ * measured assertions, no wall clock (every verify
+ * instant is injected).
+ */
+function benchmarkVerifyAllRequiredComponentsByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantSigned = signRequest(
+    REQUIRED_COMPONENTS_BY_LABEL_REQUEST,
+    {
+      keyId: REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KID,
+      alg: "ed25519",
+      key: merchantPrivate,
+      label: "merchant",
+      created: REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+      coveredComponents: ["@method", "@path"],
+    },
+  );
+  const dual = addSignature(merchantSigned, {
+    keyId: REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+    coveredComponents: ["@method", "@path", "@query"],
+  });
+  const merchantCoveredSigned = signRequest(
+    REQUIRED_COMPONENTS_BY_LABEL_REQUEST,
+    {
+      keyId: REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KID,
+      alg: "ed25519",
+      key: merchantPrivate,
+      label: "merchant",
+      created: REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+      coveredComponents: ["@method", "@path", "content-digest"],
+    },
+  );
+  const reverseDual = addSignature(merchantCoveredSigned, {
+    keyId: REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+    coveredComponents: ["@method", "@path"],
+  });
+  const neitherCoveredSigned = signRequest(
+    REQUIRED_COMPONENTS_BY_LABEL_REQUEST,
+    {
+      keyId: REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KID,
+      alg: "ed25519",
+      key: merchantPrivate,
+      label: "merchant",
+      created: REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+      coveredComponents: ["@method", "@path"],
+    },
+  );
+  const neitherCoveredDual = addSignature(neitherCoveredSigned, {
+    keyId: REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: REQUIRED_COMPONENTS_BY_LABEL_CREATED,
+    coveredComponents: ["@method", "@path"],
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: REQUIRED_COMPONENTS_BY_LABEL_NOW,
+    requiredComponentsByLabel: REQUIRED_COMPONENTS_BY_LABEL_MAP,
+  };
+  const assertDual = (where: string): void => {
+    const split = verifyAllLabels(dual, verifyOpts);
+    if (
+      split.length !== 2 ||
+      split[0].label !== "merchant" ||
+      split[0].ok ||
+      split[0].code !==
+        REQUIRED_COMPONENTS_BY_LABEL_MISMATCH_CODE ||
+      split[0].reason !==
+        REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REASON ||
+      split[1].label !== "gateway" ||
+      !split[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with requiredComponentsByLabel (${where}, split dual) gave ${JSON.stringify(split)}`,
+      );
+  };
+
+  // Outside timing: the split dual self-checks under the
+  // per-label lists before any timing starts.
+  assertDual("outside timing");
+
+  // Outside timing: the reverse split — the merchant
+  // covering the digest passes while the gateway
+  // missing `@query` fails exactly on its own list.
+  const reversed = verifyAllLabels(reverseDual, verifyOpts);
+  if (
+    reversed.length !== 2 ||
+    reversed[0].label !== "merchant" ||
+    !reversed[0].ok ||
+    reversed[1].label !== "gateway" ||
+    reversed[1].ok ||
+    reversed[1].code !==
+      REQUIRED_COMPONENTS_BY_LABEL_MISMATCH_CODE ||
+    reversed[1].reason !==
+      REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: reverse split gave ${JSON.stringify(reversed)}`,
+    );
+
+  // Outside timing: a mapped list replaces the global
+  // list rather than unioning with it — the merchant
+  // mapped to `["@method"]` passes even though the
+  // global list demands `content-digest`, which it
+  // does not cover, while the unmapped gateway falls
+  // back to the global list and fails on it.
+  const replaced = verifyAllLabels(neitherCoveredDual, {
+    keys,
+    now: REQUIRED_COMPONENTS_BY_LABEL_NOW,
+    requiredComponents: ["content-digest"],
+    requiredComponentsByLabel: { merchant: ["@method"] },
+  });
+  if (
+    replaced.length !== 2 ||
+    replaced[0].label !== "merchant" ||
+    !replaced[0].ok ||
+    replaced[1].label !== "gateway" ||
+    replaced[1].ok ||
+    replaced[1].code !==
+      REQUIRED_COMPONENTS_BY_LABEL_MISMATCH_CODE ||
+    replaced[1].reason !==
+      REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: mapped-list-replaces-global gave ${JSON.stringify(replaced)}`,
+    );
+
+  // Outside timing: a mapped `[]` disables the check
+  // for that label outright — the merchant passes
+  // under the same global `content-digest` requirement
+  // while the unmapped gateway still falls back to it
+  // and fails.
+  const emptied = verifyAllLabels(neitherCoveredDual, {
+    keys,
+    now: REQUIRED_COMPONENTS_BY_LABEL_NOW,
+    requiredComponents: ["content-digest"],
+    requiredComponentsByLabel: { merchant: [] },
+  });
+  if (
+    emptied.length !== 2 ||
+    emptied[0].label !== "merchant" ||
+    !emptied[0].ok ||
+    emptied[1].label !== "gateway" ||
+    emptied[1].ok ||
+    emptied[1].code !==
+      REQUIRED_COMPONENTS_BY_LABEL_MISMATCH_CODE ||
+    emptied[1].reason !==
+      REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: mapped-empty-list gave ${JSON.stringify(emptied)}`,
+    );
+
+  // Outside timing: the same fallback in the other
+  // direction — the gateway-only map under a global
+  // `content-digest` requirement passes the mapped
+  // gateway (it covers `@query`) while the unmapped
+  // merchant falls back to the global list and fails
+  // on the digest it does not cover.
+  const fallbackGatewayOnly = verifyAllLabels(dual, {
+    keys,
+    now: REQUIRED_COMPONENTS_BY_LABEL_NOW,
+    requiredComponents: ["content-digest"],
+    requiredComponentsByLabel: { gateway: ["@query"] },
+  });
+  if (
+    fallbackGatewayOnly.length !== 2 ||
+    fallbackGatewayOnly[0].label !== "merchant" ||
+    fallbackGatewayOnly[0].ok ||
+    fallbackGatewayOnly[0].code !==
+      REQUIRED_COMPONENTS_BY_LABEL_MISMATCH_CODE ||
+    fallbackGatewayOnly[0].reason !==
+      REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_REASON ||
+    fallbackGatewayOnly[1].label !== "gateway" ||
+    !fallbackGatewayOnly[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback (gateway-only map) gave ${JSON.stringify(fallbackGatewayOnly)}`,
+    );
+
+  // Outside timing: with no option the same split dual
+  // verifies on both labels — the coverage check is
+  // opt-in and the default behaviour is unchanged.
+  const defaulted = verifyAllLabels(dual, {
+    keys,
+    now: REQUIRED_COMPONENTS_BY_LABEL_NOW,
+  });
+  if (
+    defaulted.length !== 2 ||
+    defaulted.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: split dual default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
 const EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED = 1_700_000_000;
 const EXPECTED_KEY_IDS_REQUIRE_TAG_MERCHANT_KID =
   "bench-expected-keyids-require-tag-merchant-1";
@@ -9516,6 +9799,11 @@ results.push({
   alg: "verifyAllLabels expiredToleranceSecByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllExpiredToleranceSecByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels requiredComponentsByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllRequiredComponentsByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",
