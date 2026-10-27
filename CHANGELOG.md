@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label tag pinning (backlog #637):
+  `bench` now measures `verifyAllLabels` with `expectedTags` over a
+  dual ed25519 fixture signed outside timing with `created` pinned —
+  each measured op verifies the fully pinned dual (both labels ok,
+  each tag echoed at its pinned value) and the
+  differently-tagged-gateway dual (merchant still ok while the
+  gateway label is exactly `TAG_MISMATCH` with the pinned reason,
+  proving the failure is the tag value rather than a signature
+  error). The fallback halves (an unmapped label falling back to
+  the global `expectedTag`, matching and mismatching) and the
+  opt-in default are asserted outside timing. The README
+  Benchmarks table is refreshed from this run, including the new
+  row, and the per-label tag-pinning path is documented there.
 - Per-label `alg` fallback strategies for `verifyAllLabels` (backlog
   #636): `VerifyAllOptions.algFallbackByLabel` maps a signature label
   to its own `algFallback` value, falling back to the global strategy

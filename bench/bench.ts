@@ -232,6 +232,24 @@
  * acceptance with no option passed, an explicit `merchant: false`
  * map entry letting it through, and a differently-tagged merchant
  * fixture still verifying asserted outside timing, plus
+ * the per-label tag-pinning verify path a multi-party
+ * receiver runs when each signer must bind its signature
+ * to its own application protocol: `verifyAllLabels` with
+ * `expectedTags` over a dual ed25519 fixture signed
+ * outside timing with `created` pinned (merchant tag
+ * pinned to one protocol, gateway tag pinned to another
+ * — see EXPECTED_TAGS_* below), self-checked on every
+ * measured pass (one measured op verifies both the
+ * fully pinned dual, both labels ok with each tag
+ * echoed at its pinned value, and the
+ * differently-tagged-gateway dual, merchant still ok
+ * while the gateway label is exactly `TAG_MISMATCH`
+ * with the pinned reason, proving the failure is the
+ * tag value and not a signature error), with a label
+ * missing from the map falling back to the global
+ * `expectedTag` (both the matching and the mismatching
+ * fallback halves) and the same dual's acceptance with
+ * no option passed asserted outside timing, plus
  * the per-label required-freshness verify path a multi-party
  * receiver runs when each signer must bound its own signature
  * differently: `verifyAllLabels` with `requireCreatedByLabel`
@@ -3585,6 +3603,200 @@ function benchmarkVerifyAllRequireTagByLabel(): number {
   )
     throw new Error(
       `benchmark self-check failed: differently-tagged dual gave ${JSON.stringify(otherTagged)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels` expectedTags
+ * benchmark: two ed25519 key pairs (generated once,
+ * outside timing), two dual-label fixtures signed outside
+ * timing with `created` pinned under two pinned keyids
+ * (merchant / gateway, the canonical multi-party labels),
+ * and the verifier's injected `now` at the `created`
+ * instant. The merchant label is pinned to one
+ * application protocol and the gateway label to another
+ * in `expectedTags`, so each label's tag is checked
+ * against its own expectation.
+ */
+const EXPECTED_TAGS_CREATED = 1_700_000_000;
+const EXPECTED_TAGS_MERCHANT_KID = "bench-expected-tags-merchant-1";
+const EXPECTED_TAGS_GATEWAY_KID = "bench-expected-tags-gateway-1";
+const EXPECTED_TAGS_MERCHANT_VALUE = "bench-expected-tags-payment-v1";
+const EXPECTED_TAGS_GATEWAY_VALUE = "bench-expected-tags-settlement-v1";
+const EXPECTED_TAGS_GATEWAY_OTHER_VALUE = "bench-expected-tags-admin-v1";
+const EXPECTED_TAGS_MISMATCH_CODE = "TAG_MISMATCH";
+
+/**
+ * `verifyAllLabels` with `expectedTags` steady
+ * state: the per-label tag-pinning form a multi-party
+ * receiver uses when each signer must bind its
+ * signature to its own application protocol (the
+ * merchant signature belongs to the payment protocol,
+ * the gateway signature to the settlement protocol) —
+ * every measured call runs the per-label map
+ * resolution and the post-cryptographic
+ * `tag === expectedTag` comparison for each label,
+ * which the plain `verifyAllLabels` row above never
+ * pays, because it passes no expectation. One
+ * measured op verifies two dual-label fixtures: the
+ * fully pinned dual (both labels ok, each tag echoed
+ * at its pinned value) and the
+ * differently-tagged-gateway dual (merchant still ok
+ * while the gateway label is exactly `TAG_MISMATCH`
+ * with the pinned reason and its carried tag echoed,
+ * proving the failure is the tag value rather than a
+ * signature error and that one label's failure never
+ * blocks the other label's verdict). Outside timing,
+ * the fallback halves are pinned once: a label
+ * missing from the map falls back to the global
+ * `expectedTag` (the matching fallback passes and the
+ * mismatching fallback fails exactly on the merchant
+ * label while the mapped gateway label still
+ * verifies), and the same dual verifies with no
+ * option passed — the pinning is opt-in and the
+ * default behaviour is unchanged. Zero network, zero
+ * randomness in the measured assertions, no wall
+ * clock (every verify instant is injected).
+ */
+function benchmarkVerifyAllExpectedTags(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantSigned = signRequest(fixture, {
+    keyId: EXPECTED_TAGS_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: EXPECTED_TAGS_CREATED,
+    tag: EXPECTED_TAGS_MERCHANT_VALUE,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: EXPECTED_TAGS_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: EXPECTED_TAGS_CREATED,
+    tag: EXPECTED_TAGS_GATEWAY_VALUE,
+  });
+  const gatewayOtherTagSigned = signRequest(fixture, {
+    keyId: EXPECTED_TAGS_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: EXPECTED_TAGS_CREATED,
+    tag: EXPECTED_TAGS_MERCHANT_VALUE,
+  });
+  const dualGatewayOtherTag = addSignature(gatewayOtherTagSigned, {
+    keyId: EXPECTED_TAGS_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: EXPECTED_TAGS_CREATED,
+    tag: EXPECTED_TAGS_GATEWAY_OTHER_VALUE,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: EXPECTED_TAGS_CREATED,
+    expectedTags: {
+      merchant: EXPECTED_TAGS_MERCHANT_VALUE,
+      gateway: EXPECTED_TAGS_GATEWAY_VALUE,
+    },
+  };
+  const assertDual = (where: string): void => {
+    const accepted = verifyAllLabels(dual, verifyOpts);
+    if (
+      accepted.length !== 2 ||
+      accepted[0].label !== "merchant" ||
+      !accepted[0].ok ||
+      accepted[0].tag !== EXPECTED_TAGS_MERCHANT_VALUE ||
+      accepted[1].label !== "gateway" ||
+      !accepted[1].ok ||
+      accepted[1].tag !== EXPECTED_TAGS_GATEWAY_VALUE
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with expectedTags (${where}, fully pinned dual) gave ${JSON.stringify(accepted)}`,
+      );
+    const mismatched = verifyAllLabels(dualGatewayOtherTag, verifyOpts);
+    if (
+      mismatched.length !== 2 ||
+      mismatched[0].label !== "merchant" ||
+      !mismatched[0].ok ||
+      mismatched[0].tag !== EXPECTED_TAGS_MERCHANT_VALUE ||
+      mismatched[1].label !== "gateway" ||
+      mismatched[1].ok ||
+      mismatched[1].code !== EXPECTED_TAGS_MISMATCH_CODE ||
+      mismatched[1].reason !==
+        `tag mismatch: expected "${EXPECTED_TAGS_GATEWAY_VALUE}", got "${EXPECTED_TAGS_GATEWAY_OTHER_VALUE}"` ||
+      mismatched[1].tag !== EXPECTED_TAGS_GATEWAY_OTHER_VALUE
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with expectedTags (${where}, differently-tagged-gateway dual) gave ${JSON.stringify(mismatched)}`,
+      );
+  };
+
+  // Outside timing: both fixtures self-check under the
+  // per-label pinning before any timing starts.
+  assertDual("outside timing");
+
+  // Outside timing: a label missing from the map falls
+  // back to the global `expectedTag` — the matching
+  // fallback passes on both labels.
+  const fallbackMatch = verifyAllLabels(dual, {
+    keys,
+    now: EXPECTED_TAGS_CREATED,
+    expectedTags: { gateway: EXPECTED_TAGS_GATEWAY_VALUE },
+    expectedTag: EXPECTED_TAGS_MERCHANT_VALUE,
+  });
+  if (
+    fallbackMatch.length !== 2 ||
+    fallbackMatch.some((r) => !r.ok) ||
+    fallbackMatch[0].tag !== EXPECTED_TAGS_MERCHANT_VALUE ||
+    fallbackMatch[1].tag !== EXPECTED_TAGS_GATEWAY_VALUE
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback (match) gave ${JSON.stringify(fallbackMatch)}`,
+    );
+
+  // Outside timing: the same fallback with a global
+  // expectation the merchant tag does not meet fails
+  // exactly on the merchant label while the mapped
+  // gateway label still verifies.
+  const fallbackMismatch = verifyAllLabels(dual, {
+    keys,
+    now: EXPECTED_TAGS_CREATED,
+    expectedTags: { gateway: EXPECTED_TAGS_GATEWAY_VALUE },
+    expectedTag: EXPECTED_TAGS_GATEWAY_OTHER_VALUE,
+  });
+  if (
+    fallbackMismatch.length !== 2 ||
+    fallbackMismatch[0].label !== "merchant" ||
+    fallbackMismatch[0].ok ||
+    fallbackMismatch[0].code !== EXPECTED_TAGS_MISMATCH_CODE ||
+    fallbackMismatch[1].label !== "gateway" ||
+    !fallbackMismatch[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback (mismatch) gave ${JSON.stringify(fallbackMismatch)}`,
+    );
+
+  // Outside timing: with no option the same dual
+  // verifies — the pinning is opt-in and the default
+  // behaviour is unchanged.
+  const defaulted = verifyAllLabels(dual, {
+    keys,
+    now: EXPECTED_TAGS_CREATED,
+  });
+  if (defaulted.length !== 2 || defaulted.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: pinned dual default gave ${JSON.stringify(defaulted)}`,
     );
 
   return measure(() => {
@@ -8563,6 +8775,11 @@ results.push({
   alg: "verifyAllLabels requireFreshnessByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllRequireFreshnessByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels expectedTags (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllExpectedTags(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",
