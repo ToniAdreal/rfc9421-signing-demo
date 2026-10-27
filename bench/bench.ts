@@ -646,7 +646,9 @@
  * Run: `npm run bench`
  */
 import {
+  createHmac,
   createSecretKey,
+  createSign,
   generateKeyPairSync,
   sign as edSign,
   type KeyObject,
@@ -4685,6 +4687,302 @@ function benchmarkVerifyAllRequiredComponentsByLabel(): number {
   if (
     defaulted.length !== 2 ||
     defaulted.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: split dual default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels`
+ * algFallbackByLabel benchmark: a P-256 merchant key
+ * pair and an HMAC gateway secret (generated once,
+ * outside timing), one request, and a per-label
+ * algorithm-fallback map (merchant `"infer"`,
+ * gateway `false`) in `algFallbackByLabel`, so the
+ * same dual-label fixture splits: the merchant
+ * signature carries no `alg` parameter (a foreign
+ * signer, same shape as `test/algFallbackByLabel.test.ts`)
+ * and passes only because its label infers
+ * `ecdsa-p256-sha256` from the P-256 key, while the
+ * gateway signature (also no `alg`) fails under its
+ * strict label because the legacy default means
+ * `ed25519`, which the crypto layer rejects against
+ * a secret key. Both signatures are built outside
+ * timing with `created` pinned, and every verify
+ * instant is injected, so the measured op is pure
+ * per-label fallback resolution plus verification —
+ * no wall clock, no network.
+ */
+const ALG_FALLBACK_BY_LABEL_CREATED = 1_700_000_000;
+const ALG_FALLBACK_BY_LABEL_NOW = 1_700_000_000;
+const ALG_FALLBACK_BY_LABEL_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+  "content-digest",
+];
+const ALG_FALLBACK_BY_LABEL_MERCHANT_KID =
+  "bench-alg-fallback-by-label-merchant-1";
+const ALG_FALLBACK_BY_LABEL_GATEWAY_KID =
+  "bench-alg-fallback-by-label-gateway-1";
+const ALG_FALLBACK_BY_LABEL_MAP: Record<string, "infer" | false> = {
+  merchant: "infer",
+  gateway: false,
+};
+const ALG_FALLBACK_BY_LABEL_GATEWAY_CODE = "VERIFICATION_ERROR";
+const ALG_FALLBACK_BY_LABEL_MERCHANT_ALG = "ecdsa-p256-sha256";
+const ALG_FALLBACK_BY_LABEL_GATEWAY_ALG = "hmac-sha256";
+const ALG_FALLBACK_BY_LABEL_STRICT_MERCHANT_CODE = "SIGNATURE_MISMATCH";
+
+/**
+ * `verifyAllLabels` with `algFallbackByLabel` steady
+ * state: the per-label algorithm-inference form a
+ * multi-party receiver uses when each foreign signer
+ * omits the optional `alg` parameter and only one of
+ * them may be inferred (the merchant's P-256 key
+ * implies its algorithm; the gateway's HMAC key must
+ * stay strict so a missing `alg` never silently
+ * resolves) — every measured call runs the per-label
+ * map resolution and the key-shape inference for
+ * each label, which the plain `verifyRequest
+ * algFallback` row never pays, because it infers one
+ * signature under one global strategy. One measured
+ * op verifies the split dual: the merchant label
+ * verifies with the inferred `ecdsa-p256-sha256`
+ * algorithm while the gateway label is exactly
+ * `VERIFICATION_ERROR`, proving one label's strict
+ * rejection never blocks the other label's verdict.
+ * Outside timing, the reversed split (merchant
+ * strict, gateway inferred — the P-256 merchant is
+ * exactly `SIGNATURE_MISMATCH` under the legacy
+ * `ed25519` default while the gateway verifies as
+ * `hmac-sha256`), the mapped-`false`-overrides-global
+ * half (both labels mapped `false` under a global
+ * `"infer"` still fail with exactly the strict
+ * codes, since `??` only falls back on a missing
+ * entry, never on `false`), the unmapped-label
+ * global-fallback halves (a merchant-only strict
+ * map under a global `"infer"` lets the unmapped
+ * gateway infer, and a merchant-only infer map with
+ * no global leaves the unmapped gateway on the
+ * legacy default), and the no-option default (both
+ * labels fail, since neither infers) are pinned once.
+ * Zero network, zero randomness in the measured
+ * assertions, no wall clock (every verify instant is
+ * injected).
+ */
+function benchmarkVerifyAllAlgFallbackByLabel(): number {
+  const { publicKey: merchantPublic, privateKey: merchantPrivate } =
+    generateP256KeyPair();
+  const gatewaySecret = secretKey(Buffer.alloc(32, 0x47));
+  const requestWithDigest = {
+    ...fixture,
+    headers: {
+      ...fixture.headers,
+      "content-digest": contentDigest(fixture.body),
+    },
+  };
+  const buildLabel = (
+    keyId: string,
+    label: string,
+    key: KeyObject,
+  ): SignedHttpRequest => {
+    const params = {
+      created: ALG_FALLBACK_BY_LABEL_CREATED,
+      keyid: keyId,
+    }; // no alg, ever — the foreign-signer shape
+    const base = buildSignatureBase(
+      ALG_FALLBACK_BY_LABEL_COVERED_COMPONENTS,
+      requestWithDigest,
+      params,
+    );
+    // A spec-conformant foreign P-256 signer emits the
+    // raw r||s value RFC 9421 §3.3.4 defines
+    // (node:crypto's ieee-p1363 encoding), never DER.
+    const sig =
+      key.type === "secret"
+        ? createHmac("sha256", key).update(base, "utf8").digest()
+        : createSign("sha256")
+            .update(base, "utf8")
+            .sign({ key, dsaEncoding: "ieee-p1363" });
+    return {
+      method: fixture.method,
+      url: fixture.url,
+      body: fixture.body,
+      headers: {
+        // The covered `content-digest` component must be
+        // present on the wire, not just in the base.
+        ...requestWithDigest.headers,
+        "signature-input": signatureInputValue(
+          label,
+          ALG_FALLBACK_BY_LABEL_COVERED_COMPONENTS,
+          params,
+        ),
+        signature: `${label}=:${sig.toString("base64")}:`,
+      },
+    };
+  };
+  const merchantSigned = buildLabel(
+    ALG_FALLBACK_BY_LABEL_MERCHANT_KID,
+    "merchant",
+    merchantPrivate,
+  );
+  const gatewaySigned = buildLabel(
+    ALG_FALLBACK_BY_LABEL_GATEWAY_KID,
+    "gateway",
+    gatewaySecret,
+  );
+  const dual = {
+    ...merchantSigned,
+    headers: {
+      ...merchantSigned.headers,
+      "signature-input": `${merchantSigned.headers["signature-input"]}, ${gatewaySigned.headers["signature-input"]}`,
+      signature: `${merchantSigned.headers["signature"]}, ${gatewaySigned.headers["signature"]}`,
+    },
+  };
+  const keys = { merchant: merchantPublic, gateway: gatewaySecret };
+  const verifyOpts = {
+    keys,
+    now: ALG_FALLBACK_BY_LABEL_NOW,
+    algFallbackByLabel: ALG_FALLBACK_BY_LABEL_MAP,
+  };
+  const assertDual = (where: string): void => {
+    const split = verifyAllLabels(dual, verifyOpts);
+    if (
+      split.length !== 2 ||
+      split[0].label !== "merchant" ||
+      !split[0].ok ||
+      split[0].alg !== ALG_FALLBACK_BY_LABEL_MERCHANT_ALG ||
+      split[1].label !== "gateway" ||
+      split[1].ok ||
+      split[1].code !== ALG_FALLBACK_BY_LABEL_GATEWAY_CODE
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with algFallbackByLabel (${where}, split dual) gave ${JSON.stringify(split)}`,
+      );
+  };
+
+  // Outside timing: the split dual self-checks under
+  // the per-label map before any timing starts.
+  assertDual("outside timing");
+
+  // Outside timing: the reversed split — the merchant
+  // strict under the legacy default fails as a plain
+  // mismatch (the crypto layer returns false for the
+  // wrong key type) while the gateway infers
+  // `hmac-sha256` and verifies.
+  const reversed = verifyAllLabels(dual, {
+    keys,
+    now: ALG_FALLBACK_BY_LABEL_NOW,
+    algFallbackByLabel: { merchant: false, gateway: "infer" },
+  });
+  if (
+    reversed.length !== 2 ||
+    reversed[0].label !== "merchant" ||
+    reversed[0].ok ||
+    reversed[0].code !==
+      ALG_FALLBACK_BY_LABEL_STRICT_MERCHANT_CODE ||
+    reversed[1].label !== "gateway" ||
+    !reversed[1].ok ||
+    reversed[1].alg !== ALG_FALLBACK_BY_LABEL_GATEWAY_ALG
+  )
+    throw new Error(
+      `benchmark self-check failed: reversed split gave ${JSON.stringify(reversed)}`,
+    );
+
+  // Outside timing: a mapped `false` overrides a
+  // global `"infer"` — `??` falls back only on a
+  // missing entry, never on `false` — so both labels
+  // still fail with exactly the strict codes.
+  const strict = verifyAllLabels(dual, {
+    keys,
+    now: ALG_FALLBACK_BY_LABEL_NOW,
+    algFallback: "infer",
+    algFallbackByLabel: { merchant: false, gateway: false },
+  });
+  if (
+    strict.length !== 2 ||
+    strict[0].label !== "merchant" ||
+    strict[0].ok ||
+    strict[0].code !==
+      ALG_FALLBACK_BY_LABEL_STRICT_MERCHANT_CODE ||
+    strict[1].label !== "gateway" ||
+    strict[1].ok ||
+    strict[1].code !== ALG_FALLBACK_BY_LABEL_GATEWAY_CODE
+  )
+    throw new Error(
+      `benchmark self-check failed: mapped-false-overrides-global gave ${JSON.stringify(strict)}`,
+    );
+
+  // Outside timing: an unmapped label falls back to
+  // the global strategy — a merchant-only strict map
+  // under a global `"infer"` lets the unmapped
+  // gateway infer and verify.
+  const gatewayFallback = verifyAllLabels(dual, {
+    keys,
+    now: ALG_FALLBACK_BY_LABEL_NOW,
+    algFallback: "infer",
+    algFallbackByLabel: { merchant: false },
+  });
+  if (
+    gatewayFallback.length !== 2 ||
+    gatewayFallback[0].label !== "merchant" ||
+    gatewayFallback[0].ok ||
+    gatewayFallback[0].code !==
+      ALG_FALLBACK_BY_LABEL_STRICT_MERCHANT_CODE ||
+    gatewayFallback[1].label !== "gateway" ||
+    !gatewayFallback[1].ok ||
+    gatewayFallback[1].alg !== ALG_FALLBACK_BY_LABEL_GATEWAY_ALG
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-gateway global fallback gave ${JSON.stringify(gatewayFallback)}`,
+    );
+
+  // Outside timing: the same fallback in the other
+  // direction — a merchant-only infer map with no
+  // global leaves the unmapped gateway on the legacy
+  // default, so it fails exactly as the strict label
+  // does while the merchant verifies.
+  const merchantFallback = verifyAllLabels(dual, {
+    keys,
+    now: ALG_FALLBACK_BY_LABEL_NOW,
+    algFallbackByLabel: { merchant: "infer" },
+  });
+  if (
+    merchantFallback.length !== 2 ||
+    merchantFallback[0].label !== "merchant" ||
+    !merchantFallback[0].ok ||
+    merchantFallback[0].alg !==
+      ALG_FALLBACK_BY_LABEL_MERCHANT_ALG ||
+    merchantFallback[1].label !== "gateway" ||
+    merchantFallback[1].ok ||
+    merchantFallback[1].code !== ALG_FALLBACK_BY_LABEL_GATEWAY_CODE
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-merchant global fallback gave ${JSON.stringify(merchantFallback)}`,
+    );
+
+  // Outside timing: with no option the same split
+  // dual fails on both labels — neither infers under
+  // the legacy default.
+  const defaulted = verifyAllLabels(dual, {
+    keys,
+    now: ALG_FALLBACK_BY_LABEL_NOW,
+  });
+  if (
+    defaulted.length !== 2 ||
+    defaulted[0].label !== "merchant" ||
+    defaulted[0].ok ||
+    defaulted[0].code !==
+      ALG_FALLBACK_BY_LABEL_STRICT_MERCHANT_CODE ||
+    defaulted[1].label !== "gateway" ||
+    defaulted[1].ok ||
+    defaulted[1].code !== ALG_FALLBACK_BY_LABEL_GATEWAY_CODE
   )
     throw new Error(
       `benchmark self-check failed: split dual default gave ${JSON.stringify(defaulted)}`,
@@ -9804,6 +10102,11 @@ results.push({
   alg: "verifyAllLabels requiredComponentsByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllRequiredComponentsByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels algFallbackByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllAlgFallbackByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",

@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label algorithm-inference strategies (backlog #647):
+  `bench` now measures `verifyAllLabels` with `algFallbackByLabel`
+  over a dual-label fixture signed outside timing with `created`
+  pinned and the verifier's `now` injected — both signatures carry
+  no `alg` parameter (the foreign-signer shape of
+  `test/algFallbackByLabel.test.ts`): the merchant label (P-256 key,
+  mapped `"infer"`) verifies with the inferred `ecdsa-p256-sha256`
+  algorithm while the gateway label (HMAC secret, mapped `false`)
+  is exactly `VERIFICATION_ERROR`, so the row pays the per-label map
+  resolution and the key-shape inference for each label. The reversed
+  split (P-256 merchant strict is exactly `SIGNATURE_MISMATCH`
+  while the gateway infers `hmac-sha256`), the mapped-`false`-
+  overrides-global half, the unmapped-label global-fallback halves
+  in both directions, and the no-option default (both labels fail)
+  are asserted outside timing. The README Benchmarks table is
+  refreshed from this run, including the new row at 5,840 ops/sec
+  (171.24 µs/op), and the per-label algorithm-inference path is
+  documented there.
 - Benchmark row for per-label component-coverage lists (backlog #646):
   `bench` now measures `verifyAllLabels` with
   `requiredComponentsByLabel` over a dual ed25519 fixture signed
