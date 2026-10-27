@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Per-label expiry tolerances for `verifyAllLabels` (backlog
+  #633): `VerifyAllOptions.expiredToleranceSecByLabel` maps a
+  signature label to its own `expiredToleranceSec`, falling back to
+  the global tolerance (default 0s) for unmapped labels — a merchant
+  signer whose signatures must die on time and a gateway signer that
+  needs a wider grace period for clock lag and retries can now be
+  verified on the same request without one global window being too
+  lax or too strict. Each map value must be a non-negative finite
+  number (zero is the strict default, so it is a valid per-label
+  value), otherwise a caller configuration error (throw). The README
+  multi-party section documents the option with a 0s/120s example,
+  and `test/expiredToleranceSecByLabel.test.ts` covers the split
+  verdict (60s-expired: merchant `EXPIRED`, gateway ok), the
+  exact-boundary pass and one-second-over failure, fallback to the
+  global tolerance and to the 0s default, fail-fast on
+  negative/non-finite/non-numeric values, and the unchanged
+  single-label `verifyRequest` global path.
 - Per-label clock-skew tolerances for `verifyAllLabels` (backlog
   #631): `VerifyAllOptions.clockSkewToleranceSecByLabel` maps a
   signature label to its own `clockSkewToleranceSec`, falling back to

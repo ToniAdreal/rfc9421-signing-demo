@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 983 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 990 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -377,6 +377,26 @@ const results = verifyAllLabels(dualSigned, {
 });
 // results[0] (merchant, 120s ahead, tolerance 5s) → { ok: false, code: "CREATED_IN_FUTURE" }
 // results[1] (gateway, 120s ahead, tolerance 300s) → { ok: true }
+```
+
+Per-label expiry tolerances (a merchant signer whose signatures must
+die on time plus a gateway signer that needs a wider grace period for
+clock lag and retries, on the same request): `verifyAllLabels` accepts
+an `expiredToleranceSecByLabel` map. A label in the map is checked
+against its own grace period; any other label falls back to the global
+`expiredToleranceSec` (default 0). Each value must be a non-negative
+finite number — zero is the strict default, so it is a valid per-label
+value — otherwise a configuration error. A tolerance is not key
+selection, so it never joins the `keys`/`keyResolver`/`candidateKeys`
+mutual-exclusion rules.
+
+```ts
+const results = verifyAllLabels(dualSigned, {
+  now: verifierNow, // both signatures expired 60s before it
+  expiredToleranceSecByLabel: { merchant: 0, gateway: 120 },
+});
+// results[0] (merchant, expired 60s, tolerance 0s) → { ok: false, code: "EXPIRED" }
+// results[1] (gateway, expired 60s, tolerance 120s) → { ok: true }
 ```
 
 Per-label freshness-existence requirements (a merchant signature that
@@ -2972,7 +2992,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 983 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 990 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

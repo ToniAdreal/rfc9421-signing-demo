@@ -104,7 +104,10 @@ export interface VerifyOptions {
    * Accept signatures whose `expires` timestamp is up to this many
    * seconds in the past. Defaults to 0: expiry is enforced strictly,
    * with no grace period. Set a small positive value to tolerate
-   * verifier clock lag during deployments and key rollovers.
+   * verifier clock lag during deployments and key rollovers. In
+   * `verifyAllLabels` the same tolerance applies to every label,
+   * unless overridden per label via
+   * `VerifyAllOptions.expiredToleranceSecByLabel`.
    */
   expiredToleranceSec?: number;
   /**
@@ -1348,6 +1351,21 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    */
   clockSkewToleranceSecByLabel?: Record<string, number>;
   /**
+   * Per-label expiry tolerances for multi-party signatures (e.g. a
+   * merchant signer whose signatures must die on time plus a
+   * payment-gateway signer that needs a wider grace period for clock
+   * lag and retries, on the same request): maps a signature label to
+   * that label's own `expiredToleranceSec`. A label absent from the
+   * map falls back to the global `expiredToleranceSec` (default 0).
+   * Each value must be a non-negative finite number — zero is the
+   * strict default, so it is a valid per-label value, unlike the
+   * clock-skew tolerance; a negative, non-finite, or non-numeric
+   * value is a caller configuration error (throw). A tolerance is
+   * not key selection, so it never joins the `keys`/`keyResolver`/
+   * `candidateKeys` mutual-exclusion rules.
+   */
+  expiredToleranceSecByLabel?: Record<string, number>;
+  /**
    * Per-label freshness-existence requirements for multi-party
    * signatures (e.g. a merchant signature that must carry `created`
    * and `expires`, plus a gateway signature that historically carries
@@ -1556,6 +1574,35 @@ function assertClockSkewToleranceSecByLabel(
 }
 
 /**
+ * Validate the per-label expiry-tolerance map. Each value must be a
+ * non-negative finite number of seconds (zero is the strict global
+ * default, so it is a valid per-label value; a negative tolerance
+ * would reject signatures that expire exactly now, which no caller
+ * asked for, so it is a caller configuration error rather than a
+ * policy); a malformed map or value is a caller configuration error,
+ * so it throws rather than returning `{ ok: false }`.
+ */
+function assertExpiredToleranceSecByLabel(
+  map: Record<string, number> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `expiredToleranceSecByLabel` must be a label→tolerance object",
+    );
+  for (const [label, tolerance] of Object.entries(map)) {
+    if (
+      typeof tolerance !== "number" ||
+      !Number.isFinite(tolerance) ||
+      tolerance < 0
+    )
+      throw new Error(
+        `verifyAllLabels: \`expiredToleranceSecByLabel["${label}"]\` must be a non-negative finite number, got ${typeof tolerance === "number" ? String(tolerance) : typeof tolerance}`,
+      );
+  }
+}
+
+/**
  * Validate a per-label freshness-existence map. Each value must be a
  * boolean; a malformed map or value is a caller configuration error,
  * so it throws rather than returning `{ ok: false }`.
@@ -1602,6 +1649,7 @@ export function verifyAllLabels(
   assertCandidateKeysByLabel(opts.candidateKeysByLabel);
   assertMaxSignatureAgeSecByLabel(opts.maxSignatureAgeSecByLabel);
   assertClockSkewToleranceSecByLabel(opts.clockSkewToleranceSecByLabel);
+  assertExpiredToleranceSecByLabel(opts.expiredToleranceSecByLabel);
   assertRequireFlagByLabel("requireCreatedByLabel", opts.requireCreatedByLabel);
   assertRequireFlagByLabel("requireExpiresByLabel", opts.requireExpiresByLabel);
   assertRequireFlagByLabel("requireNonceByLabel", opts.requireNonceByLabel);
@@ -1665,6 +1713,14 @@ export function verifyAllLabels(
     const clockSkewToleranceSec =
       opts.clockSkewToleranceSecByLabel?.[label] ??
       opts.clockSkewToleranceSec;
+    // Per-label expiry tolerance: a label pinned in
+    // `expiredToleranceSecByLabel` is checked against its own grace
+    // period; every other label falls back to the global
+    // `expiredToleranceSec` (default 0 in `verifyRequest`). Like the
+    // tolerances above, it is not key selection, so it never joins
+    // the mutual-exclusion checks above.
+    const expiredToleranceSec =
+      opts.expiredToleranceSecByLabel?.[label] ?? opts.expiredToleranceSec;
     // Per-label freshness-existence requirements: a label in the map
     // is checked against its own flag; every other label falls back
     // to the global flag (unset means no existence check for it).
@@ -1688,6 +1744,6 @@ export function verifyAllLabels(
     // selection, so it never joins the mutual-exclusion checks.
     const requireTag =
       opts.requireTagByLabel?.[label] ?? opts.requireTag;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, requireCreated, requireExpires, requireNonce, requireTag });
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requireCreated, requireExpires, requireNonce, requireTag });
   });
 }
