@@ -290,6 +290,26 @@
  * dual's rejection under no option passed (the 60s
  * default covers neither 120s-ahead label) asserted
  * outside timing, plus
+ * the per-label expiry-grace verify path a multi-party
+ * receiver runs when each signer must tolerate a different
+ * grace window past `expires`: `verifyAllLabels` with
+ * `expiredToleranceSecByLabel` over a dual ed25519
+ * fixture signed outside timing with `created` pinned
+ * 3600s before the injected `now` and `expires` pinned
+ * 60s before it (merchant tolerance 0s, gateway
+ * tolerance 120s — see EXPIRED_TOLERANCE_BY_LABEL_*
+ * below), self-checked on every measured pass (one
+ * measured op verifies the split dual, merchant
+ * exactly `EXPIRED` with the pinned reason while the
+ * gateway label still verifies), with the exact-tolerance
+ * boundary (both labels at 60s pass, since the check
+ * is strict-greater), a label missing from the map
+ * falling back to the global `expiredToleranceSec`
+ * (both directions: the merchant-only map with a wide
+ * global, and the gateway-only map with a narrow
+ * global) and the same dual's rejection under no option
+ * passed (the 0s default covers neither 60s-expired
+ * label) asserted outside timing, plus
  * the per-label required-freshness verify path a multi-party
  * receiver runs when each signer must bound its own signature
  * differently: `verifyAllLabels` with `requireCreatedByLabel`
@@ -4177,6 +4197,211 @@ function benchmarkVerifyAllClockSkewToleranceSecByLabel(): number {
     defaulted.length !== 2 ||
     defaulted.some((r) => r.ok) ||
     defaulted.some((r) => r.code !== CLOCK_SKEW_BY_LABEL_MISMATCH_CODE)
+  )
+    throw new Error(
+      `benchmark self-check failed: split dual default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels`
+ * expiredToleranceSecByLabel benchmark: two ed25519 key
+ * pairs (generated once, outside timing), one dual-label
+ * fixture signed outside timing with `created` pinned
+ * 3600s before the verifier's injected `now` and
+ * `expires` pinned 60s before it under two pinned
+ * keyids (merchant / gateway, the canonical multi-party
+ * labels), and per-label expiry-grace tolerances
+ * (merchant 0s, gateway 120s) in
+ * `expiredToleranceSecByLabel`, so the same-expired
+ * signatures split: the merchant signature is already
+ * past `expires` under its own tolerance while the
+ * gateway signature is still within its own grace.
+ */
+const EXPIRED_TOLERANCE_BY_LABEL_NOW = 1_700_000_000;
+const EXPIRED_TOLERANCE_BY_LABEL_CREATED =
+  EXPIRED_TOLERANCE_BY_LABEL_NOW - 3600;
+const EXPIRED_TOLERANCE_BY_LABEL_EXPIRES =
+  EXPIRED_TOLERANCE_BY_LABEL_NOW - 60;
+const EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_KID =
+  "bench-expired-tolerance-by-label-merchant-1";
+const EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KID =
+  "bench-expired-tolerance-by-label-gateway-1";
+const EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE = 0;
+const EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE = 120;
+const EXPIRED_TOLERANCE_BY_LABEL_MISMATCH_CODE = "EXPIRED";
+const EXPIRED_TOLERANCE_BY_LABEL_MISMATCH_REASON = "signature expired";
+
+/**
+ * `verifyAllLabels` with `expiredToleranceSecByLabel`
+ * steady state: the per-label expiry-grace form a
+ * multi-party receiver uses when each signer must be
+ * granted a different grace window past `expires`
+ * (the merchant grace is zero — an expired merchant
+ * signature is dead at once — while the gateway grace
+ * absorbs clock lag and retries) — every measured call
+ * runs the per-label map resolution and the
+ * post-cryptographic expiry comparison for each label,
+ * which the plain `verifyAllLabels` row above never
+ * pays, because it passes no tolerance map. One
+ * measured op verifies the split dual: the merchant
+ * label is exactly `EXPIRED` with the pinned reason
+ * and the gateway label still verifies, proving one
+ * label's expiry never blocks the other label's
+ * verdict. Outside timing, the boundary and fallback
+ * halves are pinned once: both labels at exactly 60s
+ * tolerance pass (the expiry check is strict-greater,
+ * so `now` equal to `expires + tolerance` is still
+ * live); a label missing from the map falls back to
+ * the global `expiredToleranceSec` (the merchant-only
+ * map under a wide global passes the unmapped gateway
+ * while failing the mapped merchant, and the
+ * gateway-only map under a narrow global fails the
+ * unmapped merchant while passing the mapped gateway);
+ * and the same dual under no option fails on both
+ * labels — the 0s default grace covers neither
+ * 60s-expired signature. Zero network, zero randomness
+ * in the measured assertions, no wall clock (every
+ * verify instant is injected).
+ */
+function benchmarkVerifyAllExpiredToleranceSecByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantSigned = signRequest(fixture, {
+    keyId: EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: EXPIRED_TOLERANCE_BY_LABEL_CREATED,
+    expires: EXPIRED_TOLERANCE_BY_LABEL_EXPIRES,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: EXPIRED_TOLERANCE_BY_LABEL_CREATED,
+    expires: EXPIRED_TOLERANCE_BY_LABEL_EXPIRES,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: EXPIRED_TOLERANCE_BY_LABEL_NOW,
+    expiredToleranceSecByLabel: {
+      merchant: EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE,
+      gateway: EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE,
+    },
+  };
+  const assertDual = (where: string): void => {
+    const split = verifyAllLabels(dual, verifyOpts);
+    if (
+      split.length !== 2 ||
+      split[0].label !== "merchant" ||
+      split[0].ok ||
+      split[0].code !== EXPIRED_TOLERANCE_BY_LABEL_MISMATCH_CODE ||
+      split[0].reason !== EXPIRED_TOLERANCE_BY_LABEL_MISMATCH_REASON ||
+      split[1].label !== "gateway" ||
+      !split[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with expiredToleranceSecByLabel (${where}, split dual) gave ${JSON.stringify(split)}`,
+      );
+  };
+
+  // Outside timing: the split dual self-checks under the
+  // per-label tolerances before any timing starts.
+  assertDual("outside timing");
+
+  // Outside timing: expiry exactly at the tolerance
+  // still passes — the check is strict-greater, so
+  // `now` equal to `expires + tolerance` is live.
+  const boundary = verifyAllLabels(dual, {
+    keys,
+    now: EXPIRED_TOLERANCE_BY_LABEL_NOW,
+    expiredToleranceSecByLabel: { merchant: 60, gateway: 60 },
+  });
+  if (
+    boundary.length !== 2 ||
+    boundary.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: exact-tolerance boundary gave ${JSON.stringify(boundary)}`,
+    );
+
+  // Outside timing: a label missing from the map falls
+  // back to the global `expiredToleranceSec` — the
+  // merchant-only map under a wide global fails exactly
+  // on the mapped merchant while the unmapped gateway
+  // passes on the global tolerance.
+  const fallbackMerchantOnly = verifyAllLabels(dual, {
+    keys,
+    now: EXPIRED_TOLERANCE_BY_LABEL_NOW,
+    expiredToleranceSecByLabel: {
+      merchant: EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE,
+    },
+    expiredToleranceSec: EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE,
+  });
+  if (
+    fallbackMerchantOnly.length !== 2 ||
+    fallbackMerchantOnly[0].label !== "merchant" ||
+    fallbackMerchantOnly[0].ok ||
+    fallbackMerchantOnly[0].code !==
+      EXPIRED_TOLERANCE_BY_LABEL_MISMATCH_CODE ||
+    fallbackMerchantOnly[0].reason !==
+      EXPIRED_TOLERANCE_BY_LABEL_MISMATCH_REASON ||
+    fallbackMerchantOnly[1].label !== "gateway" ||
+    !fallbackMerchantOnly[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback (merchant-only map) gave ${JSON.stringify(fallbackMerchantOnly)}`,
+    );
+
+  // Outside timing: the same fallback in the other
+  // direction — the gateway-only map under a narrow
+  // global fails exactly on the unmapped merchant while
+  // the mapped gateway passes on its own tolerance.
+  const fallbackGatewayOnly = verifyAllLabels(dual, {
+    keys,
+    now: EXPIRED_TOLERANCE_BY_LABEL_NOW,
+    expiredToleranceSecByLabel: {
+      gateway: EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE,
+    },
+    expiredToleranceSec: EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE,
+  });
+  if (
+    fallbackGatewayOnly.length !== 2 ||
+    fallbackGatewayOnly[0].label !== "merchant" ||
+    fallbackGatewayOnly[0].ok ||
+    fallbackGatewayOnly[0].code !==
+      EXPIRED_TOLERANCE_BY_LABEL_MISMATCH_CODE ||
+    fallbackGatewayOnly[0].reason !==
+      EXPIRED_TOLERANCE_BY_LABEL_MISMATCH_REASON ||
+    fallbackGatewayOnly[1].label !== "gateway" ||
+    !fallbackGatewayOnly[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback (gateway-only map) gave ${JSON.stringify(fallbackGatewayOnly)}`,
+    );
+
+  // Outside timing: with no option the same dual fails
+  // on both labels — the 0s default grace covers
+  // neither 60s-expired signature.
+  const defaulted = verifyAllLabels(dual, {
+    keys,
+    now: EXPIRED_TOLERANCE_BY_LABEL_NOW,
+  });
+  if (
+    defaulted.length !== 2 ||
+    defaulted.some((r) => r.ok) ||
+    defaulted.some((r) => r.code !== EXPIRED_TOLERANCE_BY_LABEL_MISMATCH_CODE)
   )
     throw new Error(
       `benchmark self-check failed: split dual default gave ${JSON.stringify(defaulted)}`,
@@ -9286,6 +9511,11 @@ results.push({
   alg: "verifyAllLabels clockSkewToleranceSecByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllClockSkewToleranceSecByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels expiredToleranceSecByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllExpiredToleranceSecByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",

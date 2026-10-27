@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label expiry-grace tolerances (backlog #645):
+  `bench` now measures `verifyAllLabels` with
+  `expiredToleranceSecByLabel` over a dual ed25519 fixture signed
+  outside timing with `created` pinned 3600s before the injected
+  `now` and `expires` pinned 60s before it (merchant tolerance 0s,
+  gateway tolerance 120s) — each measured op verifies the split dual,
+  merchant exactly `EXPIRED` with the pinned reason while the gateway
+  label still verifies, so the row pays the per-label map resolution
+  and the expiry comparison for each label. The exact-tolerance
+  boundary (both labels at 60s pass), the unmapped-label global
+  fallback (merchant-only map under a wide global, gateway-only map
+  under a narrow global) and the no-option default (both labels fail
+  under the 0s default) are asserted outside timing. The README
+  Benchmarks table is refreshed from this run, including the new row
+  at 3,133 ops/sec (319.20 µs/op), and the per-label expiry-grace
+  path is documented there.
 - Benchmark row for per-label clock-skew tolerances (backlog #644):
   `bench` now measures `verifyAllLabels` with
   `clockSkewToleranceSecByLabel` over a dual ed25519 fixture signed
