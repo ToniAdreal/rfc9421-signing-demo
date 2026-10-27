@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo section for per-label clock-skew tolerance (backlog #655):
+  `src/demo.ts` now demonstrates `verifyAllLabels` with
+  `clockSkewToleranceSecByLabel` over a dual ed25519 fixture
+  (merchant tolerance 5s, gateway tolerance 300s, both signatures
+  created 120s ahead of the verifier clock): the merchant label
+  alone fails with `CREATED_IN_FUTURE` while the gateway label
+  still verifies, with a segment note that a tolerance only
+  widens the verifier-side created/freshness window and never
+  changes the signature itself. The demo asserts every outcome,
+  code, reason and keyid and fails (non-zero exit) if any fixture
+  breaks; `test/demo.test.ts` gains two tests pinning the same
+  shapes and the printed lines. The README test count moves
+  1037 → 1039.
 - Orthogonal test coverage for per-label clock-skew tolerance combined
   with per-label expired tolerance (backlog #654):
   `test/clockSkewExpiredToleranceByLabel.test.ts` pins a dual-label

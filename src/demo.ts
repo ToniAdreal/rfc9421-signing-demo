@@ -944,6 +944,25 @@
  * equals the hand-pinned expectations below. Every clock
  * is injected and the segment's key pairs are fresh per
  * run, so the segment is byte-identical between runs.
+ * The demo then closes with a per-label clock-skew
+ * tolerance segment: `VerifyAllOptions.clockSkewToleranceSecByLabel`
+ * gives each label its own clock-skew tolerance — the
+ * merchant signer runs tight (5s) while the gateway
+ * signer drifts more (300s). Two fresh ed25519 key pairs
+ * mint a dual-label fixture with both signatures created
+ * 120s ahead of the verifier's injected clock, and the
+ * printed shape is the merchant label alone rejected with
+ * `CREATED_IN_FUTURE` while the gateway label still
+ * verifies. The segment's note is explicit: a tolerance
+ * only widens the verifier-side created/freshness window,
+ * it never changes the signature itself. Outside the
+ * printed lines the demo asserts every outcome, label,
+ * code, reason and keyid equals the hand-pinned
+ * expectations below (the same per-label tolerance
+ * semantics `test/clockSkewToleranceSecByLabel.test.ts`
+ * pins). Every clock is injected and the segment's key
+ * pairs are fresh per run, so the segment is
+ * byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2817,6 +2836,43 @@ export const DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_KEY_ID =
 export const DEMO_REQUIRE_FRESHNESS_BY_LABEL_URL =
   "https://api.example.com/v1/payments";
 
+/** Label of the per-label clock-skew tolerance segment's merchant signature. */
+export const DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL = "merchant";
+/** Label of the per-label clock-skew tolerance segment's gateway signature. */
+export const DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL = "gateway";
+/** Key id the per-label clock-skew tolerance segment's merchant signature carries. */
+export const DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_KEY_ID =
+  "demo-clock-skew-by-label-merchant-1";
+/** Key id the per-label clock-skew tolerance segment's gateway signature carries. */
+export const DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_KEY_ID =
+  "demo-clock-skew-by-label-gateway-1";
+/** Absolute URL the per-label clock-skew tolerance segment signs. */
+export const DEMO_CLOCK_SKEW_BY_LABEL_URL =
+  "https://api.example.com/v1/payments";
+/** Verifier clock for the per-label clock-skew tolerance segment (the pinned `DEMO_CREATED` instant). */
+export const DEMO_CLOCK_SKEW_BY_LABEL_NOW = DEMO_CREATED;
+/** How far ahead of the verifier clock both segment signatures are created (seconds). */
+export const DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC = 120;
+/** `created` both segment signatures carry (120s ahead of the verifier clock). */
+export const DEMO_CLOCK_SKEW_BY_LABEL_FUTURE_CREATED =
+  DEMO_CLOCK_SKEW_BY_LABEL_NOW + DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC;
+/** Merchant clock-skew tolerance for the segment (seconds): tighter than the 120s skew, so the merchant label fails. */
+export const DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC = 5;
+/** Gateway clock-skew tolerance for the segment (seconds): wider than the 120s skew, so the gateway label passes. */
+export const DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC = 300;
+/**
+ * Hand-pinned failure code when a signature is created too far in the
+ * future for its label's clock-skew tolerance (`CREATED_IN_FUTURE`).
+ */
+export const DEMO_CLOCK_SKEW_BY_LABEL_REJECT_CODE: VerifyFailureCode =
+  "CREATED_IN_FUTURE";
+/**
+ * Hand-pinned `CREATED_IN_FUTURE` reason (the exact wording
+ * `src/verify.ts` returns).
+ */
+export const DEMO_CLOCK_SKEW_BY_LABEL_REJECT_REASON =
+  "signature created in the future (clock skew)";
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -4207,6 +4263,14 @@ export interface DemoResult {
    * fails `MISSING_EXPIRES`, merchant still verifies).
    */
   requireFreshnessByLabelOverrideExpiresVerification: VerifyResult[];
+  /** The per-label clock-skew tolerance segment's dual-label request (both labels created 120s ahead of the verifier clock). */
+  clockSkewByLabelSigned: SignedHttpRequest;
+  /**
+   * Per-label results for that request with
+   * `clockSkewToleranceSecByLabel: { merchant: 5, gateway: 300 }`
+   * (merchant fails `CREATED_IN_FUTURE`, gateway verifies).
+   */
+  clockSkewByLabelVerification: VerifyResult[];
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -9422,6 +9486,100 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Per-label clock-skew tolerance segment: in a multi-party
+  // request the merchant's clock runs tight (5s tolerance) while
+  // the gateway's drifts more (300s), so a single global tolerance
+  // cannot express "this label is too far ahead, that one is within
+  // tolerance" — `verifyAllLabels`' `clockSkewToleranceSecByLabel`
+  // map gives each label its own tolerance. Two fresh ed25519 key
+  // pairs mint the dual-label fixture (`merchant` via `signRequest`,
+  // `gateway` appended via `addSignature`) with both signatures
+  // created 120s ahead of the verifier's injected `now`, and the
+  // map splits them: the merchant label fails, the gateway label
+  // verifies. A tolerance only widens the verifier-side
+  // created/freshness window — it never changes the signature
+  // itself, which was already fixed at signing time, so a
+  // future-created signature rejected under a tight tolerance is
+  // a policy rejection of an otherwise cryptographically valid
+  // signature, not a signature failure. Outside the printed lines
+  // the demo asserts every outcome, label, code, reason and keyid
+  // equals the hand-pinned expectations.
+  const clockSkewByLabelMerchantPair = generateEd25519KeyPair();
+  const clockSkewByLabelGatewayPair = generateEd25519KeyPair();
+  const clockSkewByLabelRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_CLOCK_SKEW_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const clockSkewByLabelMerchantSigned = signRequest(
+    clockSkewByLabelRequest,
+    {
+      keyId: DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_KEY_ID,
+      alg: "ed25519",
+      key: clockSkewByLabelMerchantPair.privateKey,
+      created: DEMO_CLOCK_SKEW_BY_LABEL_FUTURE_CREATED,
+      label: DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL,
+    },
+  );
+  const clockSkewByLabelSigned = addSignature(
+    clockSkewByLabelMerchantSigned,
+    {
+      keyId: DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_KEY_ID,
+      alg: "ed25519",
+      key: clockSkewByLabelGatewayPair.privateKey,
+      created: DEMO_CLOCK_SKEW_BY_LABEL_FUTURE_CREATED,
+      label: DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL,
+    },
+  );
+  const clockSkewByLabelKeys = {
+    [DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL]:
+      clockSkewByLabelMerchantPair.publicKey,
+    [DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL]:
+      clockSkewByLabelGatewayPair.publicKey,
+  };
+  const clockSkewByLabelVerification = verifyAllLabels(
+    clockSkewByLabelSigned,
+    {
+      keys: clockSkewByLabelKeys,
+      now: DEMO_CLOCK_SKEW_BY_LABEL_NOW,
+      clockSkewToleranceSecByLabel: {
+        [DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL]:
+          DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC,
+        [DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL]:
+          DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC,
+      },
+    },
+  );
+  if (
+    clockSkewByLabelVerification.length !== 2 ||
+    clockSkewByLabelVerification[0].label !==
+      DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL ||
+    clockSkewByLabelVerification[0].ok !== false ||
+    clockSkewByLabelVerification[0].code !==
+      DEMO_CLOCK_SKEW_BY_LABEL_REJECT_CODE ||
+    clockSkewByLabelVerification[0].reason !==
+      DEMO_CLOCK_SKEW_BY_LABEL_REJECT_REASON ||
+    clockSkewByLabelVerification[0].keyId !==
+      DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_KEY_ID ||
+    clockSkewByLabelVerification[1].label !==
+      DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL ||
+    clockSkewByLabelVerification[1].ok !== true ||
+    clockSkewByLabelVerification[1].keyId !==
+      DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_KEY_ID
+  ) {
+    throw new Error(
+      `demo fixture broken: clockSkewToleranceSecByLabel gave ` +
+        `${JSON.stringify(clockSkewByLabelVerification)}, instead of the merchant ` +
+        `label rejected with ${DEMO_CLOCK_SKEW_BY_LABEL_REJECT_CODE} ` +
+        `(${DEMO_CLOCK_SKEW_BY_LABEL_REJECT_REASON}) while the gateway label ` +
+        `verifies, for signatures created ` +
+        `${DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC}s ahead of the verifier clock under ` +
+        `tolerances ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC}s (merchant) ` +
+        `and ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC}s (gateway)`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -9997,6 +10155,12 @@ export async function runDemo(): Promise<DemoResult> {
     ]!.ok === true
       ? `Mapped true overrides global false (expires): the gateway-without-expires request verified with requireExpires: false plus requireExpiresByLabel { gateway: true }: gateway still FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}, code ${requireFreshnessByLabelOverrideExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.code}: ${requireFreshnessByLabelOverrideExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.reason}), merchant still OK — the map wins over the global, it does not fall back to it`
       : `Mapped true overrides global false (expires): the gateway-without-expires request verified with requireExpires: false plus requireExpiresByLabel { gateway: true }: gateway ${requireFreshnessByLabelOverrideExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.ok ? "OK (unexpected — the global false overrode the map)" : `code ${requireFreshnessByLabelOverrideExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL]!.code}`}, merchant ${requireFreshnessByLabelOverrideExpiresByLabel[DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL]!.ok ? "OK" : "FAILED (unexpected — the dated merchant label was dragged down)"}`,
+    "",
+    "Per-label clock-skew tolerance: verifyAllLabels' clockSkewToleranceSecByLabel map gives each label its own clock-skew tolerance — the merchant signer runs tight, the gateway signer drifts more, and a single global tolerance cannot split a future-created dual signature — a tolerance only widens the verifier-side created/freshness window, it never changes the signature itself",
+    clockSkewByLabelVerification[0]!.ok === false &&
+    clockSkewByLabelVerification[1]!.ok === true
+      ? `Future-created dual: both signatures created ${DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC}s ahead of the verifier clock, verified with clockSkewToleranceSecByLabel { merchant: ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant FAILED (label ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL}, code ${clockSkewByLabelVerification[0]!.code}: ${clockSkewByLabelVerification[0]!.reason}), gateway still OK (label ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL}, keyid="${clockSkewByLabelVerification[1]!.keyId}", alg="ed25519") — only the tight label is rejected`
+      : `Future-created dual: both signatures created ${DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC}s ahead of the verifier clock, verified with clockSkewToleranceSecByLabel { merchant: ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant ${clockSkewByLabelVerification[0]!.ok ? "OK (unexpected — the too-far-ahead merchant signature was not rejected)" : `code ${clockSkewByLabelVerification[0]!.code}`}, gateway ${clockSkewByLabelVerification[1]!.ok ? "OK" : "FAILED (unexpected — the within-tolerance gateway label was dragged down)"}`,
   ];
 
   return {
@@ -10253,6 +10417,8 @@ export async function runDemo(): Promise<DemoResult> {
     requireFreshnessByLabelMissingExpiresVerification,
     requireFreshnessByLabelOverrideCreatedVerification,
     requireFreshnessByLabelOverrideExpiresVerification,
+    clockSkewByLabelSigned,
+    clockSkewByLabelVerification,
     lines,
   };
 }

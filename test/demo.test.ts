@@ -329,6 +329,18 @@ import {
   DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_KEY_ID,
   DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL,
   DEMO_REQUIRE_FRESHNESS_BY_LABEL_URL,
+  DEMO_CLOCK_SKEW_BY_LABEL_FUTURE_CREATED,
+  DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_KEY_ID,
+  DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL,
+  DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC,
+  DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_KEY_ID,
+  DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL,
+  DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC,
+  DEMO_CLOCK_SKEW_BY_LABEL_NOW,
+  DEMO_CLOCK_SKEW_BY_LABEL_REJECT_CODE,
+  DEMO_CLOCK_SKEW_BY_LABEL_REJECT_REASON,
+  DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC,
+  DEMO_CLOCK_SKEW_BY_LABEL_URL,
   DEMO_NODE_TRAILERS_BODY,
   DEMO_NODE_TRAILERS_COVERED_COMPONENTS,
   DEMO_NODE_TRAILERS_HOST,
@@ -5983,7 +5995,7 @@ test("demo per-label required-freshness segment pins requireCreatedByLabel/requi
   );
 });
 
-test("demo lines contain the per-label required-freshness segment (mapped label rejected, sibling verifies, override, closing the demo)", async () => {
+test("demo lines contain the per-label required-freshness segment (mapped label rejected, sibling verifies, override, followed by the per-label clock-skew segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Per-label required freshness: verifyAllLabels' requireCreatedByLabel/);
@@ -5998,9 +6010,12 @@ test("demo lines contain the per-label required-freshness segment (mapped label 
     `Mapped true overrides global false (created): the merchant-without-created request verified with requireCreated: false plus requireCreatedByLabel { ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}: true }: merchant still FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_MERCHANT_LABEL}, code MISSING_CREATED: ${DEMO_REQUIRE_FRESHNESS_MISSING_CREATED_REASON}), gateway still OK — the map wins over the global, it does not fall back to it`,
     `Mapped true overrides global false (expires): the gateway-without-expires request verified with requireExpires: false plus requireExpiresByLabel { ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}: true }: gateway still FAILED (label ${DEMO_REQUIRE_FRESHNESS_BY_LABEL_GATEWAY_LABEL}, code MISSING_EXPIRES: ${DEMO_REQUIRE_FRESHNESS_MISSING_EXPIRES_REASON}), merchant still OK — the map wins over the global, it does not fall back to it`,
   ]);
-  // The header plus its four lines are the demo's closing lines,
-  // with nothing after them.
-  assert.equal(headerIdx + 5, lines.length);
+  // The header plus its four lines are followed by the per-label
+  // clock-skew tolerance segment (blank separator, then its header).
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(
+    lines[headerIdx + 6].startsWith("Per-label clock-skew tolerance:"),
+  );
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Per-label required freshness:"),
@@ -6008,5 +6023,154 @@ test("demo lines contain the per-label required-freshness segment (mapped label 
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 5),
     lines.slice(headerIdx, headerIdx + 5),
+  );
+});
+
+test("demo per-label clock-skew tolerance segment pins clockSkewToleranceSecByLabel (tight merchant rejected, loose gateway verifies)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL, "gateway");
+  assert.equal(
+    DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_KEY_ID,
+    "demo-clock-skew-by-label-merchant-1",
+  );
+  assert.equal(
+    DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_KEY_ID,
+    "demo-clock-skew-by-label-gateway-1",
+  );
+  assert.equal(
+    DEMO_CLOCK_SKEW_BY_LABEL_URL,
+    "https://api.example.com/v1/payments",
+  );
+  assert.equal(DEMO_CLOCK_SKEW_BY_LABEL_NOW, DEMO_CREATED);
+  assert.equal(DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC, 120);
+  assert.equal(DEMO_CLOCK_SKEW_BY_LABEL_FUTURE_CREATED, DEMO_CREATED + 120);
+  assert.equal(DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC, 5);
+  assert.equal(DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC, 300);
+  assert.equal(DEMO_CLOCK_SKEW_BY_LABEL_REJECT_CODE, "CREATED_IN_FUTURE");
+  assert.equal(
+    DEMO_CLOCK_SKEW_BY_LABEL_REJECT_REASON,
+    "signature created in the future (clock skew)",
+  );
+  // Wire shapes: both labels carry the same future created instant.
+  const parts = (
+    r.clockSkewByLabelSigned.headers["signature-input"]!
+  ).split(", ");
+  const merchantPart = parts.find((p) =>
+    p.startsWith(`${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL}=`),
+  )!;
+  const gatewayPart = parts.find((p) =>
+    p.startsWith(`${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL}=`),
+  )!;
+  assert.match(merchantPart, /;created=1700000120/);
+  assert.match(gatewayPart, /;created=1700000120/);
+  assert.match(
+    merchantPart,
+    /;keyid="demo-clock-skew-by-label-merchant-1"/,
+  );
+  assert.match(
+    gatewayPart,
+    /;keyid="demo-clock-skew-by-label-gateway-1"/,
+  );
+  assert.equal(r.clockSkewByLabelVerification.length, 2);
+  assert.deepEqual(
+    r.clockSkewByLabelVerification.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL, false],
+      [DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL, true],
+    ],
+  );
+  assert.equal(
+    r.clockSkewByLabelVerification[0].code,
+    DEMO_CLOCK_SKEW_BY_LABEL_REJECT_CODE,
+  );
+  assert.equal(
+    r.clockSkewByLabelVerification[0].reason,
+    DEMO_CLOCK_SKEW_BY_LABEL_REJECT_REASON,
+  );
+  assert.equal(
+    r.clockSkewByLabelVerification[0].keyId,
+    DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(
+    r.clockSkewByLabelVerification[1].keyId,
+    DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  // Independent checks driven directly (the same per-label
+  // tolerance semantics test/clockSkewToleranceSecByLabel.test.ts
+  // pins): two fresh key pairs, a dual-label fixture created 120s
+  // ahead of the verifier clock, the 5s/300s map splitting it.
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const req = {
+    method: "POST",
+    url: DEMO_CLOCK_SKEW_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  };
+  const first = signRequest(req, {
+    keyId: DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_KEY_ID,
+    alg: "ed25519",
+    key: merchant.privateKey,
+    created: DEMO_CLOCK_SKEW_BY_LABEL_FUTURE_CREATED,
+    label: DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL,
+  });
+  const dual = addSignature(first, {
+    keyId: DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_KEY_ID,
+    alg: "ed25519",
+    key: gateway.privateKey,
+    created: DEMO_CLOCK_SKEW_BY_LABEL_FUTURE_CREATED,
+    label: DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL,
+  });
+  const keys = {
+    merchant: merchant.publicKey,
+    gateway: gateway.publicKey,
+  };
+  const direct = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_CLOCK_SKEW_BY_LABEL_NOW,
+    clockSkewToleranceSecByLabel: {
+      merchant: DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC,
+      gateway: DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC,
+    },
+  });
+  assert.deepEqual(
+    direct.map((x) => [x.label, x.ok, x.code]),
+    [
+      [
+        DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL,
+        false,
+        DEMO_CLOCK_SKEW_BY_LABEL_REJECT_CODE,
+      ],
+      [DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL, true, undefined],
+    ],
+  );
+});
+
+test("demo lines contain the per-label clock-skew tolerance segment (tight merchant rejected, loose gateway verifies, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Per-label clock-skew tolerance: verifyAllLabels' clockSkewToleranceSecByLabel/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label clock-skew tolerance:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 2), [
+    "Per-label clock-skew tolerance: verifyAllLabels' clockSkewToleranceSecByLabel map gives each label its own clock-skew tolerance — the merchant signer runs tight, the gateway signer drifts more, and a single global tolerance cannot split a future-created dual signature — a tolerance only widens the verifier-side created/freshness window, it never changes the signature itself",
+    `Future-created dual: both signatures created ${DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC}s ahead of the verifier clock, verified with clockSkewToleranceSecByLabel { merchant: ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant FAILED (label ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_CLOCK_SKEW_BY_LABEL_REJECT_CODE}: ${DEMO_CLOCK_SKEW_BY_LABEL_REJECT_REASON}), gateway still OK (label ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — only the tight label is rejected`,
+  ]);
+  // The header plus its one line are the demo's closing lines,
+  // with nothing after them.
+  assert.equal(headerIdx + 2, lines.length);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Per-label clock-skew tolerance:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 2),
+    lines.slice(headerIdx, headerIdx + 2),
   );
 });
