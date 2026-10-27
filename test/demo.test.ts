@@ -341,6 +341,19 @@ import {
   DEMO_CLOCK_SKEW_BY_LABEL_REJECT_REASON,
   DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC,
   DEMO_CLOCK_SKEW_BY_LABEL_URL,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_CREATED,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRED_AGO_SEC,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRES,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KEY_ID,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_KEY_ID,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_NOW,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_REASON,
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_URL,
   DEMO_NODE_TRAILERS_BODY,
   DEMO_NODE_TRAILERS_COVERED_COMPONENTS,
   DEMO_NODE_TRAILERS_HOST,
@@ -6147,7 +6160,7 @@ test("demo per-label clock-skew tolerance segment pins clockSkewToleranceSecByLa
   );
 });
 
-test("demo lines contain the per-label clock-skew tolerance segment (tight merchant rejected, loose gateway verifies, closing the demo)", async () => {
+test("demo lines contain the per-label clock-skew tolerance segment (tight merchant rejected, loose gateway verifies, followed by the expired-tolerance segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(
@@ -6162,12 +6175,168 @@ test("demo lines contain the per-label clock-skew tolerance segment (tight merch
     "Per-label clock-skew tolerance: verifyAllLabels' clockSkewToleranceSecByLabel map gives each label its own clock-skew tolerance — the merchant signer runs tight, the gateway signer drifts more, and a single global tolerance cannot split a future-created dual signature — a tolerance only widens the verifier-side created/freshness window, it never changes the signature itself",
     `Future-created dual: both signatures created ${DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC}s ahead of the verifier clock, verified with clockSkewToleranceSecByLabel { merchant: ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant FAILED (label ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_CLOCK_SKEW_BY_LABEL_REJECT_CODE}: ${DEMO_CLOCK_SKEW_BY_LABEL_REJECT_REASON}), gateway still OK (label ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — only the tight label is rejected`,
   ]);
+  // The header plus its one line are followed by a blank line
+  // and the per-label expired tolerance segment's header (the
+  // demo's new closing segment), not by the end of the demo.
+  assert.equal(lines[headerIdx + 2], "");
+  assert.ok(
+    lines[headerIdx + 3]!.startsWith("Per-label expired tolerance:"),
+  );
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Per-label clock-skew tolerance:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 2),
+    lines.slice(headerIdx, headerIdx + 2),
+  );
+});
+
+test("demo per-label expired tolerance segment pins expiredToleranceSecByLabel (strict merchant rejected, loose gateway verifies)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL, "gateway");
+  assert.equal(
+    DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_KEY_ID,
+    "demo-expired-tolerance-by-label-merchant-1",
+  );
+  assert.equal(
+    DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KEY_ID,
+    "demo-expired-tolerance-by-label-gateway-1",
+  );
+  assert.equal(
+    DEMO_EXPIRED_TOLERANCE_BY_LABEL_URL,
+    "https://api.example.com/v1/payments",
+  );
+  assert.equal(DEMO_EXPIRED_TOLERANCE_BY_LABEL_NOW, DEMO_CREATED);
+  assert.equal(DEMO_EXPIRED_TOLERANCE_BY_LABEL_CREATED, DEMO_CREATED - 3600);
+  assert.equal(DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRES, DEMO_CREATED - 60);
+  assert.equal(DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRED_AGO_SEC, 60);
+  assert.equal(DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC, 0);
+  assert.equal(DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC, 120);
+  assert.equal(DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE, "EXPIRED");
+  assert.equal(
+    DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_REASON,
+    "signature expired",
+  );
+  // Wire shapes: both labels carry the same created/expires instants.
+  const parts = (
+    r.expiredToleranceByLabelSigned.headers["signature-input"]!
+  ).split(", ");
+  const merchantPart = parts.find((p) =>
+    p.startsWith(`${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL}=`),
+  )!;
+  const gatewayPart = parts.find((p) =>
+    p.startsWith(`${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL}=`),
+  )!;
+  assert.match(merchantPart, /;created=1699996400;expires=1699999940/);
+  assert.match(gatewayPart, /;created=1699996400;expires=1699999940/);
+  assert.match(
+    merchantPart,
+    /;keyid="demo-expired-tolerance-by-label-merchant-1"/,
+  );
+  assert.match(
+    gatewayPart,
+    /;keyid="demo-expired-tolerance-by-label-gateway-1"/,
+  );
+  assert.equal(r.expiredToleranceByLabelVerification.length, 2);
+  assert.deepEqual(
+    r.expiredToleranceByLabelVerification.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL, false],
+      [DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL, true],
+    ],
+  );
+  assert.equal(
+    r.expiredToleranceByLabelVerification[0].code,
+    DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE,
+  );
+  assert.equal(
+    r.expiredToleranceByLabelVerification[0].reason,
+    DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_REASON,
+  );
+  assert.equal(
+    r.expiredToleranceByLabelVerification[0].keyId,
+    DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(
+    r.expiredToleranceByLabelVerification[1].keyId,
+    DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  // Independent checks driven directly (the same per-label
+  // tolerance semantics test/expiredToleranceSecByLabel.test.ts
+  // pins): two fresh key pairs, a dual-label fixture expired 60s
+  // before the verifier clock, the 0s/120s map splitting it.
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const req = {
+    method: "POST",
+    url: DEMO_EXPIRED_TOLERANCE_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  };
+  const first = signRequest(req, {
+    keyId: DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_KEY_ID,
+    alg: "ed25519",
+    key: merchant.privateKey,
+    created: DEMO_EXPIRED_TOLERANCE_BY_LABEL_CREATED,
+    expires: DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRES,
+    label: DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL,
+  });
+  const dual = addSignature(first, {
+    keyId: DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KEY_ID,
+    alg: "ed25519",
+    key: gateway.privateKey,
+    created: DEMO_EXPIRED_TOLERANCE_BY_LABEL_CREATED,
+    expires: DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRES,
+    label: DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL,
+  });
+  const keys = {
+    merchant: merchant.publicKey,
+    gateway: gateway.publicKey,
+  };
+  const direct = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_EXPIRED_TOLERANCE_BY_LABEL_NOW,
+    expiredToleranceSecByLabel: {
+      merchant: DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC,
+      gateway: DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC,
+    },
+  });
+  assert.deepEqual(
+    direct.map((x) => [x.label, x.ok, x.code]),
+    [
+      [
+        DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL,
+        false,
+        DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE,
+      ],
+      [DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL, true, undefined],
+    ],
+  );
+});
+
+test("demo lines contain the per-label expired tolerance segment (strict merchant rejected, loose gateway verifies, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Per-label expired tolerance: verifyAllLabels' expiredToleranceSecByLabel/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label expired tolerance:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 2), [
+    "Per-label expired tolerance: verifyAllLabels' expiredToleranceSecByLabel map gives each label its own expiry grace period — the merchant signer runs strict, the gateway signer tolerates clock lag, and a single global tolerance cannot split an already-expired dual signature — a grace period only widens the verifier-side past-expires window, it never changes the signature itself — and expired tolerance and clock-skew tolerance are two independent windows on the same verify chain (one widens the past-expires side, the other the future-created side)",
+    `Expired dual: both signatures expired ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRED_AGO_SEC}s ago, verified with expiredToleranceSecByLabel { merchant: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant FAILED (label ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE}: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_REASON}), gateway still OK (label ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — only the strict label is rejected`,
+  ]);
   // The header plus its one line are the demo's closing lines,
   // with nothing after them.
   assert.equal(headerIdx + 2, lines.length);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
-    l.startsWith("Per-label clock-skew tolerance:"),
+    l.startsWith("Per-label expired tolerance:"),
   );
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 2),

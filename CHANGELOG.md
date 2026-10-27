@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo section for per-label expired tolerance (backlog #656):
+  `src/demo.ts` now demonstrates `verifyAllLabels` with
+  `expiredToleranceSecByLabel` over a dual ed25519 fixture
+  (merchant tolerance 0s, gateway tolerance 120s, both signatures
+  expired 60s before the verifier clock): the merchant label
+  alone fails with `EXPIRED` while the gateway label
+  still verifies, with a segment note that a grace period only
+  widens the verifier-side past-expires window and never
+  changes the signature itself, and that expired tolerance and
+  clock-skew tolerance are two independent windows on the same
+  verify chain. The demo asserts every outcome, code, reason
+  and keyid and fails (non-zero exit) if any fixture breaks;
+  `test/demo.test.ts` gains two tests pinning the same shapes
+  and the printed lines (the per-label clock-skew segment's
+  closing-lines assertion now points at the new closing
+  segment). The README test count moves 1039 → 1041.
 - CLI demo section for per-label clock-skew tolerance (backlog #655):
   `src/demo.ts` now demonstrates `verifyAllLabels` with
   `clockSkewToleranceSecByLabel` over a dual ed25519 fixture

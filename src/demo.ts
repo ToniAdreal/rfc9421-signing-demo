@@ -962,7 +962,31 @@
  * semantics `test/clockSkewToleranceSecByLabel.test.ts`
  * pins). Every clock is injected and the segment's key
  * pairs are fresh per run, so the segment is
- * byte-identical between runs.
+ * byte-identical between runs. The demo then closes with a
+ * per-label expired tolerance segment:
+ * `VerifyAllOptions.expiredToleranceSecByLabel` gives each
+ * label its own expiry grace period — the merchant signer
+ * runs strict (0s) while the gateway signer tolerates clock
+ * lag (120s). Two fresh ed25519 key pairs mint a dual-label
+ * fixture with both signatures expired 60s before the
+ * verifier's injected clock, and the printed shape is the
+ * merchant label alone rejected with `EXPIRED` while the
+ * gateway label still verifies. The segment's note is
+ * explicit: a grace period only widens the verifier-side
+ * past-expires window, it never changes the signature
+ * itself, and expired tolerance and clock-skew tolerance
+ * are two independent windows on the same verify chain
+ * (one widens the past-expires side, the other the
+ * future-created side). Outside the printed lines the demo
+ * asserts every outcome, label, code, reason and keyid
+ * equals the hand-pinned expectations below (the same
+ * per-label tolerance semantics
+ * `test/expiredToleranceSecByLabel.test.ts` pins, with the
+ * combination semantics
+ * `test/clockSkewExpiredToleranceByLabel.test.ts` pins).
+ * Every clock is injected and the segment's key pairs are
+ * fresh per run, so the segment is byte-identical between
+ * runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -2873,6 +2897,46 @@ export const DEMO_CLOCK_SKEW_BY_LABEL_REJECT_CODE: VerifyFailureCode =
 export const DEMO_CLOCK_SKEW_BY_LABEL_REJECT_REASON =
   "signature created in the future (clock skew)";
 
+/** Label of the per-label expired tolerance segment's merchant signature. */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL = "merchant";
+/** Label of the per-label expired tolerance segment's gateway signature. */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL = "gateway";
+/** Key id the per-label expired tolerance segment's merchant signature carries. */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_KEY_ID =
+  "demo-expired-tolerance-by-label-merchant-1";
+/** Key id the per-label expired tolerance segment's gateway signature carries. */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KEY_ID =
+  "demo-expired-tolerance-by-label-gateway-1";
+/** Absolute URL the per-label expired tolerance segment signs. */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_URL =
+  "https://api.example.com/v1/payments";
+/** Verifier clock for the per-label expired tolerance segment (the pinned `DEMO_CREATED` instant). */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_NOW = DEMO_CREATED;
+/** `created` both segment signatures carry (one hour before the verifier clock). */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_CREATED =
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_NOW - 3600;
+/** `expires` both segment signatures carry (60s before the verifier clock). */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRES =
+  DEMO_EXPIRED_TOLERANCE_BY_LABEL_NOW - 60;
+/** How long ago both segment signatures expired, in seconds. */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRED_AGO_SEC = 60;
+/** Merchant expiry grace for the segment (seconds): zero, so the 60s-expired merchant label fails. */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC = 0;
+/** Gateway expiry grace for the segment (seconds): wider than the 60s expiry, so the gateway label passes. */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC = 120;
+/**
+ * Hand-pinned failure code when a signature is past its expiry for its
+ * label's expired tolerance (`EXPIRED`).
+ */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE: VerifyFailureCode =
+  "EXPIRED";
+/**
+ * Hand-pinned `EXPIRED` reason (the exact wording
+ * `src/verify.ts` returns).
+ */
+export const DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_REASON =
+  "signature expired";
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -4271,6 +4335,14 @@ export interface DemoResult {
    * (merchant fails `CREATED_IN_FUTURE`, gateway verifies).
    */
   clockSkewByLabelVerification: VerifyResult[];
+  /** The per-label expired tolerance segment's dual-label request (both labels expired 60s before the verifier clock). */
+  expiredToleranceByLabelSigned: SignedHttpRequest;
+  /**
+   * Per-label results for that request with
+   * `expiredToleranceSecByLabel: { merchant: 0, gateway: 120 }`
+   * (merchant fails `EXPIRED`, gateway verifies).
+   */
+  expiredToleranceByLabelVerification: VerifyResult[];
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -9580,6 +9652,113 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // The per-label expired tolerance segment, mirroring the
+  // clock-skew segment above with the other time window: the
+  // merchant's expiry grace is 0s while the gateway's is 120s, so
+  // a single global tolerance cannot express "this label is
+  // already dead, that one is still within grace" —
+  // `verifyAllLabels`' `expiredToleranceSecByLabel` map gives
+  // each label its own grace period. Two fresh ed25519 key pairs
+  // mint the dual-label fixture (`merchant` via `signRequest`,
+  // `gateway` appended via `addSignature`) with both signatures
+  // created an hour before the verifier's injected `now` and
+  // expired 60s before it, and the map splits them: the merchant
+  // label fails, the gateway label verifies. Expired tolerance
+  // and clock-skew tolerance are two independent windows on the
+  // same verify chain: the clock-skew tolerance widens only the
+  // future-created side, the expired tolerance widens only the
+  // past-expires side, and neither dimension masks the other —
+  // the combination semantics
+  // `test/clockSkewExpiredToleranceByLabel.test.ts` pins are
+  // that each label keeps its own verdict per dimension. Here
+  // both signatures were created in the past, so the clock
+  // dimension passes for both labels and only the expiry
+  // dimension splits them. A grace period only widens the
+  // verifier-side past-expires window — it never changes the
+  // signature itself, which was already fixed at signing time,
+  // so an expired signature accepted under a loose tolerance is
+  // a policy acceptance of an otherwise cryptographically valid
+  // signature, not a signature repair. Outside the printed lines
+  // the demo asserts every outcome, label, code, reason and keyid
+  // equals the hand-pinned expectations.
+  const expiredToleranceByLabelMerchantPair = generateEd25519KeyPair();
+  const expiredToleranceByLabelGatewayPair = generateEd25519KeyPair();
+  const expiredToleranceByLabelRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_EXPIRED_TOLERANCE_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const expiredToleranceByLabelMerchantSigned = signRequest(
+    expiredToleranceByLabelRequest,
+    {
+      keyId: DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_KEY_ID,
+      alg: "ed25519",
+      key: expiredToleranceByLabelMerchantPair.privateKey,
+      created: DEMO_EXPIRED_TOLERANCE_BY_LABEL_CREATED,
+      expires: DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRES,
+      label: DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL,
+    },
+  );
+  const expiredToleranceByLabelSigned = addSignature(
+    expiredToleranceByLabelMerchantSigned,
+    {
+      keyId: DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KEY_ID,
+      alg: "ed25519",
+      key: expiredToleranceByLabelGatewayPair.privateKey,
+      created: DEMO_EXPIRED_TOLERANCE_BY_LABEL_CREATED,
+      expires: DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRES,
+      label: DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL,
+    },
+  );
+  const expiredToleranceByLabelKeys = {
+    [DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL]:
+      expiredToleranceByLabelMerchantPair.publicKey,
+    [DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL]:
+      expiredToleranceByLabelGatewayPair.publicKey,
+  };
+  const expiredToleranceByLabelVerification = verifyAllLabels(
+    expiredToleranceByLabelSigned,
+    {
+      keys: expiredToleranceByLabelKeys,
+      now: DEMO_EXPIRED_TOLERANCE_BY_LABEL_NOW,
+      expiredToleranceSecByLabel: {
+        [DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL]:
+          DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC,
+        [DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL]:
+          DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC,
+      },
+    },
+  );
+  if (
+    expiredToleranceByLabelVerification.length !== 2 ||
+    expiredToleranceByLabelVerification[0].label !==
+      DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL ||
+    expiredToleranceByLabelVerification[0].ok !== false ||
+    expiredToleranceByLabelVerification[0].code !==
+      DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE ||
+    expiredToleranceByLabelVerification[0].reason !==
+      DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_REASON ||
+    expiredToleranceByLabelVerification[0].keyId !==
+      DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_KEY_ID ||
+    expiredToleranceByLabelVerification[1].label !==
+      DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL ||
+    expiredToleranceByLabelVerification[1].ok !== true ||
+    expiredToleranceByLabelVerification[1].keyId !==
+      DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_KEY_ID
+  ) {
+    throw new Error(
+      `demo fixture broken: expiredToleranceSecByLabel gave ` +
+        `${JSON.stringify(expiredToleranceByLabelVerification)}, instead of the merchant ` +
+        `label rejected with ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_CODE} ` +
+        `(${DEMO_EXPIRED_TOLERANCE_BY_LABEL_REJECT_REASON}) while the gateway label ` +
+        `verifies, for signatures expired ` +
+        `${DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRED_AGO_SEC}s ago under ` +
+        `tolerances ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC}s (merchant) ` +
+        `and ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC}s (gateway)`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -10161,6 +10340,12 @@ export async function runDemo(): Promise<DemoResult> {
     clockSkewByLabelVerification[1]!.ok === true
       ? `Future-created dual: both signatures created ${DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC}s ahead of the verifier clock, verified with clockSkewToleranceSecByLabel { merchant: ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant FAILED (label ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_LABEL}, code ${clockSkewByLabelVerification[0]!.code}: ${clockSkewByLabelVerification[0]!.reason}), gateway still OK (label ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_LABEL}, keyid="${clockSkewByLabelVerification[1]!.keyId}", alg="ed25519") — only the tight label is rejected`
       : `Future-created dual: both signatures created ${DEMO_CLOCK_SKEW_BY_LABEL_SKEW_SEC}s ahead of the verifier clock, verified with clockSkewToleranceSecByLabel { merchant: ${DEMO_CLOCK_SKEW_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_CLOCK_SKEW_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant ${clockSkewByLabelVerification[0]!.ok ? "OK (unexpected — the too-far-ahead merchant signature was not rejected)" : `code ${clockSkewByLabelVerification[0]!.code}`}, gateway ${clockSkewByLabelVerification[1]!.ok ? "OK" : "FAILED (unexpected — the within-tolerance gateway label was dragged down)"}`,
+    "",
+    "Per-label expired tolerance: verifyAllLabels' expiredToleranceSecByLabel map gives each label its own expiry grace period — the merchant signer runs strict, the gateway signer tolerates clock lag, and a single global tolerance cannot split an already-expired dual signature — a grace period only widens the verifier-side past-expires window, it never changes the signature itself — and expired tolerance and clock-skew tolerance are two independent windows on the same verify chain (one widens the past-expires side, the other the future-created side)",
+    expiredToleranceByLabelVerification[0]!.ok === false &&
+    expiredToleranceByLabelVerification[1]!.ok === true
+      ? `Expired dual: both signatures expired ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRED_AGO_SEC}s ago, verified with expiredToleranceSecByLabel { merchant: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant FAILED (label ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_LABEL}, code ${expiredToleranceByLabelVerification[0]!.code}: ${expiredToleranceByLabelVerification[0]!.reason}), gateway still OK (label ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_LABEL}, keyid="${expiredToleranceByLabelVerification[1]!.keyId}", alg="ed25519") — only the strict label is rejected`
+      : `Expired dual: both signatures expired ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_EXPIRED_AGO_SEC}s ago, verified with expiredToleranceSecByLabel { merchant: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_MERCHANT_TOLERANCE_SEC}, gateway: ${DEMO_EXPIRED_TOLERANCE_BY_LABEL_GATEWAY_TOLERANCE_SEC} }: merchant ${expiredToleranceByLabelVerification[0]!.ok ? "OK (unexpected — the already-expired merchant signature was not rejected)" : `code ${expiredToleranceByLabelVerification[0]!.code}`}, gateway ${expiredToleranceByLabelVerification[1]!.ok ? "OK" : "FAILED (unexpected — the within-grace gateway label was dragged down)"}`,
   ];
 
   return {
@@ -10419,6 +10604,8 @@ export async function runDemo(): Promise<DemoResult> {
     requireFreshnessByLabelOverrideExpiresVerification,
     clockSkewByLabelSigned,
     clockSkewByLabelVerification,
+    expiredToleranceByLabelSigned,
+    expiredToleranceByLabelVerification,
     lines,
   };
 }
