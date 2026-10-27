@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal test coverage for per-label freshness windows combined
+  with per-label nonce requirements (backlog #642):
+  `test/maxSignatureAgeByLabelRequireNonceByLabel.test.ts` pins a
+  dual-label fixture (merchant window 60s with
+  `requireNonceByLabel: { merchant: true }`, gateway window 3600s
+  with no nonce requirement) and asserts a fresh nonce-less
+  merchant fails `MISSING_NONCE` while the gateway passes, an old
+  nonce-carrying merchant fails `SIGNATURE_TOO_OLD` while the
+  gateway inside its window passes, an old AND nonce-less
+  merchant fails `SIGNATURE_TOO_OLD` (the age check runs before
+  the nonce check in `verifyRequest` — this corrects the backlog
+  wording, which read as old-and-nonce-less implying
+  `MISSING_NONCE`), a fresh nonce-carrying dual passes with
+  nonces and keyids echoed, and a forged old nonce-less
+  merchant still reports `SIGNATURE_MISMATCH`. The README test
+  count moves 1015 → 1020.
 - Orthogonal test coverage for per-label key resolvers combined with
   per-label keyid pinning (backlog #641):
   `test/keyResolversExpectedKeyIds.test.ts` pins a dual-label
