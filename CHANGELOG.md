@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label replay cache (backlog #660):
+  `bench/bench.ts` now measures `verifyAllLabels` with
+  `replayCacheByLabel` over a dual ed25519 fixture whose merchant and
+  gateway signatures carry the same bare nonce string: one measured op
+  verifies the dual twice against fresh per-label caches (first call
+  records the nonce in each store, both labels ok; second call is
+  replay-rejected in both stores with `NONCE_REPLAY`), with the
+  shared-global-cache contrast, the unmapped-label global fallback,
+  and the no-cache default asserted outside timing. The README
+  Benchmarks table is refreshed from this run (new row
+  ~565.6 ops/sec, Node v24.22.1, shared host).
+
 - CLI demo section for per-label replay cache (backlog #659):
   `src/demo.ts` now demonstrates `verifyAllLabels` with
   `replayCacheByLabel` over a dual ed25519 fixture whose

@@ -4993,6 +4993,202 @@ function benchmarkVerifyAllAlgFallbackByLabel(): number {
   }, ITERATIONS);
 }
 
+const REPLAY_CACHE_BY_LABEL_CREATED = 1_700_000_000;
+const REPLAY_CACHE_BY_LABEL_MERCHANT_KID =
+  "bench-replay-cache-by-label-merchant-1";
+const REPLAY_CACHE_BY_LABEL_GATEWAY_KID =
+  "bench-replay-cache-by-label-gateway-1";
+const REPLAY_CACHE_BY_LABEL_NONCE = "bench-replay-cache-by-label-1";
+const REPLAY_CACHE_BY_LABEL_CODE = "NONCE_REPLAY";
+const REPLAY_CACHE_BY_LABEL_REASON =
+  `nonce replay detected: "${REPLAY_CACHE_BY_LABEL_NONCE}" was already seen`;
+
+/**
+ * `verifyAllLabels` with `replayCacheByLabel` steady
+ * state: the per-label replay-defense form a multi-party
+ * receiver runs when each signer mints nonces in its own
+ * namespace — the same bare nonce string in both labels
+ * must pass on first presentation and replay-reject on
+ * second presentation in each label's own store, which
+ * the single shared `replayCache` row above never pays,
+ * because it consults one store for every label. One
+ * measured op verifies the dual twice against fresh
+ * per-label caches: the first call records the nonce in
+ * each store (both labels ok), the second call is
+ * replay-rejected in both stores with exactly the pinned
+ * `NONCE_REPLAY` code and reason — the cryptographic
+ * check runs before the cache consultation, so the
+ * second call still pays full verification per label
+ * plus the cache lookup, exactly the path a receiver
+ * runs to refuse a replayed multi-party request.
+ * Outside timing, the shared-store contrast is pinned
+ * once: the same dual under one global `replayCache`
+ * passes the merchant label and replay-rejects the
+ * gateway label on its very first call (the #643
+ * contract — one bare-nonce namespace cannot serve two
+ * signers); the unmapped-label fallback is pinned
+ * once (a merchant-only map over a global cache passes
+ * both labels first and replay-rejects both second,
+ * the gateway via the global store); and the no-cache
+ * default is pinned once (both labels verify twice,
+ * replay defense is opt-in). Zero network, zero
+ * randomness in the measured assertions, no wall clock
+ * (every verify instant is injected; each cache's own
+ * clock is that same pinned instant).
+ */
+function benchmarkVerifyAllReplayCacheByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantSigned = signRequest(fixture, {
+    keyId: REPLAY_CACHE_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: REPLAY_CACHE_BY_LABEL_CREATED,
+    nonce: REPLAY_CACHE_BY_LABEL_NONCE,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: REPLAY_CACHE_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: REPLAY_CACHE_BY_LABEL_CREATED,
+    nonce: REPLAY_CACHE_BY_LABEL_NONCE,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: REPLAY_CACHE_BY_LABEL_CREATED,
+  };
+  const assertPair = (where: string): void => {
+    const merchantCache = new ReplayCache({
+      now: () => REPLAY_CACHE_BY_LABEL_CREATED,
+    });
+    const gatewayCache = new ReplayCache({
+      now: () => REPLAY_CACHE_BY_LABEL_CREATED,
+    });
+    const first = verifyAllLabels(dual, {
+      ...verifyOpts,
+      replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
+    });
+    if (
+      first.length !== 2 ||
+      first[0].label !== "merchant" ||
+      !first[0].ok ||
+      first[1].label !== "gateway" ||
+      !first[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with replayCacheByLabel (${where}, first presentation) gave ${JSON.stringify(first)}`,
+      );
+    const second = verifyAllLabels(dual, {
+      ...verifyOpts,
+      replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
+    });
+    if (
+      second.length !== 2 ||
+      second[0].label !== "merchant" ||
+      second[0].ok ||
+      second[0].code !== REPLAY_CACHE_BY_LABEL_CODE ||
+      second[0].reason !== REPLAY_CACHE_BY_LABEL_REASON ||
+      second[1].label !== "gateway" ||
+      second[1].ok ||
+      second[1].code !== REPLAY_CACHE_BY_LABEL_CODE ||
+      second[1].reason !== REPLAY_CACHE_BY_LABEL_REASON
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with replayCacheByLabel (${where}, second presentation) gave ${JSON.stringify(second)}`,
+      );
+  };
+
+  // Outside timing: the per-label pair self-checks
+  // before any timing starts.
+  assertPair("outside timing");
+
+  // Outside timing: the shared-store contrast — one
+  // global cache cannot serve two signers sharing a
+  // bare nonce: the merchant passes, the gateway
+  // replay-rejects on the very first call.
+  const sharedCache = new ReplayCache({
+    now: () => REPLAY_CACHE_BY_LABEL_CREATED,
+  });
+  const shared = verifyAllLabels(dual, {
+    ...verifyOpts,
+    replayCache: sharedCache,
+  });
+  if (
+    shared.length !== 2 ||
+    shared[0].label !== "merchant" ||
+    !shared[0].ok ||
+    shared[1].label !== "gateway" ||
+    shared[1].ok ||
+    shared[1].code !== REPLAY_CACHE_BY_LABEL_CODE ||
+    shared[1].reason !== REPLAY_CACHE_BY_LABEL_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: shared-cache contrast gave ${JSON.stringify(shared)}`,
+    );
+
+  // Outside timing: an unmapped label falls back to
+  // the global cache — a merchant-only map over a
+  // global store passes both labels first and
+  // replay-rejects both second (the gateway via the
+  // global store).
+  const merchantOnlyCache = new ReplayCache({
+    now: () => REPLAY_CACHE_BY_LABEL_CREATED,
+  });
+  const globalCache = new ReplayCache({
+    now: () => REPLAY_CACHE_BY_LABEL_CREATED,
+  });
+  const fallbackFirst = verifyAllLabels(dual, {
+    ...verifyOpts,
+    replayCache: globalCache,
+    replayCacheByLabel: { merchant: merchantOnlyCache },
+  });
+  const fallbackSecond = verifyAllLabels(dual, {
+    ...verifyOpts,
+    replayCache: globalCache,
+    replayCacheByLabel: { merchant: merchantOnlyCache },
+  });
+  if (
+    fallbackFirst.length !== 2 ||
+    fallbackFirst.some((r) => !r.ok) ||
+    fallbackSecond.length !== 2 ||
+    fallbackSecond.some(
+      (r) =>
+        r.ok ||
+        r.code !== REPLAY_CACHE_BY_LABEL_CODE ||
+        r.reason !== REPLAY_CACHE_BY_LABEL_REASON,
+    )
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback gave ${JSON.stringify(fallbackFirst)} / ${JSON.stringify(fallbackSecond)}`,
+    );
+
+  // Outside timing: with no cache the same dual
+  // verifies twice — replay defense is opt-in and the
+  // default behaviour is unchanged.
+  const defaultFirst = verifyAllLabels(dual, verifyOpts);
+  const defaultSecond = verifyAllLabels(dual, verifyOpts);
+  if (
+    defaultFirst.length !== 2 ||
+    defaultFirst.some((r) => !r.ok) ||
+    defaultSecond.length !== 2 ||
+    defaultSecond.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: no-cache default gave ${JSON.stringify(defaultFirst)} / ${JSON.stringify(defaultSecond)}`,
+    );
+
+  return measure(() => {
+    assertPair("measured pass");
+  }, ITERATIONS);
+}
+
 const EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED = 1_700_000_000;
 const EXPECTED_KEY_IDS_REQUIRE_TAG_MERCHANT_KID =
   "bench-expected-keyids-require-tag-merchant-1";
@@ -10107,6 +10303,11 @@ results.push({
   alg: "verifyAllLabels algFallbackByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllAlgFallbackByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels replayCacheByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllReplayCacheByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",
