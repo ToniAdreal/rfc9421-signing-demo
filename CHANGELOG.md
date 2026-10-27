@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Per-label `alg` fallback strategies for `verifyAllLabels` (backlog
+  #636): `VerifyAllOptions.algFallbackByLabel` maps a signature label
+  to its own `algFallback` value, falling back to the global strategy
+  for unmapped labels — a merchant signature from a foreign signer
+  that omits the optional `alg` parameter can now be inferred from
+  the key shape while a gateway signature on the same request keeps
+  the strict legacy default, without one global switch being too lax
+  or too strict. A mapped value overrides the global one in both
+  directions (`"infer"` enables inference for that label only, and
+  `false` keeps that label strict even when the global strategy is
+  `"infer"`), and each value must be exactly `"infer"` or `false`,
+  otherwise a caller configuration error (throw). The README
+  multi-party section documents the option with a merchant-`infer` /
+  gateway-`false` example, and `test/algFallbackByLabel.test.ts`
+  covers the split verdicts in both directions, fallback to the
+  global strategy (and to the legacy default), the global strategy
+  applying to both labels without the map, fail-fast on malformed
+  maps and values (including a mapped `false` staying valid), and
+  the unchanged single-label `verifyRequest` global path.
 - Per-label component-coverage policies for `verifyAllLabels`
   (backlog #635): `VerifyAllOptions.requiredComponentsByLabel` maps a
   signature label to its own `requiredComponents` list, falling back

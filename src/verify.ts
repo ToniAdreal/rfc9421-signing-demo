@@ -245,6 +245,9 @@ export interface VerifyOptions {
    *
    * Automatic detection is opt-in only: the default path is untouched
    * (a missing `alg` without this option keeps meaning `"ed25519"`).
+   * In `verifyAllLabels` the same strategy applies to every label,
+   * unless overridden per label via
+   * `VerifyAllOptions.algFallbackByLabel`.
    */
   algFallback?: "infer" | false;
   /**
@@ -1389,6 +1392,26 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    */
   requiredComponentsByLabel?: Record<string, string[]>;
   /**
+   * Per-label `alg` fallback strategies for multi-party signatures
+   * (e.g. a merchant signature from a foreign signer that omits the
+   * optional `alg` parameter and must be inferred from the key shape,
+   * plus a payment-gateway signature that must keep the strict
+   * legacy default, on the same request): maps a signature label to
+   * that label's own `algFallback` value. A label in the map is
+   * verified with its own strategy; any other label falls back to
+   * the global `algFallback` (unset or `false` means the legacy
+   * `"ed25519"` default). A mapped value overrides the global one
+   * in both directions — `"infer"` enables inference for that label
+   * only, and `false` keeps that label strict even when the global
+   * strategy is `"infer"` (the override uses nullish fallback, so a
+   * mapped `false` is honored, not treated as absent). Each value
+   * must be exactly `"infer"` or `false` — any other value is a
+   * caller configuration error (throw). A fallback strategy is not
+   * key selection, so it never joins the
+   * `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+   */
+  algFallbackByLabel?: Record<string, "infer" | false>;
+  /**
    * Per-label freshness-existence requirements for multi-party
    * signatures (e.g. a merchant signature that must carry `created`
    * and `expires`, plus a gateway signature that historically carries
@@ -1652,6 +1675,30 @@ function assertRequiredComponentsByLabel(
 }
 
 /**
+ * Validate the per-label `alg` fallback map. Each value must be
+ * exactly `"infer"` or `false` — the same two values the global
+ * `algFallback` accepts; a mapped `false` is a real strict choice,
+ * not an absent entry, so it is validated as a value rather than
+ * skipped. A malformed map or value is a caller configuration error,
+ * so it throws rather than returning `{ ok: false }`.
+ */
+function assertAlgFallbackByLabel(
+  map: Record<string, "infer" | false> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `algFallbackByLabel` must be a label→strategy object",
+    );
+  for (const [label, strategy] of Object.entries(map)) {
+    if (strategy !== "infer" && strategy !== false)
+      throw new Error(
+        `verifyAllLabels: \`algFallbackByLabel["${label}"]\` must be "infer" or false, got ${typeof strategy === "string" ? `"${strategy}"` : typeof strategy}`,
+      );
+  }
+}
+
+/**
  * Validate a per-label freshness-existence map. Each value must be a
  * boolean; a malformed map or value is a caller configuration error,
  * so it throws rather than returning `{ ok: false }`.
@@ -1700,6 +1747,7 @@ export function verifyAllLabels(
   assertClockSkewToleranceSecByLabel(opts.clockSkewToleranceSecByLabel);
   assertExpiredToleranceSecByLabel(opts.expiredToleranceSecByLabel);
   assertRequiredComponentsByLabel(opts.requiredComponentsByLabel);
+  assertAlgFallbackByLabel(opts.algFallbackByLabel);
   assertRequireFlagByLabel("requireCreatedByLabel", opts.requireCreatedByLabel);
   assertRequireFlagByLabel("requireExpiresByLabel", opts.requireExpiresByLabel);
   assertRequireFlagByLabel("requireNonceByLabel", opts.requireNonceByLabel);
@@ -1781,6 +1829,15 @@ export function verifyAllLabels(
     // mutual-exclusion checks above.
     const requiredComponents =
       opts.requiredComponentsByLabel?.[label] ?? opts.requiredComponents;
+    // Per-label `alg` fallback strategy: a label in the map is
+    // verified with its own strategy; every other label falls back
+    // to the global `algFallback` (unset means the legacy default).
+    // Nullish fallback (not `||`) matters here: a mapped `false`
+    // must keep that label strict even when the global strategy is
+    // `"infer"`. Like the policies above, a strategy is not key
+    // selection, so it never joins the mutual-exclusion checks.
+    const algFallback =
+      opts.algFallbackByLabel?.[label] ?? opts.algFallback;
     // Per-label freshness-existence requirements: a label in the map
     // is checked against its own flag; every other label falls back
     // to the global flag (unset means no existence check for it).
@@ -1804,6 +1861,6 @@ export function verifyAllLabels(
     // selection, so it never joins the mutual-exclusion checks.
     const requireTag =
       opts.requireTagByLabel?.[label] ?? opts.requireTag;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, requireCreated, requireExpires, requireNonce, requireTag });
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, requireCreated, requireExpires, requireNonce, requireTag });
   });
 }

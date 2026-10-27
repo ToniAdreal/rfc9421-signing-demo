@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 998 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1004 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -424,6 +424,28 @@ const results = verifyAllLabels(dualSigned, {
 });
 // merchant covering only "@method"/"@path" → { ok: false, code: "MISSING_REQUIRED_COMPONENT" }
 // gateway covering "@query" → { ok: true }
+```
+
+Per-label `alg` fallback strategies (a merchant signature from a
+foreign signer that omits the optional `alg` parameter and must be
+inferred from the key shape, plus a payment-gateway signature that
+must keep the strict legacy default, on the same request):
+`verifyAllLabels` accepts an `algFallbackByLabel` map. A label in the
+map is verified with its own strategy; any other label falls back to
+the global `algFallback` (unset or `false` means the legacy `"ed25519"`
+default). A mapped value overrides the global one in both directions —
+`"infer"` enables inference for that label only, and `false` keeps
+that label strict even when the global strategy is `"infer"`. Each
+value must be exactly `"infer"` or `false`, otherwise a configuration
+error. A fallback strategy is not key selection, so it never joins
+the `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+
+```ts
+const results = verifyAllLabels(dualSigned, {
+  algFallbackByLabel: { merchant: "infer", gateway: false },
+});
+// merchant without alg, P-256 key → { ok: true, alg: "ecdsa-p256-sha256" }
+// gateway without alg, HMAC secret, strict → { ok: false, code: "VERIFICATION_ERROR" }
 ```
 
 Per-label freshness-existence requirements (a merchant signature that
@@ -3019,7 +3041,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 998 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1004 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
