@@ -284,7 +284,9 @@ export interface VerifyOptions {
    * a missing component is a policy violation, not an authenticity
    * verdict. An empty array disables the check. Defaults to unset:
    * no check is made (backwards compatible). Composes with
-   * `verifyAllLabels` (checked independently per label).
+   * `verifyAllLabels` (checked independently per label; see
+   * `VerifyAllOptions.requiredComponentsByLabel` for a per-label list
+   * that replaces this global list for the labels it maps).
    *
    * A malformed value (non-array, or a non-string / empty-string entry)
    * is a caller configuration error (throw), in the same style as
@@ -1366,6 +1368,27 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    */
   expiredToleranceSecByLabel?: Record<string, number>;
   /**
+   * Per-label component-coverage policies for multi-party signatures
+   * (e.g. a merchant signature that must cover `content-digest` so
+   * the body cannot be swapped, plus a payment-gateway signature
+   * that must cover `@query` so the query string cannot be changed,
+   * on the same request): maps a signature label to that label's own
+   * `requiredComponents` list. A label in the map is checked against
+   * its own list; any other label falls back to the global
+   * `requiredComponents` (unset means no coverage check for it). A
+   * mapped list replaces the global list for that label — it is not
+   * unioned with it — so mapping a label to `[]` disables the check
+   * for that label even when a global list is set. Each list follows
+   * the global list's rules (an array of non-empty strings, otherwise
+   * a configuration error); a missing component reuses the global
+   * error code (`MISSING_REQUIRED_COMPONENT`) and the same
+   * fail-fast-before-crypto check position, so a label that fails
+   * coverage never reaches the cryptographic check. A coverage policy
+   * is not key selection, so it never joins the
+   * `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+   */
+  requiredComponentsByLabel?: Record<string, string[]>;
+  /**
    * Per-label freshness-existence requirements for multi-party
    * signatures (e.g. a merchant signature that must carry `created`
    * and `expires`, plus a gateway signature that historically carries
@@ -1603,6 +1626,32 @@ function assertExpiredToleranceSecByLabel(
 }
 
 /**
+ * Validate the per-label component-coverage map. Each list is
+ * validated with the same rules as the global `requiredComponents`
+ * (reusing `assertRequiredComponents`); a malformed map or list is a
+ * caller configuration error, so it throws rather than returning
+ * `{ ok: false }`.
+ */
+function assertRequiredComponentsByLabel(
+  map: Record<string, string[]> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `requiredComponentsByLabel` must be a label→component-list object",
+    );
+  for (const [label, components] of Object.entries(map)) {
+    try {
+      assertRequiredComponents(components);
+    } catch (e) {
+      throw new Error(
+        `verifyAllLabels: \`requiredComponentsByLabel["${label}"]\` is invalid: ${(e as Error).message}`,
+      );
+    }
+  }
+}
+
+/**
  * Validate a per-label freshness-existence map. Each value must be a
  * boolean; a malformed map or value is a caller configuration error,
  * so it throws rather than returning `{ ok: false }`.
@@ -1650,6 +1699,7 @@ export function verifyAllLabels(
   assertMaxSignatureAgeSecByLabel(opts.maxSignatureAgeSecByLabel);
   assertClockSkewToleranceSecByLabel(opts.clockSkewToleranceSecByLabel);
   assertExpiredToleranceSecByLabel(opts.expiredToleranceSecByLabel);
+  assertRequiredComponentsByLabel(opts.requiredComponentsByLabel);
   assertRequireFlagByLabel("requireCreatedByLabel", opts.requireCreatedByLabel);
   assertRequireFlagByLabel("requireExpiresByLabel", opts.requireExpiresByLabel);
   assertRequireFlagByLabel("requireNonceByLabel", opts.requireNonceByLabel);
@@ -1721,6 +1771,16 @@ export function verifyAllLabels(
     // the mutual-exclusion checks above.
     const expiredToleranceSec =
       opts.expiredToleranceSecByLabel?.[label] ?? opts.expiredToleranceSec;
+    // Per-label component-coverage policy: a label in the map is
+    // checked against its own list; every other label falls back to
+    // the global `requiredComponents` (unset means no coverage check
+    // for it). A mapped list replaces the global list — it is not
+    // unioned with it — so `[]` disables the check for that label
+    // even when a global list is set. Like the tolerances above, a
+    // coverage policy is not key selection, so it never joins the
+    // mutual-exclusion checks above.
+    const requiredComponents =
+      opts.requiredComponentsByLabel?.[label] ?? opts.requiredComponents;
     // Per-label freshness-existence requirements: a label in the map
     // is checked against its own flag; every other label falls back
     // to the global flag (unset means no existence check for it).
@@ -1744,6 +1804,6 @@ export function verifyAllLabels(
     // selection, so it never joins the mutual-exclusion checks.
     const requireTag =
       opts.requireTagByLabel?.[label] ?? opts.requireTag;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requireCreated, requireExpires, requireNonce, requireTag });
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, requireCreated, requireExpires, requireNonce, requireTag });
   });
 }

@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Per-label component-coverage policies for `verifyAllLabels`
+  (backlog #635): `VerifyAllOptions.requiredComponentsByLabel` maps a
+  signature label to its own `requiredComponents` list, falling back
+  to the global list for unmapped labels — a merchant signature that
+  must cover `content-digest` and a gateway signature that must cover
+  `@query` can now be verified on the same request without one global
+  list being too lax or too strict. A mapped list replaces the global
+  list for that label (it is not unioned with it, so `[]` disables the
+  check for that label), each list follows the global list's rules (an
+  array of non-empty strings, otherwise a caller configuration error),
+  and a missing component reuses `MISSING_REQUIRED_COMPONENT` at the
+  same fail-fast-before-crypto position. The README multi-party section
+  documents the option with a content-digest/`@query` example, and
+  `test/requiredComponentsByLabel.test.ts` covers the split verdicts
+  in both directions, case-insensitivity, fallback to the global list,
+  replace-not-union (including `[]` disabling), the global list
+  applying to both labels without the map, fail-fast on malformed maps
+  and lists, and the unchanged single-label `verifyRequest` path.
 - Per-label expiry tolerances for `verifyAllLabels` (backlog
   #633): `VerifyAllOptions.expiredToleranceSecByLabel` maps a
   signature label to its own `expiredToleranceSec`, falling back to

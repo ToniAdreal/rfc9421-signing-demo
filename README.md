@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 990 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 998 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -397,6 +397,33 @@ const results = verifyAllLabels(dualSigned, {
 });
 // results[0] (merchant, expired 60s, tolerance 0s) → { ok: false, code: "EXPIRED" }
 // results[1] (gateway, expired 60s, tolerance 120s) → { ok: true }
+```
+
+Per-label component-coverage policies (a merchant signature that must
+cover `content-digest` so the body cannot be swapped, plus a
+payment-gateway signature that must cover `@query` so the query string
+cannot be changed, on the same request): `verifyAllLabels` accepts a
+`requiredComponentsByLabel` map. A label in the map is checked against
+its own list; any other label falls back to the global
+`requiredComponents` (unset means no coverage check for it). A mapped
+list replaces the global list for that label — it is not unioned with
+it — so mapping a label to `[]` disables the check for that label
+even when a global list is set. Each list follows the global list's
+rules (an array of non-empty strings, otherwise a configuration error);
+a missing component reuses the global code
+(`MISSING_REQUIRED_COMPONENT`) and the same fail-fast-before-crypto
+check position. A coverage policy is not key selection, so it never
+joins the `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+
+```ts
+const results = verifyAllLabels(dualSigned, {
+  requiredComponentsByLabel: {
+    merchant: ["content-digest"], // merchant must bind the body
+    gateway: ["@query"], // gateway must bind the query string
+  },
+});
+// merchant covering only "@method"/"@path" → { ok: false, code: "MISSING_REQUIRED_COMPONENT" }
+// gateway covering "@query" → { ok: true }
 ```
 
 Per-label freshness-existence requirements (a merchant signature that
@@ -2973,7 +3000,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `NONCE_REPLAY` | nonce already seen within the replay-cache TTL (`VerifyOptions.replayCache`) |
 | `MISSING_NONCE` | `requireNonce` is set but the signature carries no `nonce` (or an empty-string one) |
 | `MISSING_TAG` | `requireTag` is set but the signature carries no `tag` (or an empty-string one) |
-| `MISSING_REQUIRED_COMPONENT` | the signature omits a component required by `VerifyOptions.requiredComponents` |
+| `MISSING_REQUIRED_COMPONENT` | the signature omits a component required by `VerifyOptions.requiredComponents` (or, per label, by `VerifyAllOptions.requiredComponentsByLabel`) |
 
 ```ts
 import { verifyRequestOrThrow, isVerifyError } from "rfc9421-signing-demo";
@@ -2992,7 +3019,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 990 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 998 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
