@@ -400,6 +400,16 @@ import {
   DEMO_NODE_TRAILERS_ROUNDTRIP_INPUT,
   DEMO_NODE_TRAILERS_STALE_PARSED,
   DEMO_NODE_TRAILERS_URL,
+  DEMO_REPLAY_CACHE_BY_LABEL_CREATED,
+  DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID,
+  DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL,
+  DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID,
+  DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL,
+  DEMO_REPLAY_CACHE_BY_LABEL_NONCE,
+  DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+  DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE,
+  DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON,
+  DEMO_REPLAY_CACHE_BY_LABEL_URL,
   DEMO_REPLAY_CLEAR_CHECKS,
   DEMO_REPLAY_CLEAR_NONCE,
   DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR,
@@ -6828,7 +6838,7 @@ test("demo per-label algorithm fallback segment pins algFallbackByLabel (merchan
   );
 });
 
-test("demo lines contain the per-label algorithm fallback segment (merchant inferred, gateway strict, map overrides global, closing the demo)", async () => {
+test("demo lines contain the per-label algorithm fallback segment (merchant inferred, gateway strict, map overrides global, followed by the replay-cache segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(
@@ -6844,12 +6854,262 @@ test("demo lines contain the per-label algorithm fallback segment (merchant infe
     `Algorithm split: neither signature carries an alg parameter, verified with algFallback "infer" plus algFallbackByLabel { merchant: "infer", gateway: false }: merchant OK (label ${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID}", alg="${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG}"), gateway FAILED (label ${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL}, code ${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_CODE}: ${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_REASON}) — only the strict label is rejected`,
     `Map overrides global: the same fixture re-verified with algFallback "infer" alone: merchant OK (alg="${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG}"), gateway OK (alg="${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_ALG}") — the mapped false, not the global infer, is what rejects the gateway label`,
   ]);
+  // The header plus its two lines are followed by a blank line
+  // and the per-label replay-cache segment's header (the
+  // demo's new closing segment), not by the end of the demo.
+  assert.equal(lines[headerIdx + 3], "");
+  assert.ok(
+    lines[headerIdx + 4]!.startsWith("Per-label replay cache:"),
+  );
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Per-label algorithm fallback:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 3),
+    lines.slice(headerIdx, headerIdx + 3),
+  );
+});
+
+test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded merchant replays, gateway first-passes, shared cache replays the gateway)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL, "gateway");
+  assert.equal(
+    DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID,
+    "demo-replay-cache-by-label-merchant-1",
+  );
+  assert.equal(
+    DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID,
+    "demo-replay-cache-by-label-gateway-1",
+  );
+  assert.equal(
+    DEMO_REPLAY_CACHE_BY_LABEL_URL,
+    "https://api.example.com/v1/payments",
+  );
+  assert.equal(
+    DEMO_REPLAY_CACHE_BY_LABEL_NONCE,
+    "demo-replay-cache-by-label-nonce-1",
+  );
+  assert.equal(DEMO_REPLAY_CACHE_BY_LABEL_NOW, DEMO_CREATED);
+  assert.equal(DEMO_REPLAY_CACHE_BY_LABEL_CREATED, DEMO_CREATED);
+  assert.equal(DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE, "NONCE_REPLAY");
+  assert.equal(
+    DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON,
+    `nonce replay detected: "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}" was already seen`,
+  );
+  // Wire shapes: both labels carry the same bare nonce, at the
+  // pinned created instant, under their own keyids.
+  const parts = (
+    r.replayCacheByLabelSigned.headers["signature-input"]!
+  ).split(", ");
+  const merchantPart = parts.find((p) =>
+    p.startsWith(`${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}=`),
+  )!;
+  const gatewayPart = parts.find((p) =>
+    p.startsWith(`${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}=`),
+  )!;
+  assert.match(merchantPart, /;created=1700000000/);
+  assert.match(gatewayPart, /;created=1700000000/);
+  assert.match(
+    merchantPart,
+    /;keyid="demo-replay-cache-by-label-merchant-1"/,
+  );
+  assert.match(
+    gatewayPart,
+    /;keyid="demo-replay-cache-by-label-gateway-1"/,
+  );
+  assert.ok(
+    merchantPart.includes(
+      `nonce="${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}"`,
+    ),
+  );
+  assert.ok(
+    gatewayPart.includes(
+      `nonce="${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}"`,
+    ),
+  );
+  assert.equal(r.replayCacheByLabelVerification.length, 2);
+  assert.deepEqual(
+    r.replayCacheByLabelVerification.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL, false],
+      [DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL, true],
+    ],
+  );
+  assert.equal(
+    r.replayCacheByLabelVerification[0].code,
+    DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE,
+  );
+  assert.equal(
+    r.replayCacheByLabelVerification[0].reason,
+    DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON,
+  );
+  assert.equal(
+    r.replayCacheByLabelVerification[0].keyId,
+    DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(
+    r.replayCacheByLabelVerification[0].nonce,
+    DEMO_REPLAY_CACHE_BY_LABEL_NONCE,
+  );
+  assert.equal(
+    r.replayCacheByLabelVerification[1].keyId,
+    DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  assert.equal(
+    r.replayCacheByLabelVerification[1].nonce,
+    DEMO_REPLAY_CACHE_BY_LABEL_NONCE,
+  );
+  // The shared-cache re-verification: without the map, the bare
+  // nonce is shared, so the merchant label passes and the gateway
+  // label alone replays.
+  assert.equal(r.replayCacheByLabelGlobalVerification.length, 2);
+  assert.deepEqual(
+    r.replayCacheByLabelGlobalVerification.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL, true],
+      [DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL, false],
+    ],
+  );
+  assert.equal(
+    r.replayCacheByLabelGlobalVerification[0].keyId,
+    DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(
+    r.replayCacheByLabelGlobalVerification[1].code,
+    DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE,
+  );
+  assert.equal(
+    r.replayCacheByLabelGlobalVerification[1].reason,
+    DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON,
+  );
+  assert.equal(
+    r.replayCacheByLabelGlobalVerification[1].keyId,
+    DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  // Independent checks driven directly (the same per-label
+  // replay semantics test/replayCacheByLabel.test.ts pins):
+  // fresh ed25519 pairs, both labels signed with the same nonce,
+  // the merchant store pre-seeded by a single-label verification,
+  // then the dual call under the map and under a shared cache.
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const signLabel = (label: string, keyId: string, pair: KeyObject) =>
+    signRequest(
+      {
+        method: "POST",
+        url: DEMO_REPLAY_CACHE_BY_LABEL_URL,
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        label,
+        keyId,
+        alg: "ed25519",
+        key: pair,
+        created: DEMO_REPLAY_CACHE_BY_LABEL_CREATED,
+        nonce: DEMO_REPLAY_CACHE_BY_LABEL_NONCE,
+      },
+    );
+  const first = signLabel(
+    DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL,
+    DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID,
+    merchant.privateKey,
+  );
+  const second = signLabel(
+    DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL,
+    DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID,
+    gateway.privateKey,
+  );
+  const dual = {
+    ...first,
+    headers: {
+      ...first.headers,
+      "signature-input": `${first.headers["signature-input"]}, ${second.headers["signature-input"]}`,
+      signature: `${first.headers["signature"]}, ${second.headers["signature"]}`,
+    },
+  };
+  const keys = {
+    merchant: merchant.publicKey,
+    gateway: gateway.publicKey,
+  };
+  const merchantCache = new ReplayCache({
+    now: () => DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+  });
+  const gatewayCache = new ReplayCache({
+    now: () => DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+  });
+  assert.equal(
+    verifyRequest(first, {
+      label: DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL,
+      key: merchant.publicKey,
+      now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+      replayCache: merchantCache,
+    }).ok,
+    true,
+  );
+  const direct = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+    replayCacheByLabel: {
+      merchant: merchantCache,
+      gateway: gatewayCache,
+    },
+  });
+  assert.deepEqual(
+    direct.map((x) => [x.label, x.ok, x.code]),
+    [
+      [
+        DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL,
+        false,
+        DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE,
+      ],
+      [DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL, true, undefined],
+    ],
+  );
+  const directGlobal = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+    replayCache: new ReplayCache({
+      now: () => DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+    }),
+  });
+  assert.deepEqual(
+    directGlobal.map((x) => [x.label, x.ok, x.code]),
+    [
+      [DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL, true, undefined],
+      [
+        DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL,
+        false,
+        DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE,
+      ],
+    ],
+  );
+});
+
+test("demo lines contain the per-label replay cache segment (pre-seeded merchant replays, gateway first-passes, shared cache replays the gateway, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Per-label replay cache: verifyAllLabels' replayCacheByLabel/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label replay cache:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), [
+    "Per-label replay cache: verifyAllLabels' replayCacheByLabel map gives each label its own nonce store — the merchant and gateway signatures carry the same bare nonce string, because each party mints nonces in its own namespace, and a single shared cache keyed by that bare string cannot split a dual signature whose labels reuse a nonce — the merchant store was pre-seeded with the nonce before the dual verification, so the dual call is the merchant label's second presentation and the gateway label's first presentation in its own store",
+    `Replay split: both signatures carry nonce "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}", verified with replayCacheByLabel { merchant: merchantCache, gateway: gatewayCache } after the merchant store was pre-seeded with that nonce: merchant FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE}: ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON}), gateway OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — the same bare nonce is a replay in one label's store and fresh in the other's`,
+    `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: merchant OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID}"), gateway FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, code ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE}: ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON}) — without the map the cache stays shared across labels, and a label with no map entry falls back to the global store`,
+  ]);
   // The header plus its two lines are the demo's closing lines,
   // with nothing after them.
   assert.equal(headerIdx + 3, lines.length);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
-    l.startsWith("Per-label algorithm fallback:"),
+    l.startsWith("Per-label replay cache:"),
   );
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 3),

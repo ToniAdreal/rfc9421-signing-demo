@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo section for per-label replay cache (backlog #659):
+  `src/demo.ts` now demonstrates `verifyAllLabels` with
+  `replayCacheByLabel` over a dual ed25519 fixture whose
+  merchant and gateway signatures carry the same bare nonce
+  string (each party mints nonces in its own namespace): the
+  merchant store is pre-seeded with that nonce before the dual
+  verification, so the merchant label alone fails with
+  `NONCE_REPLAY` (its second presentation) while the gateway
+  label passes (its first presentation in its own store),
+  proving the stores partition the nonce namespace per label
+  rather than sharing one bare-nonce namespace. The same
+  fixture re-verified under a single shared global
+  `replayCache` with no map passes the merchant label and
+  fails the gateway label with `NONCE_REPLAY`, proving the
+  shared contract is unchanged and that a label with no map
+  entry falls back to the global store. The demo asserts
+  every outcome, code, reason, keyid and nonce and fails
+  (non-zero exit) if any fixture breaks;
+  `test/demo.test.ts` gains two tests pinning the same
+  shapes and the printed lines (the per-label algorithm
+  fallback segment's closing-lines assertion now points at
+  the new closing segment). The README test count moves
+  1045 → 1047.
 - CLI demo section for per-label algorithm fallback (backlog #658):
   `src/demo.ts` now demonstrates `verifyAllLabels` with
   `algFallbackByLabel` over a dual-label fixture with neither

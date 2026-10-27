@@ -1039,6 +1039,32 @@
  * Every clock is
  * injected and the segment's merchant key pair is fresh per
  * run, so the segment is byte-identical between runs.
+ * The demo then closes with a per-label replay-cache
+ * segment: `VerifyAllOptions.replayCacheByLabel` gives each
+ * label its own nonce store — the merchant and gateway
+ * signatures carry the same bare nonce string, because each
+ * party mints nonces in its own namespace, and the merchant
+ * store is pre-seeded with that nonce before the dual
+ * verification runs. Under the per-label map the merchant
+ * label alone fails with `NONCE_REPLAY` (its second
+ * presentation of the nonce) while the gateway label passes
+ * (its first presentation in its own store), proving the
+ * stores partition the nonce namespace per label rather than
+ * sharing one bare-nonce namespace. The segment then
+ * re-verifies the same fixture under a single shared global
+ * `replayCache` with no map: the merchant label passes and
+ * the gateway label alone fails with `NONCE_REPLAY`,
+ * proving the shared contract is unchanged — a label with
+ * no map entry falls back to the global store, and without
+ * the map the cache stays shared across labels. Outside
+ * the printed lines the demo asserts every outcome, label,
+ * code, reason and keyid equals the hand-pinned expectations
+ * below (the same per-label replay semantics
+ * `test/replayCacheByLabel.test.ts` pins; a replay failure
+ * still carries its keyid, so keyids are asserted for both
+ * labels). Every clock is injected and the segment's key
+ * pairs are fresh per run, so the segment is byte-identical
+ * between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -3083,6 +3109,39 @@ export const DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_CODE: VerifyFailureCode =
 export const DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_REASON =
   "verification error: Invalid key object type secret, expected private or public.";
 
+/** Label of the per-label replay-cache segment's merchant signature. */
+export const DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL = "merchant";
+/** Label of the per-label replay-cache segment's gateway signature. */
+export const DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL = "gateway";
+/** Key id the per-label replay-cache segment's merchant signature carries. */
+export const DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID =
+  "demo-replay-cache-by-label-merchant-1";
+/** Key id the per-label replay-cache segment's gateway signature carries. */
+export const DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID =
+  "demo-replay-cache-by-label-gateway-1";
+/** Absolute URL the per-label replay-cache segment signs. */
+export const DEMO_REPLAY_CACHE_BY_LABEL_URL =
+  "https://api.example.com/v1/payments";
+/** Nonce both segment signatures carry (the same bare nonce string in two namespaces). */
+export const DEMO_REPLAY_CACHE_BY_LABEL_NONCE =
+  "demo-replay-cache-by-label-nonce-1";
+/** Verifier clock for the per-label replay-cache segment (the pinned `DEMO_CREATED` instant). */
+export const DEMO_REPLAY_CACHE_BY_LABEL_NOW = DEMO_CREATED;
+/** `created` both segment signatures carry (the pinned `DEMO_CREATED` instant). */
+export const DEMO_REPLAY_CACHE_BY_LABEL_CREATED = DEMO_CREATED;
+/**
+ * Hand-pinned failure code when a label presents a nonce its own
+ * store has already seen (`NONCE_REPLAY`).
+ */
+export const DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE: VerifyFailureCode =
+  "NONCE_REPLAY";
+/**
+ * Hand-pinned `NONCE_REPLAY` reason (the exact wording
+ * `src/verify.ts` returns, with the segment nonce interpolated).
+ */
+export const DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON =
+  `nonce replay detected: "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}" was already seen`;
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -4521,6 +4580,23 @@ export interface DemoResult {
    * not the global strategy, is what splits them).
    */
   algFallbackByLabelGlobalVerification: VerifyResult[];
+  /** The per-label replay-cache segment's dual-label request (both labels carry the same bare nonce). */
+  replayCacheByLabelSigned: SignedHttpRequest;
+  /**
+   * Per-label results for that request with
+   * `replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache }`
+   * after the merchant store was pre-seeded with the segment nonce
+   * (merchant fails `NONCE_REPLAY`, gateway passes: the nonce is
+   * partitioned per label, not shared by bare string).
+   */
+  replayCacheByLabelVerification: VerifyResult[];
+  /**
+   * Per-label results for the same request under a single shared
+   * global `replayCache` with no map (merchant passes, gateway
+   * fails `NONCE_REPLAY`: without the map the cache stays shared
+   * across labels, and an unmapped label falls back to it).
+   */
+  replayCacheByLabelGlobalVerification: VerifyResult[];
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -10243,6 +10319,158 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Per-label replay-cache segment: each party mints nonces in its
+  // own namespace, so a merchant signature and a gateway signature
+  // can legitimately carry the same bare nonce string. A single
+  // shared cache keyed by that bare string would reject the second
+  // label as a replay even though it never saw the nonce; per-label
+  // stores partition the namespace instead. The merchant store is
+  // pre-seeded here by verifying the merchant's own signature once
+  // against it (the first presentation of the nonce in that store),
+  // so the dual verification below is the merchant label's second
+  // presentation and the gateway label's first presentation in its
+  // own store. A label with no map entry falls back to the global
+  // `replayCache` — and with no map at all the cache stays shared
+  // across labels, which the global re-verification below pins:
+  // the same fixture under one shared store passes the merchant
+  // label and replays the gateway label. The same per-label replay
+  // semantics `test/replayCacheByLabel.test.ts` pins. A replay
+  // failure still carries its keyid, so both labels' keyids are
+  // asserted (unlike a crypto failure, which may carry none).
+  const replayCacheByLabelMerchantPair = generateEd25519KeyPair();
+  const replayCacheByLabelGatewayPair = generateEd25519KeyPair();
+  const replayCacheByLabelSign = (
+    label: string,
+    keyId: string,
+    key: KeyObject,
+  ): SignedHttpRequest =>
+    signRequest(
+      {
+        method: "POST",
+        url: DEMO_REPLAY_CACHE_BY_LABEL_URL,
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        label,
+        keyId,
+        alg: "ed25519",
+        key,
+        created: DEMO_REPLAY_CACHE_BY_LABEL_CREATED,
+        nonce: DEMO_REPLAY_CACHE_BY_LABEL_NONCE,
+      },
+    );
+  const replayCacheByLabelMerchantSigned = replayCacheByLabelSign(
+    DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL,
+    DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID,
+    replayCacheByLabelMerchantPair.privateKey,
+  );
+  const replayCacheByLabelGatewaySigned = replayCacheByLabelSign(
+    DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL,
+    DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID,
+    replayCacheByLabelGatewayPair.privateKey,
+  );
+  const replayCacheByLabelSigned: SignedHttpRequest = {
+    ...replayCacheByLabelMerchantSigned,
+    headers: {
+      ...replayCacheByLabelMerchantSigned.headers,
+      "signature-input": `${replayCacheByLabelMerchantSigned.headers["signature-input"]}, ${replayCacheByLabelGatewaySigned.headers["signature-input"]}`,
+      signature: `${replayCacheByLabelMerchantSigned.headers["signature"]}, ${replayCacheByLabelGatewaySigned.headers["signature"]}`,
+    },
+  };
+  const replayCacheByLabelKeys = {
+    [DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL]:
+      replayCacheByLabelMerchantPair.publicKey,
+    [DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL]:
+      replayCacheByLabelGatewayPair.publicKey,
+  };
+  const replayCacheByLabelMerchantCache = new ReplayCache({
+    now: () => DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+  });
+  const replayCacheByLabelGatewayCache = new ReplayCache({
+    now: () => DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+  });
+  const replayCacheByLabelPreseed = verifyRequest(
+    replayCacheByLabelMerchantSigned,
+    {
+      label: DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL,
+      key: replayCacheByLabelMerchantPair.publicKey,
+      now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+      replayCache: replayCacheByLabelMerchantCache,
+    },
+  );
+  const replayCacheByLabelVerification = verifyAllLabels(
+    replayCacheByLabelSigned,
+    {
+      keys: replayCacheByLabelKeys,
+      now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+      replayCacheByLabel: {
+        [DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL]:
+          replayCacheByLabelMerchantCache,
+        [DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL]:
+          replayCacheByLabelGatewayCache,
+      },
+    },
+  );
+  const replayCacheByLabelGlobalCache = new ReplayCache({
+    now: () => DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+  });
+  const replayCacheByLabelGlobalVerification = verifyAllLabels(
+    replayCacheByLabelSigned,
+    {
+      keys: replayCacheByLabelKeys,
+      now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+      replayCache: replayCacheByLabelGlobalCache,
+    },
+  );
+  if (
+    replayCacheByLabelPreseed.ok !== true ||
+    replayCacheByLabelPreseed.nonce !== DEMO_REPLAY_CACHE_BY_LABEL_NONCE ||
+    replayCacheByLabelVerification.length !== 2 ||
+    replayCacheByLabelVerification[0].label !==
+      DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL ||
+    replayCacheByLabelVerification[0].ok !== false ||
+    replayCacheByLabelVerification[0].code !==
+      DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE ||
+    replayCacheByLabelVerification[0].reason !==
+      DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON ||
+    replayCacheByLabelVerification[0].keyId !==
+      DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID ||
+    replayCacheByLabelVerification[0].nonce !==
+      DEMO_REPLAY_CACHE_BY_LABEL_NONCE ||
+    replayCacheByLabelVerification[1].label !==
+      DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL ||
+    replayCacheByLabelVerification[1].ok !== true ||
+    replayCacheByLabelVerification[1].keyId !==
+      DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID ||
+    replayCacheByLabelVerification[1].nonce !==
+      DEMO_REPLAY_CACHE_BY_LABEL_NONCE ||
+    replayCacheByLabelGlobalVerification.length !== 2 ||
+    replayCacheByLabelGlobalVerification[0].label !==
+      DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL ||
+    replayCacheByLabelGlobalVerification[0].ok !== true ||
+    replayCacheByLabelGlobalVerification[0].keyId !==
+      DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID ||
+    replayCacheByLabelGlobalVerification[1].label !==
+      DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL ||
+    replayCacheByLabelGlobalVerification[1].ok !== false ||
+    replayCacheByLabelGlobalVerification[1].code !==
+      DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE ||
+    replayCacheByLabelGlobalVerification[1].reason !==
+      DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON ||
+    replayCacheByLabelGlobalVerification[1].keyId !==
+      DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID
+  ) {
+    throw new Error(
+      `demo fixture broken: replayCacheByLabel gave ` +
+        `${JSON.stringify(replayCacheByLabelVerification)} and ` +
+        `${JSON.stringify(replayCacheByLabelGlobalVerification)}, instead of the merchant ` +
+        `label rejected with ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE} and the gateway label ` +
+        `verifying under the per-label map, with the merchant label verifying and the gateway label ` +
+        `rejected with ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE} under a single shared global cache`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -10850,6 +11078,16 @@ export async function runDemo(): Promise<DemoResult> {
     algFallbackByLabelGlobalVerification[1]!.ok === true
       ? `Map overrides global: the same fixture re-verified with algFallback "infer" alone: merchant OK (alg="${algFallbackByLabelGlobalVerification[0]!.alg}"), gateway OK (alg="${algFallbackByLabelGlobalVerification[1]!.alg}") — the mapped false, not the global infer, is what rejects the gateway label`
       : `Map overrides global: the same fixture re-verified with algFallback "infer" alone: merchant ${algFallbackByLabelGlobalVerification[0]!.ok ? "OK" : "FAILED (unexpected — the merchant label did not infer under the global strategy)"}, gateway ${algFallbackByLabelGlobalVerification[1]!.ok ? "OK" : "FAILED (unexpected — the gateway label did not infer under the global strategy)"}`,
+    "",
+    "Per-label replay cache: verifyAllLabels' replayCacheByLabel map gives each label its own nonce store — the merchant and gateway signatures carry the same bare nonce string, because each party mints nonces in its own namespace, and a single shared cache keyed by that bare string cannot split a dual signature whose labels reuse a nonce — the merchant store was pre-seeded with the nonce before the dual verification, so the dual call is the merchant label's second presentation and the gateway label's first presentation in its own store",
+    replayCacheByLabelVerification[0]!.ok === false &&
+    replayCacheByLabelVerification[1]!.ok === true
+      ? `Replay split: both signatures carry nonce "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}", verified with replayCacheByLabel { merchant: merchantCache, gateway: gatewayCache } after the merchant store was pre-seeded with that nonce: merchant FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, code ${replayCacheByLabelVerification[0]!.code}: ${replayCacheByLabelVerification[0]!.reason}), gateway OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, keyid="${replayCacheByLabelVerification[1]!.keyId}", alg="ed25519") — the same bare nonce is a replay in one label's store and fresh in the other's`
+      : `Replay split: both signatures carry nonce "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}", verified with replayCacheByLabel { merchant: merchantCache, gateway: gatewayCache } after the merchant store was pre-seeded with that nonce: merchant ${replayCacheByLabelVerification[0]!.ok ? "OK (unexpected — the pre-seeded merchant nonce was not detected as a replay)" : `code ${replayCacheByLabelVerification[0]!.code}`}, gateway ${replayCacheByLabelVerification[1]!.ok ? "OK" : "FAILED (unexpected — the gateway label's first presentation in its own store was rejected)"}`,
+    replayCacheByLabelGlobalVerification[0]!.ok === true &&
+    replayCacheByLabelGlobalVerification[1]!.ok === false
+      ? `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: merchant OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, keyid="${replayCacheByLabelGlobalVerification[0]!.keyId}"), gateway FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, code ${replayCacheByLabelGlobalVerification[1]!.code}: ${replayCacheByLabelGlobalVerification[1]!.reason}) — without the map the cache stays shared across labels, and a label with no map entry falls back to the global store`
+      : `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: merchant ${replayCacheByLabelGlobalVerification[0]!.ok ? "OK" : "FAILED (unexpected — the merchant label did not pass under the shared cache)"}, gateway ${replayCacheByLabelGlobalVerification[1]!.ok ? "OK (unexpected — the shared cache did not replay the second label)" : `code ${replayCacheByLabelGlobalVerification[1]!.code}`}`,
   ];
 
   return {
@@ -11116,6 +11354,9 @@ export async function runDemo(): Promise<DemoResult> {
     algFallbackByLabelSigned,
     algFallbackByLabelVerification,
     algFallbackByLabelGlobalVerification,
+    replayCacheByLabelSigned,
+    replayCacheByLabelVerification,
+    replayCacheByLabelGlobalVerification,
     lines,
   };
 }
