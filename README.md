@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1020 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1031 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -488,8 +488,10 @@ check, before the replay cache), so forgeries still report
 — the cache. A non-boolean map value is a caller configuration error,
 and like the freshness requirements an existence requirement never
 joins the key-selection mutual-exclusion rules. The map only overrides
-the existence requirement: the replay cache itself stays shared across
-labels, keyed by the bare nonce string (one nonce per label).
+the existence requirement: partitioning the replay cache itself per
+label is a separate opt-in, `replayCacheByLabel` (below). Without it,
+the cache stays shared across labels, keyed by the bare nonce string
+(one nonce per label).
 
 ```ts
 const results = verifyAllLabels(dualSigned, {
@@ -497,6 +499,32 @@ const results = verifyAllLabels(dualSigned, {
 });
 // merchant without nonce → { ok: false, code: "MISSING_NONCE" }
 // gateway without nonce → { ok: true } (falls back to global, unset)
+```
+
+Per-label replay stores (a merchant signature and a gateway signature
+that happen to reuse the same nonce string, because each party mints
+nonces in its own namespace): `verifyAllLabels` accepts a
+`replayCacheByLabel` map with the same override/fallback semantics: a
+label in the map is checked against its own `NonceStore`; any other
+label falls back to the global `replayCache` (unset means no replay
+check for it). A mapped store replaces the global store for that label
+— it is not merged with it — so the same bare nonce can be fresh in
+one label's store and already seen in another's, and different labels
+can carry different TTLs/capacities. A value without a `check`
+function, or a malformed map, is a caller configuration error. Failed
+verifications never touch either store, and without the map the
+shared-store contract above is unchanged. Separate stores only
+partition the namespace inside one process — across processes, each
+label still needs its own shared store (see the Limitations and
+SECURITY.md).
+
+```ts
+const results = verifyAllLabels(dualSigned, {
+  replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
+});
+// merchant and gateway carrying the same nonce → both { ok: true }
+// (each recorded in its own store); re-verifying the same request → 
+// both { ok: false, code: "NONCE_REPLAY" }
 ```
 
 Per-label tag-existence requirement (a merchant signature that must
@@ -983,10 +1011,10 @@ example above calls the adapter.
   `requireNonce: true` alongside it when such signatures must be
   rejected instead: they then fail with `MISSING_NONCE` (an empty-string
   nonce counts as missing), checked after the cryptographic check and
-  before the cache query. The cache itself is shared across
+  before the cache query. By default the cache is shared across
   `verifyAllLabels` labels, while `requireNonce` is judged per label. The
-  store is keyed by the bare nonce string with no per-label partitioning,
-  so callers have a hard contract: **one nonce per label** — if two labels
+  shared store is keyed by the bare nonce string with no per-label
+  partitioning, so callers have a hard contract: **one nonce per label** — if two labels
   on the same request carry the *same* nonce (e.g. a gateway reusing the
   merchant's nonce while appending its own signature), the first label
   records it and every later label is rejected with `NONCE_REPLAY`, even
@@ -994,7 +1022,11 @@ example above calls the adapter.
   intentional fail-closed semantic (pinned by
   `test/replay.test.ts`), not a bug: changing the store key format would
   silently break every existing custom `NonceStore` implementation.
-  Generate a fresh `generateNonce()` value for each label you sign.
+  Generate a fresh `generateNonce()` value for each label you sign —
+  unless you deliberately partition the namespace with
+  `replayCacheByLabel` (see the per-label replay stores section above),
+  which gives each label its own store and lifts the one-nonce-per-label
+  contract for labels in the map.
   Multi-verifier deployments still need a shared nonce store (see the
   Limitations and SECURITY.md). Call `cache.stats()` for observability:
   it returns a `{ size, hits, misses, evictions }` snapshot (expired-entry
@@ -3080,7 +3112,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1020 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1031 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

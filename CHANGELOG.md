@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Per-label nonce replay stores for multi-party signatures (backlog
+  #643): `VerifyAllOptions.replayCacheByLabel` maps a signature label
+  to its own `NonceStore`, checked in `verifyAllLabels` in place of
+  the global `replayCache` for that label only; unmapped labels fall
+  back to the global store, and with no global store an unmapped label
+  is never replay-checked. A malformed map or a store value without a
+  `check` function fails fast as a caller configuration error
+  (validated for the whole map, including labels absent from the
+  request). `test/replayCacheByLabel.test.ts` (11 cases) pins the
+  same bare nonce passing in both labels in one call and replaying
+  in each label's own store on re-verification, a nonce pre-seen by
+  the merchant store still passing in the gateway store, the global
+  fallback, the no-global bypass, both fail-fast shapes, failed
+  verifications polluting neither store, the unchanged shared-store
+  contract without the map, per-label TTLs (60s vs 3600s), the
+  stable `NONCE_REPLAY` code from `verifyRequestOrThrow`, and an
+  absent-label map entry being ignored. The README test count moves
+  1020 → 1031, and the per-label replay stores section plus the
+  shared-cache contract note are updated (partitioning is opt-in
+  only; it does not change the default one-nonce-per-label
+  contract).
 - Orthogonal test coverage for per-label freshness windows combined
   with per-label nonce requirements (backlog #642):
   `test/maxSignatureAgeByLabelRequireNonceByLabel.test.ts` pins a

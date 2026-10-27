@@ -270,7 +270,10 @@ export interface VerifyOptions {
    * Note: the store is shared across `verifyAllLabels` labels and across
    * calls, so re-verifying the *same* request with the same store is
    * itself reported as a replay — one store per verifier lifetime is the
-   * intended usage.
+   * intended usage. To partition the namespace per label instead, pass
+   * `VerifyAllOptions.replayCacheByLabel`: a label in that map is
+   * checked against its own store, and only unmapped labels fall back
+   * to this global store.
    */
   replayCache?: NonceStore;
   /**
@@ -1448,12 +1451,35 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * nonce-less label never reaches — or pollutes — the cache. An
    * existence requirement is not key selection, so it never joins
    * the `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
-   * This map only overrides the existence requirement: the replay
-   * cache itself stays shared across labels, keyed by the bare nonce
-   * string with no per-label partitioning (see the `replayCache`
-   * documentation for the one-nonce-per-label contract).
+   * This map only overrides the existence requirement: partitioning
+   * the replay cache itself per label is the job of
+   * `replayCacheByLabel` below. Without that map, the cache stays
+   * shared across labels, keyed by the bare nonce string (see the
+   * `replayCache` documentation for the one-nonce-per-label contract).
    */
   requireNonceByLabel?: Record<string, boolean>;
+  /**
+   * Per-label nonce replay stores for multi-party signatures (e.g. a
+   * merchant signature and a payment-gateway signature that happen to
+   * reuse the same nonce string, because each party mints nonces in
+   * its own namespace): maps a signature label to that label's own
+   * `NonceStore`. A label in the map is checked against its own
+   * store; any other label falls back to the global `replayCache`
+   * (unset means no replay check for it). A mapped store is a
+   * complete replacement for that label — it is not merged with the
+   * global store — so the same bare nonce string can be fresh in one
+   * label's store and already seen in another's. Each value must be a
+   * `NonceStore` (an object whose `check` is a function, the duck
+   * type `ReplayCache` implements); any other value, or a malformed
+   * map, is a caller configuration error (throw). A replay store is
+   * not key selection, so it never joins the
+   * `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+   * Honest scope, unchanged from the global store: separate stores
+   * only partition the namespace inside one process — across
+   * processes, each label still needs its own shared store (see
+   * SECURITY.md for the shared-store pattern).
+   */
+  replayCacheByLabel?: Record<string, NonceStore>;
   /**
    * Per-label tag-existence requirements for multi-party signatures
    * (e.g. a merchant signature that must carry a `tag` binding it to
@@ -1699,6 +1725,36 @@ function assertAlgFallbackByLabel(
 }
 
 /**
+ * Validate the per-label nonce replay store map. Each value must be a
+ * `NonceStore` — duck-typed as an object (or function) carrying a
+ * `check` function, the contract `ReplayCache` implements; a value
+ * without one cannot be consulted safely, so it is a caller
+ * configuration error rather than a verification failure. A mapped
+ * store is validated even when its label never appears in the request,
+ * matching the other per-label maps (fail-fast at call time, not at
+ * first use).
+ */
+function assertReplayCacheByLabel(
+  map: Record<string, NonceStore> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `replayCacheByLabel` must be a label→store object",
+    );
+  for (const [label, store] of Object.entries(map)) {
+    if (
+      store === null ||
+      (typeof store !== "object" && typeof store !== "function") ||
+      typeof (store as NonceStore).check !== "function"
+    )
+      throw new Error(
+        `verifyAllLabels: \`replayCacheByLabel["${label}"]\` must be a NonceStore with a check function, got ${store === null ? "null" : typeof store}`,
+      );
+  }
+}
+
+/**
  * Validate a per-label freshness-existence map. Each value must be a
  * boolean; a malformed map or value is a caller configuration error,
  * so it throws rather than returning `{ ok: false }`.
@@ -1752,6 +1808,7 @@ export function verifyAllLabels(
   assertRequireFlagByLabel("requireExpiresByLabel", opts.requireExpiresByLabel);
   assertRequireFlagByLabel("requireNonceByLabel", opts.requireNonceByLabel);
   assertRequireFlagByLabel("requireTagByLabel", opts.requireTagByLabel);
+  assertReplayCacheByLabel(opts.replayCacheByLabel);
   let labels: string[];
   try {
     labels = listSignatureLabels(sigInput);
@@ -1861,6 +1918,16 @@ export function verifyAllLabels(
     // selection, so it never joins the mutual-exclusion checks.
     const requireTag =
       opts.requireTagByLabel?.[label] ?? opts.requireTag;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, requireCreated, requireExpires, requireNonce, requireTag });
+    // Per-label nonce replay store: a label in the map is checked
+    // against its own store; every other label falls back to the
+    // global `replayCache` (unset means no replay check for it).
+    // This must be passed explicitly — spreading `opts` alone would
+    // carry the global store for every label, since `verifyRequest`
+    // knows nothing about the per-label map. Nullish fallback
+    // matters only for absent entries; a mapped store is always an
+    // object, never a falsy override to be skipped.
+    const replayCache =
+      opts.replayCacheByLabel?.[label] ?? opts.replayCache;
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, requireCreated, requireExpires, requireNonce, requireTag, replayCache });
   });
 }
