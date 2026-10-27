@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal test coverage for per-label key resolvers combined with
+  per-label keyid pinning (backlog #641):
+  `test/keyResolversExpectedKeyIds.test.ts` pins a dual-label
+  fixture (each label with its own resolver and its own pin) and
+  asserts the consistent dual passes with both keyids echoed, a
+  resolver that follows a rotation to an unpinned keyid fails
+  `KEYID_MISMATCH` while the other label still passes, a resolver
+  that maps a pinned keyid to the wrong public key fails
+  `SIGNATURE_MISMATCH` (crypto runs before the pin check, so the
+  pin is never reached — this clarifies the backlog wording, which
+  could be read as wrong-key implying `KEYID_MISMATCH`), an
+  unresolvable keyid fails `KEY_RESOLUTION_FAILED` before any pin
+  check, a label unmapped in `keyResolvers` falls back to the
+  global `keyResolver` while its pin still holds, and a label
+  unmapped in `expectedKeyIds` passes on resolution plus crypto
+  alone. The README test count moves 1009 → 1015.
 - Orthogonal test coverage for per-label keyid pinning combined with
   per-label tag presence (backlog #640):
   `test/expectedKeyIdsRequireTagByLabel.test.ts` pins a dual-label
