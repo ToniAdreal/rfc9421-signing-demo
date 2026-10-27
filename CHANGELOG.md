@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal test coverage for per-label clock-skew tolerance combined
+  with per-label expired tolerance (backlog #654):
+  `test/clockSkewExpiredToleranceByLabel.test.ts` pins a dual-label
+  fixture (merchant strict on both windows — clock skew 5s, expired
+  tolerance 0s; gateway loose on both — 300s and 120s) and asserts
+  a future-created dual splits on the clock dimension only
+  (`CREATED_IN_FUTURE` for the merchant, gateway passes) even with
+  the expired map configured, an expired dual splits on the expiry
+  dimension only (`EXPIRED` for the merchant, gateway passes) even
+  with the clock map configured, a single call violating both
+  dimensions (merchant future-created, gateway expired beyond its
+  grace) reports each label's own code with no cross-label masking,
+  and swapped strictness flips both splits (the maps follow the
+  label, not the position). A single minted signature cannot
+  violate both windows at once — `signRequest` refuses
+  `expires < created` — so the both-violated case is pinned at the
+  call level, not the single-signature level. The README test count
+  moves 1033 → 1037.
 - CLI demo section for per-label application-tag pinning (backlog #648):
   `src/demo.ts` now demonstrates `verifyAllLabels` with `expectedTags`
   over a dual ed25519 fixture (merchant tag
