@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo section for per-label application-tag pinning (backlog #648):
+  `src/demo.ts` now demonstrates `verifyAllLabels` with `expectedTags`
+  over a dual ed25519 fixture (merchant tag
+  `payment-initiation-v1`, gateway tag `settlement-webhook-v1`):
+  both labels pass under the fully matching map with each tag
+  reported back, the gateway label alone fails with `TAG_MISMATCH`
+  under a wrong per-label pin while the merchant label still
+  verifies, and a label missing from the map falls back to the
+  global `expectedTag`. The demo asserts every outcome, code,
+  reason and tag and fails (non-zero exit) if any fixture breaks;
+  `test/demo.test.ts` gains two tests pinning the same shapes and
+  the printed lines. The README test count moves 1031 → 1033.
 - Benchmark row for per-label algorithm-inference strategies (backlog #647):
   `bench` now measures `verifyAllLabels` with `algFallbackByLabel`
   over a dual-label fixture signed outside timing with `created`

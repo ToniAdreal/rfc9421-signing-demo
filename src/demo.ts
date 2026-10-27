@@ -797,6 +797,28 @@
  * Every clock is injected and the segment's key pairs
  * are fresh per run, so the printed lines are identical
  * between runs.
+ * The demo then closes with a per-label application-tag
+ * pinning segment: `VerifyAllOptions.expectedTags`
+ * (`src/verify.ts`) pins each signature label's `tag`
+ * independently, the cross-protocol replay defense for
+ * multi-party requests whose signers serve different
+ * application protocols — the merchant signs for payment
+ * initiation while the gateway signs for the settlement
+ * webhook. Two fresh ed25519 key pairs mint a dual-label
+ * fixture (`merchant` via `signRequest`, `gateway`
+ * appended via `addSignature`), and the printed shapes
+ * are both labels passing under a fully matching map
+ * with each tag reported back, the gateway label alone
+ * rejected with `TAG_MISMATCH` under a wrong per-label
+ * pin while the merchant label still verifies, and a
+ * label missing from the map falling back to the global
+ * `expectedTag`. Outside the printed lines the demo
+ * asserts every outcome, label, code, reason and tag
+ * equals the hand-pinned expectations below (the same
+ * per-label pinning semantics
+ * `test/expectedTagsPerLabel.test.ts` pins). Every clock
+ * is injected and the segment's key pairs are fresh per
+ * run, so the printed lines are identical between runs.
  * The demo then closes with a per-label key resolver
  * segment: `VerifyAllOptions.keyResolvers`
  * (`src/verify.ts`) maps each signature label to its own
@@ -3070,6 +3092,41 @@ export const DEMO_EXPECTED_KEY_IDS_FALLBACK_MISMATCH_REASON =
 export const DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR =
   'verifyAllLabels: `expectedKeyIds["merchant"]` must be a non-empty string, got ""';
 
+/** Label of the per-label application-tag pinning segment's merchant signature. */
+export const DEMO_EXPECTED_TAGS_MERCHANT_LABEL = "merchant";
+/** Label of the per-label application-tag pinning segment's gateway signature. */
+export const DEMO_EXPECTED_TAGS_GATEWAY_LABEL = "gateway";
+/** Key id the per-label application-tag pinning segment's merchant signature carries. */
+export const DEMO_EXPECTED_TAGS_MERCHANT_KEY_ID =
+  "demo-expected-tags-merchant-1";
+/** Key id the per-label application-tag pinning segment's gateway signature carries. */
+export const DEMO_EXPECTED_TAGS_GATEWAY_KEY_ID =
+  "demo-expected-tags-gateway-7";
+/** Absolute URL the per-label application-tag pinning segment signs. */
+export const DEMO_EXPECTED_TAGS_URL =
+  "https://api.example.com/v1/payments";
+/** Application tag the per-label application-tag pinning segment's merchant signature carries. */
+export const DEMO_EXPECTED_TAGS_MERCHANT_TAG = "payment-initiation-v1";
+/** Application tag the per-label application-tag pinning segment's gateway signature carries. */
+export const DEMO_EXPECTED_TAGS_GATEWAY_TAG = "settlement-webhook-v1";
+/** Wrong tag the per-label application-tag pinning segment pins the gateway label to. */
+export const DEMO_EXPECTED_TAGS_GATEWAY_WRONG_TAG = "admin-api-v1";
+/**
+ * Hand-pinned failure code when a label's tag does not
+ * equal its per-label (or fallback global) pin
+ * (`TAG_MISMATCH`).
+ */
+export const DEMO_EXPECTED_TAGS_MISMATCH_CODE: VerifyFailureCode =
+  "TAG_MISMATCH";
+/**
+ * Hand-pinned `TAG_MISMATCH` reason for the wrong
+ * gateway pin (the exact wording `src/verify.ts`
+ * returns and `test/expectedTagsPerLabel.test.ts` pins
+ * in shape).
+ */
+export const DEMO_EXPECTED_TAGS_MISMATCH_REASON =
+  `tag mismatch: expected "${DEMO_EXPECTED_TAGS_GATEWAY_WRONG_TAG}", got "${DEMO_EXPECTED_TAGS_GATEWAY_TAG}"`;
+
 /** Label of the closing per-label key resolver segment's merchant signature. */
 export const DEMO_KEY_RESOLVERS_MERCHANT_LABEL = "merchant";
 /** Label of the closing per-label key resolver segment's gateway signature. */
@@ -4465,6 +4522,29 @@ export interface DemoResult {
    * `DEMO_EXPECTED_KEY_IDS_EMPTY_ERROR`).
    */
   expectedKeyIdsEmptyError: string;
+  /** The dual-signed request signed in the per-label application-tag pinning segment (labels `merchant` and `gateway`). */
+  expectedTagsSigned: SignedHttpRequest;
+  /**
+   * Per-label results for `expectedTagsSigned` with a
+   * fully matching `expectedTags` map (both ok, each
+   * reporting its own pinned tag).
+   */
+  expectedTagsMatchVerification: VerifyResult[];
+  /**
+   * Per-label results for `expectedTagsSigned` with
+   * the gateway label pinned wrong (merchant ok, gateway
+   * fails with `TAG_MISMATCH` and
+   * `DEMO_EXPECTED_TAGS_MISMATCH_REASON`).
+   */
+  expectedTagsMismatchVerification: VerifyResult[];
+  /**
+   * Per-label results for `expectedTagsSigned` with
+   * the merchant label missing from the map and the
+   * global `expectedTag` naming the merchant tag
+   * (both ok — the missing label falls back to the
+   * global pin).
+   */
+  expectedTagsFallbackVerification: VerifyResult[];
   /** The dual-signed request signed in the closing per-label key resolver segment (labels `merchant` and `gateway`). */
   keyResolversSigned: SignedHttpRequest;
   /**
@@ -8250,6 +8330,126 @@ export async function runDemo(): Promise<DemoResult> {
   }
 
 
+  // Per-label application-tag pinning segment: in a
+  // multi-party request the merchant signs for payment
+  // initiation and the gateway for the settlement
+  // webhook, so a single global pin cannot express
+  // "this label must carry that protocol tag" —
+  // `verifyAllLabels`' `expectedTags` map pins each
+  // label independently and a label missing from the
+  // map falls back to the global `expectedTag`. Two
+  // fresh ed25519 key pairs mint the dual-label fixture
+  // (`merchant` via `signRequest`, `gateway` appended
+  // via `addSignature`) at the pinned created instant,
+  // and every verify call injects the same fixed `now`.
+  // Outside the printed lines the demo asserts every
+  // outcome, label, code, reason and tag equals the
+  // hand-pinned expectations.
+  const expectedTagsMerchantPair = generateEd25519KeyPair();
+  const expectedTagsGatewayPair = generateEd25519KeyPair();
+  const expectedTagsRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_EXPECTED_TAGS_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const expectedTagsMerchantSigned = signRequest(expectedTagsRequest, {
+    keyId: DEMO_EXPECTED_TAGS_MERCHANT_KEY_ID,
+    alg: "ed25519",
+    key: expectedTagsMerchantPair.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_EXPECTED_TAGS_MERCHANT_LABEL,
+    tag: DEMO_EXPECTED_TAGS_MERCHANT_TAG,
+  });
+  const expectedTagsSigned = addSignature(expectedTagsMerchantSigned, {
+    keyId: DEMO_EXPECTED_TAGS_GATEWAY_KEY_ID,
+    alg: "ed25519",
+    key: expectedTagsGatewayPair.privateKey,
+    created: DEMO_CREATED,
+    label: DEMO_EXPECTED_TAGS_GATEWAY_LABEL,
+    tag: DEMO_EXPECTED_TAGS_GATEWAY_TAG,
+  });
+  const expectedTagsKeys = {
+    [DEMO_EXPECTED_TAGS_MERCHANT_LABEL]:
+      expectedTagsMerchantPair.publicKey,
+    [DEMO_EXPECTED_TAGS_GATEWAY_LABEL]:
+      expectedTagsGatewayPair.publicKey,
+  };
+  const expectedTagsMatchVerification = verifyAllLabels(
+    expectedTagsSigned,
+    {
+      keys: expectedTagsKeys,
+      now: DEMO_CREATED + 60,
+      expectedTags: {
+        [DEMO_EXPECTED_TAGS_MERCHANT_LABEL]:
+          DEMO_EXPECTED_TAGS_MERCHANT_TAG,
+        [DEMO_EXPECTED_TAGS_GATEWAY_LABEL]:
+          DEMO_EXPECTED_TAGS_GATEWAY_TAG,
+      },
+    },
+  );
+  const expectedTagsMismatchVerification = verifyAllLabels(
+    expectedTagsSigned,
+    {
+      keys: expectedTagsKeys,
+      now: DEMO_CREATED + 60,
+      expectedTags: {
+        [DEMO_EXPECTED_TAGS_MERCHANT_LABEL]:
+          DEMO_EXPECTED_TAGS_MERCHANT_TAG,
+        [DEMO_EXPECTED_TAGS_GATEWAY_LABEL]:
+          DEMO_EXPECTED_TAGS_GATEWAY_WRONG_TAG,
+      },
+    },
+  );
+  const expectedTagsFallbackVerification = verifyAllLabels(
+    expectedTagsSigned,
+    {
+      keys: expectedTagsKeys,
+      now: DEMO_CREATED + 60,
+      expectedTag: DEMO_EXPECTED_TAGS_MERCHANT_TAG,
+      expectedTags: {
+        [DEMO_EXPECTED_TAGS_GATEWAY_LABEL]:
+          DEMO_EXPECTED_TAGS_GATEWAY_TAG,
+      },
+    },
+  );
+  if (
+    expectedTagsMatchVerification.length !== 2 ||
+    expectedTagsMatchVerification.some((r) => !r.ok) ||
+    expectedTagsMatchVerification[0].tag !==
+      DEMO_EXPECTED_TAGS_MERCHANT_TAG ||
+    expectedTagsMatchVerification[1].tag !==
+      DEMO_EXPECTED_TAGS_GATEWAY_TAG ||
+    expectedTagsMismatchVerification.length !== 2 ||
+    expectedTagsMismatchVerification[0].ok !== true ||
+    expectedTagsMismatchVerification[0].tag !==
+      DEMO_EXPECTED_TAGS_MERCHANT_TAG ||
+    expectedTagsMismatchVerification[1].ok !== false ||
+    expectedTagsMismatchVerification[1].code !==
+      DEMO_EXPECTED_TAGS_MISMATCH_CODE ||
+    expectedTagsMismatchVerification[1].reason !==
+      DEMO_EXPECTED_TAGS_MISMATCH_REASON ||
+    expectedTagsMismatchVerification[1].tag !==
+      DEMO_EXPECTED_TAGS_GATEWAY_TAG ||
+    expectedTagsFallbackVerification.length !== 2 ||
+    expectedTagsFallbackVerification.some((r) => !r.ok) ||
+    expectedTagsFallbackVerification[0].tag !==
+      DEMO_EXPECTED_TAGS_MERCHANT_TAG ||
+    expectedTagsFallbackVerification[1].tag !==
+      DEMO_EXPECTED_TAGS_GATEWAY_TAG
+  ) {
+    throw new Error(
+      `demo fixture broken: expectedTags gave match ` +
+        `${JSON.stringify(expectedTagsMatchVerification)}, mismatch ` +
+        `${JSON.stringify(expectedTagsMismatchVerification)} and fallback ` +
+        `${JSON.stringify(expectedTagsFallbackVerification)}, instead of both labels ok under the matching ` +
+        `map reporting their pinned tags, the gateway label alone rejected with ` +
+        `${DEMO_EXPECTED_TAGS_MISMATCH_CODE} (${DEMO_EXPECTED_TAGS_MISMATCH_REASON}) ` +
+        `while the merchant label still passes, and both labels ok under the matching ` +
+        `global fallback reporting their pinned tags`,
+    );
+  }
+
   // Per-label key resolver segment: in a multi-party
   // request the merchant's and the gateway's key ids live
   // in separate keystores, so a single global resolver
@@ -9666,6 +9866,17 @@ export async function runDemo(): Promise<DemoResult> {
       : `Empty map falls back for every label: the same request verified with an empty expectedKeyIds map and the global expectedKeyId "${DEMO_EXPECTED_KEY_IDS_MERCHANT_KEY_ID}": gateway FAILED (code ${expectedKeyIdsFallbackMismatchVerification[1].code}: ${expectedKeyIdsFallbackMismatchVerification[1].reason}), merchant still OK (label ${expectedKeyIdsFallbackMismatchVerification[0].label}, keyid="${expectedKeyIdsFallbackMismatchVerification[0].keyId}", alg="${expectedKeyIdsFallbackMismatchVerification[0].alg}")`,
     `Empty pin value: the same request verified with expectedKeyIds merchant set to an empty string: rejected with configuration error "${expectedKeyIdsEmptyError}"`,
     "",
+    "Per-label application tags: verifyAllLabels' expectedTags option pins each label's tag independently (cross-protocol replay defense when the merchant signs for payment initiation and the gateway for the settlement webhook) — a label missing from the map falls back to the global expectedTag",
+    expectedTagsMatchVerification.every((r) => r.ok)
+      ? `All pins match: dual-signed request verified with expectedTags merchant="${DEMO_EXPECTED_TAGS_MERCHANT_TAG}", gateway="${DEMO_EXPECTED_TAGS_GATEWAY_TAG}": merchant OK (label ${expectedTagsMatchVerification[0].label}, tag="${expectedTagsMatchVerification[0].tag}", alg="ed25519"), gateway OK (label ${expectedTagsMatchVerification[1].label}, tag="${expectedTagsMatchVerification[1].tag}", alg="ed25519")`
+      : `All pins match: dual-signed request verified with expectedTags merchant="${DEMO_EXPECTED_TAGS_MERCHANT_TAG}", gateway="${DEMO_EXPECTED_TAGS_GATEWAY_TAG}": FAILED (merchant ${expectedTagsMatchVerification[0].ok ? "OK" : `code ${expectedTagsMatchVerification[0].code}: ${expectedTagsMatchVerification[0].reason}`}, gateway ${expectedTagsMatchVerification[1].ok ? "OK" : `code ${expectedTagsMatchVerification[1].code}: ${expectedTagsMatchVerification[1].reason}`})`,
+    expectedTagsMismatchVerification[1].ok
+      ? `Gateway pin wrong: the same request verified with the gateway label pinned to "${DEMO_EXPECTED_TAGS_GATEWAY_WRONG_TAG}": gateway OK (unexpected — the wrong pin was not rejected), merchant OK`
+      : `Gateway pin wrong: the same request verified with the gateway label pinned to "${DEMO_EXPECTED_TAGS_GATEWAY_WRONG_TAG}": gateway FAILED (code ${expectedTagsMismatchVerification[1].code}: ${expectedTagsMismatchVerification[1].reason}), merchant still OK (label ${expectedTagsMismatchVerification[0].label}, tag="${expectedTagsMismatchVerification[0].tag}", alg="ed25519")`,
+    expectedTagsFallbackVerification.every((r) => r.ok)
+      ? `Missing label falls back: the same request verified with expectedTags naming only gateway and the global expectedTag "${DEMO_EXPECTED_TAGS_MERCHANT_TAG}": merchant OK (label ${expectedTagsFallbackVerification[0].label}, tag="${expectedTagsFallbackVerification[0].tag}", alg="ed25519") via the global fallback, gateway OK (label ${expectedTagsFallbackVerification[1].label}, tag="${expectedTagsFallbackVerification[1].tag}", alg="ed25519")`
+      : `Missing label falls back: the same request verified with expectedTags naming only gateway and the global expectedTag "${DEMO_EXPECTED_TAGS_MERCHANT_TAG}": FAILED (merchant ${expectedTagsFallbackVerification[0].ok ? "OK" : `code ${expectedTagsFallbackVerification[0].code}: ${expectedTagsFallbackVerification[0].reason}`}, gateway ${expectedTagsFallbackVerification[1].ok ? "OK" : `code ${expectedTagsFallbackVerification[1].code}: ${expectedTagsFallbackVerification[1].reason}`})`,
+    "",
     "Per-label key resolvers: verifyAllLabels' keyResolvers option maps each label to its own keyid→key resolver (separate keystores when the merchant and the gateway keep their keys apart) — a label missing from the map falls back to the global keyResolver, and a malformed map value is a caller configuration error thrown before any verification runs",
     keyResolversMatchVerification.every((r) => r.ok)
       ? `Each label through its own keystore: dual-signed request verified with keyResolvers merchant and gateway backed by separate keystores: merchant OK (label ${keyResolversMatchVerification[0].label}, keyid="${keyResolversMatchVerification[0].keyId}", alg="${keyResolversMatchVerification[0].alg}"), gateway OK (label ${keyResolversMatchVerification[1].label}, keyid="${keyResolversMatchVerification[1].keyId}", alg="${keyResolversMatchVerification[1].alg}")`
@@ -10003,6 +10214,10 @@ export async function runDemo(): Promise<DemoResult> {
     expectedKeyIdsFallbackVerification,
     expectedKeyIdsFallbackMismatchVerification,
     expectedKeyIdsEmptyError,
+    expectedTagsSigned,
+    expectedTagsMatchVerification,
+    expectedTagsMismatchVerification,
+    expectedTagsFallbackVerification,
     keyResolversSigned,
     keyResolversMatchVerification,
     keyResolversUnresolvedVerification,

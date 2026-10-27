@@ -259,6 +259,16 @@ import {
   DEMO_EXPECTED_KEY_IDS_MISMATCH_CODE,
   DEMO_EXPECTED_KEY_IDS_MISMATCH_REASON,
   DEMO_EXPECTED_KEY_IDS_URL,
+  DEMO_EXPECTED_TAGS_GATEWAY_KEY_ID,
+  DEMO_EXPECTED_TAGS_GATEWAY_LABEL,
+  DEMO_EXPECTED_TAGS_GATEWAY_TAG,
+  DEMO_EXPECTED_TAGS_GATEWAY_WRONG_TAG,
+  DEMO_EXPECTED_TAGS_MERCHANT_KEY_ID,
+  DEMO_EXPECTED_TAGS_MERCHANT_LABEL,
+  DEMO_EXPECTED_TAGS_MERCHANT_TAG,
+  DEMO_EXPECTED_TAGS_MISMATCH_CODE,
+  DEMO_EXPECTED_TAGS_MISMATCH_REASON,
+  DEMO_EXPECTED_TAGS_URL,
   DEMO_KEY_RESOLVERS_GATEWAY_KEY_ID,
   DEMO_KEY_RESOLVERS_GATEWAY_LABEL,
   DEMO_KEY_RESOLVERS_MERCHANT_KEY_ID,
@@ -4896,6 +4906,74 @@ test("demo lines contain the per-label keyid pinning segment (match, wrong pin, 
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("Per-label keyid pinning:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 6), lines.slice(headerIdx, headerIdx + 6));
+});
+
+test("demo per-label application-tag pinning segment pins expectedTags (all match passes with tags reported, wrong gateway pin rejects one label, missing label falls back to the global tag)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_EXPECTED_TAGS_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_EXPECTED_TAGS_GATEWAY_LABEL, "gateway");
+  assert.equal(DEMO_EXPECTED_TAGS_MERCHANT_KEY_ID, "demo-expected-tags-merchant-1");
+  assert.equal(DEMO_EXPECTED_TAGS_GATEWAY_KEY_ID, "demo-expected-tags-gateway-7");
+  assert.equal(DEMO_EXPECTED_TAGS_URL, "https://api.example.com/v1/payments");
+  assert.equal(DEMO_EXPECTED_TAGS_MERCHANT_TAG, "payment-initiation-v1");
+  assert.equal(DEMO_EXPECTED_TAGS_GATEWAY_TAG, "settlement-webhook-v1");
+  assert.equal(DEMO_EXPECTED_TAGS_GATEWAY_WRONG_TAG, "admin-api-v1");
+  assert.equal(DEMO_EXPECTED_TAGS_MISMATCH_CODE, "TAG_MISMATCH");
+  assert.equal(DEMO_EXPECTED_TAGS_MISMATCH_REASON, 'tag mismatch: expected "admin-api-v1", got "settlement-webhook-v1"');
+  assert.match(r.expectedTagsSigned.headers["signature-input"], /merchant=\(/);
+  assert.match(r.expectedTagsSigned.headers["signature-input"], /gateway=\(/);
+  assert.match(r.expectedTagsSigned.headers["signature-input"], /;tag="payment-initiation-v1"/);
+  assert.match(r.expectedTagsSigned.headers["signature-input"], /;tag="settlement-webhook-v1"/);
+  assert.equal(r.expectedTagsMatchVerification.length, 2);
+  assert.deepEqual(r.expectedTagsMatchVerification.map((x) => [x.label, x.ok, x.tag]), [[DEMO_EXPECTED_TAGS_MERCHANT_LABEL, true, DEMO_EXPECTED_TAGS_MERCHANT_TAG], [DEMO_EXPECTED_TAGS_GATEWAY_LABEL, true, DEMO_EXPECTED_TAGS_GATEWAY_TAG]]);
+  assert.equal(r.expectedTagsMismatchVerification[0].ok, true);
+  assert.equal(r.expectedTagsMismatchVerification[0].tag, DEMO_EXPECTED_TAGS_MERCHANT_TAG);
+  assert.equal(r.expectedTagsMismatchVerification[1].ok, false);
+  assert.equal(r.expectedTagsMismatchVerification[1].code, DEMO_EXPECTED_TAGS_MISMATCH_CODE);
+  assert.equal(r.expectedTagsMismatchVerification[1].reason, DEMO_EXPECTED_TAGS_MISMATCH_REASON);
+  assert.equal(r.expectedTagsMismatchVerification[1].tag, DEMO_EXPECTED_TAGS_GATEWAY_TAG);
+  assert.equal(r.expectedTagsFallbackVerification.every((x) => x.ok), true);
+  assert.deepEqual(r.expectedTagsFallbackVerification.map((x) => [x.label, x.tag]), [[DEMO_EXPECTED_TAGS_MERCHANT_LABEL, DEMO_EXPECTED_TAGS_MERCHANT_TAG], [DEMO_EXPECTED_TAGS_GATEWAY_LABEL, DEMO_EXPECTED_TAGS_GATEWAY_TAG]]);
+  // Independent checks driven directly (the same per-label
+  // pinning semantics test/expectedTagsPerLabel.test.ts pins):
+  // two fresh key pairs, a dual-label fixture, the matching
+  // map passes with tags reported, a wrong gateway pin
+  // rejects only that label, and the missing-label
+  // fallback passes.
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const req = { method: "POST", url: DEMO_EXPECTED_TAGS_URL, headers: { "content-type": "application/json" }, body: "{}" };
+  const first = signRequest(req, { keyId: DEMO_EXPECTED_TAGS_MERCHANT_KEY_ID, alg: "ed25519", key: merchant.privateKey, created: DEMO_CREATED, label: DEMO_EXPECTED_TAGS_MERCHANT_LABEL, tag: DEMO_EXPECTED_TAGS_MERCHANT_TAG });
+  const dual = addSignature(first, { keyId: DEMO_EXPECTED_TAGS_GATEWAY_KEY_ID, alg: "ed25519", key: gateway.privateKey, created: DEMO_CREATED, label: DEMO_EXPECTED_TAGS_GATEWAY_LABEL, tag: DEMO_EXPECTED_TAGS_GATEWAY_TAG });
+  const keys = { merchant: merchant.publicKey, gateway: gateway.publicKey };
+  assert.deepEqual(verifyAllLabels(dual, { keys, now: DEMO_CREATED + 60, expectedTags: { merchant: DEMO_EXPECTED_TAGS_MERCHANT_TAG, gateway: DEMO_EXPECTED_TAGS_GATEWAY_TAG } }).map((x) => [x.label, x.ok, x.tag]), [[DEMO_EXPECTED_TAGS_MERCHANT_LABEL, true, DEMO_EXPECTED_TAGS_MERCHANT_TAG], [DEMO_EXPECTED_TAGS_GATEWAY_LABEL, true, DEMO_EXPECTED_TAGS_GATEWAY_TAG]]);
+  const directMismatch = verifyAllLabels(dual, { keys, now: DEMO_CREATED + 60, expectedTags: { merchant: DEMO_EXPECTED_TAGS_MERCHANT_TAG, gateway: DEMO_EXPECTED_TAGS_GATEWAY_WRONG_TAG } });
+  assert.equal(directMismatch[0].ok, true);
+  assert.equal(directMismatch[1].ok, false);
+  assert.equal(directMismatch[1].code, "TAG_MISMATCH");
+  assert.equal(directMismatch[1].reason, DEMO_EXPECTED_TAGS_MISMATCH_REASON);
+  assert.equal(verifyAllLabels(dual, { keys, now: DEMO_CREATED + 60, expectedTag: DEMO_EXPECTED_TAGS_MERCHANT_TAG, expectedTags: { gateway: DEMO_EXPECTED_TAGS_GATEWAY_TAG } }).every((x) => x.ok), true);
+});
+
+test("demo lines contain the per-label application-tag pinning segment (match, wrong pin, fallback, followed by the key resolver segment)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Per-label application tags: verifyAllLabels' expectedTags option pins/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("Per-label application tags:"));
+  const pinIdx = lines.findIndex((l) => l.startsWith("Per-label keyid pinning:"));
+  const resolverIdx = lines.findIndex((l) => l.startsWith("Per-label key resolvers:"));
+  assert.ok(pinIdx !== -1 && headerIdx !== -1 && resolverIdx !== -1 && pinIdx < headerIdx && headerIdx < resolverIdx);
+  const expectedLines = [
+    "Per-label application tags: verifyAllLabels' expectedTags option pins each label's tag independently (cross-protocol replay defense when the merchant signs for payment initiation and the gateway for the settlement webhook) — a label missing from the map falls back to the global expectedTag",
+    `All pins match: dual-signed request verified with expectedTags merchant="${DEMO_EXPECTED_TAGS_MERCHANT_TAG}", gateway="${DEMO_EXPECTED_TAGS_GATEWAY_TAG}": merchant OK (label merchant, tag="${DEMO_EXPECTED_TAGS_MERCHANT_TAG}", alg="ed25519"), gateway OK (label gateway, tag="${DEMO_EXPECTED_TAGS_GATEWAY_TAG}", alg="ed25519")`,
+    `Gateway pin wrong: the same request verified with the gateway label pinned to "${DEMO_EXPECTED_TAGS_GATEWAY_WRONG_TAG}": gateway FAILED (code ${DEMO_EXPECTED_TAGS_MISMATCH_CODE}: ${DEMO_EXPECTED_TAGS_MISMATCH_REASON}), merchant still OK (label merchant, tag="${DEMO_EXPECTED_TAGS_MERCHANT_TAG}", alg="ed25519")`,
+    `Missing label falls back: the same request verified with expectedTags naming only gateway and the global expectedTag "${DEMO_EXPECTED_TAGS_MERCHANT_TAG}": merchant OK (label merchant, tag="${DEMO_EXPECTED_TAGS_MERCHANT_TAG}", alg="ed25519") via the global fallback, gateway OK (label gateway, tag="${DEMO_EXPECTED_TAGS_GATEWAY_TAG}", alg="ed25519")`,
+    "",
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("Per-label application tags:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
 });
 
 test("demo per-label key resolver segment pins keyResolvers (each label through its own keystore, unresolved gateway fails alone, missing label falls back to the global resolver, non-function value throws)", async () => {
