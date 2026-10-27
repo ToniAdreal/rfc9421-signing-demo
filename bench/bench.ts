@@ -250,6 +250,21 @@
  * `expectedTag` (both the matching and the mismatching
  * fallback halves) and the same dual's acceptance with
  * no option passed asserted outside timing, plus
+ * the per-label freshness-window verify path a multi-party
+ * receiver runs when each signer must bound its own signature
+ * differently: `verifyAllLabels` with
+ * `maxSignatureAgeSecByLabel` over a dual ed25519 fixture
+ * signed outside timing with `created` pinned 120s before
+ * the injected `now` (merchant window 60s, gateway window
+ * 3600s — see MAX_AGE_BY_LABEL_* below), self-checked on
+ * every measured pass (one measured op verifies the split
+ * dual, merchant exactly `SIGNATURE_TOO_OLD` with the
+ * pinned reason while the gateway label still verifies),
+ * with a label missing from the map falling back to the
+ * global `maxSignatureAgeSec` (both the matching and the
+ * mismatching fallback halves) and the same dual's
+ * acceptance with no option passed asserted outside
+ * timing, plus
  * the per-label required-freshness verify path a multi-party
  * receiver runs when each signer must bound its own signature
  * differently: `verifyAllLabels` with `requireCreatedByLabel`
@@ -3797,6 +3812,167 @@ function benchmarkVerifyAllExpectedTags(): number {
   if (defaulted.length !== 2 || defaulted.some((r) => !r.ok))
     throw new Error(
       `benchmark self-check failed: pinned dual default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels`
+ * maxSignatureAgeSecByLabel benchmark: two ed25519 key
+ * pairs (generated once, outside timing), one dual-label
+ * fixture signed outside timing with `created` pinned
+ * 120s before the verifier's injected `now` under two
+ * pinned keyids (merchant / gateway, the canonical
+ * multi-party labels), and per-label freshness windows
+ * (merchant 60s, gateway 3600s) in
+ * `maxSignatureAgeSecByLabel`, so the same-age
+ * signatures split: the merchant signature is stale
+ * under its own window while the gateway signature is
+ * fresh under its own.
+ */
+const MAX_AGE_BY_LABEL_CREATED = 1_700_000_000;
+const MAX_AGE_BY_LABEL_NOW = MAX_AGE_BY_LABEL_CREATED + 120;
+const MAX_AGE_BY_LABEL_MERCHANT_KID = "bench-max-age-by-label-merchant-1";
+const MAX_AGE_BY_LABEL_GATEWAY_KID = "bench-max-age-by-label-gateway-1";
+const MAX_AGE_BY_LABEL_MERCHANT_WINDOW = 60;
+const MAX_AGE_BY_LABEL_GATEWAY_WINDOW = 3600;
+const MAX_AGE_BY_LABEL_MISMATCH_CODE = "SIGNATURE_TOO_OLD";
+
+/**
+ * `verifyAllLabels` with `maxSignatureAgeSecByLabel`
+ * steady state: the per-label freshness-window form a
+ * multi-party receiver uses when each signer must bound
+ * its own signature differently (the merchant signature
+ * is only trusted for a minute, the gateway signature
+ * for an hour) — every measured call runs the
+ * per-label map resolution and the post-cryptographic
+ * age comparison for each label, which the plain
+ * `verifyAllLabels` row above never pays, because it
+ * passes no window. One measured op verifies the split
+ * dual: the merchant label is exactly
+ * `SIGNATURE_TOO_OLD` with the pinned reason and the
+ * gateway label still verifies, proving one label's
+ * staleness never blocks the other label's verdict.
+ * Outside timing, the fallback halves are pinned once:
+ * a label missing from the map falls back to the global
+ * `maxSignatureAgeSec` (the matching fallback passes on
+ * both labels and the mismatching fallback fails
+ * exactly on the unmapped gateway label while the
+ * mapped merchant label still verifies), and the same
+ * dual verifies with no option passed — the window is
+ * opt-in and the default behaviour is unchanged. Zero
+ * network, zero randomness in the measured assertions,
+ * no wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyAllMaxSignatureAgeSecByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantSigned = signRequest(fixture, {
+    keyId: MAX_AGE_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: MAX_AGE_BY_LABEL_CREATED,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: MAX_AGE_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: MAX_AGE_BY_LABEL_CREATED,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: MAX_AGE_BY_LABEL_NOW,
+    maxSignatureAgeSecByLabel: {
+      merchant: MAX_AGE_BY_LABEL_MERCHANT_WINDOW,
+      gateway: MAX_AGE_BY_LABEL_GATEWAY_WINDOW,
+    },
+  };
+  const assertDual = (where: string): void => {
+    const split = verifyAllLabels(dual, verifyOpts);
+    if (
+      split.length !== 2 ||
+      split[0].label !== "merchant" ||
+      split[0].ok ||
+      split[0].code !== MAX_AGE_BY_LABEL_MISMATCH_CODE ||
+      split[0].reason !==
+        `signature is too old: created 120s ago, older than maxSignatureAgeSec=${MAX_AGE_BY_LABEL_MERCHANT_WINDOW}` ||
+      split[1].label !== "gateway" ||
+      !split[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with maxSignatureAgeSecByLabel (${where}, split dual) gave ${JSON.stringify(split)}`,
+      );
+  };
+
+  // Outside timing: the split dual self-checks under the
+  // per-label windows before any timing starts.
+  assertDual("outside timing");
+
+  // Outside timing: a label missing from the map falls
+  // back to the global `maxSignatureAgeSec` — the
+  // matching fallback passes on both labels.
+  const fallbackMatch = verifyAllLabels(dual, {
+    keys,
+    now: MAX_AGE_BY_LABEL_NOW,
+    maxSignatureAgeSecByLabel: {
+      merchant: MAX_AGE_BY_LABEL_GATEWAY_WINDOW,
+    },
+    maxSignatureAgeSec: MAX_AGE_BY_LABEL_GATEWAY_WINDOW,
+  });
+  if (
+    fallbackMatch.length !== 2 ||
+    fallbackMatch.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback (match) gave ${JSON.stringify(fallbackMatch)}`,
+    );
+
+  // Outside timing: the same fallback with a global
+  // window the gateway age does not meet fails exactly
+  // on the unmapped gateway label while the mapped
+  // merchant label still verifies.
+  const fallbackMismatch = verifyAllLabels(dual, {
+    keys,
+    now: MAX_AGE_BY_LABEL_NOW,
+    maxSignatureAgeSecByLabel: {
+      merchant: MAX_AGE_BY_LABEL_GATEWAY_WINDOW,
+    },
+    maxSignatureAgeSec: MAX_AGE_BY_LABEL_MERCHANT_WINDOW,
+  });
+  if (
+    fallbackMismatch.length !== 2 ||
+    fallbackMismatch[0].label !== "merchant" ||
+    !fallbackMismatch[0].ok ||
+    fallbackMismatch[1].label !== "gateway" ||
+    fallbackMismatch[1].ok ||
+    fallbackMismatch[1].code !== MAX_AGE_BY_LABEL_MISMATCH_CODE ||
+    fallbackMismatch[1].reason !==
+      `signature is too old: created 120s ago, older than maxSignatureAgeSec=${MAX_AGE_BY_LABEL_MERCHANT_WINDOW}`
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback (mismatch) gave ${JSON.stringify(fallbackMismatch)}`,
+    );
+
+  // Outside timing: with no option the same dual
+  // verifies — the window is opt-in and the default
+  // behaviour is unchanged.
+  const defaulted = verifyAllLabels(dual, {
+    keys,
+    now: MAX_AGE_BY_LABEL_NOW,
+  });
+  if (defaulted.length !== 2 || defaulted.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: split dual default gave ${JSON.stringify(defaulted)}`,
     );
 
   return measure(() => {
@@ -8780,6 +8956,11 @@ results.push({
   alg: "verifyAllLabels expectedTags (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllExpectedTags(),
+});
+results.push({
+  alg: "verifyAllLabels maxSignatureAgeSecByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllMaxSignatureAgeSecByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",

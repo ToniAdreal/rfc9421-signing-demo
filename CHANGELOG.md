@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label freshness windows (backlog #638):
+  `bench` now measures `verifyAllLabels` with
+  `maxSignatureAgeSecByLabel` over a dual ed25519 fixture signed
+  outside timing with `created` pinned 120s before the injected
+  `now` — each measured op verifies the split dual (the merchant
+  label, 60s window, is exactly `SIGNATURE_TOO_OLD` with the
+  pinned reason while the gateway label, 3600s window, still
+  verifies, proving one label's staleness never blocks the other
+  label's verdict). The fallback halves (an unmapped label
+  falling back to the global `maxSignatureAgeSec`, matching and
+  mismatching) and the opt-in default are asserted outside
+  timing. The README Benchmarks table is refreshed from this
+  run, including the new row, and the per-label
+  freshness-window path is documented there.
 - Benchmark row for per-label tag pinning (backlog #637):
   `bench` now measures `verifyAllLabels` with `expectedTags` over a
   dual ed25519 fixture signed outside timing with `created` pinned —
