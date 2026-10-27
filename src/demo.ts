@@ -1039,7 +1039,7 @@
  * Every clock is
  * injected and the segment's merchant key pair is fresh per
  * run, so the segment is byte-identical between runs.
- * The demo then closes with a per-label replay-cache
+ * The demo then adds a per-label replay-cache
  * segment: `VerifyAllOptions.replayCacheByLabel` gives each
  * label its own nonce store — the merchant and gateway
  * signatures carry the same bare nonce string, because each
@@ -1065,6 +1065,25 @@
  * labels). Every clock is injected and the segment's key
  * pairs are fresh per run, so the segment is byte-identical
  * between runs.
+ * The demo closes with a per-label maximum-signature-age
+ * segment: `VerifyAllOptions.maxSignatureAgeSecByLabel` gives each
+ * label its own freshness window — the merchant window is 60s,
+ * the gateway window is 3600s, and both signatures are 300s old,
+ * so a single global window cannot split them: the merchant label
+ * alone fails with `SIGNATURE_TOO_OLD` while the gateway label
+ * verifies. The segment then re-verifies the same fixture under
+ * a global `maxSignatureAgeSec` of 3600s plus a map covering only
+ * the merchant label: the merchant label still fails under its
+ * mapped 60s window while the gateway label verifies by falling
+ * back to the global window, proving a label absent from the map
+ * falls back to the global window rather than skipping the age
+ * check. Outside the printed lines the demo asserts every outcome,
+ * label, code, reason and keyid equals the hand-pinned expectations
+ * below (the same per-label age semantics
+ * `test/maxSignatureAgeSecByLabel.test.ts` pins; a too-old failure
+ * still carries its keyid, so keyids are asserted for both labels).
+ * Every clock is injected and the segment's key pairs are fresh per
+ * run, so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -3142,6 +3161,46 @@ export const DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE: VerifyFailureCode =
 export const DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON =
   `nonce replay detected: "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}" was already seen`;
 
+/** Label of the per-label maximum-signature-age segment's merchant signature. */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL = "merchant";
+/** Label of the per-label maximum-signature-age segment's gateway signature. */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL = "gateway";
+/** Key id the per-label maximum-signature-age segment's merchant signature carries. */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_KEY_ID =
+  "demo-max-signature-age-by-label-merchant-1";
+/** Key id the per-label maximum-signature-age segment's gateway signature carries. */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID =
+  "demo-max-signature-age-by-label-gateway-1";
+/** Absolute URL the per-label maximum-signature-age segment signs. */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_URL =
+  "https://api.example.com/v1/payments";
+/** Verifier clock for the per-label maximum-signature-age segment (the pinned `DEMO_CREATED` instant). */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_NOW = DEMO_CREATED;
+/** How old both segment signatures are at the verifier clock, in seconds. */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC = 300;
+/** `created` both segment signatures carry (300s before the verifier clock). */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_CREATED =
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_NOW - DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC;
+/** Merchant freshness window for the segment (seconds): tighter than the 300s age, so the merchant label fails. */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC = 60;
+/** Gateway freshness window for the segment (seconds): wider than the 300s age, so the gateway label passes. */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_WINDOW_SEC = 3600;
+/** Global freshness window the fallback re-verification uses (seconds): an unmapped label falls back to it. */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC = 3600;
+/**
+ * Hand-pinned failure code when a signature is older than its
+ * label's freshness window (`SIGNATURE_TOO_OLD`).
+ */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE: VerifyFailureCode =
+  "SIGNATURE_TOO_OLD";
+/**
+ * Hand-pinned `SIGNATURE_TOO_OLD` reason (the exact wording
+ * `src/verify.ts` returns, with the segment age and merchant
+ * window interpolated).
+ */
+export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON =
+  `signature is too old: created ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC}s ago, older than maxSignatureAgeSec=${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC}`;
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -4597,6 +4656,22 @@ export interface DemoResult {
    * across labels, and an unmapped label falls back to it).
    */
   replayCacheByLabelGlobalVerification: VerifyResult[];
+  /** The per-label maximum-signature-age segment's dual-label request (both labels 300s old at the verifier clock). */
+  maxSignatureAgeByLabelSigned: SignedHttpRequest;
+  /**
+   * Per-label results for that request with
+   * `maxSignatureAgeSecByLabel: { merchant: 60, gateway: 3600 }`
+   * (merchant fails `SIGNATURE_TOO_OLD`, gateway verifies).
+   */
+  maxSignatureAgeByLabelVerification: VerifyResult[];
+  /**
+   * Per-label results for the same request under a global
+   * `maxSignatureAgeSec: 3600` plus
+   * `maxSignatureAgeSecByLabel: { merchant: 60 }`
+   * (merchant still fails `SIGNATURE_TOO_OLD` under its mapped
+   * window, gateway verifies by falling back to the global window).
+   */
+  maxSignatureAgeByLabelFallbackVerification: VerifyResult[];
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -10471,6 +10546,134 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // The per-label maximum-signature-age segment, mirroring the
+  // clock-skew segment above with the other freshness window: the
+  // merchant's acceptance window is 60s while the gateway's is 3600s, so
+  // a single global window cannot express "this label is already stale,
+  // that one is still fresh" —
+  // `verifyAllLabels`' `maxSignatureAgeSecByLabel` map gives
+  // each label its own window. Two fresh ed25519 key pairs
+  // mint the dual-label fixture (`merchant` via `signRequest`,
+  // `gateway` appended via `addSignature`) with both signatures
+  // created 300s before the verifier's injected `now`, and the map
+  // splits them: the merchant label fails with `SIGNATURE_TOO_OLD`,
+  // the gateway label verifies. The age check runs after the crypto
+  // and freshness-window checks, so a too-old failure is a policy
+  // rejection of an otherwise cryptographically valid signature, not
+  // a signature failure — and a signature carrying no `created`
+  // bypasses the check entirely, which is why both segment signatures
+  // carry `created` explicitly. The segment then re-verifies the same
+  // fixture under a global `maxSignatureAgeSec` of 3600s plus a map
+  // covering only the merchant label: the merchant label still fails
+  // under its mapped 60s window while the gateway label verifies by
+  // falling back to the global window — a label absent from the map
+  // falls back to the global window rather than skipping the age
+  // check, the same fallback semantics
+  // `test/maxSignatureAgeSecByLabel.test.ts` pins. Outside the printed
+  // lines the demo asserts every outcome, label, code, reason and keyid
+  // equals the hand-pinned expectations.
+  const maxSignatureAgeByLabelMerchantPair = generateEd25519KeyPair();
+  const maxSignatureAgeByLabelGatewayPair = generateEd25519KeyPair();
+  const maxSignatureAgeByLabelRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const maxSignatureAgeByLabelMerchantSigned = signRequest(
+    maxSignatureAgeByLabelRequest,
+    {
+      keyId: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_KEY_ID,
+      alg: "ed25519",
+      key: maxSignatureAgeByLabelMerchantPair.privateKey,
+      created: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_CREATED,
+      label: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL,
+    },
+  );
+  const maxSignatureAgeByLabelSigned = addSignature(
+    maxSignatureAgeByLabelMerchantSigned,
+    {
+      keyId: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID,
+      alg: "ed25519",
+      key: maxSignatureAgeByLabelGatewayPair.privateKey,
+      created: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_CREATED,
+      label: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL,
+    },
+  );
+  const maxSignatureAgeByLabelKeys = {
+    [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL]:
+      maxSignatureAgeByLabelMerchantPair.publicKey,
+    [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL]:
+      maxSignatureAgeByLabelGatewayPair.publicKey,
+  };
+  const maxSignatureAgeByLabelVerification = verifyAllLabels(
+    maxSignatureAgeByLabelSigned,
+    {
+      keys: maxSignatureAgeByLabelKeys,
+      now: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_NOW,
+      maxSignatureAgeSecByLabel: {
+        [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL]:
+          DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC,
+        [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL]:
+          DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_WINDOW_SEC,
+      },
+    },
+  );
+  const maxSignatureAgeByLabelFallbackVerification = verifyAllLabels(
+    maxSignatureAgeByLabelSigned,
+    {
+      keys: maxSignatureAgeByLabelKeys,
+      now: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_NOW,
+      maxSignatureAgeSec: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC,
+      maxSignatureAgeSecByLabel: {
+        [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL]:
+          DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC,
+      },
+    },
+  );
+  if (
+    maxSignatureAgeByLabelVerification.length !== 2 ||
+    maxSignatureAgeByLabelVerification[0].label !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL ||
+    maxSignatureAgeByLabelVerification[0].ok !== false ||
+    maxSignatureAgeByLabelVerification[0].code !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE ||
+    maxSignatureAgeByLabelVerification[0].reason !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON ||
+    maxSignatureAgeByLabelVerification[0].keyId !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_KEY_ID ||
+    maxSignatureAgeByLabelVerification[1].label !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL ||
+    maxSignatureAgeByLabelVerification[1].ok !== true ||
+    maxSignatureAgeByLabelVerification[1].keyId !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID ||
+    maxSignatureAgeByLabelFallbackVerification.length !== 2 ||
+    maxSignatureAgeByLabelFallbackVerification[0].label !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL ||
+    maxSignatureAgeByLabelFallbackVerification[0].ok !== false ||
+    maxSignatureAgeByLabelFallbackVerification[0].code !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE ||
+    maxSignatureAgeByLabelFallbackVerification[0].reason !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON ||
+    maxSignatureAgeByLabelFallbackVerification[0].keyId !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_KEY_ID ||
+    maxSignatureAgeByLabelFallbackVerification[1].label !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL ||
+    maxSignatureAgeByLabelFallbackVerification[1].ok !== true ||
+    maxSignatureAgeByLabelFallbackVerification[1].keyId !==
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID
+  ) {
+    throw new Error(
+      `demo fixture broken: maxSignatureAgeSecByLabel gave ` +
+        `${JSON.stringify(maxSignatureAgeByLabelVerification)} and ` +
+        `${JSON.stringify(maxSignatureAgeByLabelFallbackVerification)}, instead of the merchant ` +
+        `label rejected with ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE} and the gateway label ` +
+        `verifying under the per-label map, with the merchant label rejected with ` +
+        `${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE} and the gateway label ` +
+        `verifying by falling back to the global window under a global window plus a merchant-only map`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -11088,6 +11291,16 @@ export async function runDemo(): Promise<DemoResult> {
     replayCacheByLabelGlobalVerification[1]!.ok === false
       ? `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: merchant OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, keyid="${replayCacheByLabelGlobalVerification[0]!.keyId}"), gateway FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, code ${replayCacheByLabelGlobalVerification[1]!.code}: ${replayCacheByLabelGlobalVerification[1]!.reason}) — without the map the cache stays shared across labels, and a label with no map entry falls back to the global store`
       : `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: merchant ${replayCacheByLabelGlobalVerification[0]!.ok ? "OK" : "FAILED (unexpected — the merchant label did not pass under the shared cache)"}, gateway ${replayCacheByLabelGlobalVerification[1]!.ok ? "OK (unexpected — the shared cache did not replay the second label)" : `code ${replayCacheByLabelGlobalVerification[1]!.code}`}`,
+    "",
+    "Per-label maximum signature age: verifyAllLabels' maxSignatureAgeSecByLabel map gives each label its own freshness window — the merchant window is 60s, the gateway window is 3600s, and both signatures are 300s old, so a single global window cannot split them: the merchant label is already stale while the gateway label is still fresh — an age check only rejects an otherwise cryptographically valid signature after its window, it never changes the signature itself — and a label absent from the map falls back to the global window rather than skipping the age check",
+    maxSignatureAgeByLabelVerification[0]!.ok === false &&
+    maxSignatureAgeByLabelVerification[1]!.ok === true
+      ? `Age split: both signatures created ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC}s ago, verified with maxSignatureAgeSecByLabel { merchant: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC}, gateway: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_WINDOW_SEC} }: merchant FAILED (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL}, code ${maxSignatureAgeByLabelVerification[0]!.code}: ${maxSignatureAgeByLabelVerification[0]!.reason}), gateway still OK (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL}, keyid="${maxSignatureAgeByLabelVerification[1]!.keyId}", alg="ed25519") — only the stale label is rejected`
+      : `Age split: both signatures created ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC}s ago, verified with maxSignatureAgeSecByLabel { merchant: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC}, gateway: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_WINDOW_SEC} }: merchant ${maxSignatureAgeByLabelVerification[0]!.ok ? "OK (unexpected — the stale merchant signature was not rejected)" : `code ${maxSignatureAgeByLabelVerification[0]!.code}`}, gateway ${maxSignatureAgeByLabelVerification[1]!.ok ? "OK" : "FAILED (unexpected — the within-window gateway label was dragged down)"}`,
+    maxSignatureAgeByLabelFallbackVerification[0]!.ok === false &&
+    maxSignatureAgeByLabelFallbackVerification[1]!.ok === true
+      ? `Map fallback: the same fixture re-verified with maxSignatureAgeSec ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC} plus maxSignatureAgeSecByLabel { merchant: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC} }: merchant still FAILED (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL}, code ${maxSignatureAgeByLabelFallbackVerification[0]!.code}: ${maxSignatureAgeByLabelFallbackVerification[0]!.reason}), gateway still OK (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL}, keyid="${maxSignatureAgeByLabelFallbackVerification[1]!.keyId}") — the mapped window wins for the merchant label, and the unmapped gateway label falls back to the global window rather than skipping the check`
+      : `Map fallback: the same fixture re-verified with maxSignatureAgeSec ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC} plus maxSignatureAgeSecByLabel { merchant: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC} }: merchant ${maxSignatureAgeByLabelFallbackVerification[0]!.ok ? "OK (unexpected — the mapped merchant window did not reject the stale signature)" : `code ${maxSignatureAgeByLabelFallbackVerification[0]!.code}`}, gateway ${maxSignatureAgeByLabelFallbackVerification[1]!.ok ? "OK" : "FAILED (unexpected — the gateway label did not fall back to the global window)"}`,
   ];
 
   return {
@@ -11357,6 +11570,9 @@ export async function runDemo(): Promise<DemoResult> {
     replayCacheByLabelSigned,
     replayCacheByLabelVerification,
     replayCacheByLabelGlobalVerification,
+    maxSignatureAgeByLabelSigned,
+    maxSignatureAgeByLabelVerification,
+    maxSignatureAgeByLabelFallbackVerification,
     lines,
   };
 }

@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo section for per-label maximum signature age (backlog #661):
+  `src/demo.ts` now demonstrates `verifyAllLabels` with
+  `maxSignatureAgeSecByLabel` over a dual ed25519 fixture whose
+  merchant and gateway signatures are both 300s old: the merchant
+  label alone fails with `SIGNATURE_TOO_OLD` under its 60s window
+  while the gateway label verifies under its 3600s window,
+  proving one global window cannot split them. The same fixture
+  re-verified under a global `maxSignatureAgeSec` of 3600s plus a
+  merchant-only map still fails the merchant label under its
+  mapped window while the gateway label verifies by falling back
+  to the global window, proving an unmapped label falls back to
+  the global window rather than skipping the age check. The demo
+  asserts every outcome, code, reason and keyid and fails
+  (non-zero exit) if any fixture breaks;
+  `test/demo.test.ts` gains two tests pinning the same shapes
+  and the printed lines (the per-label replay-cache segment's
+  closing-lines assertion now points at the new closing segment).
+  The README test count moves 1047 → 1049.
+
 - Benchmark row for per-label replay cache (backlog #660):
   `bench/bench.ts` now measures `verifyAllLabels` with
   `replayCacheByLabel` over a dual ed25519 fixture whose merchant and

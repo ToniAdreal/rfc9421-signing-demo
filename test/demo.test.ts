@@ -246,6 +246,19 @@ import {
   DEMO_MAX_AGE_TOO_OLD_AT_SEC,
   DEMO_MAX_AGE_TOO_OLD_CODE,
   DEMO_MAX_AGE_WITHIN_AT_SEC,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_CREATED,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_WINDOW_SEC,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_KEY_ID,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_NOW,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON,
+  DEMO_MAX_SIGNATURE_AGE_BY_LABEL_URL,
   DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC,
   DEMO_CLOCK_DEFAULT_GRACE_SEC,
   DEMO_CLOCK_DEFAULT_SKEW_SEC,
@@ -7088,7 +7101,7 @@ test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded me
   );
 });
 
-test("demo lines contain the per-label replay cache segment (pre-seeded merchant replays, gateway first-passes, shared cache replays the gateway, closing the demo)", async () => {
+test("demo lines contain the per-label replay cache segment (pre-seeded merchant replays, gateway first-passes, shared cache replays the gateway, followed by the maximum-signature-age segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(
@@ -7104,12 +7117,238 @@ test("demo lines contain the per-label replay cache segment (pre-seeded merchant
     `Replay split: both signatures carry nonce "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}", verified with replayCacheByLabel { merchant: merchantCache, gateway: gatewayCache } after the merchant store was pre-seeded with that nonce: merchant FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE}: ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON}), gateway OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — the same bare nonce is a replay in one label's store and fresh in the other's`,
     `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: merchant OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID}"), gateway FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, code ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE}: ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON}) — without the map the cache stays shared across labels, and a label with no map entry falls back to the global store`,
   ]);
+  // The header plus its two lines are followed by a blank line
+  // and the per-label maximum-signature-age segment's header (the
+  // demo's new closing segment), not by the end of the demo.
+  assert.equal(lines[headerIdx + 3], "");
+  assert.ok(
+    lines[headerIdx + 4]!.startsWith("Per-label maximum signature age:"),
+  );
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Per-label replay cache:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 3),
+    lines.slice(headerIdx, headerIdx + 3),
+  );
+});
+
+test("demo per-label maximum signature age segment pins maxSignatureAgeSecByLabel (stale merchant rejected, fresh gateway passes, unmapped gateway falls back to the global window)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL, "gateway");
+  assert.equal(
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_KEY_ID,
+    "demo-max-signature-age-by-label-merchant-1",
+  );
+  assert.equal(
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID,
+    "demo-max-signature-age-by-label-gateway-1",
+  );
+  assert.equal(
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_URL,
+    "https://api.example.com/v1/payments",
+  );
+  assert.equal(DEMO_MAX_SIGNATURE_AGE_BY_LABEL_NOW, DEMO_CREATED);
+  assert.equal(DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC, 300);
+  assert.equal(
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_CREATED,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_NOW -
+      DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC,
+  );
+  assert.equal(DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC, 60);
+  assert.equal(DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_WINDOW_SEC, 3600);
+  assert.equal(DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC, 3600);
+  assert.equal(DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE, "SIGNATURE_TOO_OLD");
+  assert.equal(
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON,
+    `signature is too old: created ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC}s ago, older than maxSignatureAgeSec=${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC}`,
+  );
+  // Wire shapes: both labels carry the same 300s-old created instant,
+  // under their own keyids.
+  const parts = (
+    r.maxSignatureAgeByLabelSigned.headers["signature-input"]!
+  ).split(", ");
+  const merchantPart = parts.find((p) =>
+    p.startsWith(`${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL}=`),
+  )!;
+  const gatewayPart = parts.find((p) =>
+    p.startsWith(`${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL}=`),
+  )!;
+  assert.match(
+    merchantPart,
+    new RegExp(`;created=${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_CREATED}`),
+  );
+  assert.match(
+    gatewayPart,
+    new RegExp(`;created=${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_CREATED}`),
+  );
+  assert.match(
+    merchantPart,
+    /;keyid="demo-max-signature-age-by-label-merchant-1"/,
+  );
+  assert.match(
+    gatewayPart,
+    /;keyid="demo-max-signature-age-by-label-gateway-1"/,
+  );
+  assert.equal(r.maxSignatureAgeByLabelVerification.length, 2);
+  assert.deepEqual(
+    r.maxSignatureAgeByLabelVerification.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL, false],
+      [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL, true],
+    ],
+  );
+  assert.equal(
+    r.maxSignatureAgeByLabelVerification[0].code,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE,
+  );
+  assert.equal(
+    r.maxSignatureAgeByLabelVerification[0].reason,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON,
+  );
+  assert.equal(
+    r.maxSignatureAgeByLabelVerification[0].keyId,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(
+    r.maxSignatureAgeByLabelVerification[1].keyId,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  // The global-fallback re-verification: the merchant label still
+  // fails under its mapped 60s window, the unmapped gateway label
+  // verifies by falling back to the 3600s global window.
+  assert.equal(r.maxSignatureAgeByLabelFallbackVerification.length, 2);
+  assert.deepEqual(
+    r.maxSignatureAgeByLabelFallbackVerification.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL, false],
+      [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL, true],
+    ],
+  );
+  assert.equal(
+    r.maxSignatureAgeByLabelFallbackVerification[0].code,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE,
+  );
+  assert.equal(
+    r.maxSignatureAgeByLabelFallbackVerification[0].reason,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON,
+  );
+  assert.equal(
+    r.maxSignatureAgeByLabelFallbackVerification[0].keyId,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(
+    r.maxSignatureAgeByLabelFallbackVerification[1].keyId,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  // Independent checks driven directly (the same per-label
+  // age semantics test/maxSignatureAgeSecByLabel.test.ts pins):
+  // fresh ed25519 pairs, both labels 300s old, verified under
+  // the map and under a global window plus a merchant-only map.
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const signLabel = (label: string, keyId: string, pair: KeyObject) =>
+    signRequest(
+      {
+        method: "POST",
+        url: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_URL,
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        label,
+        keyId,
+        alg: "ed25519",
+        key: pair,
+        created: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_CREATED,
+      },
+    );
+  const first = signLabel(
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_KEY_ID,
+    merchant.privateKey,
+  );
+  const second = signLabel(
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL,
+    DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID,
+    gateway.privateKey,
+  );
+  const dual = {
+    ...first,
+    headers: {
+      ...first.headers,
+      "signature-input": `${first.headers["signature-input"]}, ${second.headers["signature-input"]}`,
+      signature: `${first.headers["signature"]}, ${second.headers["signature"]}`,
+    },
+  };
+  const keys = {
+    merchant: merchant.publicKey,
+    gateway: gateway.publicKey,
+  };
+  const direct = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_NOW,
+    maxSignatureAgeSecByLabel: {
+      merchant: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC,
+      gateway: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_WINDOW_SEC,
+    },
+  });
+  assert.deepEqual(
+    direct.map((x) => [x.label, x.ok, x.code]),
+    [
+      [
+        DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL,
+        false,
+        DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE,
+      ],
+      [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL, true, undefined],
+    ],
+  );
+  const directFallback = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_NOW,
+    maxSignatureAgeSec: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC,
+    maxSignatureAgeSecByLabel: {
+      merchant: DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC,
+    },
+  });
+  assert.deepEqual(
+    directFallback.map((x) => [x.label, x.ok, x.code]),
+    [
+      [
+        DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL,
+        false,
+        DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE,
+      ],
+      [DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL, true, undefined],
+    ],
+  );
+});
+
+test("demo lines contain the per-label maximum signature age segment (stale merchant rejected, fresh gateway passes, unmapped gateway falls back to the global window, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Per-label maximum signature age: verifyAllLabels' maxSignatureAgeSecByLabel/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label maximum signature age:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), [
+    "Per-label maximum signature age: verifyAllLabels' maxSignatureAgeSecByLabel map gives each label its own freshness window — the merchant window is 60s, the gateway window is 3600s, and both signatures are 300s old, so a single global window cannot split them: the merchant label is already stale while the gateway label is still fresh — an age check only rejects an otherwise cryptographically valid signature after its window, it never changes the signature itself — and a label absent from the map falls back to the global window rather than skipping the age check",
+    `Age split: both signatures created ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC}s ago, verified with maxSignatureAgeSecByLabel { merchant: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC}, gateway: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_WINDOW_SEC} }: merchant FAILED (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE}: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON}), gateway still OK (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — only the stale label is rejected`,
+    `Map fallback: the same fixture re-verified with maxSignatureAgeSec ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC} plus maxSignatureAgeSecByLabel { merchant: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC} }: merchant still FAILED (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE}: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON}), gateway still OK (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID}") — the mapped window wins for the merchant label, and the unmapped gateway label falls back to the global window rather than skipping the check`,
+  ]);
   // The header plus its two lines are the demo's closing lines,
   // with nothing after them.
   assert.equal(headerIdx + 3, lines.length);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
-    l.startsWith("Per-label replay cache:"),
+    l.startsWith("Per-label maximum signature age:"),
   );
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 3),
