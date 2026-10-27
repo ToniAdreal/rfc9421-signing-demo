@@ -986,7 +986,7 @@
  * `test/clockSkewExpiredToleranceByLabel.test.ts` pins).
  * Every clock is injected and the segment's key pairs are
  * fresh per run, so the segment is byte-identical between
- * runs. The demo then closes with a per-label required
+ * runs. The demo then continues with a per-label required
  * components segment: `VerifyAllOptions.requiredComponentsByLabel`
  * gives each label its own coverage policy — the merchant
  * signer must bind `@method` and `@path` while the gateway
@@ -1011,6 +1011,34 @@
  * `test/requiredComponentsByLabel.test.ts` pins). Every
  * clock is injected and the segment's key pairs are fresh
  * per run, so the segment is byte-identical between runs.
+ * The demo then closes with a per-label algorithm-fallback
+ * segment: `VerifyAllOptions.algFallbackByLabel` gives each
+ * label its own `alg` fallback strategy — the merchant label
+ * infers its algorithm from its key shape while the gateway
+ * label stays strict even under a global `"infer"`. A fresh
+ * P-256 key pair and a fixed 32-byte HMAC secret mint a
+ * dual-label fixture with neither signature carrying an `alg`
+ * parameter (a foreign-signer shape, built by hand because
+ * `signRequest` always emits `alg`), and the map splits
+ * them: the merchant label verifies as `ecdsa-p256-sha256`
+ * by inference while the gateway label alone fails with
+ * `VERIFICATION_ERROR`, because the legacy default for a
+ * missing `alg` is `ed25519`, which the crypto layer rejects
+ * against a secret key. The segment then re-verifies the same
+ * fixture under the global `"infer"` alone: both labels
+ * verify, proving a mapped `false` overrides the global
+ * strategy rather than being ignored. Inference is key-shape
+ * inference only — an RSA key infers `rsa-pss-sha512` and
+ * never `rsa-v1_5-sha256`, since the key shape cannot
+ * distinguish the two RSA variants. Outside the printed lines
+ * the demo asserts every outcome, label, code, reason,
+ * algorithm and keyid equals the hand-pinned expectations
+ * below (the same per-label inference semantics
+ * `test/algFallbackByLabel.test.ts` pins; the failed gateway
+ * result carries no keyid, so no keyid is asserted for it).
+ * Every clock is
+ * injected and the segment's merchant key pair is fresh per
+ * run, so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -1042,7 +1070,9 @@ import { fileURLToPath } from "node:url";
 import { createServer, get, type IncomingMessage } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import {
+  createHmac,
   createSecretKey,
+  createSign,
   generateKeyPairSync,
   sign as edSign,
   type KeyObject,
@@ -1054,6 +1084,7 @@ import {
   assertRsaModulusLength,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
+  contentDigest,
   contentDigestAlgOf,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
@@ -3010,6 +3041,48 @@ export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_CODE: VerifyFailureCode =
 export const DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_REASON =
   'signature does not cover required component: "content-digest"';
 
+/** Label of the per-label algorithm-fallback segment's merchant signature. */
+export const DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL = "merchant";
+/** Label of the per-label algorithm-fallback segment's gateway signature. */
+export const DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL = "gateway";
+/** Key id the per-label algorithm-fallback segment's merchant signature carries. */
+export const DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID =
+  "demo-alg-fallback-by-label-merchant-1";
+/** Key id the per-label algorithm-fallback segment's gateway signature carries. */
+export const DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_KEY_ID =
+  "demo-alg-fallback-by-label-gateway-1";
+/** Absolute URL the per-label algorithm-fallback segment signs. */
+export const DEMO_ALG_FALLBACK_BY_LABEL_URL =
+  "https://api.example.com/v1/payments";
+/** Verifier clock for the per-label algorithm-fallback segment (the pinned `DEMO_CREATED` instant). */
+export const DEMO_ALG_FALLBACK_BY_LABEL_NOW = DEMO_CREATED;
+/** `created` both segment signatures carry (the pinned `DEMO_CREATED` instant). */
+export const DEMO_ALG_FALLBACK_BY_LABEL_CREATED = DEMO_CREATED;
+/** Components both segment signatures cover: method, authority, path and the body digest. */
+export const DEMO_ALG_FALLBACK_BY_LABEL_COVERED: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+  "content-digest",
+];
+/** Algorithm the merchant label verifies as once its P-256 key shape is inferred. */
+export const DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG = "ecdsa-p256-sha256";
+/** Algorithm the gateway label verifies as under the global `"infer"` alone (no map). */
+export const DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_ALG = "hmac-sha256";
+/**
+ * Hand-pinned failure code when a strict label meets a secret key
+ * under the legacy `ed25519` default (`VERIFICATION_ERROR`).
+ */
+export const DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_CODE: VerifyFailureCode =
+  "VERIFICATION_ERROR";
+/**
+ * Hand-pinned `VERIFICATION_ERROR` reason (the exact wording
+ * `src/verify.ts` returns when the crypto layer rejects a secret
+ * key under the legacy `ed25519` default).
+ */
+export const DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_REASON =
+  "verification error: Invalid key object type secret, expected private or public.";
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -4431,6 +4504,23 @@ export interface DemoResult {
    * (both labels verify: each mapped list replaces the global list, and `[]` switches the check off).
    */
   requiredComponentsByLabelOverrideVerification: VerifyResult[];
+  /** The per-label algorithm-fallback segment's dual-label request (neither label carries an `alg` parameter). */
+  algFallbackByLabelSigned: SignedHttpRequest;
+  /**
+   * Per-label results for that request with a global
+   * `algFallback: "infer"` plus
+   * `algFallbackByLabel: { merchant: "infer", gateway: false }`
+   * (merchant verifies as `ecdsa-p256-sha256`, gateway fails
+   * `VERIFICATION_ERROR`: the mapped `false` overrides the
+   * global `"infer"` for that label).
+   */
+  algFallbackByLabelVerification: VerifyResult[];
+  /**
+   * Per-label results for the same request under the global
+   * `algFallback: "infer"` alone (both labels verify: the map,
+   * not the global strategy, is what splits them).
+   */
+  algFallbackByLabelGlobalVerification: VerifyResult[];
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -9981,6 +10071,178 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // The per-label algorithm-fallback segment, mirroring the
+  // coverage segment above with a key-shape strategy instead of
+  // a coverage policy: the merchant's label may infer its
+  // algorithm from its key shape while the gateway's label must
+  // stay strict even under a global `"infer"`, so a single
+  // global strategy cannot express "infer this foreign signer's
+  // algorithm, keep that one strict". The merchant is
+  // deliberately P-256, not ed25519: the legacy default for a
+  // missing `alg` already IS `ed25519`, so an ed25519 merchant
+  // wire would pass under `false` too and could never show the
+  // split — a P-256 wire passes only under `"infer"` and fails
+  // under `false`, which makes both directions observable.
+  // Neither signature carries an `alg` parameter, ever: the
+  // foreign-signer shape is built by hand (`buildSignatureBase`
+  // plus node:crypto directly, mirroring `src/sign.ts`'s crypto
+  // choices: P-256 raw r||s per RFC 9421 §3.3.4, hmac-sha256)
+  // because `signRequest` always emits `alg`. Inference is
+  // key-shape inference only: an RSA key infers
+  // `rsa-pss-sha512` and never `rsa-v1_5-sha256`, since the key
+  // shape cannot distinguish the two RSA variants — and the
+  // legacy default `ed25519` is itself just a key-shape
+  // assumption, which is why the gateway's secret key fails
+  // under it with `VERIFICATION_ERROR` rather than a plain
+  // mismatch. The segment then re-verifies the same fixture
+  // under the global `"infer"` alone: both labels verify,
+  // proving a mapped `false` overrides the global strategy
+  // rather than being ignored — the same override semantics
+  // `test/algFallbackByLabel.test.ts` pins. Outside the printed
+  // lines the demo asserts every outcome, label, code, reason
+  // and algorithm equals the hand-pinned expectations, plus
+  // every keyid the results carry (the failed gateway result
+  // carries no keyid, so none is asserted for it).
+  const algFallbackByLabelMerchantPair = generateP256KeyPair();
+  const algFallbackByLabelGatewaySecret = secretKey(Buffer.alloc(32, 0x47));
+  const algFallbackByLabelRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_ALG_FALLBACK_BY_LABEL_URL,
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const algFallbackByLabelBuild = (
+    keyId: string,
+    label: string,
+    key: KeyObject,
+  ): SignedHttpRequest => {
+    const params = {
+      created: DEMO_ALG_FALLBACK_BY_LABEL_CREATED,
+      keyid: keyId,
+    }; // no alg, ever — the foreign-signer shape
+    const requestWithDigest: RequestLike = {
+      ...algFallbackByLabelRequest,
+      headers: {
+        ...algFallbackByLabelRequest.headers,
+        "content-digest": contentDigest(DEMO_BODY),
+      },
+    };
+    const base = buildSignatureBase(
+      [...DEMO_ALG_FALLBACK_BY_LABEL_COVERED],
+      requestWithDigest,
+      params,
+    );
+    // A spec-conformant foreign P-256 signer emits the raw r||s
+    // value RFC 9421 §3.3.4 defines (node:crypto's ieee-p1363
+    // encoding), never DER.
+    const sig =
+      key.type === "secret"
+        ? createHmac("sha256", key).update(base, "utf8").digest()
+        : createSign("sha256")
+            .update(base, "utf8")
+            .sign({ key, dsaEncoding: "ieee-p1363" });
+    return {
+      method: algFallbackByLabelRequest.method,
+      url: algFallbackByLabelRequest.url,
+      body: DEMO_BODY,
+      headers: {
+        ...requestWithDigest.headers,
+        "signature-input": signatureInputValue(
+          label,
+          [...DEMO_ALG_FALLBACK_BY_LABEL_COVERED],
+          params,
+        ),
+        signature: `${label}=:${sig.toString("base64")}:`,
+      },
+    };
+  };
+  const algFallbackByLabelMerchantSigned = algFallbackByLabelBuild(
+    DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID,
+    DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL,
+    algFallbackByLabelMerchantPair.privateKey,
+  );
+  const algFallbackByLabelGatewaySigned = algFallbackByLabelBuild(
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_KEY_ID,
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL,
+    algFallbackByLabelGatewaySecret,
+  );
+  const algFallbackByLabelSigned: SignedHttpRequest = {
+    ...algFallbackByLabelMerchantSigned,
+    headers: {
+      ...algFallbackByLabelMerchantSigned.headers,
+      "signature-input": `${algFallbackByLabelMerchantSigned.headers["signature-input"]}, ${algFallbackByLabelGatewaySigned.headers["signature-input"]}`,
+      signature: `${algFallbackByLabelMerchantSigned.headers["signature"]}, ${algFallbackByLabelGatewaySigned.headers["signature"]}`,
+    },
+  };
+  const algFallbackByLabelKeys = {
+    [DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL]:
+      algFallbackByLabelMerchantPair.publicKey,
+    [DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL]:
+      algFallbackByLabelGatewaySecret,
+  };
+  const algFallbackByLabelVerification = verifyAllLabels(
+    algFallbackByLabelSigned,
+    {
+      keys: algFallbackByLabelKeys,
+      now: DEMO_ALG_FALLBACK_BY_LABEL_NOW,
+      algFallback: "infer",
+      algFallbackByLabel: {
+        [DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL]: "infer",
+        [DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL]: false,
+      },
+    },
+  );
+  const algFallbackByLabelGlobalVerification = verifyAllLabels(
+    algFallbackByLabelSigned,
+    {
+      keys: algFallbackByLabelKeys,
+      now: DEMO_ALG_FALLBACK_BY_LABEL_NOW,
+      algFallback: "infer",
+    },
+  );
+  if (
+    algFallbackByLabelVerification.length !== 2 ||
+    algFallbackByLabelVerification[0].label !==
+      DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL ||
+    algFallbackByLabelVerification[0].ok !== true ||
+    algFallbackByLabelVerification[0].alg !==
+      DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG ||
+    algFallbackByLabelVerification[0].keyId !==
+      DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID ||
+    algFallbackByLabelVerification[1].label !==
+      DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL ||
+    algFallbackByLabelVerification[1].ok !== false ||
+    algFallbackByLabelVerification[1].code !==
+      DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_CODE ||
+    algFallbackByLabelVerification[1].reason !==
+      DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_REASON ||
+    algFallbackByLabelGlobalVerification.length !== 2 ||
+    algFallbackByLabelGlobalVerification[0].label !==
+      DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL ||
+    algFallbackByLabelGlobalVerification[0].ok !== true ||
+    algFallbackByLabelGlobalVerification[0].alg !==
+      DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG ||
+    algFallbackByLabelGlobalVerification[0].keyId !==
+      DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID ||
+    algFallbackByLabelGlobalVerification[1].label !==
+      DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL ||
+    algFallbackByLabelGlobalVerification[1].ok !== true ||
+    algFallbackByLabelGlobalVerification[1].alg !==
+      DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_ALG ||
+    algFallbackByLabelGlobalVerification[1].keyId !==
+      DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_KEY_ID
+  ) {
+    throw new Error(
+      `demo fixture broken: algFallbackByLabel gave ` +
+        `${JSON.stringify(algFallbackByLabelVerification)} and ` +
+        `${JSON.stringify(algFallbackByLabelGlobalVerification)}, instead of the merchant ` +
+        `label verifying as ${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG} and the gateway label ` +
+        `rejected with ${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_CODE} ` +
+        `(${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_REASON}) under the per-label map, ` +
+        `with both labels verifying once the map is dropped and only the global "infer" applies`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -10578,6 +10840,16 @@ export async function runDemo(): Promise<DemoResult> {
     requiredComponentsByLabelOverrideVerification[1]!.ok === true
       ? `Map replaces global: the same fixture re-verified with requiredComponents ["content-digest"] plus requiredComponentsByLabel { merchant: ["@method", "@path"], gateway: [] }: merchant OK, gateway OK — each mapped list replaces the global list rather than unioning with it, and [] switches the check off for that label outright`
       : `Map replaces global: the same fixture re-verified with requiredComponents ["content-digest"] plus requiredComponentsByLabel { merchant: ["@method", "@path"], gateway: [] }: merchant ${requiredComponentsByLabelOverrideVerification[0]!.ok ? "OK" : "FAILED (unexpected — the merchant map entry did not replace the global list)"}, gateway ${requiredComponentsByLabelOverrideVerification[1]!.ok ? "OK" : "FAILED (unexpected — the [] entry did not switch the check off)"}`,
+    "",
+    "Per-label algorithm fallback: verifyAllLabels' algFallbackByLabel map gives each label its own alg-fallback strategy — the merchant label infers its algorithm from its key shape, the gateway label stays strict even under a global \"infer\", and a single global strategy cannot split a dual signature whose labels omit alg differently — inference is key-shape inference only: an RSA key infers rsa-pss-sha512 and never rsa-v1_5-sha256, since the key shape cannot distinguish the two RSA variants, and the legacy default for a missing alg is ed25519",
+    algFallbackByLabelVerification[0]!.ok === true &&
+    algFallbackByLabelVerification[1]!.ok === false
+      ? `Algorithm split: neither signature carries an alg parameter, verified with algFallback "infer" plus algFallbackByLabel { merchant: "infer", gateway: false }: merchant OK (label ${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL}, keyid="${algFallbackByLabelVerification[0]!.keyId}", alg="${algFallbackByLabelVerification[0]!.alg}"), gateway FAILED (label ${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL}, code ${algFallbackByLabelVerification[1]!.code}: ${algFallbackByLabelVerification[1]!.reason}) — only the strict label is rejected`
+      : `Algorithm split: neither signature carries an alg parameter, verified with algFallback "infer" plus algFallbackByLabel { merchant: "infer", gateway: false }: merchant ${algFallbackByLabelVerification[0]!.ok ? "OK" : `FAILED (unexpected — the inferred merchant label was dragged down)`}, gateway ${algFallbackByLabelVerification[1]!.ok ? "OK (unexpected — the strict gateway label was not rejected)" : `code ${algFallbackByLabelVerification[1]!.code}`}`,
+    algFallbackByLabelGlobalVerification[0]!.ok === true &&
+    algFallbackByLabelGlobalVerification[1]!.ok === true
+      ? `Map overrides global: the same fixture re-verified with algFallback "infer" alone: merchant OK (alg="${algFallbackByLabelGlobalVerification[0]!.alg}"), gateway OK (alg="${algFallbackByLabelGlobalVerification[1]!.alg}") — the mapped false, not the global infer, is what rejects the gateway label`
+      : `Map overrides global: the same fixture re-verified with algFallback "infer" alone: merchant ${algFallbackByLabelGlobalVerification[0]!.ok ? "OK" : "FAILED (unexpected — the merchant label did not infer under the global strategy)"}, gateway ${algFallbackByLabelGlobalVerification[1]!.ok ? "OK" : "FAILED (unexpected — the gateway label did not infer under the global strategy)"}`,
   ];
 
   return {
@@ -10841,6 +11113,9 @@ export async function runDemo(): Promise<DemoResult> {
     requiredComponentsByLabelSigned,
     requiredComponentsByLabelVerification,
     requiredComponentsByLabelOverrideVerification,
+    algFallbackByLabelSigned,
+    algFallbackByLabelVerification,
+    algFallbackByLabelGlobalVerification,
     lines,
   };
 }

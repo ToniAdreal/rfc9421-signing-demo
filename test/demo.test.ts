@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
-import { createSecretKey, generateKeyPairSync, sign as edSign } from "node:crypto";
+import {
+  createHmac,
+  createSecretKey,
+  createSign,
+  generateKeyPairSync,
+  sign as edSign,
+  type KeyObject,
+} from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
@@ -35,6 +42,7 @@ import {
   parseSignatureInput,
   ReplayCache,
   buildSignatureBase,
+  contentDigest,
   resolveComponent,
   secretKey,
   signRequest,
@@ -44,6 +52,18 @@ import {
   type VerifyResult,
 } from "../src/index.js";
 import {
+  DEMO_ALG_FALLBACK_BY_LABEL_COVERED,
+  DEMO_ALG_FALLBACK_BY_LABEL_CREATED,
+  DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_ALG,
+  DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_KEY_ID,
+  DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL,
+  DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_CODE,
+  DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_REASON,
+  DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG,
+  DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID,
+  DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL,
+  DEMO_ALG_FALLBACK_BY_LABEL_NOW,
+  DEMO_ALG_FALLBACK_BY_LABEL_URL,
   DEMO_ALG_FALLBACK_DATE,
   DEMO_ALG_FALLBACK_DEFAULT_CODE,
   DEMO_ALG_FALLBACK_INCOMPATIBLE_ERROR,
@@ -6538,7 +6558,7 @@ test("demo per-label required components segment pins requiredComponentsByLabel 
   );
 });
 
-test("demo lines contain the per-label required components segment (merchant verifies, gateway rejected, map replaces global, closing the demo)", async () => {
+test("demo lines contain the per-label required components segment (merchant verifies, gateway rejected, map replaces global, followed by the alg-fallback segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(
@@ -6554,12 +6574,282 @@ test("demo lines contain the per-label required components segment (merchant ver
     `Coverage split: both signatures cover "@method" and "@path" only, verified with requiredComponentsByLabel { merchant: ["@method", "@path"], gateway: ["@method", "content-digest"] }: merchant OK (label ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_REQUIRED_COMPONENTS_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway FAILED (label ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_GATEWAY_LABEL}, code ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_CODE}: ${DEMO_REQUIRED_COMPONENTS_BY_LABEL_REJECT_REASON}) — only the gateway label is rejected`,
     `Map replaces global: the same fixture re-verified with requiredComponents ["content-digest"] plus requiredComponentsByLabel { merchant: ["@method", "@path"], gateway: [] }: merchant OK, gateway OK — each mapped list replaces the global list rather than unioning with it, and [] switches the check off for that label outright`,
   ]);
+  // The header plus its two lines are followed by a blank line
+  // and the per-label algorithm-fallback segment's header (the
+  // demo's new closing segment), not by the end of the demo.
+  assert.equal(lines[headerIdx + 3], "");
+  assert.ok(
+    lines[headerIdx + 4]!.startsWith("Per-label algorithm fallback:"),
+  );
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Per-label required components:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 3),
+    lines.slice(headerIdx, headerIdx + 3),
+  );
+});
+
+test("demo per-label algorithm fallback segment pins algFallbackByLabel (merchant inferred, gateway strict under a global infer, map overrides global)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL, "merchant");
+  assert.equal(DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL, "gateway");
+  assert.equal(
+    DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID,
+    "demo-alg-fallback-by-label-merchant-1",
+  );
+  assert.equal(
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_KEY_ID,
+    "demo-alg-fallback-by-label-gateway-1",
+  );
+  assert.equal(
+    DEMO_ALG_FALLBACK_BY_LABEL_URL,
+    "https://api.example.com/v1/payments",
+  );
+  assert.equal(DEMO_ALG_FALLBACK_BY_LABEL_NOW, DEMO_CREATED);
+  assert.equal(DEMO_ALG_FALLBACK_BY_LABEL_CREATED, DEMO_CREATED);
+  assert.deepEqual(DEMO_ALG_FALLBACK_BY_LABEL_COVERED, [
+    "@method",
+    "@authority",
+    "@path",
+    "content-digest",
+  ]);
+  assert.equal(DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG, "ecdsa-p256-sha256");
+  assert.equal(DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_ALG, "hmac-sha256");
+  assert.equal(
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_CODE,
+    "VERIFICATION_ERROR",
+  );
+  assert.equal(
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_REASON,
+    "verification error: Invalid key object type secret, expected private or public.",
+  );
+  // Wire shapes: neither label carries an `alg` parameter, at the
+  // pinned created instant, covering method, authority, path and
+  // the body digest.
+  const parts = (
+    r.algFallbackByLabelSigned.headers["signature-input"]!
+  ).split(", ");
+  const merchantPart = parts.find((p) =>
+    p.startsWith(`${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL}=`),
+  )!;
+  const gatewayPart = parts.find((p) =>
+    p.startsWith(`${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL}=`),
+  )!;
+  assert.match(
+    merchantPart,
+    /=\("@method" "@authority" "@path" "content-digest"\);created=1700000000/,
+  );
+  assert.match(
+    gatewayPart,
+    /=\("@method" "@authority" "@path" "content-digest"\);created=1700000000/,
+  );
+  assert.match(
+    merchantPart,
+    /;keyid="demo-alg-fallback-by-label-merchant-1"/,
+  );
+  assert.match(
+    gatewayPart,
+    /;keyid="demo-alg-fallback-by-label-gateway-1"/,
+  );
+  assert.ok(!merchantPart.includes("alg="));
+  assert.ok(!gatewayPart.includes("alg="));
+  assert.equal(r.algFallbackByLabelVerification.length, 2);
+  assert.deepEqual(
+    r.algFallbackByLabelVerification.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL, true],
+      [DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL, false],
+    ],
+  );
+  assert.equal(
+    r.algFallbackByLabelVerification[0].alg,
+    DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG,
+  );
+  assert.equal(
+    r.algFallbackByLabelVerification[1].code,
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_CODE,
+  );
+  assert.equal(
+    r.algFallbackByLabelVerification[1].reason,
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_REASON,
+  );
+  assert.equal(
+    r.algFallbackByLabelVerification[0].keyId,
+    DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  // The failed gateway result carries no keyid (unlike a
+  // coverage failure), so no keyid is asserted for it; the
+  // global-only re-verification below pins the gateway keyid.
+  // The global-only re-verification: without the map, the global
+  // "infer" verifies both labels, so the map's `false` — not the
+  // global strategy — is what rejects the gateway label.
+  assert.equal(r.algFallbackByLabelGlobalVerification.length, 2);
+  assert.deepEqual(
+    r.algFallbackByLabelGlobalVerification.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL, true],
+      [DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL, true],
+    ],
+  );
+  assert.equal(
+    r.algFallbackByLabelGlobalVerification[0].alg,
+    DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG,
+  );
+  assert.equal(
+    r.algFallbackByLabelGlobalVerification[1].alg,
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_ALG,
+  );
+  assert.equal(
+    r.algFallbackByLabelGlobalVerification[0].keyId,
+    DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(
+    r.algFallbackByLabelGlobalVerification[1].keyId,
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  // Independent checks driven directly (the same per-label
+  // inference semantics test/algFallbackByLabel.test.ts pins):
+  // a fresh P-256 pair plus a fixed 32-byte secret, both wires
+  // hand-built without `alg`, the per-label map splitting them
+  // under a global "infer", and the global alone verifying both.
+  const merchant = generateP256KeyPair();
+  const gateway = secretKey(Buffer.alloc(32, 0x47));
+  const signWithoutAlg = (
+    keyId: string,
+    label: string,
+    key: KeyObject,
+  ) => {
+    const req = {
+      method: "POST",
+      url: DEMO_ALG_FALLBACK_BY_LABEL_URL,
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    };
+    const headers: Record<string, string> = {
+      ...req.headers,
+      "content-digest": contentDigest(DEMO_BODY),
+    };
+    const params = {
+      created: DEMO_ALG_FALLBACK_BY_LABEL_CREATED,
+      keyid: keyId,
+    }; // no alg, ever
+    const base = buildSignatureBase(
+      [...DEMO_ALG_FALLBACK_BY_LABEL_COVERED],
+      { ...req, headers },
+      params,
+    );
+    const sig =
+      key.type === "secret"
+        ? createHmac("sha256", key).update(base, "utf8").digest()
+        : createSign("sha256")
+            .update(base, "utf8")
+            .sign({ key, dsaEncoding: "ieee-p1363" });
+    headers["signature-input"] = signatureInputValue(
+      label,
+      [...DEMO_ALG_FALLBACK_BY_LABEL_COVERED],
+      params,
+    );
+    headers["signature"] = `${label}=:${sig.toString("base64")}:`;
+    assert.ok(
+      !headers["signature-input"].includes("alg="),
+      "precondition: foreign wire must not carry alg",
+    );
+    return { method: req.method, url: req.url, headers, body: req.body };
+  };
+  const first = signWithoutAlg(
+    DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID,
+    DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL,
+    merchant.privateKey,
+  );
+  const second = signWithoutAlg(
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_KEY_ID,
+    DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL,
+    gateway,
+  );
+  const dual = {
+    ...first,
+    headers: {
+      ...first.headers,
+      "signature-input": `${first.headers["signature-input"]}, ${second.headers["signature-input"]}`,
+      signature: `${first.headers["signature"]}, ${second.headers["signature"]}`,
+    },
+  };
+  const keys = {
+    merchant: merchant.publicKey,
+    gateway,
+  };
+  const direct = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_ALG_FALLBACK_BY_LABEL_NOW,
+    algFallback: "infer",
+    algFallbackByLabel: {
+      merchant: "infer",
+      gateway: false,
+    },
+  });
+  assert.deepEqual(
+    direct.map((x) => [x.label, x.ok, x.code, x.alg]),
+    [
+      [
+        DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL,
+        true,
+        undefined,
+        DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG,
+      ],
+      [
+        DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL,
+        false,
+        DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_CODE,
+        undefined,
+      ],
+    ],
+  );
+  const directGlobal = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_ALG_FALLBACK_BY_LABEL_NOW,
+    algFallback: "infer",
+  });
+  assert.deepEqual(
+    directGlobal.map((x) => [x.label, x.ok, x.alg]),
+    [
+      [
+        DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL,
+        true,
+        DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG,
+      ],
+      [
+        DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL,
+        true,
+        DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_ALG,
+      ],
+    ],
+  );
+});
+
+test("demo lines contain the per-label algorithm fallback segment (merchant inferred, gateway strict, map overrides global, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Per-label algorithm fallback: verifyAllLabels' algFallbackByLabel/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label algorithm fallback:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), [
+    "Per-label algorithm fallback: verifyAllLabels' algFallbackByLabel map gives each label its own alg-fallback strategy — the merchant label infers its algorithm from its key shape, the gateway label stays strict even under a global \"infer\", and a single global strategy cannot split a dual signature whose labels omit alg differently — inference is key-shape inference only: an RSA key infers rsa-pss-sha512 and never rsa-v1_5-sha256, since the key shape cannot distinguish the two RSA variants, and the legacy default for a missing alg is ed25519",
+    `Algorithm split: neither signature carries an alg parameter, verified with algFallback "infer" plus algFallbackByLabel { merchant: "infer", gateway: false }: merchant OK (label ${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_KEY_ID}", alg="${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG}"), gateway FAILED (label ${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_LABEL}, code ${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_CODE}: ${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_REJECT_REASON}) — only the strict label is rejected`,
+    `Map overrides global: the same fixture re-verified with algFallback "infer" alone: merchant OK (alg="${DEMO_ALG_FALLBACK_BY_LABEL_MERCHANT_ALG}"), gateway OK (alg="${DEMO_ALG_FALLBACK_BY_LABEL_GATEWAY_ALG}") — the mapped false, not the global infer, is what rejects the gateway label`,
+  ]);
   // The header plus its two lines are the demo's closing lines,
   // with nothing after them.
   assert.equal(headerIdx + 3, lines.length);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
-    l.startsWith("Per-label required components:"),
+    l.startsWith("Per-label algorithm fallback:"),
   );
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 3),

@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo section for per-label algorithm fallback (backlog #658):
+  `src/demo.ts` now demonstrates `verifyAllLabels` with
+  `algFallbackByLabel` over a dual-label fixture with neither
+  signature carrying an `alg` parameter (a foreign-signer shape,
+  hand-built because `signRequest` always emits `alg`): a fresh
+  P-256 merchant key pair plus a fixed 32-byte HMAC gateway
+  secret, verified under a global `algFallback: "infer"` plus
+  `algFallbackByLabel: { merchant: "infer", gateway: false }`,
+  so the merchant label verifies as `ecdsa-p256-sha256` by
+  inference while the gateway label alone fails with
+  `VERIFICATION_ERROR` (the legacy default for a missing `alg`
+  is `ed25519`, which the crypto layer rejects against a secret
+  key). The same fixture re-verified under the global `"infer"`
+  alone verifies both labels, proving a mapped `false`
+  overrides the global strategy rather than being ignored,
+  with a segment note that inference is key-shape inference
+  only (an RSA key infers `rsa-pss-sha512`, never
+  `rsa-v1_5-sha256`). The demo asserts every outcome, code,
+  reason and algorithm and fails (non-zero exit) if any
+  fixture breaks; `test/demo.test.ts` gains two tests pinning
+  the same shapes and the printed lines (the per-label
+  required components segment's closing-lines assertion now
+  points at the new closing segment). The README test count
+  moves 1043 → 1045.
 - CLI demo section for per-label required components (backlog #657):
   `src/demo.ts` now demonstrates `verifyAllLabels` with
   `requiredComponentsByLabel` over a dual ed25519 fixture
