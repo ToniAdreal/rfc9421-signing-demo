@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal-combination tests for per-label expiry tolerance x
+  maximum signature age (backlog #664):
+  `test/expiredMaxAgeByLabel.test.ts` pins `verifyAllLabels` with
+  the merchant label mapped to a 0s expiry tolerance and a 60s
+  maximum age and the gateway label mapped to a 120s tolerance and
+  a 3600s window: a signature expired 60s ago reports `EXPIRED`
+  for the merchant and passes for the gateway — even though the
+  merchant also violates its 60s age window, pinning that the
+  expiry check runs before the maximum-age check; a 300s-old but
+  unexpired signature reports `SIGNATURE_TOO_OLD` for the merchant
+  only; fresh signatures pass both labels; a gateway-only expiry
+  failure does not mask a passing merchant; expiry exactly at the
+  gateway tolerance and age exactly at the merchant window both
+  still pass (strict-greater comparisons). The README test count
+  moves 1061 → 1067.
+
 - Orthogonal-combination tests for per-label clock skew x required
   components (backlog #663): `test/clockSkewRequiredComponentsByLabel.test.ts`
   pins `verifyAllLabels` with the merchant label mapped to a 5s clock
