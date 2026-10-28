@@ -3515,6 +3515,317 @@ function benchmarkVerifyAllCandidateKeysByLabel(): number {
 const REQUIRE_TAG_BY_LABEL_CREATED = 1_700_000_000;
 const REQUIRE_TAG_BY_LABEL_MERCHANT_KID =
   "bench-require-tag-by-label-merchant-1";
+/**
+ * Pinned shape of the `verifyAllLabels` candidateKeysByLabel x
+ * expectedKeyIds benchmark: three ed25519 key pairs for the
+ * merchant rotation (old / new / retired, generated once,
+ * outside timing), one ed25519 pair for the static gateway,
+ * dual-label fixtures signed outside timing with `created`
+ * pinned (merchant new / old / retired keys, plus a
+ * wrong-kid new-key variant), and the verifier's injected
+ * `now` at the `created` instant. The merchant label is
+ * mapped in `candidateKeysByLabel` to [old, new] and in
+ * `expectedKeyIds` to the new key's keyid; the gateway
+ * label resolves through `keys` and is pinned in
+ * `expectedKeyIds` to its static keyid — the disjoint
+ * per-label key sources the combination test (#627)
+ * pins, so no mutual-exclusion error fires.
+ */
+const CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED = 1_700_000_000;
+const CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_OLD_KID =
+  "bench-candidate-keys-expected-key-ids-merchant-old";
+const CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_NEW_KID =
+  "bench-candidate-keys-expected-key-ids-merchant-new";
+const CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_RETIRED_KID =
+  "bench-candidate-keys-expected-key-ids-merchant-retired";
+const CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_WRONG_KID =
+  "bench-candidate-keys-expected-key-ids-merchant-wrong";
+const CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_KID =
+  "bench-candidate-keys-expected-key-ids-gateway-1";
+const CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_WRONG_KID =
+  "bench-candidate-keys-expected-key-ids-gateway-wrong";
+const CANDIDATE_KEYS_EXPECTED_KEY_IDS_KEYID_MISMATCH_CODE =
+  "KEYID_MISMATCH";
+const CANDIDATE_KEYS_EXPECTED_KEY_IDS_SIGNATURE_MISMATCH_CODE =
+  "SIGNATURE_MISMATCH";
+
+/**
+ * `verifyAllLabels` with `candidateKeysByLabel` /
+ * `expectedKeyIds` combined: the per-label rotation-plus-
+ * pinning form a multi-party receiver uses when the
+ * merchant rotates keys on its own schedule while each
+ * label's keyid is pinned to the key that actually
+ * signed (the merchant's new key and the gateway's
+ * static key) — every measured call runs the per-label
+ * map resolutions, the ordered candidate walk for the
+ * merchant, and the post-cryptographic pin checks for
+ * both labels, which neither single-map row above pays
+ * in full, because each passes only one of the two
+ * maps. One measured op verifies four dual-label
+ * fixtures: the new-key dual (both labels ok, each
+ * returned `keyId` echoing its pinned value, the
+ * merchant found at the second candidate, proving the
+ * walk actually reaches past the stale entry); the
+ * old-key dual re-pinned to the old key's keyid (both
+ * labels ok, proving list membership — not the pin
+ * value — decides the crypto walk); the wrong-kid
+ * dual (merchant exactly `KEYID_MISMATCH` with the
+ * pinned reason while the gateway label still
+ * verifies, proving the pin check, not the rotation
+ * walk, fails it); and the retired-key dual re-pinned
+ * to the retired key's keyid (merchant exactly
+ * `SIGNATURE_MISMATCH` while the gateway label still
+ * verifies, proving a pin cannot rescue a key the
+ * rotation list no longer contains). Outside timing,
+ * the opt-in and fallback halves are pinned once: the
+ * new-key dual verifies with no pinning configured
+ * (rotation alone does not pin); a gateway label
+ * missing from the map falls back to the global
+ * `expectedKeyId` (both labels ok, and a wrong global
+ * fails only the gateway label); and combining
+ * `candidateKeysByLabel` with `keys` on the same label
+ * throws the pinned mutual-exclusion configuration
+ * error instead of silently picking one key source.
+ * Zero network, zero randomness in the measured
+ * assertions, no wall clock (every verify instant is
+ * injected).
+ */
+function benchmarkVerifyAllCandidateKeysExpectedKeyIds(): number {
+  const { publicKey: merchantOldPublic, privateKey: merchantOldPrivate } =
+    generateEd25519KeyPair();
+  const { publicKey: merchantNewPublic, privateKey: merchantNewPrivate } =
+    generateEd25519KeyPair();
+  const { privateKey: merchantRetiredPrivate } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantNewSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_NEW_KID,
+    alg: "ed25519",
+    key: merchantNewPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED,
+  });
+  const merchantOldSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_OLD_KID,
+    alg: "ed25519",
+    key: merchantOldPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED,
+  });
+  const merchantRetiredSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_RETIRED_KID,
+    alg: "ed25519",
+    key: merchantRetiredPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED,
+  });
+  const merchantWrongKidSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_WRONG_KID,
+    alg: "ed25519",
+    key: merchantNewPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED,
+  });
+  const gatewaySigned = {
+    keyId: CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_KID,
+    alg: "ed25519" as const,
+    key: gatewayPrivate,
+    label: "gateway",
+    created: CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED,
+  };
+  const dualNew = addSignature(merchantNewSigned, gatewaySigned);
+  const dualOld = addSignature(merchantOldSigned, gatewaySigned);
+  const dualRetired = addSignature(merchantRetiredSigned, gatewaySigned);
+  const dualWrongKid = addSignature(merchantWrongKidSigned, gatewaySigned);
+  const verifyOpts = {
+    candidateKeysByLabel: {
+      merchant: [merchantOldPublic, merchantNewPublic],
+    },
+    keys: { gateway: gatewayPublic },
+    expectedKeyIds: {
+      merchant: CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_NEW_KID,
+      gateway: CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_KID,
+    },
+    now: CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED,
+  };
+  const rePinnedOldOpts = {
+    ...verifyOpts,
+    expectedKeyIds: {
+      merchant: CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_OLD_KID,
+      gateway: CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_KID,
+    },
+  };
+  const rePinnedRetiredOpts = {
+    ...verifyOpts,
+    expectedKeyIds: {
+      merchant: CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_RETIRED_KID,
+      gateway: CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_KID,
+    },
+  };
+  const assertDual = (where: string): void => {
+    const rotated = verifyAllLabels(dualNew, verifyOpts);
+    if (
+      rotated.length !== 2 ||
+      rotated[0].label !== "merchant" ||
+      !rotated[0].ok ||
+      rotated[0].keyId !==
+        CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_NEW_KID ||
+      rotated[1].label !== "gateway" ||
+      !rotated[1].ok ||
+      rotated[1].keyId !== CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_KID
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysExpectedKeyIds (${where}, new-key dual) gave ${JSON.stringify(rotated)}`,
+      );
+    const windowed = verifyAllLabels(dualOld, rePinnedOldOpts);
+    if (
+      windowed.length !== 2 ||
+      windowed[0].label !== "merchant" ||
+      !windowed[0].ok ||
+      windowed[0].keyId !==
+        CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_OLD_KID ||
+      windowed[1].label !== "gateway" ||
+      !windowed[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysExpectedKeyIds (${where}, old-key dual) gave ${JSON.stringify(windowed)}`,
+      );
+    const mismatched = verifyAllLabels(dualWrongKid, verifyOpts);
+    if (
+      mismatched.length !== 2 ||
+      mismatched[0].label !== "merchant" ||
+      mismatched[0].ok ||
+      mismatched[0].code !==
+        CANDIDATE_KEYS_EXPECTED_KEY_IDS_KEYID_MISMATCH_CODE ||
+      mismatched[0].reason !==
+        `keyid mismatch: expected "${CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_NEW_KID}", got "${CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_WRONG_KID}"` ||
+      mismatched[0].keyId !==
+        CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_WRONG_KID ||
+      mismatched[1].label !== "gateway" ||
+      !mismatched[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysExpectedKeyIds (${where}, wrong-kid dual) gave ${JSON.stringify(mismatched)}`,
+      );
+    const retired = verifyAllLabels(dualRetired, rePinnedRetiredOpts);
+    if (
+      retired.length !== 2 ||
+      retired[0].label !== "merchant" ||
+      retired[0].ok ||
+      retired[0].code !==
+        CANDIDATE_KEYS_EXPECTED_KEY_IDS_SIGNATURE_MISMATCH_CODE ||
+      retired[1].label !== "gateway" ||
+      !retired[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysExpectedKeyIds (${where}, retired-key dual) gave ${JSON.stringify(retired)}`,
+      );
+  };
+
+  // Outside timing: all four fixtures self-check under
+  // the combined maps before any timing starts.
+  assertDual("outside timing");
+
+  // Outside timing: with no pinning configured the
+  // new-key dual verifies and the returned keyids echo
+  // the signing keys — pinning is opt-in, rotation
+  // alone does not pin.
+  const unpinned = verifyAllLabels(dualNew, {
+    candidateKeysByLabel: {
+      merchant: [merchantOldPublic, merchantNewPublic],
+    },
+    keys: { gateway: gatewayPublic },
+    now: CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED,
+  });
+  if (
+    unpinned.length !== 2 ||
+    unpinned.some((r) => !r.ok) ||
+    unpinned[0].keyId !==
+      CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_NEW_KID ||
+    unpinned[1].keyId !== CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_KID
+  )
+    throw new Error(
+      `benchmark self-check failed: candidateKeysExpectedKeyIds no-pinning gave ${JSON.stringify(unpinned)}`,
+    );
+
+  // Outside timing: a gateway label missing from the
+  // map falls back to the global `expectedKeyId` — the
+  // merchant keeps its own pin and both labels verify.
+  const fallbackOk = verifyAllLabels(dualNew, {
+    candidateKeysByLabel: {
+      merchant: [merchantOldPublic, merchantNewPublic],
+    },
+    keys: { gateway: gatewayPublic },
+    expectedKeyId: CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_KID,
+    expectedKeyIds: {
+      merchant: CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_NEW_KID,
+    },
+    now: CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED,
+  });
+  if (fallbackOk.length !== 2 || fallbackOk.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: candidateKeysExpectedKeyIds global fallback gave ${JSON.stringify(fallbackOk)}`,
+    );
+
+  // Outside timing: a wrong global pin fails only the
+  // unpinned gateway label with the pinned code and
+  // reason while the merchant label still verifies.
+  const fallbackMismatch = verifyAllLabels(dualNew, {
+    candidateKeysByLabel: {
+      merchant: [merchantOldPublic, merchantNewPublic],
+    },
+    keys: { gateway: gatewayPublic },
+    expectedKeyId: CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_WRONG_KID,
+    expectedKeyIds: {
+      merchant: CANDIDATE_KEYS_EXPECTED_KEY_IDS_MERCHANT_NEW_KID,
+    },
+    now: CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED,
+  });
+  if (
+    fallbackMismatch.length !== 2 ||
+    !fallbackMismatch[0].ok ||
+    fallbackMismatch[1].ok ||
+    fallbackMismatch[1].code !==
+      CANDIDATE_KEYS_EXPECTED_KEY_IDS_KEYID_MISMATCH_CODE ||
+    fallbackMismatch[1].reason !==
+      `keyid mismatch: expected "${CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_WRONG_KID}", got "${CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_KID}"` ||
+    fallbackMismatch[1].keyId !==
+      CANDIDATE_KEYS_EXPECTED_KEY_IDS_GATEWAY_KID
+  )
+    throw new Error(
+      `benchmark self-check failed: candidateKeysExpectedKeyIds global-fallback mismatch gave ${JSON.stringify(fallbackMismatch)}`,
+    );
+
+  // Outside timing: combining `candidateKeysByLabel`
+  // with `keys` on the same label throws the pinned
+  // mutual-exclusion configuration error instead of
+  // silently picking one key source.
+  let exclusionError: unknown;
+  try {
+    verifyAllLabels(dualNew, {
+      keys: { merchant: merchantNewPublic },
+      candidateKeysByLabel: {
+        merchant: [merchantOldPublic, merchantNewPublic],
+      },
+      now: CANDIDATE_KEYS_EXPECTED_KEY_IDS_CREATED,
+    });
+  } catch (e) {
+    exclusionError = e;
+  }
+  if (
+    !(exclusionError instanceof Error) ||
+    exclusionError.message !==
+      "verifyAllLabels: `candidateKeysByLabel`/`candidateKeys` is mutually exclusive with `keys`/`key` and `keyResolver`/`keyResolvers` — pass one or the other"
+  )
+    throw new Error(
+      `benchmark self-check failed: candidateKeysExpectedKeyIds + keys did not throw the pinned error, got ${exclusionError instanceof Error ? JSON.stringify(exclusionError.message) : String(exclusionError)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
 const REQUIRE_TAG_BY_LABEL_GATEWAY_KID =
   "bench-require-tag-by-label-gateway-1";
 const REQUIRE_TAG_BY_LABEL_VALUE = "bench-require-tag-by-label-1";
@@ -10738,6 +11049,11 @@ results.push({
   alg: "verifyAllLabels candidateKeysByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllCandidateKeysByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels candidateKeysByLabel expectedKeyIds (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllCandidateKeysExpectedKeyIds(),
 });
 results.push({
   alg: "verifyAllLabels requireTagByLabel (2 labels)",

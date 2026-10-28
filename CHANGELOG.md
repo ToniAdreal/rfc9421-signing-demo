@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Per-label candidate-keys plus key-id-pinning benchmark (backlog #688):
+  `bench/bench.ts` gains `benchmarkVerifyAllCandidateKeysExpectedKeyIds`,
+  measuring `verifyAllLabels` with `candidateKeysByLabel` (merchant:
+  [old, new]) combined with `expectedKeyIds` (merchant: new-kid,
+  gateway: gateway-kid) and the gateway resolving through `keys` — the
+  disjoint per-label key sources the combination test (#627) pins. One
+  measured op verifies four dual-label fixtures: the new-key dual
+  (both labels ok, keyids echoing their pins, merchant found at the
+  second candidate), the old-key dual re-pinned to the old key's keyid
+  (both labels ok), the wrong-kid dual (merchant `KEYID_MISMATCH`
+  with the pinned reason, gateway ok), and the retired-key dual
+  re-pinned to the retired key's keyid (merchant `SIGNATURE_MISMATCH`,
+  gateway ok). No-pinning acceptance, the global `expectedKeyId`
+  fallback (and its wrong-global failure mode), and the same-label
+  `candidateKeysByLabel` + `keys` mutual-exclusion error are pinned
+  outside timing. The README Benchmarks table is refreshed from this
+  run (new row: ~446.0 ops/sec, 2241.96 µs/op, Node v24.22.1 / AMD
+  EPYC 9D25 shared host). No test count change: the bench adds no
+  tests.
+
 - Per-label dual-required freshness-existence benchmark (backlog #678):
   `bench/bench.ts` gains `benchmarkVerifyAllRequireCreatedExpiresByLabel`,
   measuring `verifyAllLabels` with `requireCreatedByLabel` /
