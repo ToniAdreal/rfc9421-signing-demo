@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo `;bs` byte-sequence segment (backlog #670): `src/demo.ts`
+  closes with a section signing `x-charge-ref: "ch_42, settled "`
+  while covering `x-charge-ref;bs` — the original request verifies,
+  the rebuilt signature base contains the pinned byte-sequence line
+  `"x-charge-ref";bs: :Y2hfNDIsIHNldHRsZWQg:`, a one-byte change
+  fails with `SIGNATURE_MISMATCH`, and stripping the trailing space
+  (which plain normalization would erase) also fails with
+  `SIGNATURE_MISMATCH`; the segment states honestly that `;bs`
+  changes only the serialization, not where the value comes from.
+  The README test count moves 1069 → 1071.
+
 - CLI demo `@query-param` segment (backlog #667): `src/demo.ts`
   closes with a section signing `?a=1&b=2` while covering only
   `@query-param;name="a"` — the original request verifies, changing

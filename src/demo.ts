@@ -3222,6 +3222,34 @@ export const DEMO_QUERY_PARAM_BOUND_TAMPERED_URL =
 export const DEMO_QUERY_PARAM_REJECT_CODE: VerifyFailureCode =
   "SIGNATURE_MISMATCH";
 
+/** URL the `;bs` segment signs. */
+export const DEMO_BS_URL = "https://api.example.com/v1/charge";
+/** Key id the `;bs` segment's signature carries. */
+export const DEMO_BS_KEY_ID = "demo-bs-1";
+/**
+ * Raw header value the `;bs` segment binds: a trailing space and an
+ * embedded comma — exactly the bytes plain field-value normalization
+ * would erase or make ambiguous (the same fixture
+ * `test/bsComponent.test.ts` pins).
+ */
+export const DEMO_BS_HEADER_VALUE = "ch_42, settled ";
+/** One-byte change of the bound value (`42` -> `43`): verification must fail. */
+export const DEMO_BS_TAMPERED_HEADER_VALUE = "ch_43, settled ";
+/** The bound value with its trailing space stripped: verification must fail. */
+export const DEMO_BS_STRIPPED_HEADER_VALUE = "ch_42, settled";
+/** Covered components the `;bs` segment signs: method plus the byte-sequence field. */
+export const DEMO_BS_COVERED: string[] = ["@method", "x-charge-ref;bs"];
+/** Verifier clock for the `;bs` segment (60s after `DEMO_CREATED`). */
+export const DEMO_BS_NOW = DEMO_CREATED + 60;
+/** Hand-pinned failure code when the bound raw bytes change (`SIGNATURE_MISMATCH`). */
+export const DEMO_BS_REJECT_CODE: VerifyFailureCode = "SIGNATURE_MISMATCH";
+/**
+ * Hand-pinned signature-base line for the `;bs` component: the raw
+ * value as a base64 byte sequence (`:…:`), trailing space included.
+ */
+export const DEMO_BS_BASE_LINE =
+  '"x-charge-ref";bs: :Y2hfNDIsIHNldHRsZWQg:';
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -4708,6 +4736,27 @@ export interface DemoResult {
    * changed (`a`: 1 -> 9): rejected with `SIGNATURE_MISMATCH`.
    */
   queryParamBoundTamperVerification: VerifyResult;
+  /** The `;bs` segment's signed request (covers `@method` plus `x-charge-ref;bs`). */
+  bsSigned: SignedHttpRequest;
+  /**
+   * The `;bs` segment's rebuilt signature base: its `;bs` line
+   * carries the raw header bytes as a base64 byte sequence.
+   */
+  bsSignatureBase: string;
+  /** Verification of the `;bs` segment's signed request (ok). */
+  bsVerification: VerifyResult;
+  /**
+   * Verification of the same request with the bound value changed
+   * by one byte (`ch_42` -> `ch_43`): rejected with
+   * `SIGNATURE_MISMATCH`.
+   */
+  bsTamperVerification: VerifyResult;
+  /**
+   * Verification of the same request with the bound value's
+   * trailing space stripped: rejected with `SIGNATURE_MISMATCH`
+   * — the strip a plain component would normalize away.
+   */
+  bsStrippedVerification: VerifyResult;
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -10771,6 +10820,87 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // `;bs` segment: the byte-sequence parameter changes only how the
+  // field value is serialized into the signature base — it does NOT
+  // change where the value comes from. The value is still this same
+  // header field's value, taken exactly as given (raw bytes,
+  // trailing space and comma included) and written as a base64 byte
+  // sequence, instead of the whitespace-normalized form a plain
+  // component would bind. That is why both tampers below fail: a
+  // one-byte change, and a trailing-space strip that plain
+  // normalization would have erased — the same contrast
+  // `test/bsComponent.test.ts` pins. Outside the printed lines the
+  // demo asserts every outcome, label, code and keyid equals the
+  // hand-pinned expectations, and that the rebuilt signature base
+  // contains the pinned `;bs` line verbatim.
+  const bsPair = generateEd25519KeyPair();
+  const bsRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_BS_URL,
+    headers: { "x-charge-ref": DEMO_BS_HEADER_VALUE },
+  };
+  const bsSigned = signRequest(bsRequest, {
+    keyId: DEMO_BS_KEY_ID,
+    alg: "ed25519",
+    key: bsPair.privateKey,
+    created: DEMO_CREATED,
+    coveredComponents: [...DEMO_BS_COVERED],
+  });
+  const bsSignatureBase = buildSignatureBase(
+    [...DEMO_BS_COVERED],
+    bsSigned,
+    {
+      created: DEMO_CREATED,
+      keyid: DEMO_BS_KEY_ID,
+      alg: "ed25519",
+    },
+  );
+  const bsVerifyOptions = {
+    key: bsPair.publicKey,
+    now: DEMO_BS_NOW,
+  };
+  const bsVerification = verifyRequest(bsSigned, bsVerifyOptions);
+  const bsTamperVerification = verifyRequest(
+    {
+      ...bsSigned,
+      headers: {
+        ...bsSigned.headers,
+        "x-charge-ref": DEMO_BS_TAMPERED_HEADER_VALUE,
+      },
+    },
+    bsVerifyOptions,
+  );
+  const bsStrippedVerification = verifyRequest(
+    {
+      ...bsSigned,
+      headers: {
+        ...bsSigned.headers,
+        "x-charge-ref": DEMO_BS_STRIPPED_HEADER_VALUE,
+      },
+    },
+    bsVerifyOptions,
+  );
+  if (
+    bsVerification.ok !== true ||
+    bsVerification.label !== "sig1" ||
+    bsVerification.keyId !== DEMO_BS_KEY_ID ||
+    !bsSignatureBase.includes(DEMO_BS_BASE_LINE) ||
+    bsTamperVerification.ok !== false ||
+    bsTamperVerification.code !== DEMO_BS_REJECT_CODE ||
+    bsTamperVerification.keyId !== DEMO_BS_KEY_ID ||
+    bsStrippedVerification.ok !== false ||
+    bsStrippedVerification.code !== DEMO_BS_REJECT_CODE ||
+    bsStrippedVerification.keyId !== DEMO_BS_KEY_ID
+  ) {
+    throw new Error(
+      `demo fixture broken: ;bs gave ` +
+        `${JSON.stringify(bsVerification)}, ` +
+        `${JSON.stringify(bsTamperVerification)} and ` +
+        `${JSON.stringify(bsStrippedVerification)} with base ${JSON.stringify(bsSignatureBase)}, instead of the original verifying, ` +
+        `both tampers rejected with ${DEMO_BS_REJECT_CODE}, and the base containing ${DEMO_BS_BASE_LINE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -11409,6 +11539,18 @@ export async function runDemo(): Promise<DemoResult> {
     queryParamBoundTamperVerification.ok
       ? "Bound parameter changed (a: 1 -> 9, b untouched): OK (unexpected — the bound value change was not detected)"
       : `Bound parameter changed (a: 1 -> 9, b untouched): FAILED (code ${queryParamBoundTamperVerification.code}: ${queryParamBoundTamperVerification.reason}) — the bound value is authenticated, and the parameter name matches exactly with no normalization (order/encoding sensitive when several parameters are covered)`,
+    "",
+    "Byte-sequence binding (;bs): the signature covers the header field \"x-charge-ref\" with the ;bs parameter, so the signed bytes are that field's raw bytes — trailing space and comma included — serialized as a base64 byte sequence instead of the whitespace-normalized field value; ;bs changes only the serialization, not where the value comes from",
+    `Signature base ;bs line: ${DEMO_BS_BASE_LINE} — the raw value "ch_42, settled " (trailing space kept) as a base64 byte sequence`,
+    bsVerification.ok
+      ? `Byte-sequence verification: OK (label ${bsVerification.label}, keyid="${bsVerification.keyId}", alg="ed25519") — the raw bytes verify`
+      : `Byte-sequence verification: FAILED (code ${bsVerification.code}: ${bsVerification.reason})`,
+    bsTamperVerification.ok
+      ? "Value changed by one byte (ch_42 -> ch_43): OK (unexpected — the one-byte change was not detected)"
+      : `Value changed by one byte (ch_42 -> ch_43): FAILED (code ${bsTamperVerification.code}: ${bsTamperVerification.reason}) — one raw byte differs, so the bound bytes no longer match`,
+    bsStrippedVerification.ok
+      ? "Trailing space stripped: OK (unexpected — the strip was not detected)"
+      : `Trailing space stripped: FAILED (code ${bsStrippedVerification.code}: ${bsStrippedVerification.reason}) — a plain component would still verify after normalization, but ;bs binds the raw bytes, so the strip is a tamper`,
   ];
 
   return {
@@ -11685,6 +11827,11 @@ export async function runDemo(): Promise<DemoResult> {
     queryParamVerification,
     queryParamUnboundTamperVerification,
     queryParamBoundTamperVerification,
+    bsSigned,
+    bsSignatureBase,
+    bsVerification,
+    bsTamperVerification,
+    bsStrippedVerification,
     lines,
   };
 }

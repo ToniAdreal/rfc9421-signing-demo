@@ -266,6 +266,15 @@ import {
   DEMO_QUERY_PARAM_REJECT_CODE,
   DEMO_QUERY_PARAM_UNBOUND_TAMPERED_URL,
   DEMO_QUERY_PARAM_URL,
+  DEMO_BS_BASE_LINE,
+  DEMO_BS_COVERED,
+  DEMO_BS_HEADER_VALUE,
+  DEMO_BS_KEY_ID,
+  DEMO_BS_NOW,
+  DEMO_BS_REJECT_CODE,
+  DEMO_BS_STRIPPED_HEADER_VALUE,
+  DEMO_BS_TAMPERED_HEADER_VALUE,
+  DEMO_BS_URL,
   DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC,
   DEMO_CLOCK_DEFAULT_GRACE_SEC,
   DEMO_CLOCK_DEFAULT_SKEW_SEC,
@@ -7437,7 +7446,7 @@ test("demo @query-param segment pins the named-parameter binding (original verif
   assert.equal(bound.code, DEMO_QUERY_PARAM_REJECT_CODE);
 });
 
-test("demo lines contain the @query-param segment (bound value authenticated, unbound parameter free, closing the demo)", async () => {
+test("demo lines contain the @query-param segment (bound value authenticated, unbound parameter free)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Query-parameter binding \(@query-param\):/);
@@ -7451,9 +7460,12 @@ test("demo lines contain the @query-param segment (bound value authenticated, un
     `Unbound parameter changed (b: 2 -> 9, a untouched): OK (label sig1, keyid="${DEMO_QUERY_PARAM_KEY_ID}") — an unbound parameter is not part of the signed bytes`,
     `Bound parameter changed (a: 1 -> 9, b untouched): FAILED (code ${DEMO_QUERY_PARAM_REJECT_CODE}: signature mismatch) — the bound value is authenticated, and the parameter name matches exactly with no normalization (order/encoding sensitive when several parameters are covered)`,
   ]);
-  // The header plus its three lines are the demo's closing lines,
-  // with nothing after them.
-  assert.equal(headerIdx + 4, lines.length);
+  // The @query-param block is no longer the demo's closing segment:
+  // the ;bs segment follows it after one blank separator line.
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(
+    lines[headerIdx + 5]!.startsWith("Byte-sequence binding (;bs):"),
+  );
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Query-parameter binding (@query-param):"),
@@ -7461,5 +7473,119 @@ test("demo lines contain the @query-param segment (bound value authenticated, un
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),
     lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo ;bs segment pins the raw-bytes binding (original verifies, one-byte and stripped tampers rejected, base line is a byte sequence)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_BS_URL, "https://api.example.com/v1/charge");
+  assert.equal(DEMO_BS_KEY_ID, "demo-bs-1");
+  assert.equal(DEMO_BS_HEADER_VALUE, "ch_42, settled ");
+  assert.equal(DEMO_BS_TAMPERED_HEADER_VALUE, "ch_43, settled ");
+  assert.equal(DEMO_BS_STRIPPED_HEADER_VALUE, "ch_42, settled");
+  assert.deepEqual(DEMO_BS_COVERED, ["@method", "x-charge-ref;bs"]);
+  assert.equal(DEMO_BS_NOW, DEMO_CREATED + 60);
+  assert.equal(DEMO_BS_REJECT_CODE, "SIGNATURE_MISMATCH");
+  assert.equal(
+    DEMO_BS_BASE_LINE,
+    '"x-charge-ref";bs: :Y2hfNDIsIHNldHRsZWQg:',
+  );
+  assert.match(
+    r.bsSigned.headers["signature-input"]!,
+    /"x-charge-ref";bs/,
+  );
+  assert.equal(r.bsSigned.url, DEMO_BS_URL);
+  assert.equal(
+    r.bsSigned.headers["x-charge-ref"],
+    DEMO_BS_HEADER_VALUE,
+  );
+  assert.ok(r.bsSignatureBase.includes(DEMO_BS_BASE_LINE));
+  assert.equal(r.bsVerification.ok, true);
+  assert.equal(r.bsVerification.label, "sig1");
+  assert.equal(r.bsVerification.keyId, DEMO_BS_KEY_ID);
+  assert.equal(r.bsTamperVerification.ok, false);
+  assert.equal(r.bsTamperVerification.code, DEMO_BS_REJECT_CODE);
+  assert.equal(r.bsTamperVerification.keyId, DEMO_BS_KEY_ID);
+  assert.equal(r.bsStrippedVerification.ok, false);
+  assert.equal(r.bsStrippedVerification.code, DEMO_BS_REJECT_CODE);
+  assert.equal(r.bsStrippedVerification.keyId, DEMO_BS_KEY_ID);
+  // Independent checks driven directly (the same ;bs semantics
+  // test/bsComponent.test.ts pins): a fresh key pair, the same
+  // header value, the same covered components.
+  const pair = generateEd25519KeyPair();
+  const signed = signRequest(
+    {
+      method: "POST",
+      url: DEMO_BS_URL,
+      headers: { "x-charge-ref": DEMO_BS_HEADER_VALUE },
+    },
+    {
+      keyId: DEMO_BS_KEY_ID,
+      alg: "ed25519",
+      key: pair.privateKey,
+      created: DEMO_CREATED,
+      coveredComponents: [...DEMO_BS_COVERED],
+    },
+  );
+  const opts = { key: pair.publicKey, now: DEMO_BS_NOW };
+  assert.equal(verifyRequest(signed, opts).ok, true);
+  assert.ok(
+    buildSignatureBase([...DEMO_BS_COVERED], signed, {
+      created: DEMO_CREATED,
+      keyid: DEMO_BS_KEY_ID,
+      alg: "ed25519",
+    }).includes(DEMO_BS_BASE_LINE),
+  );
+  const tampered = verifyRequest(
+    {
+      ...signed,
+      headers: {
+        ...signed.headers,
+        "x-charge-ref": DEMO_BS_TAMPERED_HEADER_VALUE,
+      },
+    },
+    opts,
+  );
+  assert.equal(tampered.ok, false);
+  assert.equal(tampered.code, DEMO_BS_REJECT_CODE);
+  const stripped = verifyRequest(
+    {
+      ...signed,
+      headers: {
+        ...signed.headers,
+        "x-charge-ref": DEMO_BS_STRIPPED_HEADER_VALUE,
+      },
+    },
+    opts,
+  );
+  assert.equal(stripped.ok, false);
+  assert.equal(stripped.code, DEMO_BS_REJECT_CODE);
+});
+
+test("demo lines contain the ;bs segment (raw bytes bound as a byte sequence, both tampers rejected, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Byte-sequence binding \(;bs\):/);
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Byte-sequence binding (;bs):"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), [
+    "Byte-sequence binding (;bs): the signature covers the header field \"x-charge-ref\" with the ;bs parameter, so the signed bytes are that field's raw bytes — trailing space and comma included — serialized as a base64 byte sequence instead of the whitespace-normalized field value; ;bs changes only the serialization, not where the value comes from",
+    `Signature base ;bs line: ${DEMO_BS_BASE_LINE} — the raw value "ch_42, settled " (trailing space kept) as a base64 byte sequence`,
+    `Byte-sequence verification: OK (label sig1, keyid="${DEMO_BS_KEY_ID}", alg="ed25519") — the raw bytes verify`,
+    `Value changed by one byte (ch_42 -> ch_43): FAILED (code ${DEMO_BS_REJECT_CODE}: signature mismatch) — one raw byte differs, so the bound bytes no longer match`,
+    `Trailing space stripped: FAILED (code ${DEMO_BS_REJECT_CODE}: signature mismatch) — a plain component would still verify after normalization, but ;bs binds the raw bytes, so the strip is a tamper`,
+  ]);
+  // The header plus its four lines are the demo's closing lines,
+  // with nothing after them.
+  assert.equal(headerIdx + 5, lines.length);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Byte-sequence binding (;bs):"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 5),
+    lines.slice(headerIdx, headerIdx + 5),
   );
 });
