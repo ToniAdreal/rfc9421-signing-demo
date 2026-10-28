@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Per-label dual-required freshness-existence benchmark (backlog #678):
+  `bench/bench.ts` gains `benchmarkVerifyAllRequireCreatedExpiresByLabel`,
+  measuring `verifyAllLabels` with `requireCreatedByLabel` /
+  `requireExpiresByLabel` both mapped `true` on the merchant label and the
+  gateway label mapped on neither (globals unset) — one measured op
+  verifies four dual-label fixtures: the fully dated dual, the
+  no-created-merchant dual (`MISSING_CREATED`), the no-expires-merchant
+  dual (`MISSING_EXPIRES`), and the undated-gateway dual (both labels
+  ok). A both-missing merchant dual reporting `MISSING_CREATED` first,
+  no-option acceptance of all undated duals, and explicit `false` map
+  entries letting them through are pinned outside timing. The README
+  Benchmarks table is refreshed from this run (new row: ~793.7 ops/sec,
+  1259.86 µs/op, Node v24.22.1 / AMD EPYC 9D25 shared host). No test
+  count change: the bench adds no tests.
+
 - Orthogonal-combination tests for per-label required created x
   maximum signature age (backlog #677):
   `test/requireCreatedMaxAgeByLabel.test.ts` pins `verifyAllLabels`
