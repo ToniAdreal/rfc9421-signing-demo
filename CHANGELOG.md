@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal-combination tests for per-label required created x
+  required expires (backlog #675):
+  `test/requireCreatedExpiresByLabel.test.ts` pins `verifyAllLabels`
+  with the merchant label mapped to both requirements and the
+  gateway label mapped to neither — a pairing the existing
+  per-label freshness tests never made (they pair one requirement
+  per label). A merchant signature missing only `created` reports
+  `MISSING_CREATED` while a gateway signature missing the same
+  field passes; missing only `expires` is the mirror image with
+  `MISSING_EXPIRES`; missing both reports `MISSING_CREATED` first
+  (the global pair's check order); a fully dated merchant and a
+  fully undated gateway both pass; a forged merchant signature
+  missing both still reports `SIGNATURE_MISMATCH`, pinning that
+  the cryptographic check runs before the presence checks; and
+  global true plus mapped false on the gateway on both axes
+  leaves only the merchant checked. No source change: the
+  combination was untested, not unimplemented. The README test
+  count moves 1071 → 1077.
+
 - Benchmark `;tr` trailer verification row (backlog #673):
   `bench/bench.ts` adds `benchmarkVerifyNodeRequestTrailer`, the
   request-side mirror of the `fromNodeResponse` adapt+verify row —
