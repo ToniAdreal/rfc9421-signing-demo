@@ -3201,6 +3201,27 @@ export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE: VerifyFailureCode =
 export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON =
   `signature is too old: created ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC}s ago, older than maxSignatureAgeSec=${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC}`;
 
+/** Absolute URL the `@query-param` segment signs (`a` bound, `b` unbound). */
+export const DEMO_QUERY_PARAM_URL =
+  "https://api.example.com/v1/payments?a=1&b=2";
+/** Key id the `@query-param` segment's signature carries. */
+export const DEMO_QUERY_PARAM_KEY_ID = "demo-query-param-1";
+/** Covered components the `@query-param` segment signs: only the named parameter. */
+export const DEMO_QUERY_PARAM_COVERED: string[] = [
+  '@query-param;name="a"',
+];
+/** Verifier clock for the `@query-param` segment (60s after `DEMO_CREATED`). */
+export const DEMO_QUERY_PARAM_NOW = DEMO_CREATED + 60;
+/** URL with only the unbound parameter changed (`b`: 2 -> 9): verification must still pass. */
+export const DEMO_QUERY_PARAM_UNBOUND_TAMPERED_URL =
+  "https://api.example.com/v1/payments?a=1&b=9";
+/** URL with the bound parameter changed (`a`: 1 -> 9): verification must fail. */
+export const DEMO_QUERY_PARAM_BOUND_TAMPERED_URL =
+  "https://api.example.com/v1/payments?a=9&b=2";
+/** Hand-pinned failure code when the bound parameter's value changes (`SIGNATURE_MISMATCH`). */
+export const DEMO_QUERY_PARAM_REJECT_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -4672,6 +4693,21 @@ export interface DemoResult {
    * window, gateway verifies by falling back to the global window).
    */
   maxSignatureAgeByLabelFallbackVerification: VerifyResult[];
+  /** The `@query-param` segment's signed request (covers only `@query-param;name="a"`). */
+  queryParamSigned: SignedHttpRequest;
+  /** Verification of the `@query-param` segment's signed request (ok). */
+  queryParamVerification: VerifyResult;
+  /**
+   * Verification of the same request with only the unbound
+   * parameter changed (`b`: 2 -> 9): still ok — the signature
+   * binds `a`'s value, not the whole query string.
+   */
+  queryParamUnboundTamperVerification: VerifyResult;
+  /**
+   * Verification of the same request with the bound parameter
+   * changed (`a`: 1 -> 9): rejected with `SIGNATURE_MISMATCH`.
+   */
+  queryParamBoundTamperVerification: VerifyResult;
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -10674,6 +10710,67 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // `@query-param` segment: the derived component binds ONE named
+  // query parameter's value, not the whole query string. The
+  // request carries `?a=1&b=2` and covers only
+  // `@query-param;name="a"`, so changing the unbound `b` leaves
+  // verification intact while changing the bound `a` breaks it —
+  // the same split `test/queryParamComponent.test.ts` pins.
+  // Honest limitation, stated in the printed segment: the
+  // parameter name matches exactly, with no normalization — the
+  // value is taken as it appears in the target, so reordering
+  // or re-encoding the query can change which bytes are bound
+  // when more than one parameter is covered. Outside the
+  // printed lines the demo asserts every outcome, label, code
+  // and keyid equals the hand-pinned expectations.
+  const queryParamPair = generateEd25519KeyPair();
+  const queryParamRequest: RequestLike = {
+    method: "GET",
+    url: DEMO_QUERY_PARAM_URL,
+    headers: {},
+  };
+  const queryParamSigned = signRequest(queryParamRequest, {
+    keyId: DEMO_QUERY_PARAM_KEY_ID,
+    alg: "ed25519",
+    key: queryParamPair.privateKey,
+    created: DEMO_CREATED,
+    coveredComponents: [...DEMO_QUERY_PARAM_COVERED],
+  });
+  const queryParamVerifyOptions = {
+    key: queryParamPair.publicKey,
+    now: DEMO_QUERY_PARAM_NOW,
+  };
+  const queryParamVerification = verifyRequest(
+    queryParamSigned,
+    queryParamVerifyOptions,
+  );
+  const queryParamUnboundTamperVerification = verifyRequest(
+    { ...queryParamSigned, url: DEMO_QUERY_PARAM_UNBOUND_TAMPERED_URL },
+    queryParamVerifyOptions,
+  );
+  const queryParamBoundTamperVerification = verifyRequest(
+    { ...queryParamSigned, url: DEMO_QUERY_PARAM_BOUND_TAMPERED_URL },
+    queryParamVerifyOptions,
+  );
+  if (
+    queryParamVerification.ok !== true ||
+    queryParamVerification.label !== "sig1" ||
+    queryParamVerification.keyId !== DEMO_QUERY_PARAM_KEY_ID ||
+    queryParamUnboundTamperVerification.ok !== true ||
+    queryParamUnboundTamperVerification.keyId !== DEMO_QUERY_PARAM_KEY_ID ||
+    queryParamBoundTamperVerification.ok !== false ||
+    queryParamBoundTamperVerification.code !== DEMO_QUERY_PARAM_REJECT_CODE ||
+    queryParamBoundTamperVerification.keyId !== DEMO_QUERY_PARAM_KEY_ID
+  ) {
+    throw new Error(
+      `demo fixture broken: @query-param gave ` +
+        `${JSON.stringify(queryParamVerification)}, ` +
+        `${JSON.stringify(queryParamUnboundTamperVerification)} and ` +
+        `${JSON.stringify(queryParamBoundTamperVerification)}, instead of the original verifying, ` +
+        `the unbound-b tamper verifying, and the bound-a tamper rejected with ${DEMO_QUERY_PARAM_REJECT_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -11301,6 +11398,17 @@ export async function runDemo(): Promise<DemoResult> {
     maxSignatureAgeByLabelFallbackVerification[1]!.ok === true
       ? `Map fallback: the same fixture re-verified with maxSignatureAgeSec ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC} plus maxSignatureAgeSecByLabel { merchant: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC} }: merchant still FAILED (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL}, code ${maxSignatureAgeByLabelFallbackVerification[0]!.code}: ${maxSignatureAgeByLabelFallbackVerification[0]!.reason}), gateway still OK (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL}, keyid="${maxSignatureAgeByLabelFallbackVerification[1]!.keyId}") — the mapped window wins for the merchant label, and the unmapped gateway label falls back to the global window rather than skipping the check`
       : `Map fallback: the same fixture re-verified with maxSignatureAgeSec ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC} plus maxSignatureAgeSecByLabel { merchant: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC} }: merchant ${maxSignatureAgeByLabelFallbackVerification[0]!.ok ? "OK (unexpected — the mapped merchant window did not reject the stale signature)" : `code ${maxSignatureAgeByLabelFallbackVerification[0]!.code}`}, gateway ${maxSignatureAgeByLabelFallbackVerification[1]!.ok ? "OK" : "FAILED (unexpected — the gateway label did not fall back to the global window)"}`,
+    "",
+    "Query-parameter binding (@query-param): the signature covers only the named parameter's value, not the whole query string — the request carries ?a=1&b=2 and covers `@query-param;name=\"a\"` alone, so the bound value is what the signature authenticates",
+    queryParamVerification.ok
+      ? `Query-param verification: OK (label ${queryParamVerification.label}, keyid="${queryParamVerification.keyId}", alg="ed25519") — the signature binds a=1`
+      : `Query-param verification: FAILED (code ${queryParamVerification.code}: ${queryParamVerification.reason})`,
+    queryParamUnboundTamperVerification.ok
+      ? `Unbound parameter changed (b: 2 -> 9, a untouched): OK (label ${queryParamUnboundTamperVerification.label}, keyid="${queryParamUnboundTamperVerification.keyId}") — an unbound parameter is not part of the signed bytes`
+      : `Unbound parameter changed (b: 2 -> 9, a untouched): FAILED (code ${queryParamUnboundTamperVerification.code}: ${queryParamUnboundTamperVerification.reason}) (unexpected — the unbound parameter was not supposed to break verification)`,
+    queryParamBoundTamperVerification.ok
+      ? "Bound parameter changed (a: 1 -> 9, b untouched): OK (unexpected — the bound value change was not detected)"
+      : `Bound parameter changed (a: 1 -> 9, b untouched): FAILED (code ${queryParamBoundTamperVerification.code}: ${queryParamBoundTamperVerification.reason}) — the bound value is authenticated, and the parameter name matches exactly with no normalization (order/encoding sensitive when several parameters are covered)`,
   ];
 
   return {
@@ -11573,6 +11681,10 @@ export async function runDemo(): Promise<DemoResult> {
     maxSignatureAgeByLabelSigned,
     maxSignatureAgeByLabelVerification,
     maxSignatureAgeByLabelFallbackVerification,
+    queryParamSigned,
+    queryParamVerification,
+    queryParamUnboundTamperVerification,
+    queryParamBoundTamperVerification,
     lines,
   };
 }

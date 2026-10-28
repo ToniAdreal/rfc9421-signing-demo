@@ -259,6 +259,13 @@ import {
   DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE,
   DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON,
   DEMO_MAX_SIGNATURE_AGE_BY_LABEL_URL,
+  DEMO_QUERY_PARAM_BOUND_TAMPERED_URL,
+  DEMO_QUERY_PARAM_COVERED,
+  DEMO_QUERY_PARAM_KEY_ID,
+  DEMO_QUERY_PARAM_NOW,
+  DEMO_QUERY_PARAM_REJECT_CODE,
+  DEMO_QUERY_PARAM_UNBOUND_TAMPERED_URL,
+  DEMO_QUERY_PARAM_URL,
   DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC,
   DEMO_CLOCK_DEFAULT_GRACE_SEC,
   DEMO_CLOCK_DEFAULT_SKEW_SEC,
@@ -7327,7 +7334,7 @@ test("demo per-label maximum signature age segment pins maxSignatureAgeSecByLabe
   );
 });
 
-test("demo lines contain the per-label maximum signature age segment (stale merchant rejected, fresh gateway passes, unmapped gateway falls back to the global window, closing the demo)", async () => {
+test("demo lines contain the per-label maximum signature age segment (stale merchant rejected, fresh gateway passes, unmapped gateway falls back to the global window)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(
@@ -7343,9 +7350,15 @@ test("demo lines contain the per-label maximum signature age segment (stale merc
     `Age split: both signatures created ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC}s ago, verified with maxSignatureAgeSecByLabel { merchant: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC}, gateway: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_WINDOW_SEC} }: merchant FAILED (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE}: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON}), gateway still OK (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — only the stale label is rejected`,
     `Map fallback: the same fixture re-verified with maxSignatureAgeSec ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GLOBAL_WINDOW_SEC} plus maxSignatureAgeSecByLabel { merchant: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC} }: merchant still FAILED (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE}: ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON}), gateway still OK (label ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_GATEWAY_KEY_ID}") — the mapped window wins for the merchant label, and the unmapped gateway label falls back to the global window rather than skipping the check`,
   ]);
-  // The header plus its two lines are the demo's closing lines,
-  // with nothing after them.
-  assert.equal(headerIdx + 3, lines.length);
+  // The maximum-signature-age block is no longer the demo's
+  // closing segment: the @query-param segment follows it after
+  // one blank separator line.
+  assert.equal(lines[headerIdx + 3], "");
+  assert.ok(
+    lines[headerIdx + 4]!.startsWith(
+      "Query-parameter binding (@query-param):",
+    ),
+  );
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Per-label maximum signature age:"),
@@ -7353,5 +7366,100 @@ test("demo lines contain the per-label maximum signature age segment (stale merc
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 3),
     lines.slice(headerIdx, headerIdx + 3),
+  );
+});
+
+test("demo @query-param segment pins the named-parameter binding (original verifies, unbound-b tamper verifies, bound-a tamper rejected)", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_QUERY_PARAM_URL, "https://api.example.com/v1/payments?a=1&b=2");
+  assert.equal(DEMO_QUERY_PARAM_KEY_ID, "demo-query-param-1");
+  assert.deepEqual(DEMO_QUERY_PARAM_COVERED, ['@query-param;name="a"']);
+  assert.equal(DEMO_QUERY_PARAM_NOW, DEMO_CREATED + 60);
+  assert.equal(
+    DEMO_QUERY_PARAM_UNBOUND_TAMPERED_URL,
+    "https://api.example.com/v1/payments?a=1&b=9",
+  );
+  assert.equal(
+    DEMO_QUERY_PARAM_BOUND_TAMPERED_URL,
+    "https://api.example.com/v1/payments?a=9&b=2",
+  );
+  assert.equal(DEMO_QUERY_PARAM_REJECT_CODE, "SIGNATURE_MISMATCH");
+  assert.match(
+    r.queryParamSigned.headers["signature-input"]!,
+    /"@query-param";name="a"/,
+  );
+  assert.equal(r.queryParamSigned.url, DEMO_QUERY_PARAM_URL);
+  assert.equal(r.queryParamVerification.ok, true);
+  assert.equal(r.queryParamVerification.label, "sig1");
+  assert.equal(r.queryParamVerification.keyId, DEMO_QUERY_PARAM_KEY_ID);
+  assert.equal(r.queryParamUnboundTamperVerification.ok, true);
+  assert.equal(
+    r.queryParamUnboundTamperVerification.keyId,
+    DEMO_QUERY_PARAM_KEY_ID,
+  );
+  assert.equal(r.queryParamBoundTamperVerification.ok, false);
+  assert.equal(
+    r.queryParamBoundTamperVerification.code,
+    DEMO_QUERY_PARAM_REJECT_CODE,
+  );
+  assert.equal(
+    r.queryParamBoundTamperVerification.keyId,
+    DEMO_QUERY_PARAM_KEY_ID,
+  );
+  // Independent checks driven directly (the same @query-param
+  // semantics test/queryParamComponent.test.ts pins): a fresh
+  // key pair, the same three URLs, the same covered component.
+  const pair = generateEd25519KeyPair();
+  const signed = signRequest(
+    { method: "GET", url: DEMO_QUERY_PARAM_URL, headers: {} },
+    {
+      keyId: DEMO_QUERY_PARAM_KEY_ID,
+      alg: "ed25519",
+      key: pair.privateKey,
+      created: DEMO_CREATED,
+      coveredComponents: [...DEMO_QUERY_PARAM_COVERED],
+    },
+  );
+  const opts = { key: pair.publicKey, now: DEMO_QUERY_PARAM_NOW };
+  assert.equal(verifyRequest(signed, opts).ok, true);
+  assert.equal(
+    verifyRequest(
+      { ...signed, url: DEMO_QUERY_PARAM_UNBOUND_TAMPERED_URL },
+      opts,
+    ).ok,
+    true,
+  );
+  const bound = verifyRequest(
+    { ...signed, url: DEMO_QUERY_PARAM_BOUND_TAMPERED_URL },
+    opts,
+  );
+  assert.equal(bound.ok, false);
+  assert.equal(bound.code, DEMO_QUERY_PARAM_REJECT_CODE);
+});
+
+test("demo lines contain the @query-param segment (bound value authenticated, unbound parameter free, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Query-parameter binding \(@query-param\):/);
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Query-parameter binding (@query-param):"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "Query-parameter binding (@query-param): the signature covers only the named parameter's value, not the whole query string — the request carries ?a=1&b=2 and covers `@query-param;name=\"a\"` alone, so the bound value is what the signature authenticates",
+    `Query-param verification: OK (label sig1, keyid="${DEMO_QUERY_PARAM_KEY_ID}", alg="ed25519") — the signature binds a=1`,
+    `Unbound parameter changed (b: 2 -> 9, a untouched): OK (label sig1, keyid="${DEMO_QUERY_PARAM_KEY_ID}") — an unbound parameter is not part of the signed bytes`,
+    `Bound parameter changed (a: 1 -> 9, b untouched): FAILED (code ${DEMO_QUERY_PARAM_REJECT_CODE}: signature mismatch) — the bound value is authenticated, and the parameter name matches exactly with no normalization (order/encoding sensitive when several parameters are covered)`,
+  ]);
+  // The header plus its three lines are the demo's closing lines,
+  // with nothing after them.
+  assert.equal(headerIdx + 4, lines.length);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Query-parameter binding (@query-param):"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
   );
 });

@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo `@query-param` segment (backlog #667): `src/demo.ts`
+  closes with a section signing `?a=1&b=2` while covering only
+  `@query-param;name="a"` — the original request verifies, changing
+  only the unbound `b` still verifies, and changing the bound `a`
+  fails with `SIGNATURE_MISMATCH`; the segment states the exact-match,
+  no-normalization limitation honestly. The README test count moves
+  1067 → 1069.
+
 - Orthogonal-combination tests for per-label expiry tolerance x
   maximum signature age (backlog #664):
   `test/expiredMaxAgeByLabel.test.ts` pins `verifyAllLabels` with
