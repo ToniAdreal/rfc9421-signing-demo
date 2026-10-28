@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal-combination tests for per-label candidate keys x required
+  nonce (backlog #689):
+  `test/candidateKeysByLabelRequireNonceByLabel.test.ts` pins
+  `verifyAllLabels` with the merchant label mapped to both a rotating
+  candidate-key list and a nonce requirement, and the gateway label
+  mapped to neither — a pairing the existing per-label tests never
+  made. A rotated merchant key carrying a nonce verifies while the
+  nonce-less static gateway passes; a nonce-less merchant signature
+  from a valid rotated key reports `MISSING_NONCE` while the gateway
+  passes; the old rotation key with a nonce still verifies; a retired
+  key carrying a nonce reports `SIGNATURE_MISMATCH`, so the nonce
+  dimension cannot mask a key failure; and a forged nonce-less
+  merchant signature from a retired key reports `SIGNATURE_MISMATCH`
+  rather than `MISSING_NONCE`, pinning that the cryptographic check
+  runs before the nonce presence check. Global true plus a mapped
+  `false` gateway leaves only the merchant checked. No source change:
+  the combination was untested, not unimplemented. The README test
+  count moves 1084 → 1090.
+
 - Per-label candidate-keys plus key-id-pinning benchmark (backlog #688):
   `bench/bench.ts` gains `benchmarkVerifyAllCandidateKeysExpectedKeyIds`,
   measuring `verifyAllLabels` with `candidateKeysByLabel` (merchant:
