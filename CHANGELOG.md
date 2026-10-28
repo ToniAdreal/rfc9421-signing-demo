@@ -12,6 +12,31 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - Orthogonal-combination tests for per-label required created x
+  maximum signature age (backlog #677):
+  `test/requireCreatedMaxAgeByLabel.test.ts` pins `verifyAllLabels`
+  with the merchant label mapped to both time checks
+  (`requireCreatedByLabel` plus a narrow
+  `maxSignatureAgeSecByLabel` window) and the gateway label mapped
+  to neither — a pairing the existing per-label freshness tests
+  never made. A merchant signature missing `created` reports
+  `MISSING_CREATED` while a gateway signature missing the same
+  field passes; a 1-hour-old merchant signature against a 300s
+  window reports `SIGNATURE_TOO_OLD` while the same-age gateway
+  signature passes; an undated merchant signature under both maps
+  reports `MISSING_CREATED` first, never `SIGNATURE_TOO_OLD`
+  (the age check bypasses undated signatures and the presence
+  check runs first, so the two dimensions cannot be violated at
+  once); a fresh merchant and an undated gateway both pass; a
+  forged undated merchant signature still reports
+  `SIGNATURE_MISMATCH`, pinning that the cryptographic check runs
+  before the presence checks; global true plus mapped false on
+  the gateway leaves only the merchant checked; and the 300s
+  window boundary is inclusive under the combination (exactly
+  300s old passes, 301s old fails). No source change: the
+  combination was untested, not unimplemented. The README test
+  count moves 1077 → 1084.
+
+- Orthogonal-combination tests for per-label required created x
   required expires (backlog #675):
   `test/requireCreatedExpiresByLabel.test.ts` pins `verifyAllLabels`
   with the merchant label mapped to both requirements and the
