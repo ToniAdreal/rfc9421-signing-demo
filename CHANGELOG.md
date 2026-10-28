@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal-combination tests for per-label replay cache x nonce
+  requirement (backlog #662): `test/replayCacheByLabelRequireNonceByLabel.test.ts`
+  pins `verifyAllLabels` with the merchant label mapped to its own
+  `ReplayCache` and to `requireNonceByLabel: true` while the gateway
+  label is mapped to neither: the same nonce passes both labels on
+  first presentation and then replays only for the merchant; the
+  gateway's nonce reuse never pollutes the merchant store; a
+  nonce-less (or empty-string) merchant signature reports
+  `MISSING_NONCE` — never `NONCE_REPLAY`, since there is no nonce to
+  look up — and pollutes nothing, so a later well-formed nonce still
+  passes; a forged merchant signature reports `SIGNATURE_MISMATCH`
+  ahead of both checks and records nothing; and a mapped
+  `requireNonceByLabel: false` relaxes a global requirement for the
+  gateway alone while the merchant store still binds. The README
+  test count moves 1049 → 1056.
+
 - CLI demo section for per-label maximum signature age (backlog #661):
   `src/demo.ts` now demonstrates `verifyAllLabels` with
   `maxSignatureAgeSecByLabel` over a dual ed25519 fixture whose
