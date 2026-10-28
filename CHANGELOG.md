@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark `;tr` trailer verification row (backlog #673):
+  `bench/bench.ts` adds `benchmarkVerifyNodeRequestTrailer`, the
+  request-side mirror of the `fromNodeResponse` adapt+verify row —
+  one measured op adapts a Node-shaped incoming double carrying
+  a mixed-case `x-checksum` trailer and verifies a signature
+  covering `x-checksum;tr` alongside `@method`/`@authority`/`@path`
+  (200 warmup + 3000 timed iterations, the per-label bench caliber),
+  asserting the adapted trailer value and a passing verification
+  on every pass; self-checks outside timing pin a forged trailer
+  (`SIGNATURE_MISMATCH`), a dropped trailer failing closed
+  (`SIGNATURE_BASE_BUILD_FAILED`), and raw trailers beating a stale
+  parsed-trailers object. The row measured ~6,436 ops/sec
+  (~155.37 µs/op) in this run, and the README Benchmarks table is
+  refreshed wholesale from that same run (88 rows → 89 rows, the
+  new row included) with a prose note for the new row.
+
 - CLI demo `;bs` byte-sequence segment (backlog #670): `src/demo.ts`
   closes with a section signing `x-charge-ref: "ch_42, settled "`
   while covering `x-charge-ref;bs` — the original request verifies,

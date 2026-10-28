@@ -7629,6 +7629,144 @@ function benchmarkFromNodeRequest(): number {
 }
 
 /**
+ * Pinned shape of the `fromNodeRequest` + `verifyRequest` trailer
+ * benchmark: one ed25519 key pair (generated once, outside timing),
+ * one fixture signed outside timing covering `x-checksum;tr`
+ * alongside `@method`/`@authority`/`@path`, and a Node-shaped
+ * incoming double (mixed-case trailer name, so the measured
+ * pass also pays the adapter's lowercasing) rebuilt from the
+ * signed headers. The verifier's injected `now` sits 60s after
+ * `created`, so no wall clock enters the measured loop. This is
+ * the request-side mirror of the `fromNodeResponse` adapt+verify
+ * row: the existing `fromNodeRequest` row above times only the
+ * normalization, never the `;tr` verification it enables.
+ */
+const NODE_TRAILER_CREATED = 1_700_000_000;
+const NODE_TRAILER_NOW = NODE_TRAILER_CREATED + 60;
+const NODE_TRAILER_VALUE = "trailer-value";
+const NODE_TRAILER_MISMATCH_CODE = "SIGNATURE_MISMATCH";
+const NODE_TRAILER_DROPPED_CODE = "SIGNATURE_BASE_BUILD_FAILED";
+
+/**
+ * `fromNodeRequest` (with trailers) + `verifyRequest` steady
+ * state: the inbound normalization and verification a webhook
+ * receiver runs on every trailer-bound callback. One measured op
+ * adapts the incoming double and verifies the `;tr`-covered
+ * signature, asserting the adapted trailer value and a passing
+ * verification on every pass, so a silently dropped trailer
+ * cannot produce a fast-but-meaningless number. Outside timing,
+ * the negative halves are pinned once: a forged trailer value
+ * reports `SIGNATURE_MISMATCH`, a signature received without its
+ * trailers fails closed with `SIGNATURE_BASE_BUILD_FAILED`
+ * (never silently verified), and a raw-trailers form beats a
+ * stale parsed-trailers object, matching the adapter's
+ * precedence rule. Zero network, zero randomness in the
+ * measured assertions, no wall clock (every verify instant is
+ * injected).
+ */
+function benchmarkVerifyNodeRequestTrailer(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(
+    {
+      method: "POST",
+      url: "https://hooks.example.com/webhook",
+      headers: { "content-type": "application/json" },
+      trailers: { "x-checksum": NODE_TRAILER_VALUE },
+      body: "hello",
+    },
+    {
+      keyId: "bench-tr-1",
+      alg: "ed25519",
+      key: privateKey,
+      created: NODE_TRAILER_CREATED,
+      coveredComponents: ["@method", "@authority", "@path", "x-checksum;tr"],
+    },
+  );
+  const incoming: IncomingRequestLike = {
+    method: "POST",
+    url: "/webhook",
+    socket: { encrypted: true },
+    headers: {
+      Host: "hooks.example.com",
+      "Content-Type": "application/json",
+      "Signature-Input": signed.headers["signature-input"] as string,
+      Signature: signed.headers["signature"] as string,
+    },
+    // Mixed-case name exercises the adapter's lowercasing, the same
+    // convention it applies to headers.
+    trailers: { "X-Checksum": NODE_TRAILER_VALUE },
+  };
+  const assertTrailerVerify = (where: string): void => {
+    const adapted = fromNodeRequest(incoming, "hello");
+    if (adapted.trailers?.["x-checksum"] !== NODE_TRAILER_VALUE)
+      throw new Error(
+        `benchmark self-check failed: fromNodeRequest trailer normalization (${where}) gave ${JSON.stringify(adapted.trailers)}`,
+      );
+    const res = verifyRequest(adapted, {
+      key: publicKey,
+      now: NODE_TRAILER_NOW,
+    });
+    if (!res.ok)
+      throw new Error(
+        `benchmark self-check failed: ;tr trailer verification (${where}) gave ${JSON.stringify(res)}`,
+      );
+  };
+
+  // Outside timing: the adapted request verifies with its trailer bound.
+  assertTrailerVerify("outside timing");
+
+  // Outside timing: a forged trailer value fails with the pinned code.
+  const tampered = fromNodeRequest(
+    { ...incoming, trailers: { "x-checksum": "forged-value" } },
+    "hello",
+  );
+  const tamperedRes = verifyRequest(tampered, {
+    key: publicKey,
+    now: NODE_TRAILER_NOW,
+  });
+  if (tamperedRes.ok || tamperedRes.code !== NODE_TRAILER_MISMATCH_CODE)
+    throw new Error(
+      `benchmark self-check failed: forged trailer gave ${JSON.stringify(tamperedRes)}`,
+    );
+
+  // Outside timing: a ;tr signature received without its trailers
+  // fails closed, never silently verifies.
+  const dropped = fromNodeRequest(
+    { ...incoming, trailers: undefined },
+    "hello",
+  );
+  const droppedRes = verifyRequest(dropped, {
+    key: publicKey,
+    now: NODE_TRAILER_NOW,
+  });
+  if (droppedRes.ok || droppedRes.code !== NODE_TRAILER_DROPPED_CODE)
+    throw new Error(
+      `benchmark self-check failed: dropped trailer gave ${JSON.stringify(droppedRes)}`,
+    );
+
+  // Outside timing: raw trailers beat a stale parsed-trailers object.
+  const raw = fromNodeRequest(
+    {
+      ...incoming,
+      trailers: { "x-checksum": "stale-object-value" },
+      rawTrailers: ["X-Checksum", NODE_TRAILER_VALUE],
+    },
+    "hello",
+  );
+  if (
+    raw.trailers?.["x-checksum"] !== NODE_TRAILER_VALUE ||
+    !verifyRequest(raw, { key: publicKey, now: NODE_TRAILER_NOW }).ok
+  )
+    throw new Error(
+      "benchmark self-check failed: rawTrailers did not take precedence over the trailers object",
+    );
+
+  return measure(() => {
+    assertTrailerVerify("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Loopback-signed response for the `fromNodeResponse` path — the
  * gateway-settlement shape a client verifies on every callback: a
  * real `http` server (loopback only, no external network) signs a
@@ -10379,6 +10517,11 @@ results.push({
   alg: "fromNodeRequest (inbound, trailers)",
   op: "normalize",
   ops: benchmarkFromNodeRequest(),
+});
+results.push({
+  alg: "fromNodeRequest + verifyRequest (;tr trailer)",
+  op: "adapt+verify",
+  ops: benchmarkVerifyNodeRequestTrailer(),
 });
 results.push({
   alg: "fromNodeResponse (@status, loopback)",
