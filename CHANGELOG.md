@@ -11,7 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal-combination tests for per-label clock skew x required
+  components (backlog #663): `test/clockSkewRequiredComponentsByLabel.test.ts`
+  pins `verifyAllLabels` with the merchant label mapped to a 5s clock
+  tolerance and an `@path` coverage requirement and the gateway label
+  mapped to a 300s tolerance and a `content-digest` requirement, both
+  signatures 120s in the future: a future-created merchant signature
+  missing `@path` reports `MISSING_REQUIRED_COMPONENT` (the policy
+  gate runs before the clock window), the same signature with
+  components complete reports `CREATED_IN_FUTURE`, each label reports
+  its own dimension with no cross-label masking, a missing component
+  beats a bad signature (gate before cryptography), and a bad
+  signature beats the clock code (clock window after cryptography).
+  The README test count moves 1056 → 1061.
+
 - Orthogonal-combination tests for per-label replay cache x nonce
+  requirement (backlog #662): `test/replayCacheByLabelRequireNonceByLabel.test.ts`
   requirement (backlog #662): `test/replayCacheByLabelRequireNonceByLabel.test.ts`
   pins `verifyAllLabels` with the merchant label mapped to its own
   `ReplayCache` and to `requireNonceByLabel: true` while the gateway
