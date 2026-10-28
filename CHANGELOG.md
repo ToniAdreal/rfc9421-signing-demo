@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Orthogonal-combination tests for per-label algorithm fallback x
+  candidate keys (backlog #690):
+  `test/algFallbackByLabelCandidateKeysByLabel.test.ts` pins
+  `verifyAllLabels` with the merchant label mapped to both an
+  `algFallbackByLabel` strategy and a `candidateKeysByLabel` rotation
+  list, and the gateway label mapped to neither — a pairing the
+  existing per-label tests never made. The fallback is inferred per
+  candidate inside the rotation walk: a no-`alg` P-256 merchant wire
+  passes on the second candidate (after the ed25519 candidate
+  mismatches) and reports `ecdsa-p256-sha256`, and passes on the
+  first candidate when the list order is reversed; a retired P-256
+  wire with both dimensions exhausted reports `SIGNATURE_MISMATCH`
+  while the gateway passes; the same new-key wire under a strict
+  merchant never infers and fails against every candidate; an infer
+  walk advances past a mismatching secret candidate to the real
+  ed25519 key, while the strict walk stops at the secret candidate's
+  `VERIFICATION_ERROR` and never tries the real key, pinning that
+  only `SIGNATURE_MISMATCH` advances the walk. No source change:
+  the combination was untested, not unimplemented. The README test
+  count moves 1090 → 1096.
+
 - Orthogonal-combination tests for per-label candidate keys x required
   nonce (backlog #689):
   `test/candidateKeysByLabelRequireNonceByLabel.test.ts` pins
