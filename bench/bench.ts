@@ -391,6 +391,21 @@
  * the both-missing merchant dual reporting `MISSING_CREATED` first, all
  * undated duals' acceptance with no option passed, and explicit `false`
  * map entries letting them through asserted outside timing, plus
+ * the per-label key-id binding plus nonce-presence verify path a multi-party
+ * receiver runs when one signer must both pin its key and carry a nonce:
+ * `verifyAllLabels` with `expectedKeyIds` and `requireNonceByLabel` over dual
+ * ed25519 fixtures signed outside timing with `created` pinned (see
+ * EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_* below), self-checked on every
+ * measured pass (one measured op verifies three duals: the pinned
+ * nonce-carrying dual, both labels ok with the merchant nonce returned and
+ * both keyids echoed; the pinned nonce-less-merchant dual, merchant exactly
+ * `MISSING_NONCE` with the pinned reason while the gateway label still
+ * verifies; and the wrong-keyid nonce-carrying dual, merchant exactly
+ * `KEYID_MISMATCH` with the pinned reason while the gateway label still
+ * verifies), with the unmapped-label fallback to the global `expectedKeyId`
+ * with no nonce requirement, the wrong-global-pin fallback half, the same
+ * nonce-less dual's acceptance with no option passed, and an explicit
+ * `merchant: false` map entry letting it through asserted outside timing, plus
  * the algorithm-inference verify path a
  * receiver runs for foreign signers that omit the optional
  * `alg` parameter: `verifyRequest` with
@@ -6855,6 +6870,251 @@ function benchmarkVerifyAllRequireCreatedExpiresByLabel(): number {
 }
 
 /**
+ * Pinned shape of the `verifyAllLabels`
+ * expectedKeyIds x requireNonceByLabel benchmark: two ed25519 key pairs
+ * (generated once, outside timing), three dual-label fixtures signed
+ * outside timing with `created` pinned under two pinned keyids
+ * (merchant / gateway, the canonical multi-party labels), and the
+ * verifier's injected `now` at the `created` instant. The merchant label
+ * is mapped in both `expectedKeyIds` and `requireNonceByLabel` and the
+ * gateway label is mapped only in `expectedKeyIds` — the combination
+ * test (#702) pins, so neither map joins the
+ * `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules and no
+ * configuration error fires.
+ */
+const EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED = 1_700_000_000;
+const EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_KID =
+  "bench-expected-keyids-require-nonce-merchant-1";
+const EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_GATEWAY_KID =
+  "bench-expected-keyids-require-nonce-gateway-1";
+const EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_WRONG_KID =
+  "bench-expected-keyids-require-nonce-merchant-wrong";
+const EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_NONCE_VALUE =
+  "bench-expected-keyids-require-nonce-1";
+const EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MISSING_NONCE_CODE =
+  "MISSING_NONCE";
+const EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MISSING_NONCE_REASON =
+  "signature carries no `nonce` but requireNonce is set";
+const EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_KEYID_MISMATCH_CODE =
+  "KEYID_MISMATCH";
+
+/**
+ * `verifyAllLabels` with `expectedKeyIds` plus `requireNonceByLabel`
+ * steady state: the combined per-label form a multi-party receiver uses
+ * when the merchant must both pin its key and carry a nonce while the
+ * gateway only pins its key — every measured call runs the per-label pin
+ * resolution and the post-cryptographic keyid comparison for both labels
+ * plus the per-label nonce-presence check for the merchant, which neither
+ * single-map row above pays together. One measured op verifies three
+ * duals: the pinned nonce-carrying dual (both labels ok, merchant nonce
+ * returned, each keyid echoed at its pinned value); the pinned
+ * nonce-less-merchant dual (merchant exactly `MISSING_NONCE` with the
+ * pinned reason while the gateway still verifies, proving the pin does
+ * not rescue a nonce-less signature); and the wrong-keyid
+ * nonce-carrying dual (merchant exactly `KEYID_MISMATCH` with the pinned
+ * reason while the gateway still verifies, proving the nonce requirement
+ * does not mask a key-confusion failure — and, per the #702 order pin,
+ * a both-violating merchant would report the keyid code first). Outside
+ * timing, the fallback and opt-in halves are pinned once: a label missing
+ * from both maps falls back to the global `expectedKeyId` with no nonce
+ * requirement (matching fallback verifies both labels; a wrong global pin
+ * fails only the fallback label with `KEYID_MISMATCH` while the
+ * per-label-pinned merchant still verifies), the same nonce-less dual
+ * verifies with no option passed, and an explicit `merchant: false` map
+ * entry likewise lets the nonce-less merchant through. Zero network,
+ * zero randomness in the measured assertions, no wall clock (every verify
+ * instant is injected).
+ */
+function benchmarkVerifyAllExpectedKeyIdsRequireNonceByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantWithNonceSigned = signRequest(fixture, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED,
+    nonce: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_NONCE_VALUE,
+  });
+  const dualWithNonce = addSignature(merchantWithNonceSigned, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED,
+  });
+  const merchantWithoutNonceSigned = signRequest(fixture, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED,
+  });
+  const dualWithoutNonce = addSignature(merchantWithoutNonceSigned, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED,
+  });
+  const merchantWrongKidSigned = signRequest(fixture, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_WRONG_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED,
+    nonce: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_NONCE_VALUE,
+  });
+  const dualWrongKid = addSignature(merchantWrongKidSigned, {
+    keyId: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = {
+    keys,
+    now: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED,
+    expectedKeyIds: {
+      merchant: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_KID,
+      gateway: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_GATEWAY_KID,
+    },
+    requireNonceByLabel: { merchant: true },
+  };
+  const assertAll = (where: string): void => {
+    const accepted = verifyAllLabels(dualWithNonce, verifyOpts);
+    if (
+      accepted.length !== 2 ||
+      accepted[0].label !== "merchant" ||
+      !accepted[0].ok ||
+      accepted[0].nonce !==
+        EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_NONCE_VALUE ||
+      accepted[0].keyId !==
+        EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_KID ||
+      accepted[1].label !== "gateway" ||
+      !accepted[1].ok ||
+      accepted[1].keyId !==
+        EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_GATEWAY_KID
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with expectedKeyIds x requireNonceByLabel (${where}, pinned nonce-carrying dual) gave ${JSON.stringify(accepted)}`,
+      );
+    const nonceLess = verifyAllLabels(dualWithoutNonce, verifyOpts);
+    if (
+      nonceLess.length !== 2 ||
+      nonceLess[0].label !== "merchant" ||
+      nonceLess[0].ok ||
+      nonceLess[0].code !==
+        EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MISSING_NONCE_CODE ||
+      nonceLess[0].reason !==
+        EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MISSING_NONCE_REASON ||
+      nonceLess[1].label !== "gateway" ||
+      !nonceLess[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with expectedKeyIds x requireNonceByLabel (${where}, pinned nonce-less-merchant dual) gave ${JSON.stringify(nonceLess)}`,
+      );
+    const wrongKid = verifyAllLabels(dualWrongKid, verifyOpts);
+    if (
+      wrongKid.length !== 2 ||
+      wrongKid[0].label !== "merchant" ||
+      wrongKid[0].ok ||
+      wrongKid[0].code !==
+        EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_KEYID_MISMATCH_CODE ||
+      wrongKid[0].reason !==
+        `keyid mismatch: expected "${EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_KID}", got "${EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_WRONG_KID}"` ||
+      wrongKid[0].keyId !==
+        EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_WRONG_KID ||
+      wrongKid[1].label !== "gateway" ||
+      !wrongKid[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with expectedKeyIds x requireNonceByLabel (${where}, wrong-keyid nonce-carrying dual) gave ${JSON.stringify(wrongKid)}`,
+      );
+  };
+
+  // Outside timing: all three fixtures self-check under the combined
+  // per-label options before any timing starts.
+  assertAll("outside timing");
+
+  // Outside timing: a label missing from both maps falls back to the
+  // global `expectedKeyId` with no nonce requirement — here the gateway
+  // label is unmapped in both maps and the global pin matches it, so
+  // both labels verify.
+  const fallbackOk = verifyAllLabels(dualWithNonce, {
+    keys,
+    now: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED,
+    expectedKeyId: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_GATEWAY_KID,
+    expectedKeyIds: {
+      merchant: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_KID,
+    },
+    requireNonceByLabel: { merchant: true },
+  });
+  if (fallbackOk.length !== 2 || fallbackOk.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: global-fallback result ${JSON.stringify(fallbackOk)}`,
+    );
+
+  // Outside timing: with a wrong global pin the same fallback label
+  // fails with `KEYID_MISMATCH` while the per-label-pinned merchant
+  // still verifies — the global pin never overrides a per-label pin.
+  const fallbackMismatch = verifyAllLabels(dualWithNonce, {
+    keys,
+    now: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED,
+    expectedKeyId:
+      EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_WRONG_KID,
+    expectedKeyIds: {
+      merchant: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_MERCHANT_KID,
+    },
+    requireNonceByLabel: { merchant: true },
+  });
+  if (
+    fallbackMismatch.length !== 2 ||
+    !fallbackMismatch[0].ok ||
+    fallbackMismatch[1].ok ||
+    fallbackMismatch[1].code !==
+      EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_KEYID_MISMATCH_CODE ||
+    fallbackMismatch[1].keyId !==
+      EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_GATEWAY_KID
+  )
+    throw new Error(
+      `benchmark self-check failed: global-fallback mismatch result ${JSON.stringify(fallbackMismatch)}`,
+    );
+
+  // Outside timing: with no option the same nonce-less dual verifies —
+  // both checks are opt-in and the default behaviour is unchanged.
+  const defaulted = verifyAllLabels(dualWithoutNonce, {
+    keys,
+    now: EXPECTED_KEY_IDS_REQUIRE_NONCE_BY_LABEL_CREATED,
+  });
+  if (defaulted.length !== 2 || defaulted.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: nonce-less default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  // Outside timing: an explicit `merchant: false` map entry likewise
+  // lets the nonce-less merchant label through — the map entry, not
+  // the label name, drives the check.
+  const optedOut = verifyAllLabels(dualWithoutNonce, {
+    ...verifyOpts,
+    requireNonceByLabel: { merchant: false },
+  });
+  if (optedOut.length !== 2 || optedOut.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: nonce-less merchant:false gave ${JSON.stringify(optedOut)}`,
+    );
+
+  return measure(() => {
+    assertAll("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `verifyRequest` algFallback
  * benchmark: the RFC 9421 Appendix B.2.5 hmac-sha256
  * wire value verbatim — its signature-input carries
@@ -11660,6 +11920,11 @@ results.push({
   alg: "verifyAllLabels replayCacheByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllReplayCacheByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels expectedKeyIds requireNonceByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllExpectedKeyIdsRequireNonceByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",

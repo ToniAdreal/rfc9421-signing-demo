@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label keyid pinning x nonce requirement
+  verification (backlog #709): `bench/bench.ts` gains
+  `benchmarkVerifyAllExpectedKeyIdsRequireNonceByLabel`, measuring
+  `verifyAllLabels` with the merchant label mapped to both
+  `expectedKeyIds` and `requireNonceByLabel` and the gateway label
+  mapped only to `expectedKeyIds` — the combination test (#702)
+  pins, so neither map joins the `keys`/`keyResolver`/`candidateKeys`
+  mutual-exclusion rules and no configuration error fires. One
+  measured op verifies three duals: the pinned nonce-carrying dual
+  (both labels ok, merchant nonce returned, each keyid echoed at its
+  pinned value); the pinned nonce-less-merchant dual (merchant exactly
+  `MISSING_NONCE` with the pinned reason while the gateway still
+  verifies); and the wrong-keyid nonce-carrying dual (merchant exactly
+  `KEYID_MISMATCH` with the pinned reason while the gateway still
+  verifies). The unmapped-label fallback to the global `expectedKeyId`
+  with no nonce requirement, the wrong-global-pin fallback half, the
+  same nonce-less dual's acceptance with no option passed, and an
+  explicit `merchant: false` map entry are asserted outside timing.
+  The README Benchmarks table is refreshed from this run's real
+  output (94 rows, 2026-10-29, Node v24.22.1), with the new row at
+  ~198.3 ops/sec (5042.56 µs/op). No source change: the combination
+  was untested on the bench side, not unimplemented.
 - Combination test for per-label key resolvers x tag requirement
   (backlog #705): `test/keyResolversRequireTagByLabel.test.ts`
   adds 8 cases for `verifyAllLabels` with each label resolving
