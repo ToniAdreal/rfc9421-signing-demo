@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Combination test for per-label candidate keys x per-label freshness
+  window (backlog #712): `test/candidateKeysByLabelMaxAgeByLabel.test.ts`
+  adds 7 cases for `verifyAllLabels` with the merchant label on a
+  single fixed key and a tight 300s window and the gateway label on a
+  rotating [old, new] HMAC secret list and a wide 7200s window — the
+  new key in-window and the old key inside the rotation window both
+  pass; a 1h-old signature fails the merchant label with exactly
+  `SIGNATURE_TOO_OLD` while the gateway still passes; out-of-window
+  signatures are rejected for both labels whichever rotation key
+  signed them; a retired key is rejected with `SIGNATURE_MISMATCH`
+  even inside the window; and swapped windows prove neither label's
+  window leaks into the other. Illegal combination shapes (empty
+  candidate list, negative window, candidate keys mixed with `keys`)
+  throw configuration errors naming the label. No source change: the
+  combination was untested, not unimplemented.
+
 - Benchmark row for per-label keyid pinning x nonce requirement
   verification (backlog #709): `bench/bench.ts` gains
   `benchmarkVerifyAllExpectedKeyIdsRequireNonceByLabel`, measuring
