@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Combination test for per-label keyid pinning x nonce requirement
+  (backlog #702): `test/expectedKeyIdsRequireNonceByLabel.test.ts`
+  adds 8 cases for `verifyAllLabels` with the merchant label pinned
+  (`expectedKeyIds`) and nonce-required (`requireNonceByLabel`) and
+  the gateway label pinned but nonce-free — both labels pass, a
+  nonce-less merchant fails exactly `MISSING_NONCE`, a wrong-keyid
+  merchant fails exactly `KEYID_MISMATCH`, a merchant violating
+  both reports the keyid code (keyid check precedes the nonce
+  check), simultaneous per-label failures keep their own codes, an
+  empty-string nonce counts as missing, and labels absent from both
+  maps fall back to the global `expectedKeyId` with no nonce
+  requirement. Source unchanged: the combination was previously
+  untested, not unimplemented. Test count moves 1096 → 1104.
 - Benchmark row for per-label candidate-keys x tag-presence
   verification (backlog #692): `bench/bench.ts` gains
   `benchmarkVerifyAllCandidateKeysRequireTagByLabel`, measuring
