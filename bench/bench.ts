@@ -271,6 +271,28 @@
  * global `maxSignatureAgeSec` (both the matching and the
  * mismatching fallback halves) and the same dual's
  * acceptance with no option passed asserted outside
+ * timing, plus the per-label nonce-presence plus
+ * freshness-window verify path a multi-party receiver
+ * runs when one signer must both carry a nonce and stay
+ * fresh: `verifyAllLabels` with `requireNonceByLabel`
+ * and `maxSignatureAgeSecByLabel` over dual ed25519
+ * fixtures signed outside timing with `created` pinned
+ * (merchant window 60s, gateway window 3600s — see
+ * REQUIRE_NONCE_MAX_AGE_BY_LABEL_* below), self-checked
+ * on every measured pass (one measured op verifies four
+ * duals: the fresh nonce-carrying dual, both labels ok
+ * with the merchant nonce returned; the fresh
+ * nonce-less-merchant dual, merchant exactly
+ * `MISSING_NONCE` with the pinned reason while the
+ * gateway still verifies; the old nonce-carrying dual,
+ * merchant exactly `SIGNATURE_TOO_OLD` with the pinned
+ * reason while the gateway still verifies; and the old
+ * nonce-less-merchant dual, merchant exactly
+ * `SIGNATURE_TOO_OLD`, pinning that the age check
+ * precedes the nonce-presence check), with the same old
+ * nonce-less dual's acceptance with no option passed and
+ * an explicit `merchant: false` map entry letting the
+ * fresh nonce-less merchant through asserted outside
  * timing, plus
  * the per-label clock-skew verify path a multi-party
  * receiver runs when each signer clock may run ahead by
@@ -4351,6 +4373,227 @@ function benchmarkVerifyAllMaxSignatureAgeSecByLabel(): number {
 
   return measure(() => {
     assertDual("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels`
+ * requireNonceByLabel x maxSignatureAgeSecByLabel benchmark: two
+ * ed25519 key pairs (generated once, outside timing), two dual-label
+ * fixtures signed outside timing with `created` pinned under two
+ * pinned keyids (merchant / gateway, the canonical multi-party
+ * labels) — the merchant label signed once with a pinned nonce and
+ * once without one, the gateway label signed without a nonce in
+ * both — and per-label options that combine both maps (merchant
+ * window 60s, gateway window 3600s in
+ * `maxSignatureAgeSecByLabel`; merchant nonce required in
+ * `requireNonceByLabel`, gateway mapped to neither), so the same
+ * merchant signature can fail on either dimension while the
+ * gateway label still verifies.
+ */
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_CREATED = 1_700_000_000;
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_FRESH_NOW =
+  REQUIRE_NONCE_MAX_AGE_BY_LABEL_CREATED + 30;
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_OLD_NOW =
+  REQUIRE_NONCE_MAX_AGE_BY_LABEL_CREATED + 300;
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_MERCHANT_KID =
+  "bench-require-nonce-max-age-by-label-merchant-1";
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_GATEWAY_KID =
+  "bench-require-nonce-max-age-by-label-gateway-1";
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_VALUE =
+  "bench-require-nonce-max-age-by-label-1";
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_MERCHANT_WINDOW = 60;
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_GATEWAY_WINDOW = 3600;
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_MISSING_NONCE_CODE = "MISSING_NONCE";
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_MISSING_NONCE_REASON =
+  "signature carries no `nonce` but requireNonce is set";
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_TOO_OLD_CODE = "SIGNATURE_TOO_OLD";
+const REQUIRE_NONCE_MAX_AGE_BY_LABEL_TOO_OLD_REASON =
+  `signature is too old: created 300s ago, older than maxSignatureAgeSec=${REQUIRE_NONCE_MAX_AGE_BY_LABEL_MERCHANT_WINDOW}`;
+
+/**
+ * `verifyAllLabels` with `requireNonceByLabel` plus
+ * `maxSignatureAgeSecByLabel` steady state: the combined
+ * per-label form a multi-party receiver uses when one signer
+ * must both carry a nonce and stay fresh (the merchant
+ * signature is only trusted for a minute and only with a
+ * nonce; the gateway signature carries neither requirement)
+ * — every measured call runs both per-label map resolutions
+ * and both post-cryptographic checks for each label, which
+ * neither single-map row above ever pays together. One
+ * measured op verifies four duals: the fresh nonce-carrying
+ * dual (both labels ok, merchant nonce returned); the fresh
+ * nonce-less-merchant dual (merchant exactly `MISSING_NONCE`
+ * with the pinned reason while the gateway still verifies,
+ * proving the nonce check fires only inside the window);
+ * the old nonce-carrying dual (merchant exactly
+ * `SIGNATURE_TOO_OLD` with the pinned reason while the
+ * gateway still verifies, proving the window check fires
+ * even when a nonce is present); and the old
+ * nonce-less-merchant dual (merchant exactly
+ * `SIGNATURE_TOO_OLD`, pinning that the age check precedes
+ * the nonce-presence check — the precedence backlog #642
+ * tested — while the gateway still verifies). Outside
+ * timing, the opt-in halves are pinned once: the same old
+ * nonce-less dual verifies with no option passed, and an
+ * explicit `merchant: false` map entry lets the fresh
+ * nonce-less merchant label through. Zero network, zero
+ * randomness in the measured assertions, no wall clock
+ * (every verify instant is injected).
+ */
+function benchmarkVerifyAllRequireNonceMaxAgeByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantWithNonceSigned = signRequest(fixture, {
+    keyId: REQUIRE_NONCE_MAX_AGE_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: REQUIRE_NONCE_MAX_AGE_BY_LABEL_CREATED,
+    nonce: REQUIRE_NONCE_MAX_AGE_BY_LABEL_VALUE,
+  });
+  const dualWithNonce = addSignature(merchantWithNonceSigned, {
+    keyId: REQUIRE_NONCE_MAX_AGE_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: REQUIRE_NONCE_MAX_AGE_BY_LABEL_CREATED,
+  });
+  const merchantWithoutNonceSigned = signRequest(fixture, {
+    keyId: REQUIRE_NONCE_MAX_AGE_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: REQUIRE_NONCE_MAX_AGE_BY_LABEL_CREATED,
+  });
+  const dualWithoutNonce = addSignature(merchantWithoutNonceSigned, {
+    keyId: REQUIRE_NONCE_MAX_AGE_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: REQUIRE_NONCE_MAX_AGE_BY_LABEL_CREATED,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = (now: number) => ({
+    keys,
+    now,
+    maxSignatureAgeSecByLabel: {
+      merchant: REQUIRE_NONCE_MAX_AGE_BY_LABEL_MERCHANT_WINDOW,
+      gateway: REQUIRE_NONCE_MAX_AGE_BY_LABEL_GATEWAY_WINDOW,
+    },
+    requireNonceByLabel: { merchant: true },
+  });
+  const assertAll = (where: string): void => {
+    const freshAccepted = verifyAllLabels(
+      dualWithNonce,
+      verifyOpts(REQUIRE_NONCE_MAX_AGE_BY_LABEL_FRESH_NOW),
+    );
+    if (
+      freshAccepted.length !== 2 ||
+      freshAccepted[0].label !== "merchant" ||
+      !freshAccepted[0].ok ||
+      freshAccepted[0].nonce !== REQUIRE_NONCE_MAX_AGE_BY_LABEL_VALUE ||
+      freshAccepted[1].label !== "gateway" ||
+      !freshAccepted[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with requireNonceByLabel x maxSignatureAgeSecByLabel (${where}, fresh nonce-carrying dual) gave ${JSON.stringify(freshAccepted)}`,
+      );
+    const freshRejected = verifyAllLabels(
+      dualWithoutNonce,
+      verifyOpts(REQUIRE_NONCE_MAX_AGE_BY_LABEL_FRESH_NOW),
+    );
+    if (
+      freshRejected.length !== 2 ||
+      freshRejected[0].label !== "merchant" ||
+      freshRejected[0].ok ||
+      freshRejected[0].code !==
+        REQUIRE_NONCE_MAX_AGE_BY_LABEL_MISSING_NONCE_CODE ||
+      freshRejected[0].reason !==
+        REQUIRE_NONCE_MAX_AGE_BY_LABEL_MISSING_NONCE_REASON ||
+      freshRejected[1].label !== "gateway" ||
+      !freshRejected[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with requireNonceByLabel x maxSignatureAgeSecByLabel (${where}, fresh nonce-less-merchant dual) gave ${JSON.stringify(freshRejected)}`,
+      );
+    const oldWithNonce = verifyAllLabels(
+      dualWithNonce,
+      verifyOpts(REQUIRE_NONCE_MAX_AGE_BY_LABEL_OLD_NOW),
+    );
+    if (
+      oldWithNonce.length !== 2 ||
+      oldWithNonce[0].label !== "merchant" ||
+      oldWithNonce[0].ok ||
+      oldWithNonce[0].code !==
+        REQUIRE_NONCE_MAX_AGE_BY_LABEL_TOO_OLD_CODE ||
+      oldWithNonce[0].reason !==
+        REQUIRE_NONCE_MAX_AGE_BY_LABEL_TOO_OLD_REASON ||
+      oldWithNonce[1].label !== "gateway" ||
+      !oldWithNonce[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with requireNonceByLabel x maxSignatureAgeSecByLabel (${where}, old nonce-carrying dual) gave ${JSON.stringify(oldWithNonce)}`,
+      );
+    const oldWithoutNonce = verifyAllLabels(
+      dualWithoutNonce,
+      verifyOpts(REQUIRE_NONCE_MAX_AGE_BY_LABEL_OLD_NOW),
+    );
+    if (
+      oldWithoutNonce.length !== 2 ||
+      oldWithoutNonce[0].label !== "merchant" ||
+      oldWithoutNonce[0].ok ||
+      oldWithoutNonce[0].code !==
+        REQUIRE_NONCE_MAX_AGE_BY_LABEL_TOO_OLD_CODE ||
+      oldWithoutNonce[0].reason !==
+        REQUIRE_NONCE_MAX_AGE_BY_LABEL_TOO_OLD_REASON ||
+      oldWithoutNonce[1].label !== "gateway" ||
+      !oldWithoutNonce[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with requireNonceByLabel x maxSignatureAgeSecByLabel (${where}, old nonce-less-merchant dual) gave ${JSON.stringify(oldWithoutNonce)}`,
+      );
+  };
+
+  // Outside timing: all four duals self-check under the combined
+  // per-label options before any timing starts.
+  assertAll("outside timing");
+
+  // Outside timing: with no option the same old nonce-less dual
+  // verifies — both requirements are opt-in and the default
+  // behaviour is unchanged.
+  const defaulted = verifyAllLabels(dualWithoutNonce, {
+    keys,
+    now: REQUIRE_NONCE_MAX_AGE_BY_LABEL_OLD_NOW,
+  });
+  if (defaulted.length !== 2 || defaulted.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: old nonce-less dual default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  // Outside timing: an explicit `merchant: false` map entry
+  // likewise lets the fresh nonce-less merchant label through
+  // — the map entry, not the label name, drives the check.
+  const optedOut = verifyAllLabels(dualWithoutNonce, {
+    keys,
+    now: REQUIRE_NONCE_MAX_AGE_BY_LABEL_FRESH_NOW,
+    maxSignatureAgeSecByLabel: {
+      merchant: REQUIRE_NONCE_MAX_AGE_BY_LABEL_MERCHANT_WINDOW,
+      gateway: REQUIRE_NONCE_MAX_AGE_BY_LABEL_GATEWAY_WINDOW,
+    },
+    requireNonceByLabel: { merchant: false },
+  });
+  if (optedOut.length !== 2 || optedOut.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: fresh nonce-less merchant:false gave ${JSON.stringify(optedOut)}`,
+    );
+
+  return measure(() => {
+    assertAll("measured pass");
   }, ITERATIONS);
 }
 
@@ -11084,6 +11327,11 @@ results.push({
   alg: "verifyAllLabels maxSignatureAgeSecByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllMaxSignatureAgeSecByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels requireNonceByLabel maxSignatureAgeSecByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllRequireNonceMaxAgeByLabel(),
 });
 results.push({
   alg: "verifyAllLabels clockSkewToleranceSecByLabel (2 labels)",

@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label nonce-presence x freshness-window
+  verification (backlog #691): `bench/bench.ts` gains
+  `benchmarkVerifyAllRequireNonceMaxAgeByLabel`, measuring
+  `verifyAllLabels` with the merchant label mapped to both
+  `requireNonceByLabel` and `maxSignatureAgeSecByLabel` (60s window)
+  and the gateway label mapped to neither (3600s window). One
+  measured op verifies four duals: the fresh nonce-carrying dual
+  (both labels ok, merchant nonce returned); the fresh
+  nonce-less-merchant dual (merchant exactly `MISSING_NONCE` with
+  the pinned reason while the gateway still verifies); the old
+  nonce-carrying dual (merchant exactly `SIGNATURE_TOO_OLD` with
+  the pinned reason while the gateway still verifies); and the old
+  nonce-less-merchant dual (merchant exactly `SIGNATURE_TOO_OLD`,
+  pinning that the age check precedes the nonce-presence check,
+  the precedence backlog #642 tested). The opt-in default and an
+  explicit `merchant: false` map entry are asserted outside timing.
+  The README Benchmarks table is refreshed from this run's real
+  output (92 rows, 2026-10-29), with the new row at ~761.1
+  ops/sec (1313.94 µs/op). No source change: the combination was
+  untested on the bench side, not unimplemented.
+
 - Orthogonal-combination tests for per-label algorithm fallback x
   candidate keys (backlog #690):
   `test/algFallbackByLabelCandidateKeysByLabel.test.ts` pins
