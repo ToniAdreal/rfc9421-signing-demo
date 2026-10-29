@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Combination test for per-label replay cache x per-label tag
+  requirement (backlog #718): `test/replayCacheByLabelRequireTag.test.ts`
+  adds 6 cases for `verifyAllLabels` with the merchant label on its
+  own replay store (`replayCacheByLabel`) and requiring a tag
+  (`requireTagByLabel`) and the gateway label with neither — a tagged
+  first-seen nonce passes both labels and echoes tag + nonce, the
+  same nonce replayed with its tag intact fails exactly
+  `NONCE_REPLAY` while the gateway still verifies, a tag-less
+  merchant fails exactly `MISSING_TAG` (and an empty-string tag
+  counts as missing) without entering the cache so the same nonce
+  passes once tagged, the gateway reusing the merchant's nonce —
+  before or after the merchant records it — is never affected by
+  the merchant store, and a forged merchant signature (wrong key,
+  with or without a tag) reports `SIGNATURE_MISMATCH` (crypto
+  precedes the tag check, which precedes the cache). No source
+  change: the combination was untested, not unimplemented.
+
 - Combination test for per-label key resolvers x per-label nonce
   requirement (backlog #715): `test/keyResolversRequireNonceByLabel.test.ts`
   adds 10 cases for `verifyAllLabels` with the merchant label resolving
