@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Combination test for per-label key resolvers x per-label nonce
+  requirement (backlog #715): `test/keyResolversRequireNonceByLabel.test.ts`
+  adds 10 cases for `verifyAllLabels` with the merchant label resolving
+  through a rotating keystore (`keyResolvers`, old + current keyids)
+  and requiring a nonce (`requireNonceByLabel`) and the gateway label
+  verifying against a static key (`keys`) with no nonce requirement —
+  the nonce-carrying merchant through either rotation key passes, a
+  nonce-less merchant fails exactly `MISSING_NONCE` while the gateway
+  still verifies, a rotated-out merchant keyid fails exactly
+  `KEY_RESOLUTION_FAILED` while the gateway still verifies, a
+  merchant that is both unresolvable and nonce-less reports
+  `KEY_RESOLUTION_FAILED` (resolution precedes the nonce check), a
+  forged nonce-less merchant reports `SIGNATURE_MISMATCH` (crypto
+  precedes the nonce check), and a nonce on the unrequired gateway is
+  tolerated and echoed. Illegal combination shapes (non-function
+  resolver entry, non-boolean nonce-map entry, the same label in both
+  `keys` and `keyResolvers`) throw configuration errors naming the
+  label. No source change: the combination was untested, not
+  unimplemented.
+
 - Combination test for per-label candidate keys x per-label freshness
   window (backlog #712): `test/candidateKeysByLabelMaxAgeByLabel.test.ts`
   adds 7 cases for `verifyAllLabels` with the merchant label on a
