@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Combination test for per-label key resolvers x tag requirement
+  (backlog #705): `test/keyResolversRequireTagByLabel.test.ts`
+  adds 8 cases for `verifyAllLabels` with each label resolving
+  through its own keystore (`keyResolvers`) and carrying its own
+  application tag (`requireTagByLabel` + `expectedTags`) — both
+  labels pass with tags and keyids echoed, a merchant replaying
+  the gateway tag (and symmetrically a gateway replaying the
+  merchant tag) fails exactly `TAG_MISMATCH` while the other label
+  still verifies, a tag-less merchant under presence-only options
+  fails exactly `MISSING_TAG`, a key rotated out of either
+  keystore fails exactly `KEY_RESOLUTION_FAILED` while the other
+  label still verifies, a label absent from both maps falls back
+  to the global `keyResolver` with no tag requirement, and a
+  label that is both unresolvable and wrongly tagged reports the
+  resolution failure (resolution precedes the tag checks). Source
+  unchanged: the combination was previously untested, not
+  unimplemented. Test count moves 1104 → 1112.
 - Combination test for per-label keyid pinning x nonce requirement
   (backlog #702): `test/expectedKeyIdsRequireNonceByLabel.test.ts`
   adds 8 cases for `verifyAllLabels` with the merchant label pinned
