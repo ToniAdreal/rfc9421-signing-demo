@@ -293,7 +293,33 @@
  * nonce-less dual's acceptance with no option passed and
  * an explicit `merchant: false` map entry letting the
  * fresh nonce-less merchant through asserted outside
- * timing, plus
+ * timing, plus the per-label candidate-keys plus
+ * tag-presence verify path a multi-party receiver
+ * runs when one signer rotates keys while the other
+ * stays static and the tag requirement is global with
+ * a per-label opt-out: `verifyAllLabels` with
+ * `candidateKeysByLabel` and `requireTag` /
+ * `requireTagByLabel` over dual ed25519 fixtures
+ * signed outside timing with `created` pinned (see
+ * CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_* below),
+ * self-checked on every measured pass (one measured
+ * op verifies four duals: the new-key tagged dual,
+ * both labels ok with the merchant tag returned and
+ * the new key found at the second candidate; the
+ * old-key tagged dual, both labels ok inside the
+ * rotation window; the new-key tag-less-merchant
+ * dual, merchant exactly `MISSING_TAG` with the
+ * pinned reason while the gateway still verifies;
+ * and the retired-key tagged dual, merchant exactly
+ * `SIGNATURE_MISMATCH` while the gateway still
+ * verifies, pinning that list membership, not key
+ * age, decides the crypto walk), with the same
+ * tag-less dual's acceptance with no tag option
+ * passed, an explicit `merchant: false` map entry
+ * letting the tag-less merchant through, and the
+ * global flag rejecting the tag-less gateway when
+ * the opt-out is dropped asserted outside timing,
+ * plus
  * the per-label clock-skew verify path a multi-party
  * receiver runs when each signer clock may run ahead by
  * a different amount: `verifyAllLabels` with
@@ -4590,6 +4616,278 @@ function benchmarkVerifyAllRequireNonceMaxAgeByLabel(): number {
   if (optedOut.length !== 2 || optedOut.some((r) => !r.ok))
     throw new Error(
       `benchmark self-check failed: fresh nonce-less merchant:false gave ${JSON.stringify(optedOut)}`,
+    );
+
+  return measure(() => {
+    assertAll("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels`
+ * candidateKeysByLabel x requireTagByLabel benchmark: four ed25519
+ * key pairs (merchant old / new / retired plus a static gateway,
+ * generated once, outside timing), four dual-label fixtures signed
+ * outside timing with `created` pinned under four pinned keyids
+ * (merchant old / new / retired, gateway static — the canonical
+ * multi-party labels), and the verifier's injected `now` at the
+ * `created` instant. The merchant label is mapped in
+ * `candidateKeysByLabel` to [old, new] (the retired key is
+ * deliberately absent) and the gateway label resolves through the
+ * disjoint `keys` map — the disjoint per-label key sources the
+ * combination test (#618) pins, so no mutual-exclusion error
+ * fires. The tag requirement is global (`requireTag: true`) with
+ * an explicit per-label opt-out for the gateway
+ * (`requireTagByLabel: { gateway: false }`), the tag-less
+ * legacy gateway shape, so the same merchant signature can fail
+ * on either dimension while the gateway label still verifies.
+ */
+const CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED = 1_700_000_000;
+const CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MERCHANT_OLD_KID =
+  "bench-candidate-keys-require-tag-merchant-old";
+const CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MERCHANT_NEW_KID =
+  "bench-candidate-keys-require-tag-merchant-new";
+const CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MERCHANT_RETIRED_KID =
+  "bench-candidate-keys-require-tag-merchant-retired";
+const CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_GATEWAY_KID =
+  "bench-candidate-keys-require-tag-gateway-1";
+const CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_TAG_VALUE =
+  "bench-candidate-keys-require-tag-v1";
+const CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MISSING_TAG_CODE =
+  "MISSING_TAG";
+const CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MISSING_TAG_REASON =
+  "signature carries no `tag` but requireTag is set";
+const CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_SIGNATURE_MISMATCH_CODE =
+  "SIGNATURE_MISMATCH";
+
+/**
+ * `verifyAllLabels` with `candidateKeysByLabel` plus
+ * `requireTag` / `requireTagByLabel` steady state: the combined
+ * per-label form a multi-party receiver uses when the merchant
+ * rotates keys on its own schedule while each signature must
+ * carry a tag, except a tag-less legacy gateway that keeps
+ * verifying through its explicit opt-out — every measured call
+ * runs the per-label map resolutions, the ordered candidate walk
+ * for the merchant, and the post-cryptographic tag-presence check
+ * for both labels, which neither single-map row above pays
+ * together. One measured op verifies four duals: the new-key
+ * tagged dual (both labels ok, merchant tag returned, merchant
+ * keyId echoing the new keyid, the merchant found at the second
+ * candidate, proving the walk actually reaches past the stale
+ * entry); the old-key tagged dual (both labels ok, merchant
+ * keyId echoing the old keyid, proving the rotation window still
+ * accepts the outgoing key); the new-key tag-less-merchant dual
+ * (merchant exactly `MISSING_TAG` with the pinned reason while
+ * the gateway still verifies, proving the tag check fires only
+ * after the crypto walk passes — a valid rotated key with no tag
+ * fails on the tag, not the key); and the retired-key tagged
+ * dual (merchant exactly `SIGNATURE_MISMATCH` while the gateway
+ * still verifies, proving a tag cannot rescue a key the rotation
+ * list no longer contains). Outside timing, the opt-in halves
+ * are pinned once: the same tag-less dual verifies with no tag
+ * option passed, an explicit `merchant: false` map entry lets
+ * the tag-less merchant through, and dropping the gateway
+ * opt-out makes the global flag reject the tag-less gateway
+ * (merchant still ok) — proving the gateway pass above is the
+ * opt-out, not the global flag ignoring the gateway. Zero
+ * network, zero randomness in the measured assertions, no wall
+ * clock (every verify instant is injected).
+ */
+function benchmarkVerifyAllCandidateKeysRequireTagByLabel(): number {
+  const {
+    publicKey: merchantOldPublic,
+    privateKey: merchantOldPrivate,
+  } = generateEd25519KeyPair();
+  const {
+    publicKey: merchantNewPublic,
+    privateKey: merchantNewPrivate,
+  } = generateEd25519KeyPair();
+  const { privateKey: merchantRetiredPrivate } =
+    generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantNewTaggedSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MERCHANT_NEW_KID,
+    alg: "ed25519",
+    key: merchantNewPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+    tag: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_TAG_VALUE,
+  });
+  const dualNewTagged = addSignature(merchantNewTaggedSigned, {
+    keyId: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+  });
+  const merchantOldTaggedSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MERCHANT_OLD_KID,
+    alg: "ed25519",
+    key: merchantOldPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+    tag: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_TAG_VALUE,
+  });
+  const dualOldTagged = addSignature(merchantOldTaggedSigned, {
+    keyId: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+  });
+  const merchantNewUntaggedSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MERCHANT_NEW_KID,
+    alg: "ed25519",
+    key: merchantNewPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+  });
+  const dualNewUntagged = addSignature(merchantNewUntaggedSigned, {
+    keyId: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+  });
+  const merchantRetiredTaggedSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MERCHANT_RETIRED_KID,
+    alg: "ed25519",
+    key: merchantRetiredPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+    tag: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_TAG_VALUE,
+  });
+  const dualRetiredTagged = addSignature(merchantRetiredTaggedSigned, {
+    keyId: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+  });
+  const verifyOpts = {
+    now: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+    candidateKeysByLabel: {
+      merchant: [merchantOldPublic, merchantNewPublic],
+    },
+    keys: { gateway: gatewayPublic },
+    requireTag: true,
+    requireTagByLabel: { gateway: false },
+  };
+  const assertAll = (where: string): void => {
+    const newTagged = verifyAllLabels(dualNewTagged, verifyOpts);
+    if (
+      newTagged.length !== 2 ||
+      newTagged[0].label !== "merchant" ||
+      !newTagged[0].ok ||
+      newTagged[0].tag !==
+        CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_TAG_VALUE ||
+      newTagged[0].keyId !==
+        CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MERCHANT_NEW_KID ||
+      newTagged[1].label !== "gateway" ||
+      !newTagged[1].ok ||
+      newTagged[1].tag !== undefined
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel x requireTagByLabel (${where}, new-key tagged dual) gave ${JSON.stringify(newTagged)}`,
+      );
+    const oldTagged = verifyAllLabels(dualOldTagged, verifyOpts);
+    if (
+      oldTagged.length !== 2 ||
+      oldTagged[0].label !== "merchant" ||
+      !oldTagged[0].ok ||
+      oldTagged[0].keyId !==
+        CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MERCHANT_OLD_KID ||
+      oldTagged[1].label !== "gateway" ||
+      !oldTagged[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel x requireTagByLabel (${where}, old-key tagged dual) gave ${JSON.stringify(oldTagged)}`,
+      );
+    const newUntagged = verifyAllLabels(dualNewUntagged, verifyOpts);
+    if (
+      newUntagged.length !== 2 ||
+      newUntagged[0].label !== "merchant" ||
+      newUntagged[0].ok ||
+      newUntagged[0].code !==
+        CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MISSING_TAG_CODE ||
+      newUntagged[0].reason !==
+        CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MISSING_TAG_REASON ||
+      newUntagged[1].label !== "gateway" ||
+      !newUntagged[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel x requireTagByLabel (${where}, new-key tag-less-merchant dual) gave ${JSON.stringify(newUntagged)}`,
+      );
+    const retiredTagged = verifyAllLabels(dualRetiredTagged, verifyOpts);
+    if (
+      retiredTagged.length !== 2 ||
+      retiredTagged[0].label !== "merchant" ||
+      retiredTagged[0].ok ||
+      retiredTagged[0].code !==
+        CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_SIGNATURE_MISMATCH_CODE ||
+      retiredTagged[1].label !== "gateway" ||
+      !retiredTagged[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel x requireTagByLabel (${where}, retired-key tagged dual) gave ${JSON.stringify(retiredTagged)}`,
+      );
+  };
+
+  // Outside timing: all four duals self-check under the combined
+  // per-label options before any timing starts.
+  assertAll("outside timing");
+
+  // Outside timing: with no tag option the same tag-less dual
+  // verifies — both the global requirement and the per-label
+  // opt-out are opt-in and the default behaviour is unchanged.
+  const defaulted = verifyAllLabels(dualNewUntagged, {
+    now: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+    candidateKeysByLabel: {
+      merchant: [merchantOldPublic, merchantNewPublic],
+    },
+    keys: { gateway: gatewayPublic },
+  });
+  if (defaulted.length !== 2 || defaulted.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: tag-less dual default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  // Outside timing: an explicit `merchant: false` map entry
+  // likewise lets the tag-less merchant label through — the
+  // map entry, not the label name, drives the check.
+  const optedOut = verifyAllLabels(dualNewUntagged, {
+    ...verifyOpts,
+    requireTagByLabel: { merchant: false, gateway: false },
+  });
+  if (optedOut.length !== 2 || optedOut.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: tag-less merchant:false gave ${JSON.stringify(optedOut)}`,
+    );
+
+  // Outside timing: without the gateway opt-out, the global
+  // flag rejects the tag-less gateway too — the gateway pass
+  // in the measured duals is the opt-out, not the global flag
+  // ignoring the gateway.
+  const noOptOut = verifyAllLabels(dualNewTagged, {
+    now: CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_CREATED,
+    candidateKeysByLabel: {
+      merchant: [merchantOldPublic, merchantNewPublic],
+    },
+    keys: { gateway: gatewayPublic },
+    requireTag: true,
+  });
+  if (
+    noOptOut.length !== 2 ||
+    noOptOut[0].label !== "merchant" ||
+    !noOptOut[0].ok ||
+    noOptOut[1].label !== "gateway" ||
+    noOptOut[1].ok ||
+    noOptOut[1].code !==
+      CANDIDATE_KEYS_REQUIRE_TAG_BY_LABEL_MISSING_TAG_CODE
+  )
+    throw new Error(
+      `benchmark self-check failed: tagged dual without gateway opt-out gave ${JSON.stringify(noOptOut)}`,
     );
 
   return measure(() => {
@@ -11332,6 +11630,11 @@ results.push({
   alg: "verifyAllLabels requireNonceByLabel maxSignatureAgeSecByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllRequireNonceMaxAgeByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels candidateKeysByLabel requireTagByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllCandidateKeysRequireTagByLabel(),
 });
 results.push({
   alg: "verifyAllLabels clockSkewToleranceSecByLabel (2 labels)",

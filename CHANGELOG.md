@@ -11,6 +11,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label candidate-keys x tag-presence
+  verification (backlog #692): `bench/bench.ts` gains
+  `benchmarkVerifyAllCandidateKeysRequireTagByLabel`, measuring
+  `verifyAllLabels` with the merchant label mapped to a
+  `candidateKeysByLabel` rotation list [old, new] and the gateway
+  label resolving through the disjoint `keys` map, under a global
+  `requireTag: true` with an explicit per-label opt-out
+  (`requireTagByLabel: { gateway: false }`) for the tag-less legacy
+  gateway — the disjoint key sources the combination test (#618)
+  pins, so no mutual-exclusion error fires. One measured op
+  verifies four duals: the new-key tagged dual (both labels ok,
+  merchant tag returned, merchant key found at the second
+  candidate); the old-key tagged dual (both labels ok inside the
+  rotation window); the new-key tag-less-merchant dual (merchant
+  exactly `MISSING_TAG` with the pinned reason while the gateway
+  still verifies); and the retired-key tagged dual (merchant
+  exactly `SIGNATURE_MISMATCH` while the gateway still verifies,
+  proving a tag cannot rescue a key the rotation list no longer
+  contains). The opt-in default, an explicit `merchant: false`
+  map entry, and the global flag rejecting the tag-less gateway
+  when the opt-out is dropped are asserted outside timing. The
+  README Benchmarks table is refreshed from this run's real
+  output (93 rows, 2026-10-29), with the new row at ~101.2
+  ops/sec (9879.20 µs/op). No source change: the combination was
+  untested on the bench side, not unimplemented.
+
 - Benchmark row for per-label nonce-presence x freshness-window
   verification (backlog #691): `bench/bench.ts` gains
   `benchmarkVerifyAllRequireNonceMaxAgeByLabel`, measuring
