@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifyAllLabels` x per-label age window + per-label replay cache
+  coverage (backlog #727):
+  `test/replayCacheByLabelMaxAgeByLabel.test.ts` adds 6 cases
+  combining the two previously separate surfaces — fresh dual-label
+  verification recording into each label's own store; re-verification
+  replaying in both labels; a seen nonce past the merchant 60s
+  window reporting `SIGNATURE_TOO_OLD` (age checked before the
+  replay cache) while the gateway label reports `NONCE_REPLAY`,
+  with the age failure leaving the merchant store's counters
+  untouched; the window boundary being inclusive (`>` not `>=`)
+  with one second past it aging out only the tight label; a replay
+  in one label not failing the other; and an age failure recording
+  nothing, so the same nonce verifies fresh later. Pure test
+  addition: no source change, since the combination was untested,
+  not unimplemented.
+
 - `verifyAllLabels` x `JwksKeyStore` per-label resolver coverage
   (backlog #724): `test/verifyAllLabelsJwksKeyResolvers.test.ts` adds
   4 cases combining the two previously separate surfaces — each label
