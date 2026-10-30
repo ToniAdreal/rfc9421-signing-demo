@@ -7115,6 +7115,328 @@ function benchmarkVerifyAllExpectedKeyIdsRequireNonceByLabel(): number {
 }
 
 /**
+ * Pinned shape of the `verifyAllLabels`
+ * candidateKeysByLabel x maxSignatureAgeSecByLabel benchmark: three
+ * ed25519 key pairs for the merchant rotation (old / new / retired,
+ * generated once, outside timing), one HMAC secret for the gateway
+ * (a single-element candidate list — the static-key equivalent,
+ * because `candidateKeysByLabel` is mutually exclusive with `keys`,
+ * the correction backlog #712 recorded), dual-label fixtures signed
+ * outside timing with `created` pinned under two pinned keyids
+ * (merchant / gateway, the canonical multi-party labels), and the
+ * verifier's injected `now` at three instants: 60s after `created`
+ * (inside both windows), 3600s after (outside the merchant's 300s
+ * tight window, inside the gateway's 7200s wide window), and 8000s
+ * after (outside both windows). The merchant label is mapped in
+ * `candidateKeysByLabel` to [old, new] and in
+ * `maxSignatureAgeSecByLabel` to 300; the gateway label is mapped
+ * to its single secret and to 7200 — rotation must not widen a
+ * label's age window, and a tight window must not break rotation.
+ */
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_CREATED = 1_700_000_000;
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_IN_WINDOW_NOW =
+  CANDIDATE_KEYS_MAX_AGE_BY_LABEL_CREATED + 60;
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_EXPIRED_NOW =
+  CANDIDATE_KEYS_MAX_AGE_BY_LABEL_CREATED + 3600;
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_BOTH_EXPIRED_NOW =
+  CANDIDATE_KEYS_MAX_AGE_BY_LABEL_CREATED + 8000;
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_KID =
+  "bench-candidate-keys-max-age-by-label-merchant-1";
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_GATEWAY_KID =
+  "bench-candidate-keys-max-age-by-label-gateway-1";
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_WINDOW = 300;
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_GATEWAY_WINDOW = 7200;
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_TOO_OLD_CODE = "SIGNATURE_TOO_OLD";
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MISMATCH_CODE = "SIGNATURE_MISMATCH";
+const CANDIDATE_KEYS_MAX_AGE_BY_LABEL_EXCLUSION_ERROR =
+  "verifyAllLabels: `candidateKeysByLabel`/`candidateKeys` is mutually exclusive with `keys`/`key` and `keyResolver`/`keyResolvers` — pass one or the other";
+
+/**
+ * `verifyAllLabels` with `candidateKeysByLabel` plus
+ * `maxSignatureAgeSecByLabel` steady state: the combined
+ * per-label form a multi-party receiver uses when one signer
+ * rotates keys on its own schedule while each label's signature
+ * carries its own freshness bound (the merchant signature is
+ * only trusted for five minutes no matter which rotation key
+ * signed it; the gateway signature stays trusted for two hours)
+ * — every measured call runs both per-label map resolutions,
+ * the ordered candidate walk for the merchant, and the
+ * post-cryptographic age check for each label, which neither
+ * single-map row above pays together. One measured op verifies
+ * five duals: the in-window new-key dual (both labels ok, each
+ * returned `keyId` echoing its pinned value, the merchant found
+ * at the second candidate, proving the walk actually reaches
+ * past the stale entry); the in-window old-key dual (both labels
+ * ok, proving list membership survives the tight window); the
+ * merchant-expired dual (merchant exactly `SIGNATURE_TOO_OLD`
+ * with the pinned 3600s/300 reason while the gateway still
+ * verifies, proving the windows do not leak across labels); the
+ * both-expired dual (both labels exactly `SIGNATURE_TOO_OLD`
+ * with their pinned 8000s reasons); and the in-window
+ * retired-key dual (merchant exactly `SIGNATURE_MISMATCH`
+ * while the gateway still verifies, proving a key the rotation
+ * list no longer contains cannot be rescued by a fresh
+ * signature). Outside timing, the isolation halves are pinned
+ * once: swapped windows let the merchant's 1h-old signature
+ * through while rejecting the gateway's; the same both-expired
+ * dual verifies with the key source but no age window (both
+ * age checks are opt-in); and the illegal shapes — an empty
+ * candidate list, a negative window, and `candidateKeysByLabel`
+ * combined with `keys` — throw instead of silently picking one
+ * key source. Zero network, zero randomness in the measured
+ * assertions, no wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyAllCandidateKeysMaxAgeByLabel(): number {
+  const { publicKey: merchantOldPublic, privateKey: merchantOldPrivate } =
+    generateEd25519KeyPair();
+  const { publicKey: merchantNewPublic, privateKey: merchantNewPrivate } =
+    generateEd25519KeyPair();
+  const { privateKey: merchantRetiredPrivate } = generateEd25519KeyPair();
+  const gatewaySecret = secretKey(Buffer.alloc(32, 0xcc));
+  const merchantNewSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantNewPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_CREATED,
+  });
+  const dualNew = addSignature(merchantNewSigned, {
+    keyId: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    label: "gateway",
+    created: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_CREATED,
+  });
+  const merchantOldSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantOldPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_CREATED,
+  });
+  const dualOld = addSignature(merchantOldSigned, {
+    keyId: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    label: "gateway",
+    created: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_CREATED,
+  });
+  const merchantRetiredSigned = signRequest(fixture, {
+    keyId: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantRetiredPrivate,
+    label: "merchant",
+    created: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_CREATED,
+  });
+  const dualRetired = addSignature(merchantRetiredSigned, {
+    keyId: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    label: "gateway",
+    created: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_CREATED,
+  });
+  const candidateKeysByLabel = {
+    merchant: [merchantOldPublic, merchantNewPublic],
+    gateway: [gatewaySecret],
+  };
+  const maxSignatureAgeSecByLabel = {
+    merchant: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_WINDOW,
+    gateway: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_GATEWAY_WINDOW,
+  };
+  const opts = (now: number) => ({
+    candidateKeysByLabel,
+    maxSignatureAgeSecByLabel,
+    now,
+  });
+  const assertAll = (where: string): void => {
+    const freshNew = verifyAllLabels(
+      dualNew,
+      opts(CANDIDATE_KEYS_MAX_AGE_BY_LABEL_IN_WINDOW_NOW),
+    );
+    if (
+      freshNew.length !== 2 ||
+      freshNew[0].label !== "merchant" ||
+      !freshNew[0].ok ||
+      freshNew[0].keyId !==
+        CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_KID ||
+      freshNew[1].label !== "gateway" ||
+      !freshNew[1].ok ||
+      freshNew[1].keyId !== CANDIDATE_KEYS_MAX_AGE_BY_LABEL_GATEWAY_KID
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel x maxSignatureAgeSecByLabel (${where}, in-window new-key dual) gave ${JSON.stringify(freshNew)}`,
+      );
+    const freshOld = verifyAllLabels(
+      dualOld,
+      opts(CANDIDATE_KEYS_MAX_AGE_BY_LABEL_IN_WINDOW_NOW),
+    );
+    if (
+      freshOld.length !== 2 ||
+      freshOld[0].label !== "merchant" ||
+      !freshOld[0].ok ||
+      freshOld[1].label !== "gateway" ||
+      !freshOld[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel x maxSignatureAgeSecByLabel (${where}, in-window old-key dual) gave ${JSON.stringify(freshOld)}`,
+      );
+    const merchantExpired = verifyAllLabels(
+      dualNew,
+      opts(CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_EXPIRED_NOW),
+    );
+    if (
+      merchantExpired.length !== 2 ||
+      merchantExpired[0].label !== "merchant" ||
+      merchantExpired[0].ok ||
+      merchantExpired[0].code !==
+        CANDIDATE_KEYS_MAX_AGE_BY_LABEL_TOO_OLD_CODE ||
+      merchantExpired[0].reason !==
+        `signature is too old: created 3600s ago, older than maxSignatureAgeSec=${CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_WINDOW}` ||
+      merchantExpired[1].label !== "gateway" ||
+      !merchantExpired[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel x maxSignatureAgeSecByLabel (${where}, merchant-expired dual) gave ${JSON.stringify(merchantExpired)}`,
+      );
+    const bothExpired = verifyAllLabels(
+      dualNew,
+      opts(CANDIDATE_KEYS_MAX_AGE_BY_LABEL_BOTH_EXPIRED_NOW),
+    );
+    if (
+      bothExpired.length !== 2 ||
+      bothExpired[0].label !== "merchant" ||
+      bothExpired[0].ok ||
+      bothExpired[0].code !==
+        CANDIDATE_KEYS_MAX_AGE_BY_LABEL_TOO_OLD_CODE ||
+      bothExpired[0].reason !==
+        `signature is too old: created 8000s ago, older than maxSignatureAgeSec=${CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_WINDOW}` ||
+      bothExpired[1].label !== "gateway" ||
+      bothExpired[1].ok ||
+      bothExpired[1].code !==
+        CANDIDATE_KEYS_MAX_AGE_BY_LABEL_TOO_OLD_CODE ||
+      bothExpired[1].reason !==
+        `signature is too old: created 8000s ago, older than maxSignatureAgeSec=${CANDIDATE_KEYS_MAX_AGE_BY_LABEL_GATEWAY_WINDOW}`
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel x maxSignatureAgeSecByLabel (${where}, both-expired dual) gave ${JSON.stringify(bothExpired)}`,
+      );
+    const retired = verifyAllLabels(
+      dualRetired,
+      opts(CANDIDATE_KEYS_MAX_AGE_BY_LABEL_IN_WINDOW_NOW),
+    );
+    if (
+      retired.length !== 2 ||
+      retired[0].label !== "merchant" ||
+      retired[0].ok ||
+      retired[0].code !== CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MISMATCH_CODE ||
+      retired[1].label !== "gateway" ||
+      !retired[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with candidateKeysByLabel x maxSignatureAgeSecByLabel (${where}, retired-key dual) gave ${JSON.stringify(retired)}`,
+      );
+  };
+
+  // Outside timing: all five fixtures self-check under the combined
+  // per-label options before any timing starts.
+  assertAll("outside timing");
+
+  // Outside timing: swapped windows let the merchant's 1h-old
+  // signature through while rejecting the gateway's — the windows
+  // are per label and never leak across.
+  const swapped = verifyAllLabels(
+    dualNew,
+    {
+      candidateKeysByLabel,
+      maxSignatureAgeSecByLabel: {
+        merchant: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_GATEWAY_WINDOW,
+        gateway: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_WINDOW,
+      },
+      now: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_EXPIRED_NOW,
+    },
+  );
+  if (
+    swapped.length !== 2 ||
+    swapped[0].label !== "merchant" ||
+    !swapped[0].ok ||
+    swapped[1].label !== "gateway" ||
+    swapped[1].ok ||
+    swapped[1].code !== CANDIDATE_KEYS_MAX_AGE_BY_LABEL_TOO_OLD_CODE ||
+    swapped[1].reason !==
+      `signature is too old: created 3600s ago, older than maxSignatureAgeSec=${CANDIDATE_KEYS_MAX_AGE_BY_LABEL_MERCHANT_WINDOW}`
+  )
+    throw new Error(
+      `benchmark self-check failed: swapped-window dual gave ${JSON.stringify(swapped)}`,
+    );
+
+  // Outside timing: with the key source but no age window the
+  // same both-expired dual verifies — the age checks are opt-in
+  // and the default behaviour is unchanged.
+  const defaulted = verifyAllLabels(dualNew, {
+    candidateKeysByLabel,
+    now: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_BOTH_EXPIRED_NOW,
+  });
+  if (defaulted.length !== 2 || defaulted.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: both-expired default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  // Outside timing: the illegal shapes throw instead of silently
+  // picking one key source or one window.
+  let emptyListError: unknown;
+  try {
+    verifyAllLabels(dualNew, {
+      candidateKeysByLabel: { merchant: [] },
+      maxSignatureAgeSecByLabel,
+      now: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_IN_WINDOW_NOW,
+    });
+  } catch (e) {
+    emptyListError = e;
+  }
+  if (!(emptyListError instanceof Error))
+    throw new Error(
+      "benchmark self-check failed: empty candidateKeysByLabel list did not throw",
+    );
+  let negativeWindowError: unknown;
+  try {
+    verifyAllLabels(dualNew, {
+      candidateKeysByLabel,
+      maxSignatureAgeSecByLabel: { merchant: -1, gateway: 7200 },
+      now: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_IN_WINDOW_NOW,
+    });
+  } catch (e) {
+    negativeWindowError = e;
+  }
+  if (!(negativeWindowError instanceof Error))
+    throw new Error(
+      "benchmark self-check failed: negative maxSignatureAgeSecByLabel window did not throw",
+    );
+  let exclusionError: unknown;
+  try {
+    verifyAllLabels(dualNew, {
+      keys: { merchant: merchantNewPublic, gateway: gatewaySecret },
+      candidateKeysByLabel,
+      maxSignatureAgeSecByLabel,
+      now: CANDIDATE_KEYS_MAX_AGE_BY_LABEL_IN_WINDOW_NOW,
+    });
+  } catch (e) {
+    exclusionError = e;
+  }
+  if (
+    !(exclusionError instanceof Error) ||
+    exclusionError.message !==
+      CANDIDATE_KEYS_MAX_AGE_BY_LABEL_EXCLUSION_ERROR
+  )
+    throw new Error(
+      `benchmark self-check failed: candidateKeysByLabel + keys did not throw the pinned error, got ${exclusionError instanceof Error ? JSON.stringify(exclusionError.message) : String(exclusionError)}`,
+    );
+
+  return measure(() => {
+    assertAll("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `verifyRequest` algFallback
  * benchmark: the RFC 9421 Appendix B.2.5 hmac-sha256
  * wire value verbatim — its signature-input carries
@@ -11925,6 +12247,11 @@ results.push({
   alg: "verifyAllLabels expectedKeyIds requireNonceByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllExpectedKeyIdsRequireNonceByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels candidateKeysByLabel maxSignatureAgeSecByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllCandidateKeysMaxAgeByLabel(),
 });
 results.push({
   alg: "verifyRequest algFallback (infer)",

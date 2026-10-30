@@ -11,6 +11,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for per-label candidate keys x per-label freshness
+  window verification (backlog #721): `bench/bench.ts` gains
+  `benchmarkVerifyAllCandidateKeysMaxAgeByLabel`, measuring
+  `verifyAllLabels` with the merchant label mapped to both
+  `candidateKeysByLabel` ([old, new] rotation) and
+  `maxSignatureAgeSecByLabel` (300s tight window) and the gateway
+  label mapped to a single-element candidate list (the static-key
+  equivalent, since `candidateKeysByLabel` is mutually exclusive
+  with `keys` — the correction backlog #712 recorded) and a 7200s
+  wide window. One measured op verifies five duals: the in-window
+  new-key dual (both labels ok, each keyid echoed, the merchant
+  found at the second candidate); the in-window old-key dual
+  (both labels ok, proving list membership survives the tight
+  window); the merchant-expired dual (merchant exactly
+  `SIGNATURE_TOO_OLD` with the pinned 3600s/300 reason while the
+  gateway still verifies); the both-expired dual (both labels
+  exactly `SIGNATURE_TOO_OLD` with their pinned 8000s reasons);
+  and the in-window retired-key dual (merchant exactly
+  `SIGNATURE_MISMATCH` while the gateway still verifies). The
+  swapped-window isolation half, the key-source-but-no-window
+  acceptance half, and the illegal shapes (empty candidate list,
+  negative window, `candidateKeysByLabel` + `keys` mutual
+  exclusion) are asserted outside timing. The README Benchmarks
+  table is refreshed from this run's real output (95 rows,
+  2026-10-30, Node v24.22.1), with the new row at ~436.0 ops/sec
+  (2293.77 µs/op). No source change: the combination was
+  unmeasured on the bench side, not unimplemented.
 - Combination test for per-label replay cache x per-label tag
   requirement (backlog #718): `test/replayCacheByLabelRequireTag.test.ts`
   adds 6 cases for `verifyAllLabels` with the merchant label on its
