@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for `verifyAllLabels` x `JwksKeyStore` per-label
+  resolvers (backlog #733): `bench/bench.ts` gains
+  `benchmarkVerifyAllJwksKeyStores`, measuring `verifyAllLabels`
+  with each label resolving through its own offline-restored
+  `JwksKeyStore` (snapshot restore, fetch throws if called, zero
+  network). One measured op verifies three duals: the fresh dual
+  (both labels ok, each keyid echoed); the rotated dual, verified
+  against a merchant store whose snapshot holds only the rotated
+  kid (merchant exactly `KEY_RESOLUTION_FAILED` with the pinned
+  reason while the gateway still verifies); and the stale dual,
+  verified against a gateway store past its 300s TTL (clock pinned
+  1000s past the fetch time, `isStale()` re-pinned true on every
+  pass) that still resolves. The cross-kid isolation half
+  (neither store resolves the other party's kid) is asserted
+  outside timing. The README Benchmarks table is refreshed from
+  this run's real output (96 rows, 2026-10-30, Node v24.22.1),
+  with the new row at ~1,185 ops/sec (843.94 µs/op). No source
+  change: the combination was unmeasured on the bench side, not
+  unimplemented.
+
 - `verifyAllLabels` x content-digest covered-component coverage
   (backlog #730): `test/verifyAllLabelsContentDigest.test.ts` adds 8
   cases combining the two previously separate surfaces — a dual

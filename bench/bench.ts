@@ -3227,6 +3227,220 @@ function benchmarkVerifyAllKeyResolvers(): number {
 }
 
 /**
+ * Pinned shape of the `verifyAllLabels` x `JwksKeyStore`
+ * benchmark: the bench variant of the #724 test
+ * combination. Two ed25519 key pairs (generated once,
+ * outside timing), a dual-label fixture signed outside
+ * timing with `created` pinned under two pinned keyids
+ * (merchant / gateway), and each party's public key
+ * held in its own offline-restored `JwksKeyStore`
+ * (snapshot restore, fetch implementation throws if
+ * ever called, zero network). The verifier's injected
+ * `now` is at the `created` instant.
+ */
+const JWKS_ALL_CREATED = 1_700_000_000;
+const JWKS_ALL_MERCHANT_KID = "bench-jwks-all-merchant-1";
+const JWKS_ALL_GATEWAY_KID = "bench-jwks-all-gateway-1";
+const JWKS_ALL_MERCHANT_ROTATED_KID = "bench-jwks-all-merchant-2";
+const JWKS_ALL_MERCHANT_URL =
+  "https://merchant.example.com/.well-known/jwks.json";
+const JWKS_ALL_GATEWAY_URL =
+  "https://gateway.example.com/.well-known/jwks.json";
+const JWKS_ALL_ROTATED_REASON =
+  `keyid "${JWKS_ALL_MERCHANT_KID}" could not be resolved to a key`;
+
+/**
+ * `verifyAllLabels` with per-label `JwksKeyStore`
+ * resolvers steady state: the two-store form a gateway
+ * verifier uses when the merchant's and the gateway's
+ * keys rotate on separate JWKS endpoints — every
+ * measured call runs the per-label store lookup for
+ * both labels, which the plain `verifyAllLabels` row
+ * above never pays, because it passes static keys,
+ * and which the `verifyAllLabels keyResolvers` row
+ * pays only against in-memory Maps, never against
+ * store snapshots. One measured op verifies three
+ * dual-label fixtures: the fresh dual (both labels
+ * ok, each returned `keyId` equal to its pinned
+ * value); the rotated dual, verified against a
+ * merchant store whose snapshot holds only the
+ * rotated kid (the merchant label exactly
+ * `KEY_RESOLUTION_FAILED` with the pinned reason
+ * while the gateway label still verifies, proving a
+ * retired kid fails closed rather than falling back
+ * to the new key); and the stale dual, verified
+ * against a gateway store past its 300s TTL
+ * (clock pinned 1000s past the snapshot fetch time,
+ * `isStale()` re-pinned true on every pass) that
+ * still resolves (both labels ok, proving stale
+ * snapshots keep serving). Outside timing, the
+ * cross-kid isolation half is pinned once: neither
+ * store resolves the other party's kid. Zero network
+ * (every store's fetch throws if called), zero
+ * randomness in the measured assertions, no wall
+ * clock (every verify instant and every store clock
+ * is injected).
+ */
+function benchmarkVerifyAllJwksKeyStores(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const { publicKey: rotatedPublic } = generateEd25519KeyPair();
+  const merchantSigned = signRequest(fixture, {
+    keyId: JWKS_ALL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: JWKS_ALL_CREATED,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: JWKS_ALL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: JWKS_ALL_CREATED,
+  });
+  const offlineFetch: JwksFetchImpl = async () => {
+    throw new Error("benchmark must not fetch (offline store)");
+  };
+  const merchantStore = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_ALL_CREATED,
+      keys: [
+        { ...exportPublicKeyJwk(merchantPublic), kid: JWKS_ALL_MERCHANT_KID },
+      ],
+    },
+    JWKS_ALL_MERCHANT_URL,
+    { fetchImpl: offlineFetch, ttlSec: 300, now: () => JWKS_ALL_CREATED },
+  );
+  const gatewayStore = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_ALL_CREATED,
+      keys: [
+        { ...exportPublicKeyJwk(gatewayPublic), kid: JWKS_ALL_GATEWAY_KID },
+      ],
+    },
+    JWKS_ALL_GATEWAY_URL,
+    { fetchImpl: offlineFetch, ttlSec: 300, now: () => JWKS_ALL_CREATED },
+  );
+  const rotatedMerchantStore = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_ALL_CREATED,
+      keys: [
+        {
+          ...exportPublicKeyJwk(rotatedPublic),
+          kid: JWKS_ALL_MERCHANT_ROTATED_KID,
+        },
+      ],
+    },
+    JWKS_ALL_MERCHANT_URL,
+    { fetchImpl: offlineFetch, ttlSec: 300, now: () => JWKS_ALL_CREATED },
+  );
+  const staleGatewayStore = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_ALL_CREATED,
+      keys: [
+        { ...exportPublicKeyJwk(gatewayPublic), kid: JWKS_ALL_GATEWAY_KID },
+      ],
+    },
+    JWKS_ALL_GATEWAY_URL,
+    {
+      fetchImpl: offlineFetch,
+      ttlSec: 300,
+      now: () => JWKS_ALL_CREATED + 1000,
+    },
+  );
+  const verifyOpts = {
+    now: JWKS_ALL_CREATED,
+    keyResolvers: {
+      merchant: merchantStore.resolve,
+      gateway: gatewayStore.resolve,
+    },
+  };
+  const assertAll = (where: string): void => {
+    const fresh = verifyAllLabels(dual, verifyOpts);
+    if (
+      fresh.length !== 2 ||
+      fresh[0].label !== "merchant" ||
+      !fresh[0].ok ||
+      fresh[0].keyId !== JWKS_ALL_MERCHANT_KID ||
+      fresh[1].label !== "gateway" ||
+      !fresh[1].ok ||
+      fresh[1].keyId !== JWKS_ALL_GATEWAY_KID
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels x JwksKeyStore (${where}, fresh dual) gave ${JSON.stringify(fresh)}`,
+      );
+    const rotated = verifyAllLabels(dual, {
+      now: JWKS_ALL_CREATED,
+      keyResolvers: {
+        merchant: rotatedMerchantStore.resolve,
+        gateway: gatewayStore.resolve,
+      },
+    });
+    if (
+      rotated.length !== 2 ||
+      rotated[0].label !== "merchant" ||
+      rotated[0].ok ||
+      rotated[0].code !== "KEY_RESOLUTION_FAILED" ||
+      rotated[0].reason !== JWKS_ALL_ROTATED_REASON ||
+      rotated[0].keyId !== JWKS_ALL_MERCHANT_KID ||
+      rotated[1].label !== "gateway" ||
+      !rotated[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels x JwksKeyStore (${where}, rotated dual) gave ${JSON.stringify(rotated)}`,
+      );
+    if (!staleGatewayStore.isStale())
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels x JwksKeyStore (${where}, stale gateway store) reported fresh at CREATED + 1000s past a 300s TTL`,
+      );
+    const stale = verifyAllLabels(dual, {
+      now: JWKS_ALL_CREATED,
+      keyResolvers: {
+        merchant: merchantStore.resolve,
+        gateway: staleGatewayStore.resolve,
+      },
+    });
+    if (
+      stale.length !== 2 ||
+      stale[0].label !== "merchant" ||
+      !stale[0].ok ||
+      stale[1].label !== "gateway" ||
+      !stale[1].ok ||
+      stale[1].keyId !== JWKS_ALL_GATEWAY_KID
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels x JwksKeyStore (${where}, stale dual) gave ${JSON.stringify(stale)}`,
+      );
+  };
+
+  // Outside timing: all three fixtures self-check
+  // under their per-label stores before any timing
+  // starts, and neither store resolves the other
+  // party's kid.
+  assertAll("outside timing");
+  if (
+    merchantStore.resolve(JWKS_ALL_GATEWAY_KID) !== undefined ||
+    gatewayStore.resolve(JWKS_ALL_MERCHANT_KID) !== undefined
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x JwksKeyStore cross-kid isolation broken`,
+    );
+
+  return measure(() => {
+    assertAll("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `verifyAllLabels` requireNonceByLabel
  * benchmark: two ed25519 key pairs (generated once,
  * outside timing), two dual-label fixtures signed outside
@@ -12162,6 +12376,11 @@ results.push({
   alg: "verifyAllLabels keyResolvers (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllKeyResolvers(),
+});
+results.push({
+  alg: "verifyAllLabels JwksKeyStore (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllJwksKeyStores(),
 });
 results.push({
   alg: "verifyAllLabels requireNonceByLabel (2 labels)",
