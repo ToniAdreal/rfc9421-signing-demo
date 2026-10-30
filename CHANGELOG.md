@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` x `replayCacheByLabel` x
+  `JwksKeyStore` per-label resolvers (backlog #742):
+  `test/verifyAllLabelsReplayCacheJwks.test.ts` adds 6 cases — a
+  dual-signed request resolves each label through its own
+  offline-restored `JwksKeyStore` and records the same bare nonce
+  once per label (cross-kid isolation re-pinned); re-verifying the
+  same request replays in each label's own store; a nonce pre-seeded
+  in only the merchant store replays for merchant but stays fresh
+  for gateway; a merchant kid rotated out by a stubbed refresh
+  fails only that label with `KEY_RESOLUTION_FAILED` while gateway
+  still verifies, records nothing for merchant, and on a second
+  attempt gateway replays while merchant still fails resolution; a
+  stale gateway snapshot still resolves, records, and replays; and
+  per-label replay TTLs (60s merchant, 3600s gateway) expire
+  independently under per-label resolvers. Pure test addition: no
+  source change, since the combination was untested, not
+  unimplemented. Zero real network throughout.
+
 - Test coverage for `verifyAllLabels` x `fromNodeResponse` dual-signed
   responses (backlog #737): `test/nodeHttpResponseVerifyAllLabels.test.ts`
   adds 6 cases — a dual-signed response verifies both labels through
