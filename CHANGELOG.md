@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` x `fromNodeResponse` dual-signed
+  responses (backlog #737): `test/nodeHttpResponseVerifyAllLabels.test.ts`
+  adds 6 cases — a dual-signed response verifies both labels through
+  the adapter (each keyid echoed, `@status` in both covered lists), a
+  real loopback server dual-signs a response verified end-to-end by
+  an `http.get` client, a label minted over a different status fails
+  alone with `SIGNATURE_MISMATCH` while the other label still
+  verifies, a wrong per-label key fails only that label, a bound
+  request is attached and a `;req` component binds for both labels,
+  and a status-less dual-signed response still fails fast in the
+  adapter. Pure test addition: no source change, since the
+  combination was untested, not unimplemented.
+
+
 - Benchmark row for `verifyAllLabels` x content-digest
   (backlog #736): `bench/bench.ts` gains
   `benchmarkVerifyAllContentDigest`, measuring `verifyAllLabels`
