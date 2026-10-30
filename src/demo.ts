@@ -857,6 +857,17 @@
  * tamper rejection code equal the hand-pinned expectations below.
  * Only the loopback port (never printed) and the key pair are fresh
  * per run, so the segment is byte-identical between runs.
+ * The demo then runs a dual-signed response segment: the same
+ * loopback settlement response, now signed by both the merchant
+ * and the gateway labels (`signRequest` + `addSignature`, each
+ * covering `@status`); the client adapts it with
+ * `fromNodeResponse` and verifies both labels with
+ * `verifyAllLabels`, each against its own key. A second pass
+ * tampers the gateway label's signature bytes in the adapted
+ * headers: only the gateway label fails, the merchant label
+ * still verifies. Only the loopback port (never printed) and
+ * the key pairs are fresh per run, so the segment is
+ * byte-identical between runs.
  * The demo closes with a JWKS requireHttps segment: a real loopback
  * `http` server serves the scripted key's JWKS document, and a
  * `JwksKeyStore` built over that plaintext endpoint with
@@ -3624,6 +3635,29 @@ export const DEMO_GATEWAY_RESPONSE_TAMPERED_STATUS = 500;
  */
 export const DEMO_GATEWAY_RESPONSE_TAMPER_CODE: VerifyFailureCode =
   "SIGNATURE_MISMATCH";
+/** Label of the merchant signature in the dual-signed response segment. */
+export const DEMO_DUAL_RESPONSE_MERCHANT_LABEL = "merchant";
+/** Label of the gateway signature in the dual-signed response segment. */
+export const DEMO_DUAL_RESPONSE_GATEWAY_LABEL = "gateway";
+/** Key id the dual-signed response segment's merchant signature carries. */
+export const DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID =
+  "demo-dual-response-merchant-1";
+/** Key id the dual-signed response segment's gateway signature carries. */
+export const DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID =
+  "demo-dual-response-gateway-1";
+/** Nonce the dual-signed response segment's merchant signature carries. */
+export const DEMO_DUAL_RESPONSE_MERCHANT_NONCE =
+  "demo-dual-response-merchant-nonce-1";
+/** Nonce the dual-signed response segment's gateway signature carries. */
+export const DEMO_DUAL_RESPONSE_GATEWAY_NONCE =
+  "demo-dual-response-gateway-nonce-1";
+/**
+ * Hand-pinned failure code for the dual-signed response segment's
+ * gateway-signature tamper (`SIGNATURE_MISMATCH`): only the gateway
+ * label fails, the merchant label still verifies.
+ */
+export const DEMO_DUAL_RESPONSE_TAMPER_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
 
 export interface DemoResult {
   signed: SignedHttpRequest;
@@ -5136,6 +5170,21 @@ export interface DemoResult {
    * 500 (rejected with `SIGNATURE_MISMATCH`).
    */
   gatewayResponseTamperedVerification: VerifyResult;
+  /**
+   * The client's adapted `RequestLike` for the dual-signed settlement
+   * response in the dual-signed response segment: the same
+   * `DEMO_GATEWAY_RESPONSE_*` settlement response, signed by both
+   * the merchant and the gateway labels.
+   */
+  dualSignedResponseRequest: RequestLike;
+  /** Per-label results for the dual-signed response (both ok). */
+  dualSignedResponseVerification: VerifyResult[];
+  /**
+   * Per-label results after the gateway label's signature bytes are
+   * tampered: merchant still ok, gateway rejected with
+   * `DEMO_DUAL_RESPONSE_TAMPER_CODE`.
+   */
+  dualSignedResponseTamperedVerification: VerifyResult[];
   lines: string[];
 }
 
@@ -5350,6 +5399,212 @@ async function fetchGatewaySignedResponse(): Promise<GatewaySignedResponseFixtur
         `demo fixture broken: gateway signed-response segment status flip gave ` +
           `${JSON.stringify(tamperedVerification)} instead of ` +
           `${DEMO_GATEWAY_RESPONSE_TAMPER_CODE}`,
+      );
+    }
+    return { requestLike, verification, tamperedVerification };
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * The dual-signed response segment's loopback fixture: a real `http`
+ * server on 127.0.0.1 plays the payment gateway serving the same
+ * settlement response the closing signed-response segment serves
+ * (`DEMO_GATEWAY_RESPONSE_*`), but signed twice — the merchant label
+ * first via `signRequest`, the gateway label appended via
+ * `addSignature`, both covering `@status` with fresh ed25519 keys
+ * (pinned keyids, nonces and `created`; the verify instant is
+ * injected). The client fetches it with `http.get`, buffers the
+ * body, adapts the response with `fromNodeResponse(res, body,
+ * { request })` and verifies both labels with `verifyAllLabels`,
+ * each label against its own key.
+ *
+ * A second verification tampers the gateway label's signature
+ * bytes in the adapted headers (one base64 character flipped):
+ * the merchant label still verifies and only the gateway label
+ * is rejected with `DEMO_DUAL_RESPONSE_TAMPER_CODE` — the
+ * per-label failure isolation `test/nodeHttpResponseVerifyAllLabels.test.ts`
+ * pins for the #737 combination, here shown end to end over
+ * loopback. Nothing about the wire form is printed except
+ * through fixed literals, so the printed segment is
+ * byte-identical between runs even though the port and the
+ * key pairs are fresh per run.
+ */
+interface DualSignedResponseFixture {
+  /** The client's adapted `RequestLike` for the dual-signed response. */
+  requestLike: RequestLike;
+  /** Per-label results for the dual-signed response (both ok). */
+  verification: VerifyResult[];
+  /**
+   * Per-label results after the gateway label's signature bytes
+   * are tampered: merchant ok, gateway rejected with
+   * `DEMO_DUAL_RESPONSE_TAMPER_CODE`.
+   */
+  tamperedVerification: VerifyResult[];
+}
+
+async function fetchDualSignedResponse(): Promise<DualSignedResponseFixture> {
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const server = createServer((req, res) => {
+    const port = (server.address() as AddressInfo).port;
+    const merchantSigned = signRequest(
+      {
+        method: "GET",
+        url: `http://127.0.0.1:${port}${DEMO_GATEWAY_RESPONSE_PATH}`,
+        headers: {},
+        body: DEMO_GATEWAY_RESPONSE_BODY,
+        status: DEMO_GATEWAY_RESPONSE_STATUS,
+      },
+      {
+        keyId: DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID,
+        alg: "ed25519",
+        key: merchant.privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_DUAL_RESPONSE_MERCHANT_NONCE,
+        label: DEMO_DUAL_RESPONSE_MERCHANT_LABEL,
+        coveredComponents: ["@status"],
+      },
+    );
+    const dual = addSignature(merchantSigned, {
+      keyId: DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID,
+      alg: "ed25519",
+      key: gateway.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_DUAL_RESPONSE_GATEWAY_NONCE,
+      label: DEMO_DUAL_RESPONSE_GATEWAY_LABEL,
+      coveredComponents: ["@status"],
+    });
+    res.writeHead(DEMO_GATEWAY_RESPONSE_STATUS, {
+      "content-type": "application/json",
+      "signature-input": dual.headers["signature-input"] as string,
+      signature: dual.headers["signature"] as string,
+    });
+    res.end(DEMO_GATEWAY_RESPONSE_BODY);
+  });
+  try {
+    const { port } = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    });
+    const url = `http://127.0.0.1:${port}${DEMO_GATEWAY_RESPONSE_PATH}`;
+    const request: RequestLike = {
+      method: "GET",
+      url,
+      headers: { host: `127.0.0.1:${port}` },
+    };
+    const { res, body } = await new Promise<{
+      res: IncomingMessage;
+      body: Buffer;
+    }>((resolve, reject) => {
+      get(url, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => resolve({ res, body: Buffer.concat(chunks) }));
+        res.on("error", reject);
+      }).on("error", reject);
+    });
+    const requestLike = fromNodeResponse(res, body, { request });
+    const verifyOptions = {
+      keys: {
+        [DEMO_DUAL_RESPONSE_MERCHANT_LABEL]: merchant.publicKey,
+        [DEMO_DUAL_RESPONSE_GATEWAY_LABEL]: gateway.publicKey,
+      },
+      now: DEMO_CREATED + 60,
+      requiredComponents: ["@status"],
+    };
+    const verification = verifyAllLabels(requestLike, verifyOptions);
+    // Flip one base64 character of the gateway label's signature
+    // bytes: any byte change must break that label alone.
+    const wireSignature = getHeader(requestLike.headers, "signature");
+    if (wireSignature === undefined) {
+      throw new Error(
+        "demo fixture broken: dual-signed response segment adapted " +
+          "headers carry no signature",
+      );
+    }
+    const marker = `${DEMO_DUAL_RESPONSE_GATEWAY_LABEL}=:`;
+    const at = wireSignature.indexOf(marker);
+    if (at === -1) {
+      throw new Error(
+        `demo fixture broken: dual-signed response segment signature ` +
+          `header carries no ${DEMO_DUAL_RESPONSE_GATEWAY_LABEL} entry`,
+      );
+    }
+    const first = wireSignature[at + marker.length];
+    if (first === undefined || first === "=") {
+      throw new Error(
+        "demo fixture broken: dual-signed response segment gateway " +
+          "signature entry has no flippable first base64 character",
+      );
+    }
+    const tamperedSignature =
+      wireSignature.slice(0, at + marker.length) +
+      (first === "A" ? "B" : "A") +
+      wireSignature.slice(at + marker.length + 1);
+    const tamperedVerification = verifyAllLabels(
+      {
+        ...requestLike,
+        headers: { ...requestLike.headers, signature: tamperedSignature },
+      },
+      verifyOptions,
+    );
+    if (
+      requestLike.status !== DEMO_GATEWAY_RESPONSE_STATUS ||
+      body.toString() !== DEMO_GATEWAY_RESPONSE_BODY
+    ) {
+      throw new Error(
+        `demo fixture broken: dual-signed response segment adapted status ` +
+          `${requestLike.status} / body ${JSON.stringify(body.toString())} ` +
+          `instead of ${DEMO_GATEWAY_RESPONSE_STATUS} / the pinned settlement body`,
+      );
+    }
+    const expected: ReadonlyArray<{
+      label: string;
+      keyId: string;
+      nonce: string;
+    }> = [
+      {
+        label: DEMO_DUAL_RESPONSE_MERCHANT_LABEL,
+        keyId: DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID,
+        nonce: DEMO_DUAL_RESPONSE_MERCHANT_NONCE,
+      },
+      {
+        label: DEMO_DUAL_RESPONSE_GATEWAY_LABEL,
+        keyId: DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID,
+        nonce: DEMO_DUAL_RESPONSE_GATEWAY_NONCE,
+      },
+    ];
+    if (
+      verification.length !== 2 ||
+      !verification.every(
+        (r, i) =>
+          r.ok &&
+          r.label === expected[i].label &&
+          r.keyId === expected[i].keyId &&
+          r.alg === "ed25519" &&
+          r.nonce === expected[i].nonce,
+      )
+    ) {
+      throw new Error(
+        `demo fixture broken: dual-signed response segment verification gave ` +
+          `${JSON.stringify(verification)} instead of both labels ok with ` +
+          `the pinned label/keyid/alg/nonce`,
+      );
+    }
+    if (
+      tamperedVerification.length !== 2 ||
+      tamperedVerification[0].ok !== true ||
+      tamperedVerification[1].ok !== false ||
+      tamperedVerification[1].code !== DEMO_DUAL_RESPONSE_TAMPER_CODE
+    ) {
+      throw new Error(
+        `demo fixture broken: dual-signed response segment gateway-signature ` +
+          `tamper gave ${JSON.stringify(tamperedVerification)} instead of ` +
+          `merchant ok and gateway ${DEMO_DUAL_RESPONSE_TAMPER_CODE}`,
       );
     }
     return { requestLike, verification, tamperedVerification };
@@ -9155,6 +9410,20 @@ export async function runDemo(): Promise<DemoResult> {
   // segment's printed lines are byte-identical between runs.
   const gatewayResponse = await fetchGatewaySignedResponse();
 
+  // Dual-signed response segment (client direction): the sequel to
+  // the single-label segment above — the same loopback settlement
+  // response, now signed by both the merchant and the gateway
+  // labels, adapted with `fromNodeResponse` and verified with
+  // `verifyAllLabels` so each label is checked against its own
+  // key. A second pass tampers the gateway label's signature
+  // bytes in the adapted headers: only the gateway label fails,
+  // the merchant label still verifies. The helper's fail-fast
+  // asserts already pinned every outcome outside the printed
+  // lines; only the port (never printed) and the key pairs are
+  // fresh per run, so the segment's printed lines are
+  // byte-identical between runs.
+  const dualSignedResponse = await fetchDualSignedResponse();
+
   // JWKS requireHttps segment: the JWKS sections above fetch
   // over fake endpoints or restored snapshots, so none shows
   // the opt-in transport rule a production deployment turns
@@ -11378,6 +11647,15 @@ export async function runDemo(): Promise<DemoResult> {
       ? "Gateway response verification after status tampering (200 -> 500): OK (unexpected — tampering was not detected)"
       : `Gateway response verification after status tampering (200 -> 500): FAILED (code ${gatewayResponse.tamperedVerification.code}: ${gatewayResponse.tamperedVerification.reason})`,
     "",
+    "Dual-signed response verification: the same loopback settlement response signed by both the merchant and the gateway labels — fromNodeResponse adapts it and verifyAllLabels verifies each label against its own key, so tampering one label's signature fails only that label",
+    `Dual-signed response status: ${dualSignedResponse.requestLike.status}`,
+    dualSignedResponse.verification.every((r) => r.ok)
+      ? `Dual-signed response verification: merchant OK (label ${dualSignedResponse.verification[0].label}, keyid="${dualSignedResponse.verification[0].keyId}", alg="${dualSignedResponse.verification[0].alg}"), gateway OK (label ${dualSignedResponse.verification[1].label}, keyid="${dualSignedResponse.verification[1].keyId}", alg="${dualSignedResponse.verification[1].alg}")`
+      : `Dual-signed response verification: FAILED (merchant ${dualSignedResponse.verification[0].ok ? "OK" : `code ${dualSignedResponse.verification[0].code}: ${dualSignedResponse.verification[0].reason}`}, gateway ${dualSignedResponse.verification[1].ok ? "OK" : `code ${dualSignedResponse.verification[1].code}: ${dualSignedResponse.verification[1].reason}`})`,
+    dualSignedResponse.tamperedVerification[1].ok
+      ? "Dual-signed response after gateway signature tampering: gateway OK (unexpected — the tampered gateway signature was not rejected), merchant OK"
+      : `Dual-signed response after gateway signature tampering: gateway FAILED (code ${dualSignedResponse.tamperedVerification[1].code}: ${dualSignedResponse.tamperedVerification[1].reason}), merchant still OK (label ${dualSignedResponse.tamperedVerification[0].label}, keyid="${dualSignedResponse.tamperedVerification[0].keyId}", alg="${dualSignedResponse.tamperedVerification[0].alg}")`,
+    "",
     "JWKS requireHttps: JwksKeyStore requireHttps is an opt-in transport rule — a plaintext JWKS endpoint is rejected at construction, before any fetch, so a path attacker cannot substitute the key set",
     `JWKS requireHttps over a loopback http: endpoint (requireHttps true): construction FAILED (${jwksRequireHttpsError}) after ${jwksRequireHttpsRejectedFetchCalls} fetches — the check runs before any network`,
     "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule is a construction-time check only and does not intercept a later https-to-http redirect",
@@ -11780,6 +12058,9 @@ export async function runDemo(): Promise<DemoResult> {
     gatewayResponseRequest: gatewayResponse.requestLike,
     gatewayResponseVerification: gatewayResponse.verification,
     gatewayResponseTamperedVerification: gatewayResponse.tamperedVerification,
+    dualSignedResponseRequest: dualSignedResponse.requestLike,
+    dualSignedResponseVerification: dualSignedResponse.verification,
+    dualSignedResponseTamperedVerification: dualSignedResponse.tamperedVerification,
     jwksRequireHttpsError,
     jwksRequireHttpsRejectedFetchCalls,
     jwksRequireHttpsHttpsConstruction,

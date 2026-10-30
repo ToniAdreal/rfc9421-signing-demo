@@ -170,7 +170,14 @@ request verifies against the restored cache and is
 recorded only there; outside the printed lines the demo
 asserts the restored rejection code and the exported
 snapshot against hand-pinned expectations and that the
-original cache still holds only the exported entry:
+original cache still holds only the exported entry. The
+demo also runs a dual-signed response segment: a real
+loopback gateway signs the same settlement response with
+merchant and gateway labels, the client adapts it with
+`fromNodeResponse` and verifies both labels with
+`verifyAllLabels` (each against its own key), and
+tampering the gateway label's signature bytes fails only
+that label:
 
 ```bash
 npm run demo
@@ -3318,7 +3325,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1159 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1160 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

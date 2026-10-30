@@ -89,6 +89,13 @@ import {
   DEMO_GATEWAY_RESPONSE_STATUS,
   DEMO_GATEWAY_RESPONSE_TAMPER_CODE,
   DEMO_GATEWAY_RESPONSE_TAMPERED_STATUS,
+  DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID,
+  DEMO_DUAL_RESPONSE_GATEWAY_LABEL,
+  DEMO_DUAL_RESPONSE_GATEWAY_NONCE,
+  DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID,
+  DEMO_DUAL_RESPONSE_MERCHANT_LABEL,
+  DEMO_DUAL_RESPONSE_MERCHANT_NONCE,
+  DEMO_DUAL_RESPONSE_TAMPER_CODE,
   DEMO_INBOUND_COVERED_COMPONENTS,
   DEMO_INBOUND_HOST,
   DEMO_INBOUND_NONCE,
@@ -5220,9 +5227,103 @@ test("demo signed-response segment verifies a gateway-signed @status response ov
     `Signed @status value: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
     `Gateway response verification after status tampering (200 -> 500): FAILED (code ${DEMO_GATEWAY_RESPONSE_TAMPER_CODE}: ${gatewayResponseTamperedVerification.reason})`,
   ]);
-  // The JWKS requireHttps segment follows the signed-response segment.
+  // The dual-signed response segment follows the signed-response segment.
   assert.equal(lines[headerIdx + 5], "");
-  assert.ok(lines[headerIdx + 6]!.startsWith("JWKS requireHttps:"));
+  assert.ok(
+    lines[headerIdx + 6]!.startsWith("Dual-signed response verification:"),
+  );
+});
+
+test("demo dual-signed response segment verifies both labels over loopback and fails only the tampered gateway label", async () => {
+  const {
+    lines,
+    dualSignedResponseRequest,
+    dualSignedResponseVerification,
+    dualSignedResponseTamperedVerification,
+  } = await runDemo();
+
+  // Structure: the same settlement response, adapted with both wire labels.
+  assert.equal(dualSignedResponseRequest.status, DEMO_GATEWAY_RESPONSE_STATUS);
+  assert.equal(dualSignedResponseRequest.method, "GET");
+  assert.match(
+    dualSignedResponseRequest.url,
+    new RegExp(
+      `^http://127\\.0\\.0\\.1:\\d+${DEMO_GATEWAY_RESPONSE_PATH}$`,
+    ),
+  );
+  assert.equal(
+    dualSignedResponseRequest.body?.toString(),
+    DEMO_GATEWAY_RESPONSE_BODY,
+  );
+  assert.equal(
+    dualSignedResponseRequest.headers["content-type"],
+    "application/json",
+  );
+  assert.equal(dualSignedResponseRequest.request?.method, "GET");
+  assert.equal(
+    dualSignedResponseRequest.request?.url,
+    dualSignedResponseRequest.url,
+  );
+
+  // Both labels verify with their own pinned keyids/algs/nonces.
+  assert.equal(dualSignedResponseVerification.length, 2);
+  assert.deepEqual(
+    dualSignedResponseVerification.map((r) => [
+      r.label,
+      r.ok,
+      r.keyId,
+      r.alg,
+      r.nonce,
+    ]),
+    [
+      [
+        DEMO_DUAL_RESPONSE_MERCHANT_LABEL,
+        true,
+        DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID,
+        "ed25519",
+        DEMO_DUAL_RESPONSE_MERCHANT_NONCE,
+      ],
+      [
+        DEMO_DUAL_RESPONSE_GATEWAY_LABEL,
+        true,
+        DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID,
+        "ed25519",
+        DEMO_DUAL_RESPONSE_GATEWAY_NONCE,
+      ],
+    ],
+  );
+  // Tampering the gateway signature bytes fails only that label.
+  assert.equal(dualSignedResponseTamperedVerification.length, 2);
+  assert.equal(dualSignedResponseTamperedVerification[0].ok, true);
+  assert.equal(
+    dualSignedResponseTamperedVerification[0].label,
+    DEMO_DUAL_RESPONSE_MERCHANT_LABEL,
+  );
+  assert.equal(dualSignedResponseTamperedVerification[1].ok, false);
+  assert.equal(
+    dualSignedResponseTamperedVerification[1].label,
+    DEMO_DUAL_RESPONSE_GATEWAY_LABEL,
+  );
+  assert.equal(
+    dualSignedResponseTamperedVerification[1].code,
+    DEMO_DUAL_RESPONSE_TAMPER_CODE,
+  );
+
+  // Printed lines: header + status + dual ok + tamper isolation —
+  // byte-exact, between the signed-response segment and the
+  // JWKS requireHttps segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Dual-signed response verification:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 4), [
+    `Dual-signed response status: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
+    `Dual-signed response verification: merchant OK (label ${DEMO_DUAL_RESPONSE_MERCHANT_LABEL}, keyid="${DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_DUAL_RESPONSE_GATEWAY_LABEL}, keyid="${DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID}", alg="ed25519")`,
+    `Dual-signed response after gateway signature tampering: gateway FAILED (code ${DEMO_DUAL_RESPONSE_TAMPER_CODE}: ${dualSignedResponseTamperedVerification[1].reason}), merchant still OK (label ${DEMO_DUAL_RESPONSE_MERCHANT_LABEL}, keyid="${DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID}", alg="ed25519")`,
+  ]);
+  // The JWKS requireHttps segment follows the dual-signed segment.
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(lines[headerIdx + 5]!.startsWith("JWKS requireHttps:"));
 });
 
 test("demo signed-response segment prints byte-identical lines across runs", async () => {
