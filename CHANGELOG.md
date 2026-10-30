@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifyAllLabels` x `JwksKeyStore` per-label resolver coverage
+  (backlog #724): `test/verifyAllLabelsJwksKeyResolvers.test.ts` adds
+  4 cases combining the two previously separate surfaces — each label
+  resolving through its own offline-restored `JwksKeyStore` (passed
+  by reference as `store.resolve`, with keyid echo and cross-kid
+  isolation); a rotation refresh retiring the merchant kid so that
+  label fails exactly `KEY_RESOLUTION_FAILED` while the gateway
+  label still verifies; a stale-but-serving snapshot past its TTL
+  that still resolves with no fetch attempted; and a third label
+  absent from the `keyResolvers` map falling back to the global
+  `keyResolver`. Pure test addition: no source change, since the
+  combination was untested, not unimplemented.
+
 - Benchmark row for per-label candidate keys x per-label freshness
   window verification (backlog #721): `bench/bench.ts` gains
   `benchmarkVerifyAllCandidateKeysMaxAgeByLabel`, measuring
