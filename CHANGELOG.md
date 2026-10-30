@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for `verifyAllLabels` x content-digest
+  (backlog #736): `bench/bench.ts` gains
+  `benchmarkVerifyAllContentDigest`, measuring `verifyAllLabels`
+  with both labels covering `content-digest` over the one wire
+  sha-512 digest header the first signature minted (the appended
+  second signature keeps that header, it mints no second one).
+  One measured op verifies the dual-label fixture and re-pins
+  both results ok, each keyid echoed, and `content-digest` in
+  both labels' covered lists. The two tamper dimensions are
+  asserted outside timing, exactly as the #730 tests pin them:
+  a body swap fails both labels exactly `BODY_DIGEST_MISMATCH`
+  with the pinned reason, and a digest-header swap to another
+  body's digest fails both labels exactly `SIGNATURE_MISMATCH`
+  with the pinned reason. The README Benchmarks table is
+  refreshed from this run's real output (97 rows, 2026-10-30,
+  Node v24.22.1), with the new row at ~2,565 ops/sec
+  (389.90 µs/op). No source change: the combination was
+  unmeasured on the bench side, not unimplemented.
+
 - Benchmark row for `verifyAllLabels` x `JwksKeyStore` per-label
   resolvers (backlog #733): `bench/bench.ts` gains
   `benchmarkVerifyAllJwksKeyStores`, measuring `verifyAllLabels`

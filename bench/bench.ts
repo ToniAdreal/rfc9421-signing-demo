@@ -3441,6 +3441,173 @@ function benchmarkVerifyAllJwksKeyStores(): number {
 }
 
 /**
+ * Pinned shape of the `verifyAllLabels` x content-digest
+ * benchmark: the bench variant of the #730 test
+ * combination. Two ed25519 key pairs (generated once,
+ * outside timing), a dual-label fixture signed outside
+ * timing with `created` pinned under two pinned keyids
+ * (merchant / gateway), and the default covered list —
+ * so both labels cover `content-digest` over the one
+ * wire sha-512 digest header the first signature
+ * minted (`addSignature` keeps that header, it mints
+ * no second one). The verifier's injected `now` is 60
+ * seconds past `created`, inside no freshness cap.
+ */
+const CONTENT_DIGEST_ALL_CREATED = 1_700_000_000;
+const CONTENT_DIGEST_ALL_NOW = CONTENT_DIGEST_ALL_CREATED + 60;
+const CONTENT_DIGEST_ALL_MERCHANT_KID =
+  "bench-content-digest-merchant-1";
+const CONTENT_DIGEST_ALL_GATEWAY_KID =
+  "bench-content-digest-gateway-1";
+const CONTENT_DIGEST_ALL_OTHER_BODY = JSON.stringify({
+  amount: 2,
+  currency: "USD",
+});
+const CONTENT_DIGEST_ALL_BODY_MISMATCH_REASON =
+  "body does not match content-digest";
+const CONTENT_DIGEST_ALL_SIGNATURE_MISMATCH_REASON =
+  "signature mismatch";
+
+/**
+ * `verifyAllLabels` with both labels covering
+ * `content-digest` steady state: the dual-signature
+ * form a gateway receiver uses when merchant and
+ * gateway each sign the same payment body — every
+ * measured call runs the per-label crypto check plus
+ * the body-vs-digest binding for both labels, which
+ * the plain `verifyAllLabels` rows above never pay
+ * in this combination, because their fixtures carry
+ * no body binding to re-check per label. One measured
+ * op verifies the dual-label fixture and re-pins that
+ * both results are ok, in wire order, that each
+ * returned `keyId` equals its label's pinned value,
+ * and that both labels' covered lists include
+ * `content-digest`. Outside timing, the two tamper
+ * dimensions are pinned once, exactly as #730 pins
+ * them: swapping the body (header untouched) fails
+ * both labels exactly `BODY_DIGEST_MISMATCH` with the
+ * pinned reason — the digest dimension is not masked
+ * as a signature failure — and swapping the digest
+ * header to another body's digest fails both labels
+ * exactly `SIGNATURE_MISMATCH` with the pinned reason,
+ * because the header value is part of both signature
+ * bases and the crypto check runs before the body
+ * binding. Zero network, zero randomness in the
+ * measured assertions, no wall clock (every verify
+ * instant is injected).
+ */
+function benchmarkVerifyAllContentDigest(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantSigned = signRequest(fixture, {
+    keyId: CONTENT_DIGEST_ALL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: CONTENT_DIGEST_ALL_CREATED,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: CONTENT_DIGEST_ALL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: CONTENT_DIGEST_ALL_CREATED,
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts = { keys, now: CONTENT_DIGEST_ALL_NOW };
+  const assertAccepted = (where: string): void => {
+    const results = verifyAllLabels(dual, verifyOpts);
+    if (
+      results.length !== 2 ||
+      results[0].label !== "merchant" ||
+      !results[0].ok ||
+      results[0].keyId !== CONTENT_DIGEST_ALL_MERCHANT_KID ||
+      !results[0].coveredComponents?.includes("content-digest") ||
+      results[1].label !== "gateway" ||
+      !results[1].ok ||
+      results[1].keyId !== CONTENT_DIGEST_ALL_GATEWAY_KID ||
+      !results[1].coveredComponents?.includes("content-digest")
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels x content-digest (${where}) gave ${JSON.stringify(results)}`,
+      );
+  };
+
+  // Outside timing: the wire carries exactly one
+  // digest header, minted by the first signature as
+  // sha-512, and the appended second signature did
+  // not mint a second one.
+  if (
+    !dual.headers["content-digest"]?.startsWith("sha-512=:") ||
+    dual.headers["content-digest"] !==
+      merchantSigned.headers["content-digest"]
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x content-digest wire digest is ${JSON.stringify(dual.headers["content-digest"])} (expected the merchant's single sha-512 line)`,
+    );
+  assertAccepted("outside timing");
+
+  // Outside timing: swapping the body (header
+  // untouched) fails both labels exactly
+  // BODY_DIGEST_MISMATCH with the pinned reason.
+  const bodySwapped = verifyAllLabels(
+    { ...dual, body: CONTENT_DIGEST_ALL_OTHER_BODY },
+    verifyOpts,
+  );
+  if (
+    bodySwapped.length !== 2 ||
+    bodySwapped.some(
+      (r) =>
+        r.ok ||
+        r.code !== "BODY_DIGEST_MISMATCH" ||
+        r.reason !== CONTENT_DIGEST_ALL_BODY_MISMATCH_REASON,
+    )
+  )
+    throw new Error(
+      `benchmark self-check failed: body-swapped result ${JSON.stringify(bodySwapped)} (expected BODY_DIGEST_MISMATCH on both labels)`,
+    );
+
+  // Outside timing: swapping the digest header to
+  // another body's digest fails both labels exactly
+  // SIGNATURE_MISMATCH with the pinned reason.
+  const otherDigest = contentDigest(
+    CONTENT_DIGEST_ALL_OTHER_BODY,
+    "sha-512",
+  );
+  if (otherDigest === dual.headers["content-digest"])
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x content-digest tamper digest equals the wire digest`,
+    );
+  const headerSwapped = verifyAllLabels(
+    {
+      ...dual,
+      headers: { ...dual.headers, "content-digest": otherDigest },
+    },
+    verifyOpts,
+  );
+  if (
+    headerSwapped.length !== 2 ||
+    headerSwapped.some(
+      (r) =>
+        r.ok ||
+        r.code !== "SIGNATURE_MISMATCH" ||
+        r.reason !== CONTENT_DIGEST_ALL_SIGNATURE_MISMATCH_REASON,
+    )
+  )
+    throw new Error(
+      `benchmark self-check failed: header-swapped result ${JSON.stringify(headerSwapped)} (expected SIGNATURE_MISMATCH on both labels)`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `verifyAllLabels` requireNonceByLabel
  * benchmark: two ed25519 key pairs (generated once,
  * outside timing), two dual-label fixtures signed outside
@@ -12381,6 +12548,11 @@ results.push({
   alg: "verifyAllLabels JwksKeyStore (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllJwksKeyStores(),
+});
+results.push({
+  alg: "verifyAllLabels content-digest (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllContentDigest(),
 });
 results.push({
   alg: "verifyAllLabels requireNonceByLabel (2 labels)",
