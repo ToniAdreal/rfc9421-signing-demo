@@ -10090,6 +10090,220 @@ async function benchmarkFromNodeResponse(): Promise<number> {
 }
 
 /**
+ * Loopback dual-signed response for the `fromNodeResponse` x
+ * `verifyAllLabels` path — the bench variant of the #737 test
+ * combination, which the single-label `fromNodeResponse` row above
+ * and the plain `verifyAllLabels` rows never measure together: a
+ * real `http` server (loopback only, no external network) signs a
+ * 200 settlement response twice, merchant first and gateway
+ * appended, each label covering `@status` only, exactly as the
+ * #737 loopback case does. The signatures are created once,
+ * outside timing, when the server answers the bench's single
+ * client request; the timed loop then re-measures only the
+ * client-side work (`fromNodeResponse` + `verifyAllLabels`) over
+ * that captured live response — re-measuring the network per
+ * iteration would time TCP loopback, not the adapter, and a live
+ * `IncomingMessage` is inert after `end`, so reusing it across
+ * passes is sound (the adapter builds a fresh `RequestLike` per
+ * call and never mutates the message).
+ */
+
+/** Key ids pinned for the dual-signed loopback response row. */
+const DUAL_RESP_MERCHANT_KID = "merchant-key";
+const DUAL_RESP_GATEWAY_KID = "gateway-key";
+
+/**
+ * `fromNodeResponse` + `verifyAllLabels` steady state: the
+ * response-side normalization and dual-label verification a client
+ * runs on every merchant-and-gateway-signed settlement callback.
+ * One measured op adapts the captured loopback response and runs
+ * `verifyAllLabels` over it, re-pinning on every pass that both
+ * results are ok, in wire order, and that each returned `keyId`
+ * equals its label's pinned value. Asserted outside timing: the
+ * captured dual-signed response verifies both labels with those
+ * keyids, and a divergent pair (merchant signed over status 200,
+ * gateway signed over status 500, wire headers merged exactly as
+ * the #737 test merges them) fails only the gateway label with
+ * `SIGNATURE_MISMATCH` while the merchant label still verifies —
+ * the per-label isolation the dual row exists to price.
+ */
+async function benchmarkFromNodeResponseVerifyAllLabels(): Promise<number> {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const server = createServer((req, res) => {
+    const port = (server.address() as AddressInfo).port;
+    const url = `http://127.0.0.1:${port}/settle`;
+    const merchantSigned = signRequest(
+      { method: "GET", url, headers: {}, body: RESP_BODY, status: RESP_STATUS },
+      {
+        keyId: DUAL_RESP_MERCHANT_KID,
+        alg: "ed25519",
+        key: merchantPrivate,
+        created: RESP_CREATED,
+        label: "merchant",
+        coveredComponents: ["@status"],
+      },
+    );
+    const dual = addSignature(merchantSigned, {
+      keyId: DUAL_RESP_GATEWAY_KID,
+      alg: "ed25519",
+      key: gatewayPrivate,
+      created: RESP_CREATED,
+      label: "gateway",
+      coveredComponents: ["@status"],
+    });
+    res.writeHead(RESP_STATUS, {
+      "content-type": "application/json",
+      "signature-input": dual.headers["signature-input"] as string,
+      signature: dual.headers["signature"] as string,
+    });
+    res.end(RESP_BODY);
+  });
+  try {
+    const captured = await new Promise<{
+      res: IncomingMessage;
+      body: Buffer;
+      request: RequestLike;
+    }>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => {
+        const port = (server.address() as AddressInfo).port;
+        const url = `http://127.0.0.1:${port}/settle`;
+        const request: RequestLike = {
+          method: "GET",
+          url,
+          headers: { host: `127.0.0.1:${port}` },
+        };
+        get(url, (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c: Buffer) => chunks.push(c));
+          res.on("end", () => {
+            try {
+              resolve({ res, body: Buffer.concat(chunks), request });
+            } catch (e) {
+              reject(e);
+            }
+          });
+          res.on("error", reject);
+        }).on("error", reject);
+      });
+      server.on("error", reject);
+    });
+    const { res, body, request } = captured;
+    const assertDualOk = (where: string): void => {
+      const results = verifyAllLabels(
+        fromNodeResponse(res, body, { request }),
+        { keys, now: RESP_NOW, requiredComponents: ["@status"] },
+      );
+      if (
+        results.length !== 2 ||
+        results[0].label !== "merchant" ||
+        !results[0].ok ||
+        results[0].keyId !== DUAL_RESP_MERCHANT_KID ||
+        results[1].label !== "gateway" ||
+        !results[1].ok ||
+        results[1].keyId !== DUAL_RESP_GATEWAY_KID
+      )
+        throw new Error(
+          `benchmark self-check failed: fromNodeResponse x verifyAllLabels (${where}) gave ${JSON.stringify(results)}`,
+        );
+    };
+    assertDualOk("outside timing");
+    const merchantOnly = signRequest(
+      {
+        method: "GET",
+        url: "https://api.example.com/v1/charge",
+        headers: {},
+        body: RESP_BODY,
+        status: RESP_STATUS,
+      },
+      {
+        keyId: DUAL_RESP_MERCHANT_KID,
+        alg: "ed25519",
+        key: merchantPrivate,
+        created: RESP_CREATED,
+        label: "merchant",
+        coveredComponents: ["@status"],
+      },
+    );
+    const gatewayDivergent = signRequest(
+      {
+        method: "GET",
+        url: "https://api.example.com/v1/charge",
+        headers: {},
+        body: RESP_BODY,
+        status: 500,
+      },
+      {
+        keyId: DUAL_RESP_GATEWAY_KID,
+        alg: "ed25519",
+        key: gatewayPrivate,
+        created: RESP_CREATED,
+        label: "gateway",
+        coveredComponents: ["@status"],
+      },
+    );
+    const divergent = fromNodeResponse(
+      {
+        statusCode: RESP_STATUS,
+        headers: {
+          "Signature-Input": `${merchantOnly.headers["signature-input"]}, ${gatewayDivergent.headers["signature-input"]}`,
+          Signature: `${merchantOnly.headers["signature"]}, ${gatewayDivergent.headers["signature"]}`,
+        },
+      },
+      RESP_BODY,
+      { request },
+    );
+    const divergentResults = verifyAllLabels(divergent, {
+      keys,
+      now: RESP_NOW,
+      requiredComponents: ["@status"],
+    });
+    if (
+      divergentResults.length !== 2 ||
+      divergentResults[0].label !== "merchant" ||
+      !divergentResults[0].ok ||
+      divergentResults[1].label !== "gateway" ||
+      divergentResults[1].ok ||
+      divergentResults[1].code !== "SIGNATURE_MISMATCH"
+    )
+      throw new Error(
+        `benchmark self-check failed: divergent dual response gave ${JSON.stringify(divergentResults)} (expected gateway-only SIGNATURE_MISMATCH)`,
+      );
+    return measure(() => {
+      const r = fromNodeResponse(res, body, { request });
+      if (r.status !== RESP_STATUS)
+        throw new Error(
+          "benchmark self-check failed: fromNodeResponse adapted an unexpected status",
+        );
+      const results = verifyAllLabels(r, {
+        keys,
+        now: RESP_NOW,
+        requiredComponents: ["@status"],
+      });
+      if (
+        results.length !== 2 ||
+        results[0].label !== "merchant" ||
+        !results[0].ok ||
+        results[0].keyId !== DUAL_RESP_MERCHANT_KID ||
+        results[1].label !== "gateway" ||
+        !results[1].ok ||
+        results[1].keyId !== DUAL_RESP_GATEWAY_KID
+      )
+        throw new Error(
+          `benchmark self-check failed: fromNodeResponse x verifyAllLabels (timed) gave ${JSON.stringify(results)}`,
+        );
+    }, ITERATIONS);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/**
  * Per-curve JWK round-trip steady state: for one key shape, a measured
  * call runs `exportPublicKeyJwk*` on a fixed public key, pushes the
  * JWK through a JSON stringify/parse round trip (the wire form a JWKS
@@ -12724,6 +12938,11 @@ results.push({
   alg: "fromNodeResponse (@status, loopback)",
   op: "adapt+verify",
   ops: await benchmarkFromNodeResponse(),
+});
+results.push({
+  alg: "fromNodeResponse + verifyAllLabels (@status, loopback, 2 labels)",
+  op: "adapt+verify",
+  ops: await benchmarkFromNodeResponseVerifyAllLabels(),
 });
 results.push({
   alg: "JWK round-trip P-256",

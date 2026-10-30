@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for `fromNodeResponse` x `verifyAllLabels`
+  dual-signed responses (backlog #743): `bench/bench.ts` gains
+  `benchmarkFromNodeResponseVerifyAllLabels`, measuring the
+  client-side `fromNodeResponse` + `verifyAllLabels` path over one
+  real loopback-signed 200 settlement response (merchant first,
+  gateway appended, each label covering `@status` only, exactly as
+  the #737 test signs it). One measured op adapts the captured
+  live response and verifies both labels, re-pinning both results
+  ok, in wire order, with each label's pinned keyid echoed.
+  Asserted outside timing: the captured dual-signed response
+  verifies both labels, and a divergent pair (merchant signed over
+  status 200, gateway over status 500, wire headers merged as the
+  #737 test merges them) fails only the gateway label with
+  `SIGNATURE_MISMATCH` while merchant still verifies. The README
+  Benchmarks table is refreshed from this run's real output (98
+  rows, 2026-10-30, Node v24.22.1), with the new row at ~1,366
+  ops/sec (732.06 µs/op); the P-384 / P-521 notes under the table
+  are re-based on this run's numbers too. No source change: the
+  combination was unmeasured on the bench side, not unimplemented.
+
 - Test coverage for `verifyAllLabels` x `replayCacheByLabel` x
   `JwksKeyStore` per-label resolvers (backlog #742):
   `test/verifyAllLabelsReplayCacheJwks.test.ts` adds 6 cases — a
