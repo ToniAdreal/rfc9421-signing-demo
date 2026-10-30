@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifyAllLabels` x content-digest covered-component coverage
+  (backlog #730): `test/verifyAllLabelsContentDigest.test.ts` adds 8
+  cases combining the two previously separate surfaces — a dual
+  sha-512 dual-label request verifying with `content-digest` in
+  both labels' covered lists; a post-signing body swap failing
+  both labels exactly `BODY_DIGEST_MISMATCH` (not masked as a
+  signature failure); a digest-header swap failing both labels
+  exactly `SIGNATURE_MISMATCH` (crypto is checked before the body
+  binding); a label minted over a different body's digest failing
+  alone with `SIGNATURE_MISMATCH` while the other label verifies
+  (the wire header is shared, so per-label divergence is built in
+  signing history); a sha-256-only dual verifying via the
+  sha-256 fallback; a both-algorithms header whose sha-512 entry
+  is of another body failing both labels `BODY_DIGEST_MISMATCH`
+  even though its sha-256 entry matches (sha-512 wins); an
+  `addSignature`-appended second label covering the same wire
+  digest and verifying; and a label not covering
+  `content-digest` still failing `BODY_DIGEST_MISMATCH` on a body
+  swap, since the verifier checks the body against the wire
+  digest whenever the header is present. Pure test addition: no
+  source change, since the combination was untested, not
+  unimplemented.
+
 - `verifyAllLabels` x per-label age window + per-label replay cache
   coverage (backlog #727):
   `test/replayCacheByLabelMaxAgeByLabel.test.ts` adds 6 cases
