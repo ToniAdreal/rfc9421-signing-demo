@@ -12,6 +12,25 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - Test coverage for `verifyAllLabels` x `fromNodeRequest` x
+  `JwksKeyStore` (backlog #759):
+  `test/nodeHttpRequestVerifyAllLabelsJwks.test.ts` adds 4 cases —
+  a dual-signed request adapted with `fromNodeRequest`, one label
+  covering `@method` and the business header `x-event-type` and the
+  other covering only `@method`, verifies both labels with each
+  label's key resolved from its own offline-restored `JwksKeyStore`
+  (snapshot restore, zero real network, fetch stub throws if ever
+  called); a rotated merchant store retires the old kid so only the
+  merchant label fails with `KEY_RESOLUTION_FAILED` while the
+  gateway label still verifies; a mismatched gateway store key fails
+  only the gateway label with `SIGNATURE_MISMATCH`; and a tampered
+  `x-event-type` wire value fails only the covering merchant label
+  while the gateway label still verifies. No source change: the
+  combination was untested, not unimplemented; it is the JWKS
+  counterpart of the #747 dual-signed request coverage and the
+  adapter counterpart of the `verifyAllLabelsJwksKeyResolvers`
+  coverage.
+
+- Test coverage for `verifyAllLabels` x `fromNodeRequest` x
   trailers (backlog #757):
   `test/nodeHttpRequestVerifyAllLabelsTrailers.test.ts` adds 5 cases —
   a dual-signed request adapted with `fromNodeRequest`, one label
