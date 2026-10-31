@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` x `fromNodeRequest` x
+  trailers x `JwksKeyStore` (backlog #769):
+  `test/nodeHttpRequestVerifyAllLabelsTrailersJwks.test.ts` adds 4
+  cases — a dual-signed request received through `fromNodeRequest`
+  verifies both labels, each key resolved from its own
+  offline-restored `JwksKeyStore`, with the merchant label binding
+  `@method` + `x-checksum;tr` and the gateway plain label covering
+  `@method` only; a tampered trailer fails only the merchant label
+  with `SIGNATURE_MISMATCH` while the gateway label still verifies;
+  a refresh that retires the merchant kid fails only the trailer
+  label with `KEY_RESOLUTION_FAILED` while the gateway label still
+  verifies; and the mirror retirement of the gateway kid fails
+  only the plain label while the merchant trailer label still
+  verifies. No source change: the combination was untested, not
+  unimplemented; it is the trailer counterpart of the #759 JWKS
+  coverage and the JWKS counterpart of the #757 trailer coverage.
+
 - Test coverage for `verifyAllLabels` x `JwksKeyStore` x
   sha-256-only content-digest (backlog #767):
   `test/verifyAllLabelsJwksSha256Digest.test.ts` adds 4 cases — a
