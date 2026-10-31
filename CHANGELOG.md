@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` x content-digest x
+  `JwksKeyStore` per-label resolvers (backlog #751):
+  `test/verifyAllLabelsContentDigestJwks.test.ts` adds 6 cases —
+  dual labels each resolve through their own offline-restored
+  `JwksKeyStore` and both cover `content-digest`; a body swapped
+  after signing fails both labels as `BODY_DIGEST_MISMATCH` (not a
+  key failure); a gateway label minted over a different body's
+  digest fails alone with `SIGNATURE_MISMATCH` while merchant
+  still verifies; a merchant key rotated out of its store fails
+  alone with `KEY_RESOLUTION_FAILED` while the gateway digest
+  label still verifies; a stale gateway snapshot still resolves
+  with no fetch attempted and its digest label still verifies;
+  and a sha-256-only dual via per-label stores verifies via the
+  sha-256 fallback. No source change: the combination was
+  untested, not unimplemented; it is the three-way counterpart
+  of the #730 content-digest and #733/#742 JWKS coverage.
+
 - Test coverage for `verifyAllLabels` x `fromNodeRequest`
   dual-signed requests (backlog #747):
   `test/nodeHttpRequestVerifyAllLabels.test.ts` adds 6 cases — a
