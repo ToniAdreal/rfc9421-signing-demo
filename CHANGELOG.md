@@ -12,6 +12,25 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - Test coverage for `verifyAllLabels` x `JwksKeyStore` x
+  sha-256-only content-digest (backlog #767):
+  `test/verifyAllLabelsJwksSha256Digest.test.ts` adds 4 cases — a
+  dual-signed request whose signatures each resolve from their own
+  offline-restored `JwksKeyStore` verifies both labels over the
+  shared sha-256-only `Content-Digest` header (sha-512 absent, so
+  the sha-256 fallback path is exercised, not the sha-512 path
+  pinned in #751); a body swap after signing fails both labels
+  with `BODY_DIGEST_MISMATCH` (not `SIGNATURE_MISMATCH`); a
+  refresh that retires the merchant kid fails that label with
+  `KEY_RESOLUTION_FAILED` while the gateway sha-256 label still
+  verifies; and the combined retired-kid plus body-swap case
+  keeps both codes exactly as in the single-failure cases, so a
+  neighbour's key failure does not change the other label's
+  digest failure code. No source change: the combination was
+  untested, not unimplemented; it is the sha-256 counterpart of
+  the #751 sha-512 coverage and the JWKS counterpart of the #730
+  sha-256 fallback coverage.
+
+- Test coverage for `verifyAllLabels` x `JwksKeyStore` x
   `expiredToleranceSecByLabel` (backlog #762):
   `test/verifyAllLabelsJwksExpiredToleranceByLabel.test.ts` adds 4
   cases — a dual-signed request whose signatures both expired 60s
