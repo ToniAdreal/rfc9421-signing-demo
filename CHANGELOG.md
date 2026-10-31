@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` x `fromNodeRequest` x
+  trailers (backlog #757):
+  `test/nodeHttpRequestVerifyAllLabelsTrailers.test.ts` adds 5 cases —
+  a dual-signed request adapted with `fromNodeRequest`, one label
+  covering `@method` and `x-checksum;tr` and the other covering
+  only `@method`, verifies both labels with their own keyids and
+  covered components; a tampered trailer fails only the trailer
+  label with `SIGNATURE_MISMATCH` while the plain label still
+  verifies; a missing trailer fails only the trailer label with
+  `SIGNATURE_BASE_BUILD_FAILED` while the plain label still
+  verifies; the same dual verifies through the `rawTrailers` path;
+  and a rotated trailer key fails only the trailer label while the
+  plain label still verifies. No source change: the combination was
+  untested, not unimplemented; it is the trailer counterpart of
+  the #747 dual-signed request coverage and the multi-label
+  counterpart of the single-label `nodeHttpTrailers` coverage.
+
 - Benchmark for `verifyAllLabels` x `JwksKeyStore` x
   `replayCacheByLabel` (backlog #753): `bench/bench.ts` adds
   `benchmarkVerifyAllJwksReplayCacheByLabel` — a dual-label fixture
