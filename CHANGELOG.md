@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` x `replayCacheByLabel` x
+  sha-512 content-digest (backlog #775):
+  `test/verifyAllLabelsReplayCacheDigest.test.ts` adds 4 cases — a
+  dual-signed request whose two labels share one sha-512
+  `Content-Digest` header verifies both labels, each label
+  recording the shared nonce in its own `ReplayCache`; a body swap
+  after signing fails both labels with `BODY_DIGEST_MISMATCH`
+  (not `SIGNATURE_MISMATCH`) and records nothing in either cache;
+  a nonce pre-seeded in only the merchant store replays only the
+  merchant label while the gateway label still verifies; and after
+  a digest failure the true message still verifies and records
+  both nonces. No source change: the combination was untested, not
+  unimplemented; it is the replay-cache counterpart of the #767
+  digest coverage and the digest counterpart of the #643
+  per-label replay coverage.
+
 - Benchmark row for `fromNodeRequest` x `verifyAllLabels` x
   trailers (backlog #773): `bench/bench.ts` adds
   `benchmarkFromNodeRequestVerifyAllLabelsTrailers` — a real
