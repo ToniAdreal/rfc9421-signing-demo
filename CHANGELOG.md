@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark for `verifyAllLabels` x `JwksKeyStore` x
+  `replayCacheByLabel` (backlog #753): `bench/bench.ts` adds
+  `benchmarkVerifyAllJwksReplayCacheByLabel` — a dual-label fixture
+  signed outside timing with `created` pinned, the same bare nonce
+  in both labels, and each party's public key in its own
+  offline-restored `JwksKeyStore`; each measured op verifies the
+  dual twice against fresh per-label `ReplayCache` instances
+  (first call both labels ok with their pinned keyids and each
+  cache holding exactly one entry, second call both labels
+  `NONCE_REPLAY` with neither cache growing), with a
+  merchant-replay-only split, a rotated-merchant-key
+  `KEY_RESOLUTION_FAILED` half, and cross-kid isolation pinned
+  outside timing. The new row measures ~1,456 ops/sec
+  (686.60 µs/op) on this run (Node v24.22.1); the README
+  Benchmarks table is refreshed from the same run (99 → 100
+  rows) and the intro list gains per-label JWKS key-resolution
+  plus replay-cache verification. No source change: the
+  combination was unmeasured, not unimplemented; it is the
+  bench variant of the #742 test combination and the three-way
+  counterpart of the `JwksKeyStore` and `replayCacheByLabel`
+  rows.
+
 - Benchmark for `fromNodeRequest` x `verifyAllLabels` dual-signed
   requests (backlog #752): `bench/bench.ts` adds
   `benchmarkFromNodeRequestVerifyAllLabels` — a real loopback server

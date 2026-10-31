@@ -6453,6 +6453,303 @@ function benchmarkVerifyAllReplayCacheByLabel(): number {
   }, ITERATIONS);
 }
 
+const JWKS_REPLAY_ALL_CREATED = 1_700_000_000;
+const JWKS_REPLAY_ALL_MERCHANT_KID = "bench-jwks-replay-merchant-1";
+const JWKS_REPLAY_ALL_GATEWAY_KID = "bench-jwks-replay-gateway-1";
+const JWKS_REPLAY_ALL_MERCHANT_ROTATED_KID =
+  "bench-jwks-replay-merchant-2";
+const JWKS_REPLAY_ALL_MERCHANT_URL =
+  "https://merchant.example.com/.well-known/jwks.json";
+const JWKS_REPLAY_ALL_GATEWAY_URL =
+  "https://gateway.example.com/.well-known/jwks.json";
+const JWKS_REPLAY_ALL_NONCE = "bench-jwks-replay-1";
+const JWKS_REPLAY_ALL_FRESH_NONCE = "bench-jwks-replay-fresh-1";
+const JWKS_REPLAY_ALL_CODE = "NONCE_REPLAY";
+const JWKS_REPLAY_ALL_REASON =
+  `nonce replay detected: "${JWKS_REPLAY_ALL_NONCE}" was already seen`;
+const JWKS_REPLAY_ALL_ROTATED_REASON =
+  `keyid "${JWKS_REPLAY_ALL_MERCHANT_KID}" could not be resolved to a key`;
+
+/**
+ * `verifyAllLabels` with per-label `JwksKeyStore`
+ * resolvers plus per-label replay caches steady state:
+ * the bench variant of the #742 test combination, and
+ * the three-way counterpart of the `JwksKeyStore` row
+ * above (per-label store resolution, no replay check)
+ * and the `replayCacheByLabel` row above (per-label
+ * replay stores over static keys). Two ed25519 key
+ * pairs (generated once, outside timing), a dual-label
+ * fixture signed outside timing with `created` pinned
+ * under two pinned keyids (merchant / gateway) and the
+ * same bare nonce in both labels, each party's public
+ * key held in its own offline-restored `JwksKeyStore`
+ * (snapshot restore, fetch implementation throws if
+ * ever called, zero network), and each label checked
+ * against its own `ReplayCache` (injected clock at
+ * the `created` instant). One measured op verifies
+ * the dual twice against fresh per-label caches: the
+ * first call records the nonce in each store (both
+ * labels ok, each returned `keyId` equal to its pinned
+ * value, each cache holding exactly one entry), the
+ * second call is replay-rejected in both stores with
+ * exactly the pinned `NONCE_REPLAY` code and reason
+ * and neither cache growing — the cryptographic check
+ * and the per-label store lookup run before the cache
+ * consultation, so the second presentation still pays
+ * full verification per label plus the cache lookup,
+ * exactly the path a gateway receiver runs to refuse
+ * a replayed multi-party request whose keys rotate on
+ * separate JWKS endpoints. Outside timing, the two
+ * isolation halves are pinned once: a second dual
+ * whose merchant signature reuses the recorded nonce
+ * while the gateway signature carries a fresh nonce
+ * replay-rejects only the merchant label (the fresh
+ * gateway label still verifies, proving one label's
+ * replay never drags the other label's verdict), and
+ * the dual verified against a merchant store whose
+ * snapshot holds only the rotated kid fails only the
+ * merchant label exactly `KEY_RESOLUTION_FAILED` with
+ * the pinned reason while the gateway label still
+ * verifies (proving a retired kid fails closed rather
+ * than falling back to the new key); neither store
+ * resolves the other party's kid. Zero network, zero
+ * randomness in the measured assertions, no wall
+ * clock (every verify instant, every store clock and
+ * every cache clock is injected).
+ */
+function benchmarkVerifyAllJwksReplayCacheByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const { publicKey: rotatedPublic } = generateEd25519KeyPair();
+  const merchantSigned = signRequest(fixture, {
+    keyId: JWKS_REPLAY_ALL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: JWKS_REPLAY_ALL_CREATED,
+    nonce: JWKS_REPLAY_ALL_NONCE,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: JWKS_REPLAY_ALL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: JWKS_REPLAY_ALL_CREATED,
+    nonce: JWKS_REPLAY_ALL_NONCE,
+  });
+  const dualFreshGateway = addSignature(merchantSigned, {
+    keyId: JWKS_REPLAY_ALL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: JWKS_REPLAY_ALL_CREATED,
+    nonce: JWKS_REPLAY_ALL_FRESH_NONCE,
+  });
+  const offlineFetch: JwksFetchImpl = async () => {
+    throw new Error("benchmark must not fetch (offline store)");
+  };
+  const merchantStore = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_REPLAY_ALL_CREATED,
+      keys: [
+        {
+          ...exportPublicKeyJwk(merchantPublic),
+          kid: JWKS_REPLAY_ALL_MERCHANT_KID,
+        },
+      ],
+    },
+    JWKS_REPLAY_ALL_MERCHANT_URL,
+    {
+      fetchImpl: offlineFetch,
+      ttlSec: 300,
+      now: () => JWKS_REPLAY_ALL_CREATED,
+    },
+  );
+  const gatewayStore = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_REPLAY_ALL_CREATED,
+      keys: [
+        {
+          ...exportPublicKeyJwk(gatewayPublic),
+          kid: JWKS_REPLAY_ALL_GATEWAY_KID,
+        },
+      ],
+    },
+    JWKS_REPLAY_ALL_GATEWAY_URL,
+    {
+      fetchImpl: offlineFetch,
+      ttlSec: 300,
+      now: () => JWKS_REPLAY_ALL_CREATED,
+    },
+  );
+  const rotatedMerchantStore = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_REPLAY_ALL_CREATED,
+      keys: [
+        {
+          ...exportPublicKeyJwk(rotatedPublic),
+          kid: JWKS_REPLAY_ALL_MERCHANT_ROTATED_KID,
+        },
+      ],
+    },
+    JWKS_REPLAY_ALL_MERCHANT_URL,
+    {
+      fetchImpl: offlineFetch,
+      ttlSec: 300,
+      now: () => JWKS_REPLAY_ALL_CREATED,
+    },
+  );
+  const assertPair = (where: string): void => {
+    const merchantCache = new ReplayCache({
+      now: () => JWKS_REPLAY_ALL_CREATED,
+    });
+    const gatewayCache = new ReplayCache({
+      now: () => JWKS_REPLAY_ALL_CREATED,
+    });
+    const first = verifyAllLabels(dual, {
+      now: JWKS_REPLAY_ALL_CREATED,
+      keyResolvers: {
+        merchant: merchantStore.resolve,
+        gateway: gatewayStore.resolve,
+      },
+      replayCacheByLabel: {
+        merchant: merchantCache,
+        gateway: gatewayCache,
+      },
+    });
+    if (
+      first.length !== 2 ||
+      first[0].label !== "merchant" ||
+      !first[0].ok ||
+      first[0].keyId !== JWKS_REPLAY_ALL_MERCHANT_KID ||
+      first[1].label !== "gateway" ||
+      !first[1].ok ||
+      first[1].keyId !== JWKS_REPLAY_ALL_GATEWAY_KID ||
+      merchantCache.size !== 1 ||
+      gatewayCache.size !== 1
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels x JwksKeyStore x replayCacheByLabel (${where}, first presentation) gave ${JSON.stringify(first)} (cache sizes ${merchantCache.size}/${gatewayCache.size})`,
+      );
+    const second = verifyAllLabels(dual, {
+      now: JWKS_REPLAY_ALL_CREATED,
+      keyResolvers: {
+        merchant: merchantStore.resolve,
+        gateway: gatewayStore.resolve,
+      },
+      replayCacheByLabel: {
+        merchant: merchantCache,
+        gateway: gatewayCache,
+      },
+    });
+    if (
+      second.length !== 2 ||
+      second[0].label !== "merchant" ||
+      second[0].ok ||
+      second[0].code !== JWKS_REPLAY_ALL_CODE ||
+      second[0].reason !== JWKS_REPLAY_ALL_REASON ||
+      second[1].label !== "gateway" ||
+      second[1].ok ||
+      second[1].code !== JWKS_REPLAY_ALL_CODE ||
+      second[1].reason !== JWKS_REPLAY_ALL_REASON ||
+      merchantCache.size !== 1 ||
+      gatewayCache.size !== 1
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels x JwksKeyStore x replayCacheByLabel (${where}, second presentation) gave ${JSON.stringify(second)} (cache sizes ${merchantCache.size}/${gatewayCache.size})`,
+      );
+  };
+
+  // Outside timing: the per-label pair self-checks
+  // before any timing starts, and neither store
+  // resolves the other party's kid.
+  assertPair("outside timing");
+  if (
+    merchantStore.resolve(JWKS_REPLAY_ALL_GATEWAY_KID) !== undefined ||
+    gatewayStore.resolve(JWKS_REPLAY_ALL_MERCHANT_KID) !== undefined
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x JwksKeyStore x replayCacheByLabel cross-kid isolation broken`,
+    );
+
+  // Outside timing: one label's replay never drags
+  // the other label — the merchant nonce is already
+  // recorded in its own store while the gateway
+  // signature carries a fresh nonce.
+  const replayMerchantCache = new ReplayCache({
+    now: () => JWKS_REPLAY_ALL_CREATED,
+  });
+  const replayGatewayCache = new ReplayCache({
+    now: () => JWKS_REPLAY_ALL_CREATED,
+  });
+  const replayOpts = {
+    now: JWKS_REPLAY_ALL_CREATED,
+    keyResolvers: {
+      merchant: merchantStore.resolve,
+      gateway: gatewayStore.resolve,
+    },
+    replayCacheByLabel: {
+      merchant: replayMerchantCache,
+      gateway: replayGatewayCache,
+    },
+  };
+  const recorded = verifyAllLabels(dual, replayOpts);
+  if (recorded.length !== 2 || recorded.some((r) => !r.ok))
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x JwksKeyStore x replayCacheByLabel replay-isolation setup gave ${JSON.stringify(recorded)}`,
+    );
+  const split = verifyAllLabels(dualFreshGateway, replayOpts);
+  if (
+    split.length !== 2 ||
+    split[0].label !== "merchant" ||
+    split[0].ok ||
+    split[0].code !== JWKS_REPLAY_ALL_CODE ||
+    split[0].reason !== JWKS_REPLAY_ALL_REASON ||
+    split[1].label !== "gateway" ||
+    !split[1].ok ||
+    split[1].keyId !== JWKS_REPLAY_ALL_GATEWAY_KID
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x JwksKeyStore x replayCacheByLabel replay-isolation split gave ${JSON.stringify(split)}`,
+    );
+
+  // Outside timing: a merchant key rotated out of
+  // its store fails only that label, exactly
+  // KEY_RESOLUTION_FAILED, while the gateway label
+  // still verifies.
+  const rotated = verifyAllLabels(dual, {
+    now: JWKS_REPLAY_ALL_CREATED,
+    keyResolvers: {
+      merchant: rotatedMerchantStore.resolve,
+      gateway: gatewayStore.resolve,
+    },
+  });
+  if (
+    rotated.length !== 2 ||
+    rotated[0].label !== "merchant" ||
+    rotated[0].ok ||
+    rotated[0].code !== "KEY_RESOLUTION_FAILED" ||
+    rotated[0].reason !== JWKS_REPLAY_ALL_ROTATED_REASON ||
+    rotated[0].keyId !== JWKS_REPLAY_ALL_MERCHANT_KID ||
+    rotated[1].label !== "gateway" ||
+    !rotated[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x JwksKeyStore x replayCacheByLabel rotated dual gave ${JSON.stringify(rotated)}`,
+    );
+
+  return measure(() => {
+    assertPair("measured pass");
+  }, ITERATIONS);
+}
+
 const EXPECTED_KEY_IDS_REQUIRE_TAG_CREATED = 1_700_000_000;
 const EXPECTED_KEY_IDS_REQUIRE_TAG_MERCHANT_KID =
   "bench-expected-keyids-require-tag-merchant-1";
@@ -13008,6 +13305,11 @@ results.push({
   alg: "verifyAllLabels replayCacheByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllReplayCacheByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels JwksKeyStore replayCacheByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllJwksReplayCacheByLabel(),
 });
 results.push({
   alg: "verifyAllLabels expectedKeyIds requireNonceByLabel (2 labels)",
