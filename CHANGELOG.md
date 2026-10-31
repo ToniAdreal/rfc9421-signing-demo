@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` x `JwksKeyStore` x
+  `expiredToleranceSecByLabel` (backlog #762):
+  `test/verifyAllLabelsJwksExpiredToleranceByLabel.test.ts` adds 4
+  cases — a dual-signed request whose signatures both expired 60s
+  ago, each label's key resolved from its own offline-restored
+  `JwksKeyStore`, verifies merchant `EXPIRED` at a 0s tolerance
+  while gateway passes at 120s; expiry exactly at a 60s per-label
+  tolerance passes through the JWKS resolvers; a JWKS refresh that
+  re-publishes both signing kids leaves both tolerance verdicts
+  unchanged (refresh does not reset the tolerance clock); and a
+  refresh that retires the merchant kid fails that label with
+  `KEY_RESOLUTION_FAILED` even at a generous 120s tolerance while
+  the gateway label still passes. No source change: the combination
+  was untested, not unimplemented; it is the tolerance counterpart
+  of the `verifyAllLabelsJwksKeyResolvers` coverage and the JWKS
+  counterpart of the `expiredToleranceSecByLabel` coverage.
+
 - Test coverage for `verifyAllLabels` x `fromNodeRequest` x
   `JwksKeyStore` (backlog #759):
   `test/nodeHttpRequestVerifyAllLabelsJwks.test.ts` adds 4 cases —
