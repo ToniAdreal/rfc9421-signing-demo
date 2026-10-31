@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` x `fromNodeRequest`
+  dual-signed requests (backlog #747):
+  `test/nodeHttpRequestVerifyAllLabels.test.ts` adds 6 cases — a
+  dual-signed request verifies both labels through the adapter with
+  each label's pinned keyid echoed, a real loopback server receives a
+  dual-signed POST and verifies both labels after buffering the body,
+  a tampered gateway signature fails only the gateway label with
+  `SIGNATURE_MISMATCH` while merchant still verifies, a gateway label
+  minted over a different body fails alone the same way (the wire
+  carries a single `content-digest` header, so per-label divergence
+  is built in signing history, as in the #730 case), each label is
+  checked against its own key (a stranger gateway key fails only the
+  gateway label), and the single-label `verifyRequest` control path
+  through the adapter is unchanged. No source change: the combination
+  was untested, not unimplemented; the request side is the symmetric
+  counterpart of the #737 `fromNodeResponse` coverage.
+
 - Benchmark row for `fromNodeResponse` x `verifyAllLabels`
   dual-signed responses (backlog #743): `bench/bench.ts` gains
   `benchmarkFromNodeResponseVerifyAllLabels`, measuring the
