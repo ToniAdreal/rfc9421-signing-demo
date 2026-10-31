@@ -10762,6 +10762,200 @@ async function benchmarkFromNodeRequestVerifyAllLabels(): Promise<number> {
 }
 
 /**
+ * Dual-signed request adapter + dual-label trailer-bound verification
+ * steady state: the bench variant of the #757 test coverage, and the
+ * combination of the `benchmarkFromNodeRequestVerifyAllLabels` dual
+ * row and the `benchmarkVerifyNodeRequestTrailer` trailer row. A real
+ * loopback server receives one dual-signed POST (trailer label
+ * first, plain label appended): the trailer label covers `@method` +
+ * `x-checksum;tr`, the plain label covers `@method` only, over the
+ * same body; the trailer travels as a real HTTP trailer (chunked
+ * request + `addTrailers`, mixed-case name, so the measured pass
+ * also pays the adapter's lowercasing and raw-trailer precedence).
+ * The timed loop re-measures only the server-side work
+ * (`fromNodeRequest` + `verifyAllLabels`) over that captured live
+ * request — re-measuring the network per iteration would time TCP
+ * loopback, not the adapter, and a live `IncomingMessage` is inert
+ * after `end`, so reusing it across passes is sound (the adapter
+ * builds a fresh `RequestLike` per call and never mutates the
+ * message). Self-checks on every measured pass pin both labels ok
+ * with their pinned keyids, the trailer label's `x-checksum;tr`
+ * coverage, and the plain label NOT claiming trailer coverage.
+ * Asserted outside timing: a forged trailer value fails only the
+ * trailer label with `SIGNATURE_MISMATCH` while the plain label
+ * still verifies, and a request received without its trailers fails
+ * only the trailer label with `SIGNATURE_BASE_BUILD_FAILED` while
+ * the plain label still verifies.
+ */
+const DUAL_TR_CREATED = 1_700_000_000;
+const DUAL_TR_NOW = DUAL_TR_CREATED + 60;
+const DUAL_TR_BODY = "hello";
+const DUAL_TR_TRAILER_VALUE = "trailer-value";
+const DUAL_TR_TRAILER_KID = "trailer-key";
+const DUAL_TR_PLAIN_KID = "plain-key";
+
+async function benchmarkFromNodeRequestVerifyAllLabelsTrailers(): Promise<number> {
+  const {
+    publicKey: trailerPublic,
+    privateKey: trailerPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: plainPublic, privateKey: plainPrivate } =
+    generateEd25519KeyPair();
+  const keys = { trailer: trailerPublic, plain: plainPublic };
+  let captured: { req: IncomingRequestLike; body: Buffer } | null = null;
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      captured = {
+        req: req as unknown as IncomingRequestLike,
+        body: Buffer.concat(chunks),
+      };
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("ok");
+    });
+    req.on("error", () => undefined);
+  });
+  try {
+    const { req, body } = await new Promise<{
+      req: IncomingRequestLike;
+      body: Buffer;
+    }>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const port = (server.address() as AddressInfo).port;
+        const url = `http://127.0.0.1:${port}/webhook`;
+        const trailerSigned = signRequest(
+          {
+            method: "POST",
+            url,
+            headers: { "content-type": "application/json" },
+            trailers: { "x-checksum": DUAL_TR_TRAILER_VALUE },
+            body: DUAL_TR_BODY,
+          },
+          {
+            keyId: DUAL_TR_TRAILER_KID,
+            alg: "ed25519",
+            key: trailerPrivate,
+            created: DUAL_TR_CREATED,
+            label: "trailer",
+            coveredComponents: ["@method", "x-checksum;tr"],
+          },
+        );
+        const dual = addSignature(trailerSigned, {
+          keyId: DUAL_TR_PLAIN_KID,
+          alg: "ed25519",
+          key: plainPrivate,
+          created: DUAL_TR_CREATED,
+          label: "plain",
+          coveredComponents: ["@method"],
+        });
+        const client = request(
+          url,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "transfer-encoding": "chunked",
+              "signature-input": dual.headers["signature-input"] as string,
+              signature: dual.headers["signature"] as string,
+              // No content-digest: the pinned covered components are
+              // `@method` + `x-checksum;tr` / `@method`, so signRequest
+              // emits no digest header (same wire shape as the #757
+              // test, which sends only the two signature headers).
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => {
+              if (captured === null)
+                reject(
+                  new Error(
+                    "benchmark setup failed: loopback request was not captured",
+                  ),
+                );
+              else resolve(captured);
+            });
+          },
+        );
+        client.on("error", reject);
+        // Chunked write, not end(body): end(body) lets Node set a
+        // Content-Length, which disables trailers entirely.
+        client.write(DUAL_TR_BODY);
+        client.addTrailers({ "X-Checksum": DUAL_TR_TRAILER_VALUE });
+        client.end();
+      });
+    });
+    const assertDualTrailerOk = (where: string): void => {
+      const adapted = fromNodeRequest(req, body);
+      if (adapted.trailers?.["x-checksum"] !== DUAL_TR_TRAILER_VALUE)
+        throw new Error(
+          `benchmark self-check failed: fromNodeRequest trailer normalization (${where}) gave ${JSON.stringify(adapted.trailers)}`,
+        );
+      const results = verifyAllLabels(adapted, { keys, now: DUAL_TR_NOW });
+      if (
+        results.length !== 2 ||
+        results[0].label !== "trailer" ||
+        !results[0].ok ||
+        results[0].keyId !== DUAL_TR_TRAILER_KID ||
+        !results[0].coveredComponents?.includes("x-checksum;tr") ||
+        results[1].label !== "plain" ||
+        !results[1].ok ||
+        results[1].keyId !== DUAL_TR_PLAIN_KID ||
+        results[1].coveredComponents?.includes("x-checksum;tr")
+      )
+        throw new Error(
+          `benchmark self-check failed: fromNodeRequest x verifyAllLabels x trailers (${where}) gave ${JSON.stringify(results)}`,
+        );
+    };
+    assertDualTrailerOk("outside timing");
+    const baseDouble: IncomingRequestLike = {
+      method: req.method,
+      url: req.url,
+      socket: { encrypted: false },
+      headers: req.headers,
+    };
+    const forgedResults = verifyAllLabels(
+      fromNodeRequest(
+        {
+          ...baseDouble,
+          trailers: { "x-checksum": "forged-value" },
+        },
+        body,
+      ),
+      { keys, now: DUAL_TR_NOW },
+    );
+    if (
+      forgedResults.length !== 2 ||
+      forgedResults[0].ok ||
+      forgedResults[0].code !== "SIGNATURE_MISMATCH" ||
+      !forgedResults[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: forged trailer gave ${JSON.stringify(forgedResults)} (expected trailer-only SIGNATURE_MISMATCH)`,
+      );
+    const droppedResults = verifyAllLabels(
+      fromNodeRequest(baseDouble, body),
+      { keys, now: DUAL_TR_NOW },
+    );
+    if (
+      droppedResults.length !== 2 ||
+      droppedResults[0].ok ||
+      droppedResults[0].code !== "SIGNATURE_BASE_BUILD_FAILED" ||
+      !droppedResults[1].ok
+    )
+      throw new Error(
+        `benchmark self-check failed: dropped trailer gave ${JSON.stringify(droppedResults)} (expected trailer-only SIGNATURE_BASE_BUILD_FAILED)`,
+      );
+    return measure(() => {
+      assertDualTrailerOk("timed");
+    }, ITERATIONS);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/**
  * Per-curve JWK round-trip steady state: for one key shape, a measured
  * call runs `exportPublicKeyJwk*` on a fixed public key, pushes the
  * JWK through a JSON stringify/parse round trip (the wire form a JWKS
@@ -13411,6 +13605,11 @@ results.push({
   alg: "fromNodeRequest + verifyAllLabels (loopback, 2 labels)",
   op: "adapt+verify",
   ops: await benchmarkFromNodeRequestVerifyAllLabels(),
+});
+results.push({
+  alg: "fromNodeRequest + verifyAllLabels (;tr trailer, loopback, 2 labels)",
+  op: "adapt+verify",
+  ops: await benchmarkFromNodeRequestVerifyAllLabelsTrailers(),
 });
 results.push({
   alg: "JWK round-trip P-256",

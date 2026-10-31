@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for `fromNodeRequest` x `verifyAllLabels` x
+  trailers (backlog #773): `bench/bench.ts` adds
+  `benchmarkFromNodeRequestVerifyAllLabelsTrailers` — a real
+  loopback dual-signed POST (trailer label covering `@method` +
+  `x-checksum;tr`, plain label covering `@method` only) whose
+  trailer travels as a genuine HTTP trailer (chunked request +
+  `addTrailers`, mixed-case name, so the measured pass also pays
+  the adapter's lowercasing and raw-trailer precedence); every
+  measured pass re-adapts the captured live request and pins
+  both labels ok with their pinned keyids, the trailer label's
+  `x-checksum;tr` coverage, and the plain label not claiming
+  trailer coverage. Asserted outside timing: a forged trailer
+  fails only the trailer label with `SIGNATURE_MISMATCH` while
+  the plain label still verifies, and a request received without
+  its trailers fails only the trailer label with
+  `SIGNATURE_BASE_BUILD_FAILED` while the plain label still
+  verifies. The README Benchmarks table is refreshed from this
+  run. No source change: the combination was benched, not
+  unimplemented; it is the bench variant of the #757 test
+  coverage and the combination of the dual-label request row
+  and the single-label trailer row.
+
 - Test coverage for `verifyAllLabels` x `fromNodeRequest` x
   trailers x `JwksKeyStore` (backlog #769):
   `test/nodeHttpRequestVerifyAllLabelsTrailersJwks.test.ts` adds 4
