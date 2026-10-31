@@ -733,7 +733,7 @@ import {
   type KeyObject,
 } from "node:crypto";
 import { cpus } from "node:os";
-import { createServer, get, type IncomingMessage } from "node:http";
+import { createServer, get, request, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
   addSignature,
@@ -10304,6 +10304,167 @@ async function benchmarkFromNodeResponseVerifyAllLabels(): Promise<number> {
 }
 
 /**
+ * Dual-signed request adapter + dual-label verification steady state:
+ * the request-side mirror of `benchmarkFromNodeResponseVerifyAllLabels`
+ * above, and the bench variant of the #747 test coverage. A real
+ * loopback server receives one dual-signed POST (merchant first,
+ * gateway appended, both labels covering the default components over
+ * the same JSON body), buffers the body, and answers 200; the timed
+ * loop then re-measures only the server-side work (`fromNodeRequest`
+ * + `verifyAllLabels`) over that captured live request — re-measuring
+ * the network per iteration would time TCP loopback, not the adapter,
+ * and a live `IncomingMessage` is inert after `end`, so reusing it
+ * across passes is sound (the adapter builds a fresh `RequestLike`
+ * per call and never mutates the message). Self-checks on every
+ * measured pass pin both labels ok with their pinned keyids.
+ * Asserted outside timing: flipping the first base64 character of
+ * the gateway label's signature fails only that label with
+ * `SIGNATURE_MISMATCH` while merchant still verifies.
+ */
+const DUAL_REQ_CREATED = 1_700_000_000;
+const DUAL_REQ_NOW = DUAL_REQ_CREATED + 60;
+const DUAL_REQ_BODY = JSON.stringify({ amount: 100, currency: "USD" });
+const DUAL_REQ_MERCHANT_KID = "merchant-key";
+const DUAL_REQ_GATEWAY_KID = "gateway-key";
+
+async function benchmarkFromNodeRequestVerifyAllLabels(): Promise<number> {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  let captured: { req: IncomingRequestLike; body: Buffer } | null = null;
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      captured = {
+        req: req as unknown as IncomingRequestLike,
+        body: Buffer.concat(chunks),
+      };
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("ok");
+    });
+    req.on("error", () => undefined);
+  });
+  try {
+    const { req, body } = await new Promise<{
+      req: IncomingRequestLike;
+      body: Buffer;
+    }>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const port = (server.address() as AddressInfo).port;
+        const url = `http://127.0.0.1:${port}/webhook?event=push`;
+        const merchantSigned = signRequest(
+          {
+            method: "POST",
+            url,
+            headers: { "content-type": "application/json" },
+            body: DUAL_REQ_BODY,
+          },
+          {
+            keyId: DUAL_REQ_MERCHANT_KID,
+            alg: "ed25519",
+            key: merchantPrivate,
+            created: DUAL_REQ_CREATED,
+            label: "merchant",
+          },
+        );
+        const dual = addSignature(merchantSigned, {
+          keyId: DUAL_REQ_GATEWAY_KID,
+          alg: "ed25519",
+          key: gatewayPrivate,
+          created: DUAL_REQ_CREATED,
+          label: "gateway",
+        });
+        const client = request(
+          url,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "signature-input": dual.headers["signature-input"] as string,
+              signature: dual.headers["signature"] as string,
+              "content-digest": dual.headers["content-digest"] as string,
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => {
+              if (captured === null)
+                reject(
+                  new Error(
+                    "benchmark setup failed: loopback request was not captured",
+                  ),
+                );
+              else resolve(captured);
+            });
+          },
+        );
+        client.on("error", reject);
+        client.end(DUAL_REQ_BODY);
+      });
+    });
+    const assertDualOk = (where: string): void => {
+      const results = verifyAllLabels(fromNodeRequest(req, body), {
+        keys,
+        now: DUAL_REQ_NOW,
+      });
+      if (
+        results.length !== 2 ||
+        results[0].label !== "merchant" ||
+        !results[0].ok ||
+        results[0].keyId !== DUAL_REQ_MERCHANT_KID ||
+        results[1].label !== "gateway" ||
+        !results[1].ok ||
+        results[1].keyId !== DUAL_REQ_GATEWAY_KID
+      )
+        throw new Error(
+          `benchmark self-check failed: fromNodeRequest x verifyAllLabels (${where}) gave ${JSON.stringify(results)}`,
+        );
+    };
+    assertDualOk("outside timing");
+    const rawSignature = req.headers["signature"] as string;
+    const tamperedSignature = rawSignature
+      .split(", ")
+      .map((entry) => {
+        if (!entry.startsWith("gateway=:")) return entry;
+        const inner = entry.slice("gateway".length + 2, -1);
+        const flipped = (inner[0] === "A" ? "B" : "A") + inner.slice(1);
+        return `gateway=:${flipped}:`;
+      })
+      .join(", ");
+    const tamperedIncoming: IncomingRequestLike = {
+      method: req.method,
+      url: req.url,
+      socket: { encrypted: false },
+      headers: { ...req.headers, signature: tamperedSignature },
+    };
+    const tamperedResults = verifyAllLabels(
+      fromNodeRequest(tamperedIncoming, body),
+      { keys, now: DUAL_REQ_NOW },
+    );
+    if (
+      tamperedResults.length !== 2 ||
+      !tamperedResults[0].ok ||
+      tamperedResults[1].ok ||
+      tamperedResults[1].code !== "SIGNATURE_MISMATCH"
+    )
+      throw new Error(
+        `benchmark self-check failed: tampered dual request gave ${JSON.stringify(tamperedResults)} (expected gateway-only SIGNATURE_MISMATCH)`,
+      );
+    return measure(() => {
+      assertDualOk("timed");
+    }, ITERATIONS);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/**
  * Per-curve JWK round-trip steady state: for one key shape, a measured
  * call runs `exportPublicKeyJwk*` on a fixed public key, pushes the
  * JWK through a JSON stringify/parse round trip (the wire form a JWKS
@@ -12943,6 +13104,11 @@ results.push({
   alg: "fromNodeResponse + verifyAllLabels (@status, loopback, 2 labels)",
   op: "adapt+verify",
   ops: await benchmarkFromNodeResponseVerifyAllLabels(),
+});
+results.push({
+  alg: "fromNodeRequest + verifyAllLabels (loopback, 2 labels)",
+  op: "adapt+verify",
+  ops: await benchmarkFromNodeRequestVerifyAllLabels(),
 });
 results.push({
   alg: "JWK round-trip P-256",

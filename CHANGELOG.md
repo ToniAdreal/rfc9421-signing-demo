@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark for `fromNodeRequest` x `verifyAllLabels` dual-signed
+  requests (backlog #752): `bench/bench.ts` adds
+  `benchmarkFromNodeRequestVerifyAllLabels` — a real loopback server
+  receives one dual-signed POST (merchant first, gateway appended),
+  buffers the body, and answers 200; each measured op re-adapts the
+  captured live request with `fromNodeRequest` and verifies both
+  labels with `verifyAllLabels`, self-checked every pass against
+  both labels ok with their pinned keyids, with a tampered gateway
+  signature pinned outside timing to fail only that label with
+  `SIGNATURE_MISMATCH` while merchant still verifies. The new row
+  measures ~3,038 ops/sec (329.12 µs/op) on this run (Node v24.22.1);
+  the README Benchmarks table is refreshed from the same run
+  (98 → 99 rows) and the intro list gains dual-label request
+  verification. No source change: the combination was unmeasured,
+  not unimplemented; it is the bench variant of the #747 test
+  coverage and the request-side mirror of the #743 dual-signed
+  response row.
+
 - Test coverage for `verifyAllLabels` x content-digest x
   `JwksKeyStore` per-label resolvers (backlog #751):
   `test/verifyAllLabelsContentDigestJwks.test.ts` adds 6 cases —
