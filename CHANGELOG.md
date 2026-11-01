@@ -12,6 +12,19 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - Test coverage for `verifyAllLabels` x `fromNodeResponse` x
+  `replayCacheByLabel` (backlog #782):
+  `test/nodeHttpResponseVerifyAllLabelsReplayCache.test.ts` adds
+  4 cases — a dual-signed response first verifies both labels
+  through `fromNodeResponse` and records the shared nonce in each
+  label's own store; re-presenting the same response replays on
+  both labels with `NONCE_REPLAY`; reusing only the merchant
+  nonce fails only that label while the gateway label with a
+  fresh nonce still verifies; and a re-signed response over a
+  new body is first-seen only with fresh nonces, since replay
+  identity is the nonce, not the body. No source change: the
+  combination was untested, not unimplemented.
+
+- Test coverage for `verifyAllLabels` x `fromNodeResponse` x
   trailers x JwksKeyStore (backlog #781):
   `test/nodeHttpResponseVerifyAllLabelsTrailersJwks.test.ts` adds
   4 cases — a dual-signed response verifies both labels through
