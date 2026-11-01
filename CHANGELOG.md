@@ -12,6 +12,23 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - Test coverage for `verifyAllLabels` x `fromNodeResponse` x
+  JwksKeyStore (backlog #780):
+  `test/nodeHttpResponseVerifyAllLabelsJwks.test.ts` adds 4 cases —
+  a dual-signed response verifies both labels through
+  `fromNodeResponse`, each label resolved from its own
+  offline-restored JwksKeyStore; a rotation that retires one kid
+  fails only that label with `KEY_RESOLUTION_FAILED`; a label
+  minted over a different body fails alone with
+  `SIGNATURE_MISMATCH` (signing-history divergence); and a
+  post-signing body swap fails both content-digest labels with
+  `BODY_DIGEST_MISMATCH`, because the verifier's body check runs
+  whenever a wire content-digest header is present — the
+  per-label isolation form is the divergence case, not the swap.
+  No source change: the combination was untested, not
+  unimplemented; it is the response-side mirror of the #759
+  request-side JWKS coverage.
+
+- Test coverage for `verifyAllLabels` x `fromNodeResponse` x
   trailers (backlog #777):
   `test/nodeHttpResponseVerifyAllLabelsTrailers.test.ts` adds 5 cases —
   a dual-signed response whose trailer label covers `@status` +
