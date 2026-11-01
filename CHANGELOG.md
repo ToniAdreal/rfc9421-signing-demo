@@ -12,6 +12,21 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - Test coverage for `verifyAllLabels` x `fromNodeResponse` x
+  trailers x JwksKeyStore (backlog #781):
+  `test/nodeHttpResponseVerifyAllLabelsTrailersJwks.test.ts` adds
+  4 cases — a dual-signed response verifies both labels through
+  `fromNodeResponse`, the merchant label covering `@status` +
+  `x-checksum;tr` and resolved from its own offline-restored
+  JwksKeyStore while the gateway label covers `@status` only
+  from its own store; a tampered trailer fails only the merchant
+  label with `SIGNATURE_MISMATCH`; a rotation that retires the
+  merchant kid fails only that label with
+  `KEY_RESOLUTION_FAILED`; and the same pair verifies through
+  `rawTrailers`. No source change: the combination was untested,
+  not unimplemented; it is the response-side mirror of the
+  request-side four-way coverage.
+
+- Test coverage for `verifyAllLabels` x `fromNodeResponse` x
   JwksKeyStore (backlog #780):
   `test/nodeHttpResponseVerifyAllLabelsJwks.test.ts` adds 4 cases —
   a dual-signed response verifies both labels through
