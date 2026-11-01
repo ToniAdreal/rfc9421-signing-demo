@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` x trailers x
+  `replayCacheByLabel` (backlog #793):
+  `test/verifyAllLabelsTrailersReplayCache.test.ts` adds 5 cases —
+  a dual-signed response verifies both labels through
+  `fromNodeResponse`, each binding its own `;tr` trailer and
+  recording its nonce in its own store (exactly 1 entry each);
+  re-presenting the same response replays on both labels with
+  `NONCE_REPLAY`; reusing only one label's nonce fails only that
+  label; tampering one trailer fails only that label with
+  `SIGNATURE_MISMATCH` while the other label still verifies, and
+  the failed presentation is never recorded (a corrected
+  re-presentation then passes the tampered label but replays the
+  other); and tampering the other trailer is symmetric. No
+  source change: the combination was untested, not
+  unimplemented.
+
 - Test coverage for `JwksKeyStore` fetch retries x `requireHttps`
   (backlog #785): `test/jwksFetchRetryHttps.test.ts` adds 3 cases
   — an `http:` endpoint with `requireHttps: true` and
