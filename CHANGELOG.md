@@ -12,6 +12,25 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - Test coverage for `verifyAllLabels` x `fromNodeResponse` x
+  expected tags per label (backlog #784):
+  `test/nodeHttpResponseVerifyAllLabelsExpectedTags.test.ts`
+  adds 7 cases — a dual-signed response verifies both labels
+  through `fromNodeResponse`, each pinned to its own
+  `expectedTags` entry; one label's tag mismatch fails only
+  that label with `TAG_MISMATCH`; a tagless label fails only
+  itself with `TAG_MISMATCH` when the map pins it; tags
+  swapped between labels fail both labels with
+  `TAG_MISMATCH` (a cross-protocol transplant is rejected by
+  the pins, not the signatures, since tag pinning is checked
+  after crypto verification); adapter and direct paths agree
+  on a mixed pass/fail pair; a label absent from the map
+  stays unchecked through the adapter when no global
+  `expectedTag` is set; and the global `expectedTag`
+  fallback applies through the adapter to labels the map
+  does not name. No source change: the combination was
+  untested, not unimplemented.
+
+- Test coverage for `verifyAllLabels` x `fromNodeResponse` x
   keyid pinning per label (backlog #783):
   `test/nodeHttpResponseVerifyAllLabelsKeyidPinning.test.ts` adds
   5 cases — a dual-signed response verifies both labels through
