@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` mixed per-label key sources
+  (backlog #795): `test/verifyAllLabelsJwksCandidateKeys.test.ts`
+  adds 4 cases — a dual-signed request verifies with the merchant
+  label resolved through an offline-restored `JwksKeyStore` and the
+  gateway label verified against its own `candidateKeysByLabel`
+  rotation list (old + new HMAC secrets, with `keyId`/`alg` echoed
+  per label); the gateway still verifies with its old secret during
+  the rotation window; after a merchant rotation refresh retires
+  `merchant-key-1`, only the merchant label fails with
+  `KEY_RESOLUTION_FAILED` while the gateway label still verifies
+  (no silent fallback to the rotated key); and pairing a resolver
+  with candidate keys on the same label throws the
+  mutual-exclusion configuration error. No source change: the
+  combination was untested, not unimplemented.
+
 - Test coverage for `;sf` structured-field components x
   `JwksKeyStore` key discovery (backlog #794):
   `test/sfComponentJwks.test.ts` adds 5 cases — a dictionary
