@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `verifyAllLabels` x `fromNodeResponse` x
+  trailers (backlog #777):
+  `test/nodeHttpResponseVerifyAllLabelsTrailers.test.ts` adds 5 cases —
+  a dual-signed response whose trailer label covers `@status` +
+  `x-checksum;tr` and whose plain label covers `@status` only
+  verifies both labels through `fromNodeResponse`, with a
+  mixed-case trailer name lowercased by the adapter; a tampered
+  trailer fails only the trailer label with `SIGNATURE_MISMATCH`;
+  a missing trailer fails only the trailer label with
+  `SIGNATURE_BASE_BUILD_FAILED`; the same pair verifies through
+  `rawTrailers`; and each label is checked against its own key.
+  No source change: the combination was untested, not
+  unimplemented; it is the response-side mirror of the #757
+  request-side trailers coverage.
+
 - Test coverage for `verifyAllLabels` x `replayCacheByLabel` x
   sha-512 content-digest (backlog #775):
   `test/verifyAllLabelsReplayCacheDigest.test.ts` adds 4 cases — a
