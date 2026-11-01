@@ -12,6 +12,22 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - Test coverage for `verifyAllLabels` x `fromNodeResponse` x
+  keyid pinning per label (backlog #783):
+  `test/nodeHttpResponseVerifyAllLabelsKeyidPinning.test.ts` adds
+  5 cases — a dual-signed response verifies both labels through
+  `fromNodeResponse`, each pinned to its own `expectedKeyIds`
+  entry; a label re-signed under a rotated kid fails only that
+  label with `KEYID_MISMATCH` (the pin, not the signature,
+  rejects it, since pinning is checked after crypto
+  verification); a wrong pin on one label fails only that
+  label; a label missing from the pin map stays unchecked on
+  both the adapter and the direct path, even after its kid
+  rotates; and the global `expectedKeyId` fallback applies
+  through the adapter to labels the map does not name. No
+  source change: the combination was untested, not
+  unimplemented.
+
+- Test coverage for `verifyAllLabels` x `fromNodeResponse` x
   `replayCacheByLabel` (backlog #782):
   `test/nodeHttpResponseVerifyAllLabelsReplayCache.test.ts` adds
   4 cases — a dual-signed response first verifies both labels
