@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `JwksKeyStore` fetch retries x `requireHttps`
+  (backlog #785): `test/jwksFetchRetryHttps.test.ts` adds 3 cases
+  — an `http:` endpoint with `requireHttps: true` and
+  `fetchRetries: 3` is rejected at construction with the
+  `requireHttps` error before any fetch is attempted (0 fetches,
+  no backoff sleep: the rejection is terminal, never retried;
+  this corrects the backlog's "fetch exactly 1" premise, since
+  #554 ships `requireHttps` as a construction-time check, not a
+  refresh-time one); an `https:` endpoint answering 500, 500,
+  then 200 succeeds on the third fetch with `fetchRetries: 2`
+  and two recorded backoff sleeps; and an `https:` endpoint
+  answering persistent 500 exhausts its retries after exactly
+  3 fetches and throws while the previously seeded snapshot,
+  `lastRefreshedAt`, and refresh counters stay untouched. No
+  source change: the combination was untested, not
+  unimplemented.
+
 - Test coverage for `verifyAllLabels` x `fromNodeResponse` x
   expected tags per label (backlog #784):
   `test/nodeHttpResponseVerifyAllLabelsExpectedTags.test.ts`
