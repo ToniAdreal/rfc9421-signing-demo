@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage for `;sf` structured-field components x
+  `JwksKeyStore` key discovery (backlog #794):
+  `test/sfComponentJwks.test.ts` adds 5 cases — a dictionary
+  component (`a=1, b=2;x=1`) covered with `;sf` verifies through
+  an offline-restored `JwksKeyStore` (key resolved by `kid`, with
+  `keyId`/`alg` echoed); re-spacing the dictionary wire value in
+  either direction still verifies, because `;sf` signs the strict
+  serialization, not the raw bytes; tampering a member value
+  (`b=2` -> `b=3`) or a parameter (`x=1` -> `x=2`) fails with
+  `SIGNATURE_MISMATCH`; after a rotation refresh retires the kid,
+  the same signature fails with `KEY_RESOLUTION_FAILED`, never a
+  silent fallback to the new key; and a snapshot past its TTL
+  still resolves and verifies with zero fetches attempted
+  (stale-but-serving). No source change: the combination was
+  untested, not unimplemented.
+
 - Test coverage for `verifyAllLabels` x trailers x
   `replayCacheByLabel` (backlog #793):
   `test/verifyAllLabelsTrailersReplayCache.test.ts` adds 5 cases —
