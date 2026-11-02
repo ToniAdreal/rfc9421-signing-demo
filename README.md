@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1282 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1292 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1115,6 +1115,10 @@ example above calls the adapter.
   `keys`/`key` cannot be combined with either resolver or with any
   candidate list (configuration error). Duplicate labels are verified once (first occurrence); a
   request with no `Signature-Input` header yields an empty array.
+  First occurrence wins in full: the second occurrence's covered
+  components and signature bytes are never verified, so tampering with
+  them alone cannot change the verdict (and a duplicate label on the
+  wire is not rejected, unlike `addSignature` at sign time).
   A repeated signature-input parameter (e.g. two `created=` values, case
   variants included) is ambiguous authenticated input and is rejected as
   `MALFORMED_SIGNATURE_INPUT` before any crypto runs — the parser never
@@ -3357,7 +3361,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1282 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1292 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

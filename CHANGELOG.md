@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Test coverage pinning duplicate signature-input label first-wins
+  semantics (backlog #827): `test/duplicateLabel.test.ts` adds 10
+  cases and changes no source code — `listSignatureLabels` returns a
+  duplicate label once, `parseSignatureInput`/`parseSignatureField`
+  return the first member's components, params and signature bytes,
+  `verifyAllLabels` and `verifyRequest` return a single verdict
+  decided by the first member, corrupting or retargeting only the
+  second member leaves the verdict unchanged, corrupting the first
+  member fails with `SIGNATURE_MISMATCH`, a third occurrence still
+  converges to one result, and `addSignature` still refuses a
+  duplicate label at sign time. The README multi-signature section
+  now states the full first-wins rule explicitly: a duplicate label
+  on the wire is not rejected, and the later occurrence is never
+  verified.
+
 - Benchmark row for `verifyAllLabels` x `;key` x `JwksKeyStore`
   per-label resolvers (backlog #822): `bench/bench.ts` gains
   `benchmarkVerifyAllJwksKeyComponents`, measuring `verifyAllLabels`
