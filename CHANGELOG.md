@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore` validates a JWKS entry's declared `alg` against its
+  key family (backlog #830): `src/jwks.ts` gains `assertJwkEntryAlg`,
+  run in `fetchAndSwap` before import — OKP only accepts `EdDSA`,
+  P-256 only `ES256`, P-384 only `ES384`, P-521 only `ES512`, and RSA
+  only `PS512` or `RS256`; a mismatch or a non-string `alg` makes
+  `refresh()` throw and leaves the previous snapshot untouched, while
+  an entry with no `alg` is unchecked and snapshot restore is
+  unaffected (snapshots carry no `alg`). `test/jwksAlg.test.ts` adds
+  12 cases: correct `alg` for all five families (plus RSA `RS256`),
+  one mismatch per family with the old snapshot untouched, non-string
+  `alg`, missing-`alg` regression, snapshot-restore round-trip,
+  kid-less mismatched entries still skipped, and unknown `kty`
+  still failing as unsupported. The README JWKS section documents
+  the mapping table and the missing-`alg` limitation.
+
 - Test coverage pinning duplicate signature-input label first-wins
   semantics (backlog #827): `test/duplicateLabel.test.ts` adds 10
   cases and changes no source code — `listSignatureLabels` returns a

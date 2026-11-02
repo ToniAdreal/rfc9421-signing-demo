@@ -217,6 +217,60 @@ function importJwkEntry(entry: unknown): KeyObject {
 }
 
 /**
+ * The `alg` values this library's verify side accepts for each JWKS
+ * key family, in JWA naming: an ed25519 (OKP) key is `EdDSA`, the
+ * three NIST curves are `ES256` / `ES384` / `ES512`, and an RSA key
+ * is `PS512` (rsa-pss-sha512) or `RS256` (rsa-v1_5-sha256) — the two
+ * RSA algorithms the verify side supports.
+ *
+ * Returns the expected list for a family the importers recognize, or
+ * `null` for an unknown `kty` / `crv`, so an unrecognized family keeps
+ * its existing "unsupported kty/crv" error from `importJwkEntry`
+ * instead of gaining a second, misleading alg error.
+ */
+function expectedJwkAlgs(entry: Record<string, unknown>): string[] | null {
+  const kty = entry["kty"];
+  if (kty === "OKP") return ["EdDSA"];
+  if (kty === "RSA") return ["PS512", "RS256"];
+  if (kty === "EC") {
+    const crv = entry["crv"];
+    if (crv === "P-256") return ["ES256"];
+    if (crv === "P-384") return ["ES384"];
+    if (crv === "P-521") return ["ES512"];
+  }
+  return null;
+}
+
+/**
+ * Check a JWKS entry's self-declared `alg` against its key family,
+ * used only by the `refresh()` path (see `fetchAndSwap`). An entry
+ * carrying no `alg` is unchecked — the field is optional in a JWKS
+ * document, and the verify side keys off the signature-input `alg`
+ * anyway — but an entry that *does* declare one must agree with its
+ * key: a publisher labeling an ed25519 key `ES256`, or a P-256 key
+ * `EdDSA`, is either misconfigured or hostile, and silently
+ * importing it would leave the mismatch for a later reader to
+ * notice. A non-string `alg` is likewise rejected, not coerced.
+ * Throws a descriptive `Error`; `fetchAndSwap` wraps it with the
+ * entry's `kid` and leaves the previous snapshot untouched.
+ */
+function assertJwkEntryAlg(entry: Record<string, unknown>): void {
+  const alg = entry["alg"];
+  if (alg === undefined) return;
+  const expected = expectedJwkAlgs(entry);
+  if (expected === null) return;
+  if (typeof alg !== "string")
+    throw new Error(
+      `"alg" must be a string when present, got ${typeof alg}`,
+    );
+  if (!expected.includes(alg))
+    throw new Error(
+      `"alg" ${JSON.stringify(alg)} does not match this key's family ` +
+        `(expected ${expected.map((a) => JSON.stringify(a)).join(" or ")})`,
+    );
+}
+
+/**
  * Serializable snapshot of a {@link JwksKeyStore}, produced by
  * `exportSnapshot()` and consumed by `JwksKeyStore.restore()` /
  * `JwksKeyStore.fromSnapshot()` / `restoreSnapshot()`.
@@ -368,6 +422,16 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   with an unsupported or missing `crv` — makes `refresh()` throw:
  *   silently dropping a key the publisher expects verifiers to use
  *   would be a nastier surprise than a loud setup error.
+ * - **A carried `alg` must agree with the key family.** When a JWKS
+ *   entry declares `alg`, `refresh()` checks it against the family
+ *   table (OKP → `EdDSA`; P-256 → `ES256`; P-384 → `ES384`;
+ *   P-521 → `ES512`; RSA → `PS512` or `RS256`) and throws on a
+ *   mismatch or a non-string value, leaving the previous snapshot
+ *   untouched. An entry with no `alg` is unchecked: the field is
+ *   optional in JWKS, and the verify side keys off the
+ *   signature-input `alg`, not the entry's. Snapshot restore does
+ *   not re-check `alg` — a snapshot is this store's own export
+ *   format and carries no `alg`.
  * - **Duplicate `kid`s** within one document: the later entry wins
  *   (ordinary dictionary semantics).
  * - **Refreshes are single-flight.** Concurrent `refresh()` calls —
@@ -618,7 +682,8 @@ export class JwksKeyStore {
    * fetch itself fails, the response is not `ok`, the body is not
    * JSON, the document is not a `{ keys: [...] }` object, or any
    * `kid`-carrying entry is rejected by the JWK importers (wrong shape,
-   * unsupported `kty`, or private `"d"` material). Entries with a
+   * unsupported `kty`, or private `"d"` material) or declares an `alg`
+   * that disagrees with its key family. Entries with a
    * missing or empty `kid` are skipped (see class documentation).
    */
   refresh(): Promise<void> {
@@ -777,6 +842,7 @@ export class JwksKeyStore {
       if (typeof kid !== "string" || kid.length === 0) continue; // skipped, not fatal
       let key: KeyObject;
       try {
+        assertJwkEntryAlg(o);
         key = importJwkEntry(entry);
       } catch (err) {
         throw new Error(
