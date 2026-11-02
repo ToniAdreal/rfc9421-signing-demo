@@ -3441,6 +3441,252 @@ function benchmarkVerifyAllJwksKeyStores(): number {
 }
 
 /**
+ * Pinned shape of the `verifyAllLabels` x `;key` x
+ * `JwksKeyStore` benchmark: the bench variant of the
+ * #817 test combination. Two ed25519 key pairs
+ * (generated once, outside timing), a dual-label
+ * dictionary fixture signed outside timing with
+ * `created` pinned under two pinned keyids (merchant /
+ * gateway), each label covering its own dictionary
+ * member — merchant `x-dict;key="b"`, gateway
+ * `x-dict;key="c"` (per-label selection, as #817
+ * records: identical selection on both labels could
+ * never fail on only one label) — and each party's
+ * public key held in its own offline-restored
+ * `JwksKeyStore` (snapshot restore, fetch
+ * implementation throws if ever called, zero
+ * network). The verifier's injected `now` is 60
+ * seconds past `created`, as in #817, inside no
+ * freshness cap.
+ */
+const JWKS_KEY_CREATED = 1_700_000_000;
+const JWKS_KEY_NOW = JWKS_KEY_CREATED + 60;
+const JWKS_KEY_MERCHANT_KID = "bench-jwks-key-merchant-1";
+const JWKS_KEY_GATEWAY_KID = "bench-jwks-key-gateway-1";
+const JWKS_KEY_MERCHANT_ROTATED_KID = "bench-jwks-key-merchant-2";
+const JWKS_KEY_MERCHANT_URL =
+  "https://merchant.example.com/.well-known/jwks.json";
+const JWKS_KEY_GATEWAY_URL =
+  "https://gateway.example.com/.well-known/jwks.json";
+const JWKS_KEY_DICT = "a=1, b=2;x=1;y=2, c=(a b c), d";
+const JWKS_KEY_ROTATED_REASON =
+  `keyid "${JWKS_KEY_MERCHANT_KID}" could not be resolved to a key`;
+
+/**
+ * `verifyAllLabels` with per-label `JwksKeyStore`
+ * resolvers plus per-label `;key` member coverage
+ * steady state: the form a gateway verifier uses when
+ * merchant and gateway each sign their own member of
+ * one shared dictionary header and rotate on separate
+ * JWKS endpoints — every measured call runs the
+ * per-label store lookup, the per-label member
+ * extraction, and the per-label crypto check for both
+ * labels, which the `verifyAllLabels JwksKeyStore` row
+ * above never pays (its fixture covers no `;key`
+ * member) and which the single-label `;key` rows pay
+ * only for one label against a static key, never
+ * through a store. One measured op verifies the
+ * fresh dual and re-pins that both results are ok, in
+ * wire order, that each returned `keyId` equals its
+ * label's pinned value, and that each label's covered
+ * list includes its own `;key` member. Outside
+ * timing, the two isolation dimensions are pinned
+ * once, exactly as #817 pins them: tampering the
+ * merchant's selected member (b) fails only the
+ * merchant label with `SIGNATURE_MISMATCH` while the
+ * gateway label still verifies (and symmetrically for
+ * the gateway's member c), editing only unselected
+ * members (a, d) still verifies both labels, and a
+ * merchant store whose snapshot holds only the
+ * rotated kid fails only the merchant label exactly
+ * `KEY_RESOLUTION_FAILED` with the pinned reason
+ * while the gateway label still verifies, proving a
+ * retired kid fails closed rather than falling back
+ * to the new key. Zero network, zero randomness in
+ * the measured assertions, no wall clock (every
+ * verify instant and every store clock is injected).
+ */
+function benchmarkVerifyAllJwksKeyComponents(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const { publicKey: rotatedPublic } = generateEd25519KeyPair();
+  const dictFixture = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: {
+      "content-type": "application/json",
+      "x-dict": JWKS_KEY_DICT,
+    },
+    body: '{"amount":100}',
+  };
+  const merchantSigned = signRequest(dictFixture, {
+    keyId: JWKS_KEY_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    label: "merchant",
+    created: JWKS_KEY_CREATED,
+    coveredComponents: ["@method", 'x-dict;key="b"'],
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: JWKS_KEY_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: JWKS_KEY_CREATED,
+    coveredComponents: ["@method", 'x-dict;key="c"'],
+  });
+  const offlineFetch: JwksFetchImpl = async () => {
+    throw new Error("benchmark must not fetch (offline store)");
+  };
+  const merchantStore = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_KEY_CREATED,
+      keys: [
+        { ...exportPublicKeyJwk(merchantPublic), kid: JWKS_KEY_MERCHANT_KID },
+      ],
+    },
+    JWKS_KEY_MERCHANT_URL,
+    { fetchImpl: offlineFetch, ttlSec: 300, now: () => JWKS_KEY_CREATED },
+  );
+  const gatewayStore = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_KEY_CREATED,
+      keys: [
+        { ...exportPublicKeyJwk(gatewayPublic), kid: JWKS_KEY_GATEWAY_KID },
+      ],
+    },
+    JWKS_KEY_GATEWAY_URL,
+    { fetchImpl: offlineFetch, ttlSec: 300, now: () => JWKS_KEY_CREATED },
+  );
+  const rotatedMerchantStore = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_KEY_CREATED,
+      keys: [
+        {
+          ...exportPublicKeyJwk(rotatedPublic),
+          kid: JWKS_KEY_MERCHANT_ROTATED_KID,
+        },
+      ],
+    },
+    JWKS_KEY_MERCHANT_URL,
+    { fetchImpl: offlineFetch, ttlSec: 300, now: () => JWKS_KEY_CREATED },
+  );
+  const verifyOpts = {
+    now: JWKS_KEY_NOW,
+    keyResolvers: {
+      merchant: merchantStore.resolve,
+      gateway: gatewayStore.resolve,
+    },
+  };
+  const assertDual = (where: string): void => {
+    const results = verifyAllLabels(dual, verifyOpts);
+    if (
+      results.length !== 2 ||
+      results[0].label !== "merchant" ||
+      !results[0].ok ||
+      results[0].keyId !== JWKS_KEY_MERCHANT_KID ||
+      !results[0].coveredComponents?.includes('x-dict;key="b"') ||
+      results[1].label !== "gateway" ||
+      !results[1].ok ||
+      results[1].keyId !== JWKS_KEY_GATEWAY_KID ||
+      !results[1].coveredComponents?.includes('x-dict;key="c"')
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels x ;key x JwksKeyStore (${where}, fresh dual) gave ${JSON.stringify(results)}`,
+      );
+  };
+  const withDict = (value: string) => ({
+    ...dual,
+    headers: { ...dual.headers, "x-dict": value },
+  });
+
+  // Outside timing: the fresh dual self-checks under
+  // its per-label stores before any timing starts,
+  // and neither store resolves the other party's kid.
+  assertDual("outside timing");
+  if (
+    merchantStore.resolve(JWKS_KEY_GATEWAY_KID) !== undefined ||
+    gatewayStore.resolve(JWKS_KEY_MERCHANT_KID) !== undefined
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x ;key x JwksKeyStore cross-kid isolation broken`,
+    );
+  const tamperedMerchant = verifyAllLabels(
+    withDict("a=1, b=3;x=1;y=2, c=(a b c), d"),
+    verifyOpts,
+  );
+  if (
+    tamperedMerchant.length !== 2 ||
+    tamperedMerchant[0].label !== "merchant" ||
+    tamperedMerchant[0].ok ||
+    tamperedMerchant[0].code !== "SIGNATURE_MISMATCH" ||
+    tamperedMerchant[1].label !== "gateway" ||
+    !tamperedMerchant[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x ;key x JwksKeyStore (outside timing, tampered merchant member) gave ${JSON.stringify(tamperedMerchant)}`,
+    );
+  const tamperedGateway = verifyAllLabels(
+    withDict("a=1, b=2;x=1;y=2, c=(a b d), d"),
+    verifyOpts,
+  );
+  if (
+    tamperedGateway.length !== 2 ||
+    tamperedGateway[0].label !== "merchant" ||
+    !tamperedGateway[0].ok ||
+    tamperedGateway[1].label !== "gateway" ||
+    tamperedGateway[1].ok ||
+    tamperedGateway[1].code !== "SIGNATURE_MISMATCH"
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x ;key x JwksKeyStore (outside timing, tampered gateway member) gave ${JSON.stringify(tamperedGateway)}`,
+    );
+  const editedUnselected = verifyAllLabels(
+    withDict("a=99, b=2;x=1;y=2, c=(a b c), d=?0"),
+    verifyOpts,
+  );
+  if (
+    editedUnselected.length !== 2 ||
+    !editedUnselected[0].ok ||
+    !editedUnselected[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x ;key x JwksKeyStore (outside timing, edited unselected members) gave ${JSON.stringify(editedUnselected)}`,
+    );
+  const rotated = verifyAllLabels(dual, {
+    now: JWKS_KEY_NOW,
+    keyResolvers: {
+      merchant: rotatedMerchantStore.resolve,
+      gateway: gatewayStore.resolve,
+    },
+  });
+  if (
+    rotated.length !== 2 ||
+    rotated[0].label !== "merchant" ||
+    rotated[0].ok ||
+    rotated[0].code !== "KEY_RESOLUTION_FAILED" ||
+    rotated[0].reason !== JWKS_KEY_ROTATED_REASON ||
+    rotated[0].keyId !== JWKS_KEY_MERCHANT_KID ||
+    rotated[1].label !== "gateway" ||
+    !rotated[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels x ;key x JwksKeyStore (outside timing, rotated dual) gave ${JSON.stringify(rotated)}`,
+    );
+
+  return measure(() => {
+    assertDual("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `verifyAllLabels` x content-digest
  * benchmark: the bench variant of the #730 test
  * combination. Two ed25519 key pairs (generated once,
@@ -13594,6 +13840,11 @@ results.push({
   alg: "verifyAllLabels JwksKeyStore (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllJwksKeyStores(),
+});
+results.push({
+  alg: "verifyAllLabels JwksKeyStore ;key (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllJwksKeyComponents(),
 });
 results.push({
   alg: "verifyAllLabels content-digest (2 labels)",

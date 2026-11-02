@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for `verifyAllLabels` x `;key` x `JwksKeyStore`
+  per-label resolvers (backlog #822): `bench/bench.ts` gains
+  `benchmarkVerifyAllJwksKeyComponents`, measuring `verifyAllLabels`
+  with each label resolving through its own offline-restored
+  `JwksKeyStore` (snapshot restore, fetch throws if called, zero
+  network) while covering its own dictionary member (merchant
+  `x-dict;key="b"`, gateway `x-dict;key="c"`, per-label selection
+  as #817 records). One measured op verifies the fresh dual
+  (both labels ok, each keyid echoed, each covered list including
+  its own `;key` member). Outside timing, tampering either
+  label's selected member fails only that label with
+  `SIGNATURE_MISMATCH`, editing only unselected members still
+  verifies both labels, and a merchant store whose snapshot holds
+  only the rotated kid fails only the merchant label exactly
+  `KEY_RESOLUTION_FAILED` with the pinned reason while the
+  gateway label still verifies. The README Benchmarks table is
+  refreshed from this run's real output (103 rows, 2026-11-02,
+  Node v24.22.1), with the new row at ~3,045 ops/sec
+  (328.40 µs/op). No source change: the combination was
+  unmeasured on the bench side, not unimplemented.
+
 - Test coverage for `verifyAllLabels` mixed per-label key sources
   (backlog #795): `test/verifyAllLabelsJwksCandidateKeys.test.ts`
   adds 4 cases — a dual-signed request verifies with the merchant
