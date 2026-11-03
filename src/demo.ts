@@ -3261,6 +3261,34 @@ export const DEMO_BS_REJECT_CODE: VerifyFailureCode = "SIGNATURE_MISMATCH";
 export const DEMO_BS_BASE_LINE =
   '"x-charge-ref";bs: :Y2hfNDIsIHNldHRsZWQg:';
 
+/** URL the request-target segment signs (the same URL in all four forms). */
+export const DEMO_RT_URL = "https://api.example.com/v1/payments?a=1";
+/** Key id the request-target segment's signatures carry. */
+export const DEMO_RT_KEY_ID = "demo-request-target-1";
+/** Covered components the request-target segment signs: the request target alone. */
+export const DEMO_RT_COVERED: string[] = ["@request-target"];
+/** Verifier clock for the request-target segment (60s after `DEMO_CREATED`). */
+export const DEMO_RT_NOW = DEMO_CREATED + 60;
+/** Hand-pinned failure code when the signed override is changed after signing. */
+export const DEMO_RT_REJECT_CODE: VerifyFailureCode = "SIGNATURE_MISMATCH";
+/**
+ * The origin-form value the default (no override) form derives: path
+ * plus query, with no scheme or authority.
+ */
+export const DEMO_RT_ORIGIN_FORM = "/v1/payments?a=1";
+/**
+ * Absolute-form override: the full URL, as a proxy would see it on
+ * the request line.
+ */
+export const DEMO_RT_ABSOLUTE_FORM =
+  "https://api.example.com/v1/payments?a=1";
+/** Authority-form override: host plus port, as a CONNECT-style target. */
+export const DEMO_RT_AUTHORITY_FORM = "api.example.com:443";
+/** Asterisk-form override: the OPTIONS `*` target. */
+export const DEMO_RT_ASTERISK_FORM = "*";
+/** Tampered override: signing `*` then presenting a different target must fail. */
+export const DEMO_RT_TAMPERED_FORM = "/v1/refunds";
+
 /** Label of the closing alg-fallback segment's wire signature (the RFC 9421 Appendix B.2.5 label). */
 export const DEMO_ALG_FALLBACK_LABEL = "sig-b25";
 /** Key id carried by the segment's B.2.5 signature-input. */
@@ -4791,6 +4819,25 @@ export interface DemoResult {
    * — the strip a plain component would normalize away.
    */
   bsStrippedVerification: VerifyResult;
+  /**
+   * The request-target segment's four forms, in printed order:
+   * each form's name, the `@request-target` value that entered
+   * the signature base, and the pinned base line
+   * (`"@request-target": <value>`).
+   */
+  requestTargetForms: ReadonlyArray<{
+    form: string;
+    target: string;
+    baseLine: string;
+  }>;
+  /** Verification of each of the four request-target forms (all ok). */
+  requestTargetVerifications: VerifyResult[];
+  /**
+   * Verification of the asterisk-form request after its override
+   * was changed to `DEMO_RT_TAMPERED_FORM`: rejected with
+   * `SIGNATURE_MISMATCH` — the override is part of the signed bytes.
+   */
+  requestTargetTamperVerification: VerifyResult;
   /**
    * The closing ReplayCache observability segment's six
    * `check()` outcomes, in call order (equals the
@@ -11170,6 +11217,97 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Request-target override segment: the same URL is signed four
+  // times, once per request-target form — the default origin-form
+  // derivation, then the explicit absolute-form, authority-form and
+  // asterisk-form overrides a proxy or gateway caller pins with
+  // `RequestLike.requestTarget` (the #617 feature the library
+  // tests in `test/requestTargetOverride.test.ts` pin, which the
+  // demo never showed). Each form's `@request-target` base line is
+  // printed verbatim, so the reader sees the override entering the
+  // signed bytes rather than the rebuilt origin-form value. A fifth
+  // check signs asterisk-form and then presents a different target:
+  // the override is covered, so verification must fail with
+  // SIGNATURE_MISMATCH. Outside the printed lines the demo asserts
+  // every form verifies, every base contains its pinned line, and
+  // the tamper fails with the pinned code and keyid.
+  const rtPair = generateEd25519KeyPair();
+  const rtVerifyOptions = {
+    key: rtPair.publicKey,
+    now: DEMO_RT_NOW,
+  };
+  const rtFormSpecs: ReadonlyArray<{
+    form: string;
+    target: string | undefined;
+  }> = [
+    { form: "Origin-form (default)", target: undefined },
+    { form: "Absolute-form", target: DEMO_RT_ABSOLUTE_FORM },
+    { form: "Authority-form", target: DEMO_RT_AUTHORITY_FORM },
+    { form: "Asterisk-form", target: DEMO_RT_ASTERISK_FORM },
+  ];
+  const rtSigned = rtFormSpecs.map(({ target }) =>
+    signRequest(
+      target === undefined
+        ? { method: "POST", url: DEMO_RT_URL, headers: {} }
+        : {
+            method: "POST",
+            url: DEMO_RT_URL,
+            headers: {},
+            requestTarget: target,
+          },
+      {
+        keyId: DEMO_RT_KEY_ID,
+        alg: "ed25519",
+        key: rtPair.privateKey,
+        created: DEMO_CREATED,
+        coveredComponents: [...DEMO_RT_COVERED],
+      },
+    ),
+  );
+  const requestTargetVerifications = rtSigned.map((signed) =>
+    verifyRequest(signed, rtVerifyOptions),
+  );
+  const requestTargetForms = rtFormSpecs.map(({ form, target }) => {
+    const expectedTarget = target ?? DEMO_RT_ORIGIN_FORM;
+    return {
+      form,
+      target: expectedTarget,
+      baseLine: `"@request-target": ${expectedTarget}`,
+    };
+  });
+  const requestTargetBases = rtSigned.map((signed) =>
+    buildSignatureBase([...DEMO_RT_COVERED], signed, {
+      created: DEMO_CREATED,
+      keyid: DEMO_RT_KEY_ID,
+      alg: "ed25519",
+    }),
+  );
+  const requestTargetTamperVerification = verifyRequest(
+    {
+      ...rtSigned[3]!,
+      requestTarget: DEMO_RT_TAMPERED_FORM,
+    },
+    rtVerifyOptions,
+  );
+  if (
+    requestTargetVerifications.some(
+      (v) =>
+        v.ok !== true || v.label !== "sig1" || v.keyId !== DEMO_RT_KEY_ID,
+    ) ||
+    requestTargetBases.some(
+      (base, i) => !base.includes(requestTargetForms[i]!.baseLine),
+    ) ||
+    requestTargetTamperVerification.ok !== false ||
+    requestTargetTamperVerification.code !== DEMO_RT_REJECT_CODE ||
+    requestTargetTamperVerification.keyId !== DEMO_RT_KEY_ID
+  ) {
+    throw new Error(
+      `demo fixture broken: request-target gave ` +
+        `${JSON.stringify(requestTargetVerifications)} and ` +
+        `${JSON.stringify(requestTargetTamperVerification)}, instead of all four forms verifying and the tampered override rejected with ${DEMO_RT_REJECT_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -11829,6 +11967,17 @@ export async function runDemo(): Promise<DemoResult> {
     bsStrippedVerification.ok
       ? "Trailing space stripped: OK (unexpected — the strip was not detected)"
       : `Trailing space stripped: FAILED (code ${bsStrippedVerification.code}: ${bsStrippedVerification.reason}) — a plain component would still verify after normalization, but ;bs binds the raw bytes, so the strip is a tamper`,
+    "",
+    "Request-target override (requestTarget): the signature covers @request-target, and by default that is the origin-form path plus query — but a proxy or gateway signs the request-line target it actually saw, so RequestLike.requestTarget lets the caller pin absolute-form, authority-form, or asterisk-form instead; the override enters the signature base verbatim, so changing it after signing breaks verification",
+    ...requestTargetForms.map(({ form, target, baseLine }, i) => {
+      const v = requestTargetVerifications[i]!;
+      return v.ok
+        ? `${form}: ${baseLine} — verified OK (label ${v.label}, keyid="${v.keyId}", alg="ed25519")`
+        : `${form}: ${baseLine} — FAILED (code ${v.code}: ${v.reason}) (unexpected — the ${target} form was not supposed to fail)`;
+    }),
+    requestTargetTamperVerification.ok
+      ? `Override tampered after signing (${DEMO_RT_ASTERISK_FORM} -> ${DEMO_RT_TAMPERED_FORM}): OK (unexpected — the changed override was not detected)`
+      : `Override tampered after signing (${DEMO_RT_ASTERISK_FORM} -> ${DEMO_RT_TAMPERED_FORM}): FAILED (code ${requestTargetTamperVerification.code}: ${requestTargetTamperVerification.reason}) — the override is part of the signed bytes, so presenting a different target breaks the signature`,
   ];
 
   return {
@@ -12113,6 +12262,9 @@ export async function runDemo(): Promise<DemoResult> {
     bsVerification,
     bsTamperVerification,
     bsStrippedVerification,
+    requestTargetForms,
+    requestTargetVerifications,
+    requestTargetTamperVerification,
     lines,
   };
 }

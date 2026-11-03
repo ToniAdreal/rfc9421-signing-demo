@@ -282,6 +282,16 @@ import {
   DEMO_BS_STRIPPED_HEADER_VALUE,
   DEMO_BS_TAMPERED_HEADER_VALUE,
   DEMO_BS_URL,
+  DEMO_RT_ABSOLUTE_FORM,
+  DEMO_RT_ASTERISK_FORM,
+  DEMO_RT_AUTHORITY_FORM,
+  DEMO_RT_COVERED,
+  DEMO_RT_KEY_ID,
+  DEMO_RT_NOW,
+  DEMO_RT_ORIGIN_FORM,
+  DEMO_RT_REJECT_CODE,
+  DEMO_RT_TAMPERED_FORM,
+  DEMO_RT_URL,
   DEMO_CLOCK_DEFAULT_EXPIRED_AT_SEC,
   DEMO_CLOCK_DEFAULT_GRACE_SEC,
   DEMO_CLOCK_DEFAULT_SKEW_SEC,
@@ -7663,7 +7673,7 @@ test("demo ;bs segment pins the raw-bytes binding (original verifies, one-byte a
   assert.equal(stripped.code, DEMO_BS_REJECT_CODE);
 });
 
-test("demo lines contain the ;bs segment (raw bytes bound as a byte sequence, both tampers rejected, closing the demo)", async () => {
+test("demo lines contain the ;bs segment (raw bytes bound as a byte sequence, both tampers rejected, followed by the request-target segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Byte-sequence binding \(;bs\):/);
@@ -7678,9 +7688,15 @@ test("demo lines contain the ;bs segment (raw bytes bound as a byte sequence, bo
     `Value changed by one byte (ch_42 -> ch_43): FAILED (code ${DEMO_BS_REJECT_CODE}: signature mismatch) — one raw byte differs, so the bound bytes no longer match`,
     `Trailing space stripped: FAILED (code ${DEMO_BS_REJECT_CODE}: signature mismatch) — a plain component would still verify after normalization, but ;bs binds the raw bytes, so the strip is a tamper`,
   ]);
-  // The header plus its four lines are the demo's closing lines,
-  // with nothing after them.
-  assert.equal(headerIdx + 5, lines.length);
+  // The header plus its four lines are followed by the
+  // request-target segment (the demo's closing segment since #833),
+  // with nothing between them but the blank separator line.
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(
+    lines[headerIdx + 6]!.startsWith(
+      "Request-target override (requestTarget):",
+    ),
+  );
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Byte-sequence binding (;bs):"),
@@ -7688,5 +7704,141 @@ test("demo lines contain the ;bs segment (raw bytes bound as a byte sequence, bo
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 5),
     lines.slice(headerIdx, headerIdx + 5),
+  );
+});
+
+test("demo request-target segment pins all four forms, their base lines, and the tampered-override rejection", async () => {
+  const r = await runDemo();
+  assert.equal(DEMO_RT_URL, "https://api.example.com/v1/payments?a=1");
+  assert.equal(DEMO_RT_KEY_ID, "demo-request-target-1");
+  assert.deepEqual(DEMO_RT_COVERED, ["@request-target"]);
+  assert.equal(DEMO_RT_NOW, DEMO_CREATED + 60);
+  assert.equal(DEMO_RT_REJECT_CODE, "SIGNATURE_MISMATCH");
+  assert.equal(DEMO_RT_ORIGIN_FORM, "/v1/payments?a=1");
+  assert.equal(
+    DEMO_RT_ABSOLUTE_FORM,
+    "https://api.example.com/v1/payments?a=1",
+  );
+  assert.equal(DEMO_RT_AUTHORITY_FORM, "api.example.com:443");
+  assert.equal(DEMO_RT_ASTERISK_FORM, "*");
+  assert.equal(DEMO_RT_TAMPERED_FORM, "/v1/refunds");
+  assert.deepEqual(r.requestTargetForms, [
+    {
+      form: "Origin-form (default)",
+      target: DEMO_RT_ORIGIN_FORM,
+      baseLine: `"@request-target": ${DEMO_RT_ORIGIN_FORM}`,
+    },
+    {
+      form: "Absolute-form",
+      target: DEMO_RT_ABSOLUTE_FORM,
+      baseLine: `"@request-target": ${DEMO_RT_ABSOLUTE_FORM}`,
+    },
+    {
+      form: "Authority-form",
+      target: DEMO_RT_AUTHORITY_FORM,
+      baseLine: `"@request-target": ${DEMO_RT_AUTHORITY_FORM}`,
+    },
+    {
+      form: "Asterisk-form",
+      target: DEMO_RT_ASTERISK_FORM,
+      baseLine: `"@request-target": ${DEMO_RT_ASTERISK_FORM}`,
+    },
+  ]);
+  assert.equal(r.requestTargetVerifications.length, 4);
+  for (const v of r.requestTargetVerifications) {
+    assert.equal(v.ok, true);
+    assert.equal(v.label, "sig1");
+    assert.equal(v.keyId, DEMO_RT_KEY_ID);
+  }
+  assert.equal(r.requestTargetTamperVerification.ok, false);
+  assert.equal(r.requestTargetTamperVerification.code, DEMO_RT_REJECT_CODE);
+  assert.equal(r.requestTargetTamperVerification.keyId, DEMO_RT_KEY_ID);
+  // Independent library cross-check (not the demo's own assertions):
+  // re-sign each form with a fresh keypair, verify it, and confirm
+  // the rebuilt base carries the pinned line.
+  const pair = generateEd25519KeyPair();
+  const opts = { key: pair.publicKey, now: DEMO_RT_NOW };
+  const forms: Array<string | undefined> = [
+    undefined,
+    DEMO_RT_ABSOLUTE_FORM,
+    DEMO_RT_AUTHORITY_FORM,
+    DEMO_RT_ASTERISK_FORM,
+  ];
+  for (let i = 0; i < forms.length; i++) {
+    const target = forms[i];
+    const req =
+      target === undefined
+        ? { method: "POST", url: DEMO_RT_URL, headers: {} }
+        : {
+            method: "POST",
+            url: DEMO_RT_URL,
+            headers: {},
+            requestTarget: target,
+          };
+    const signed = signRequest(req, {
+      keyId: DEMO_RT_KEY_ID,
+      alg: "ed25519",
+      key: pair.privateKey,
+      created: DEMO_CREATED,
+      coveredComponents: [...DEMO_RT_COVERED],
+    });
+    assert.equal(verifyRequest(signed, opts).ok, true);
+    assert.ok(
+      buildSignatureBase([...DEMO_RT_COVERED], signed, {
+        created: DEMO_CREATED,
+        keyid: DEMO_RT_KEY_ID,
+        alg: "ed25519",
+      }).includes(r.requestTargetForms[i]!.baseLine),
+    );
+  }
+  const asteriskSigned = signRequest(
+    {
+      method: "POST",
+      url: DEMO_RT_URL,
+      headers: {},
+      requestTarget: DEMO_RT_ASTERISK_FORM,
+    },
+    {
+      keyId: DEMO_RT_KEY_ID,
+      alg: "ed25519",
+      key: pair.privateKey,
+      created: DEMO_CREATED,
+      coveredComponents: [...DEMO_RT_COVERED],
+    },
+  );
+  const tampered = verifyRequest(
+    { ...asteriskSigned, requestTarget: DEMO_RT_TAMPERED_FORM },
+    opts,
+  );
+  assert.equal(tampered.ok, false);
+  assert.equal(tampered.code, DEMO_RT_REJECT_CODE);
+});
+
+test("demo lines contain the request-target segment (four forms plus tampered override, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /Request-target override \(requestTarget\):/);
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Request-target override (requestTarget):"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), [
+    "Request-target override (requestTarget): the signature covers @request-target, and by default that is the origin-form path plus query — but a proxy or gateway signs the request-line target it actually saw, so RequestLike.requestTarget lets the caller pin absolute-form, authority-form, or asterisk-form instead; the override enters the signature base verbatim, so changing it after signing breaks verification",
+    `Origin-form (default): "@request-target": ${DEMO_RT_ORIGIN_FORM} — verified OK (label sig1, keyid="${DEMO_RT_KEY_ID}", alg="ed25519")`,
+    `Absolute-form: "@request-target": ${DEMO_RT_ABSOLUTE_FORM} — verified OK (label sig1, keyid="${DEMO_RT_KEY_ID}", alg="ed25519")`,
+    `Authority-form: "@request-target": ${DEMO_RT_AUTHORITY_FORM} — verified OK (label sig1, keyid="${DEMO_RT_KEY_ID}", alg="ed25519")`,
+    `Asterisk-form: "@request-target": ${DEMO_RT_ASTERISK_FORM} — verified OK (label sig1, keyid="${DEMO_RT_KEY_ID}", alg="ed25519")`,
+    `Override tampered after signing (${DEMO_RT_ASTERISK_FORM} -> ${DEMO_RT_TAMPERED_FORM}): FAILED (code ${DEMO_RT_REJECT_CODE}: signature mismatch) — the override is part of the signed bytes, so presenting a different target breaks the signature`,
+  ]);
+  // The header plus its five lines are the demo's closing lines,
+  // with nothing after them.
+  assert.equal(headerIdx + 6, lines.length);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Request-target override (requestTarget):"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 6),
+    lines.slice(headerIdx, headerIdx + 6),
   );
 });

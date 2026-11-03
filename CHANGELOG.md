@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo gains a closing request-target override segment
+  (backlog #833): the same URL is signed four times — default
+  origin-form, explicit absolute-form, authority-form and
+  asterisk-form `RequestLike.requestTarget` overrides — and each
+  form's `@request-target` base line is printed verbatim with its
+  verification, plus a tampered override (asterisk-form signed,
+  `/v1/refunds` presented) rejected with `SIGNATURE_MISMATCH`.
+  `DemoResult` gains `requestTargetForms`,
+  `requestTargetVerifications` and `requestTargetTamperVerification`;
+  the `;bs` segment's lines test now expects the request-target
+  segment to follow it, and `test/demo.test.ts` adds 2 cases
+  (structure plus byte-exact closing lines with determinism).
+  No source-code change: the override feature (#617) was already
+  implemented and library-tested, the demo had never shown it.
+
 - `JwksKeyStore` validates a JWKS entry's declared `alg` against its
   key family (backlog #830): `src/jwks.ts` gains `assertJwkEntryAlg`,
   run in `fetchAndSwap` before import — OKP only accepts `EdDSA`,
