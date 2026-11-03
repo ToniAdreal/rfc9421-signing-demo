@@ -1,4 +1,4 @@
-import type { KeyObject } from "node:crypto";
+import { createHmac, timingSafeEqual, type KeyObject } from "node:crypto";
 import {
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -312,7 +312,13 @@ function assertJwkEntryAlg(entry: Record<string, unknown>): void {
  * transport it only where you would store the JWKS endpoint's own
  * trust decision — and the endpoint-trust responsibility described on
  * {@link JwksKeyStore} is unchanged: whatever keys are restored
- * become verification keys.
+ * become verification keys. For an integrity-protected form, use
+ * the signed envelope instead (see
+ * {@link JwksSignedSnapshotEnvelope} and
+ * `JwksKeyStore.exportSignedSnapshot()` /
+ * `JwksKeyStore.restoreSignedSnapshot()`): the unsigned snapshot
+ * stays unsigned, the envelope is the opt-in that catches a
+ * rewrite.
  *
  * A snapshot covers a single process across its own restart only:
  * two processes restoring the same snapshot afterwards diverge, and
@@ -322,6 +328,114 @@ export interface JwksKeyStoreSnapshot {
   v: 1;
   fetchedAtSec: number;
   keys: JwksSnapshotKey[];
+}
+
+/**
+ * Integrity-protected form of a {@link JwksKeyStoreSnapshot},
+ * produced by `JwksKeyStore.exportSignedSnapshot(secret)` and
+ * consumed by `JwksKeyStore.restoreSignedSnapshot(envelope, secret)`
+ * (see those methods for the exact contract).
+ *
+ * - `v`: envelope format version. Only `1` exists; restore rejects
+ *   any other value (including a missing `v`) instead of guessing.
+ * - `snapshot`: the wrapped {@link JwksKeyStoreSnapshot}, exactly as
+ *   `exportSnapshot()` produces it (public keys only).
+ * - `mac`: lowercase hex HMAC-SHA256 over the canonical JSON of
+ *   `snapshot` (object keys sorted recursively, array order
+ *   preserved) under the caller's secret.
+ *
+ * The envelope carries no secret: the secret is caller configuration,
+ * never persisted in the envelope, and the same secret must be
+ * supplied at restore time. An envelope with any other field is
+ * rejected, so a caller cannot smuggle extra data (including a
+ * secret) past restore. The MAC is integrity protection only — it
+ * proves the snapshot was not rewritten by anyone without the
+ * secret — not confidentiality: the keys inside are public keys, and
+ * the envelope itself is plain JSON. A caller that needs the
+ * snapshot kept private must encrypt it separately; this envelope
+ * does not.
+ */
+export interface JwksSignedSnapshotEnvelope {
+  v: 1;
+  snapshot: JwksKeyStoreSnapshot;
+  mac: string;
+}
+
+/**
+ * Canonical JSON for snapshot MACing: object keys sorted
+ * recursively (so a JSON round-trip that reorders keys still
+ * verifies), array order preserved (reordering keys would change
+ * which kid wins a duplicate, so it must change the MAC), and
+ * primitives via `JSON.stringify`. A non-JSON value (notably
+ * `undefined`, which `JSON.stringify` would silently drop) throws
+ * instead of being silently normalized — a MAC computed over a
+ * silently altered document would be worse than no MAC.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new Error(
+        "JwksKeyStore: cannot canonicalize a non-finite number for snapshot signing",
+      );
+    return JSON.stringify(value);
+  }
+  if (typeof value === "string" || typeof value === "boolean")
+    return JSON.stringify(value);
+  if (Array.isArray(value))
+    return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  throw new Error(
+    `JwksKeyStore: cannot canonicalize a non-JSON value of type ${typeof value} for snapshot signing`,
+  );
+}
+
+/**
+ * Validate a signed-snapshot secret and return its bytes. A secret
+ * is a non-empty string (UTF-8) or a non-empty `Buffer` — the same
+ * input shapes as `keys.secretKey`, but deliberately without that
+ * helper's 32-byte floor: this MAC is integrity protection for
+ * public keys, and the backlog contract for this helper rejects
+ * only an empty secret, so a shorter caller secret is the caller's
+ * risk to take (use a long random secret; the envelope never
+ * records how long it was). An empty or wrongly typed secret is a
+ * caller-configuration error, thrown before any store state is
+ * touched.
+ */
+function signedSnapshotSecretBytes(secret: unknown): Buffer {
+  if (typeof secret === "string") {
+    if (secret.length === 0)
+      throw new Error(
+        "JwksKeyStore: signed snapshot secret must not be empty",
+      );
+    return Buffer.from(secret, "utf8");
+  }
+  if (Buffer.isBuffer(secret)) {
+    if (secret.length === 0)
+      throw new Error(
+        "JwksKeyStore: signed snapshot secret must not be empty",
+      );
+    return secret;
+  }
+  throw new Error(
+    `JwksKeyStore: signed snapshot secret must be a non-empty string or Buffer, got ${typeof secret}`,
+  );
+}
+
+/** HMAC-SHA256 (hex) over the canonical JSON of a snapshot. */
+function computeSnapshotMac(
+  snapshot: JwksKeyStoreSnapshot,
+  secretBytes: Buffer,
+): string {
+  return createHmac("sha256", secretBytes)
+    .update(canonicalJson(snapshot), "utf8")
+    .digest("hex");
 }
 
 /**
@@ -489,8 +603,12 @@ function parseJwksSnapshot(snapshot: unknown): {
  * startup — so a cold start during a JWKS outage can still verify
  * with the last fetched keys (staleness still counted from the
  * original fetch time; see {@link JwksKeyStoreSnapshot}). This
- * library never writes the snapshot anywhere itself: persisting it,
- * and protecting its integrity, is the caller's job.
+ * library never writes the snapshot anywhere itself: persisting it
+ * is the caller's job, and protecting its integrity is opt-in —
+ * the unsigned snapshot is trusted configuration (see
+ * {@link JwksKeyStoreSnapshot}), while `exportSignedSnapshot()` /
+ * `restoreSignedSnapshot()` wrap it in an HMAC envelope that
+ * catches a rewritten snapshot at restore time.
  */
 export class JwksKeyStore {
   private readonly url: string;
@@ -1027,6 +1145,112 @@ export class JwksKeyStore {
    * (see {@link JwksKeyStoreSnapshot}).
    */
   restoreSnapshot(snapshot: unknown): void {
+    const { fetchedAtSec, keysByKid } = parseJwksSnapshot(snapshot);
+    this.keysByKid = keysByKid;
+    this.lastRefreshAtSec = fetchedAtSec;
+  }
+
+  /**
+   * Export the current snapshot wrapped in an HMAC-signed envelope
+   * (see {@link JwksSignedSnapshotEnvelope}): `{ v: 1, snapshot,
+   * mac }` where `mac` is HMAC-SHA256 over the canonical JSON of
+   * the snapshot under `secret`. Persist the envelope (plain JSON)
+   * before a restart and restore it with
+   * {@link JwksKeyStore.restoreSignedSnapshot} — a process that
+   * restarts during a JWKS outage can then still verify offline,
+   * and anyone who rewrites the persisted keys without the secret
+   * is caught at restore instead of silently trusted.
+   *
+   * The secret is never written into the envelope, and the envelope
+   * is integrity protection only, not encryption: the keys inside
+   * are public keys, so the envelope itself needs no secrecy, but
+   * the secret must be kept where the snapshot writer keeps its
+   * other signing-side secrets. An empty secret is a
+   * caller-configuration error. Exporting before any successful
+   * `refresh()` throws exactly like `exportSnapshot()` — there is
+   * no keyless envelope to sign. The unsigned `exportSnapshot()`
+   * path is unchanged: this envelope is opt-in, and a caller that
+   * never signs keeps the old trusted-configuration semantics.
+   */
+  exportSignedSnapshot(secret: string | Buffer): JwksSignedSnapshotEnvelope {
+    const secretBytes = signedSnapshotSecretBytes(secret);
+    const snapshot = this.exportSnapshot();
+    return { v: 1, snapshot, mac: computeSnapshotMac(snapshot, secretBytes) };
+  }
+
+  /**
+   * Atomically replace this store's snapshot with one from a signed
+   * envelope produced by
+   * {@link JwksKeyStore.exportSignedSnapshot}, without any network
+   * access. On success the endpoint, `fetchImpl`, TTL, clock, and
+   * `stats()` counters are unchanged — only the keys and the
+   * freshness timestamp are replaced, with staleness still counted
+   * from the snapshot's original `fetchedAtSec`, exactly like
+   * {@link JwksKeyStore.restoreSnapshot}.
+   *
+   * Restore is fail-closed in the same order as the unsigned path,
+   * with authenticity checked first: an envelope with an unknown
+   * field (including a smuggled `secret`), a version other than
+   * `1`, a malformed `mac`, or a MAC that does not match the
+   * snapshot under `secret` throws a descriptive `Error` and
+   * leaves the current snapshot and freshness timestamp exactly as
+   * they were — a tampered key, a tampered `fetchedAtSec`, or a
+   * wrong secret all fail here, before any snapshot parsing, so a
+   * tampered envelope can never partially install. A MAC-valid
+   * envelope whose snapshot is itself malformed then fails through
+   * the same strict snapshot validation as `restoreSnapshot()`,
+   * again without touching the current snapshot. The MAC comparison
+   * is constant-time over equal-length hex digests; a wrong-length
+   * `mac` is rejected as malformed before comparison.
+   *
+   * Like the unsigned path, this method never fetches: build a
+   * store for the endpoint first (`new JwksKeyStore(url, opts)`)
+   * and restore into it for a cold start.
+   */
+  restoreSignedSnapshot(envelope: unknown, secret: string | Buffer): void {
+    const secretBytes = signedSnapshotSecretBytes(secret);
+    if (
+      typeof envelope !== "object" ||
+      envelope === null ||
+      Array.isArray(envelope)
+    )
+      throw new Error(
+        "JwksKeyStore: invalid signed snapshot envelope: expected an object of the form { v: 1, snapshot, mac }",
+      );
+    const record = envelope as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key !== "v" && key !== "snapshot" && key !== "mac")
+        throw new Error(
+          `JwksKeyStore: invalid signed snapshot envelope: unknown field "${key}"`,
+        );
+    }
+    if (record["v"] !== 1)
+      throw new Error(
+        `JwksKeyStore: invalid signed snapshot envelope: unsupported envelope version ${JSON.stringify(record["v"]) ?? String(record["v"])} (expected 1)`,
+      );
+    const mac = record["mac"];
+    if (typeof mac !== "string" || !/^[0-9a-f]{64}$/.test(mac))
+      throw new Error(
+        "JwksKeyStore: invalid signed snapshot envelope: mac must be a 64-character lowercase hex HMAC-SHA256 digest",
+      );
+    const snapshot = record["snapshot"];
+    if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot))
+      throw new Error(
+        'JwksKeyStore: invalid signed snapshot envelope: "snapshot" must be an object',
+      );
+    const expectedMac = computeSnapshotMac(
+      snapshot as JwksKeyStoreSnapshot,
+      secretBytes,
+    );
+    const macBytes = Buffer.from(mac, "hex");
+    const expectedBytes = Buffer.from(expectedMac, "hex");
+    if (
+      macBytes.length !== expectedBytes.length ||
+      !timingSafeEqual(macBytes, expectedBytes)
+    )
+      throw new Error(
+        "JwksKeyStore: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
+      );
     const { fetchedAtSec, keysByKid } = parseJwksSnapshot(snapshot);
     this.keysByKid = keysByKid;
     this.lastRefreshAtSec = fetchedAtSec;

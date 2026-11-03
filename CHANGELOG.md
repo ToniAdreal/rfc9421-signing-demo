@@ -11,6 +11,37 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore` snapshot opt-in HMAC signed envelope (backlog
+  #842): `exportSignedSnapshot(secret)` wraps the snapshot in
+  `{ v: 1, snapshot, mac }`, where `mac` is HMAC-SHA256 (hex) over
+  the canonical JSON of the snapshot (object keys sorted
+  recursively, array order preserved) under the caller's secret,
+  and `restoreSignedSnapshot(envelope, secret)` rejects a tampered
+  key, a tampered `fetchedAtSec`, or a wrong secret with the old
+  snapshot untouched — authenticity is checked before snapshot
+  parsing, so a MAC-valid but malformed snapshot still fails on
+  validation and never partially installs. An envelope with an
+  unknown field (including a smuggled `secret`), a version other
+  than `1`, or a malformed `mac` is rejected; an empty secret is a
+  caller-configuration error on both sides; the secret is never
+  written into the envelope, and the envelope is integrity
+  protection only, not encryption. The unsigned
+  `exportSnapshot()` / `restore()` paths are unchanged, and the two
+  forms do not cross-accept. `src/jwks.ts` gains the exported
+  `JwksSignedSnapshotEnvelope` type, `src/index.ts` exports it, and
+  `test/jwksSignedSnapshot.test.ts` adds 12 cases (signed
+  round-trip through JSON persistence verifying all three key
+  types, Buffer secret, key-order-insensitive canonical JSON,
+  tampered key/timestamp/mac and wrong secret rejected with the old
+  store untouched, unknown-field and version/mac-shape rejections,
+  empty-secret rejections, MAC-valid malformed snapshot failing
+  closed, unsigned-path regression and non-cross-acceptance, and
+  export-before-refresh plus no refresh-counter movement on a
+  failed signed restore). The README snapshot section, Limitations,
+  and SECURITY.md now describe the signed envelope alongside the
+  unchanged unsigned trusted-configuration semantics, and both
+  test-count mentions move 1328 → 1340.
+
 - Per-field `;sf` type registry (backlog #839): `SignOptions` and
   `VerifyOptions` gain optional `structuredFieldTypes` (a field name
   → `"dictionary" | "list" | "item"` map, matched case-insensitively).

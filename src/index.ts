@@ -18,6 +18,7 @@ export type {
   JwksKeyStoreOptions,
   JwksKeyStoreSnapshot,
   JwksKeyStoreStats,
+  JwksSignedSnapshotEnvelope,
   JwksSleepImpl,
   JwksSnapshotKey,
 } from "./jwks.js";

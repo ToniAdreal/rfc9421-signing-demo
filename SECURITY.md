@@ -121,7 +121,13 @@ Read this before using it anywhere that matters.
   (`JwksKeyStore.restore()`) across the same process's restart, but the
   exported snapshot is unsigned — anyone who can rewrite it can
   substitute verification keys, so treat it as trusted configuration —
-  and the library never persists it itself. There is still
+  and the library never persists it itself. The opt-in signed
+  envelope (`exportSignedSnapshot(secret)` /
+  `restoreSignedSnapshot(envelope, secret)`) closes exactly that
+  hole for the persisted form: a rewritten key or timestamp, or a
+  wrong secret, is rejected at restore with the old snapshot
+  untouched (the envelope is integrity protection only, not
+  encryption, and the secret is never stored in it). There is still
   no built-in persistent keystore and no automatic rotation schedule:
   how keys are generated and stored, how often the JWKS snapshot is
   re-fetched, and the mapping of `keyid` values are on the caller.

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1328 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1340 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -733,13 +733,25 @@ still run. Restore is fail-closed, deliberately stricter than
 material, an unsupported `kty`, or a kid-less entry (skipped by
 `refresh()`, fatal here — a snapshot is this store's own export format,
 so a kid-less entry means corrupt data) throws and leaves any existing
-snapshot untouched. Honest caveats: the snapshot is **not signed** —
-treat the persisted form as trusted configuration, since whoever can
-rewrite it can substitute their own verification keys — and it covers
+snapshot untouched. For an integrity-protected form, use the opt-in
+signed envelope instead: `store.exportSignedSnapshot(secret)` wraps
+the same snapshot in `{ v: 1, snapshot, mac }`, where `mac` is
+HMAC-SHA256 over the canonical JSON of the snapshot (object keys
+sorted, so a JSON round-trip that reorders keys still verifies) under
+the caller's secret, and `store.restoreSignedSnapshot(envelope,
+secret)` rejects a tampered key, a tampered `fetchedAtSec`, or a
+wrong secret with the old snapshot untouched — checking authenticity
+before snapshot parsing, so a MAC-valid but malformed snapshot still
+fails on validation, never partially installs. The secret is never
+written into the envelope, and the envelope is integrity protection
+only, not encryption (the keys inside are public keys). Honest
+caveats: the *unsigned* snapshot is **not signed** — treat that
+persisted form as trusted configuration, since whoever can rewrite it
+can substitute their own verification keys — and either form covers
 one process across its own restart only; two processes restoring the
 same snapshot diverge immediately afterwards. Exporting before any
 successful `refresh()` throws rather than persisting a keyless
-placeholder.
+placeholder, signed or not.
 
 Receiving signed webhooks with Node's `http` server — the receive→verify
 chain via `fromNodeRequest`:
@@ -1281,8 +1293,11 @@ const dual = addSignature(merchantSigned, {
   via `JwksKeyStore`. There is no built-in persistent keystore and
   no automatic rotation schedule: a `JwksKeyStore` snapshot can be
   exported and restored across a single process's restart, but the
-  library never writes it anywhere itself, its persisted form is
-  unsigned (treat it as trusted configuration only), and deciding
+  library never writes it anywhere itself, its unsigned persisted form
+  is unsigned (treat it as trusted configuration only; the opt-in
+  signed envelope, `exportSignedSnapshot` /
+  `restoreSignedSnapshot`, catches a rewritten snapshot at restore
+  time), and deciding
   *when* to re-fetch is your loop — `refreshIfStale()` performs the
   staleness check and the re-fetch in one call, but nothing calls
   it for you. Until a successful `refresh()` replaces the snapshot,
@@ -1339,8 +1354,10 @@ const dual = addSignature(merchantSigned, {
   `JwksKeyStore`; there is still no built-in persistent keystore and no
   automatic rotation schedule — a `JwksKeyStore` snapshot can be exported
   and restored across a single process's restart, but the library never
-  writes it anywhere itself, its persisted form is unsigned (trusted
-  configuration only), and deciding *when* to re-fetch remains the
+  writes it anywhere itself, its unsigned persisted form is unsigned
+  (trusted configuration only; the opt-in signed envelope,
+  `exportSignedSnapshot` / `restoreSignedSnapshot`, catches a
+  rewritten snapshot at restore time), and deciding *when* to re-fetch remains the
   caller's loop (`refreshIfStale()` performs the `isStale()` check and
   the re-fetch in one call, but nothing calls it for you). Trusting
   the JWKS endpoint is the caller's responsibility (see SECURITY.md).
@@ -3390,7 +3407,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1328 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1340 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
