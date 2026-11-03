@@ -524,6 +524,34 @@
  * is a fresh ed25519 pair (generation is not printed) and
  * every clock is injected, so the segment's printed lines
  * are identical between runs.
+ * The demo closes with a JWKS signed snapshot restart
+ * segment: a `JwksKeyStore` is loaded through a counting
+ * fake fetch (zero network) under an injected clock
+ * pinned to `DEMO_CREATED`, its snapshot is exported
+ * with `exportSignedSnapshot()` — only the envelope
+ * version and the key count are printed, never the
+ * secret or the MAC — the envelope crosses a JSON text
+ * round-trip, and a new store cold-starts from it with
+ * `restoreSignedSnapshot()` over a fetch that throws if
+ * called, so the unchanged fetch count proves the
+ * restore performed no network access. A detached copy
+ * of the envelope with one key rewritten is then fed to
+ * the restored store's `restoreSignedSnapshot()` and
+ * printed rejected with its pinned MAC mismatch
+ * message; only after that rejection is a request signed
+ * under the snapshotted keyid verified through the
+ * restored store, and verified again after the
+ * rejection, so the passing verifications themselves
+ * prove the failed restore left the good snapshot
+ * untouched. Outside the printed lines the demo asserts
+ * the envelope shape, the fetch count, the restored
+ * store's size and original freshness timestamp, the
+ * verified identities and the rejection message equal
+ * the hand-pinned expectations below (the same shapes
+ * `test/jwksSignedSnapshot.test.ts` pins). The segment
+ * key pair is a fresh ed25519 pair (generation is not
+ * printed) and every clock is injected, so the
+ * segment's printed lines are identical between runs.
  * The demo closes with a JWKS observability segment:
  * a `JwksKeyStore` over a counting fake fetch (zero
  * network) and an injected clock is read through its
@@ -1193,6 +1221,7 @@ import {
   type RsaPublicJwk,
   type IncomingRequestLike,
   type JwksKeyStoreSnapshot,
+  type JwksSignedSnapshotEnvelope,
   type JwksKeyStoreStats,
   type ParsedSignatureInput,
   type ReplayCacheSnapshot,
@@ -2379,6 +2408,47 @@ export const DEMO_JWKS_SNAPSHOT_POISON_ERROR =
 export const DEMO_JWKS_SNAPSHOT_EXPORT_ERROR =
   "JwksKeyStore: cannot export a snapshot before a successful refresh() " +
   "(no keys have been fetched yet)";
+
+/** Key id of the closing JWKS signed snapshot segment's snapshotted key. */
+export const DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID = "demo-jwks-signed-snapshot-1";
+/** Nonce of the closing JWKS signed snapshot segment's signed request. */
+export const DEMO_JWKS_SIGNED_SNAPSHOT_NONCE =
+  "demo-nonce-jwks-signed-snapshot-001";
+/** Label every JWKS signed snapshot segment signature carries (the library default). */
+export const DEMO_JWKS_SIGNED_SNAPSHOT_LABEL = "sig1";
+/** Algorithm of the closing JWKS signed snapshot segment's signature. */
+export const DEMO_JWKS_SIGNED_SNAPSHOT_ALG = "ed25519";
+/**
+ * Fixed secret the closing JWKS signed snapshot segment signs
+ * its envelope with: a demo-only literal, never printed (the
+ * printed lines carry only the envelope version and the key
+ * count, never the secret or the MAC).
+ */
+export const DEMO_JWKS_SIGNED_SNAPSHOT_SECRET =
+  "demo-jwks-signed-snapshot-secret-001";
+/**
+ * Fetch count of the closing JWKS signed snapshot segment: the
+ * source store's `refresh()` fetches exactly once, and the
+ * signed cold start plus the tampered-restore probe fetch
+ * zero times — the count after the restore still equals
+ * this pin, which is what proves the restored store
+ * performed no network access.
+ */
+export const DEMO_JWKS_SIGNED_SNAPSHOT_FETCH_CALLS = 1;
+/** Key count of the segment's signed envelope (exactly one key). */
+export const DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT = 1;
+/**
+ * Hand-pinned rejection of the closing JWKS signed snapshot
+ * segment's tampered envelope: the MAC is checked before
+ * any snapshot parsing, so rewriting one key is caught as
+ * a MAC mismatch (the same message
+ * `test/jwksSignedSnapshot.test.ts` pins). Written out
+ * here, never derived from the restore the demo is
+ * checking.
+ */
+export const DEMO_JWKS_SIGNED_SNAPSHOT_TAMPER_ERROR =
+  "JwksKeyStore: signed snapshot MAC mismatch: the snapshot was " +
+  "tampered with or the secret is wrong";
 
 /** Key id of the closing JWKS observability segment's pinned key. */
 export const DEMO_JWKS_OBSERVABILITY_KEY_ID =
@@ -4421,6 +4491,64 @@ export interface DemoResult {
    * `DEMO_JWKS_SNAPSHOT_EXPORT_ERROR`).
    */
   jwksSnapshotPersistUnrefreshedError: string;
+  /**
+   * The closing JWKS signed snapshot segment's exported
+   * envelope: `exportSignedSnapshot()` of the refreshed
+   * source store (v 1, exactly
+   * `DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT` key carrying
+   * `DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID` and no `"d"`
+   * material, plus a MAC the segment never prints).
+   */
+  jwksSignedSnapshotEnvelope: JwksSignedSnapshotEnvelope;
+  /**
+   * Fake-fetch count after the signed cold start
+   * (unchanged: still
+   * `DEMO_JWKS_SIGNED_SNAPSHOT_FETCH_CALLS` — a signed
+   * restore never fetches, and the tampered-restore probe
+   * below fetches nothing either).
+   */
+  jwksSignedSnapshotFetchCallsAfterRestore: number;
+  /**
+   * The signed-restored store's size, read after the
+   * tampered restore attempt (equals
+   * `DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT` — the failed
+   * restore left the good snapshot untouched).
+   */
+  jwksSignedSnapshotRestoredSize: number;
+  /**
+   * The signed-restored store's `lastRefreshedAt`: the
+   * snapshot's original `fetchedAtSec` (`DEMO_CREATED`),
+   * never the restore instant — restoring does not renew
+   * freshness.
+   */
+  jwksSignedSnapshotRestoredFetchedAtSec: number | null;
+  /**
+   * The request the closing JWKS signed snapshot segment
+   * signs under the snapshotted keyid
+   * (`DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID`, nonce
+   * `DEMO_JWKS_SIGNED_SNAPSHOT_NONCE`).
+   */
+  jwksSignedSnapshotSigned: SignedHttpRequest;
+  /**
+   * Verification of `jwksSignedSnapshotSigned` through
+   * the signed-restored store's resolver (ok — the
+   * envelope's snapshot carries the key).
+   */
+  jwksSignedSnapshotVerification: VerifyResult;
+  /**
+   * Error message thrown when the signed-restored store's
+   * `restoreSignedSnapshot()` is fed the detached envelope
+   * copy with one key rewritten (equals the hand-pinned
+   * `DEMO_JWKS_SIGNED_SNAPSHOT_TAMPER_ERROR`).
+   */
+  jwksSignedSnapshotTamperError: string;
+  /**
+   * Verification of `jwksSignedSnapshotSigned` through
+   * the signed-restored store's resolver, run after the
+   * tampered restore attempt (ok — the rejection left
+   * the restored snapshot fully usable).
+   */
+  jwksSignedSnapshotVerificationAfterTamper: VerifyResult;
   /**
    * The closing JWKS observability segment's
    * `lastRefreshedAt` before any refresh: `null` — no
@@ -7832,6 +7960,188 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+
+  // JWKS signed snapshot restart segment: the snapshot
+  // persistence segment above shows the unsigned restart
+  // path — a persisted snapshot is trusted configuration —
+  // but never the opt-in signed envelope from backlog
+  // #842, where a rewritten key must be caught at restore
+  // instead of silently trusted. This segment drives a
+  // JwksKeyStore through refresh() with a counting fake
+  // fetch (a scripted function — zero network, the
+  // configured endpoint is never contacted) and an
+  // injected clock pinned to DEMO_CREATED, exports the
+  // signed envelope with exportSignedSnapshot() (only
+  // its version and key count are printed — never the
+  // secret or the MAC), round-trips it through JSON text
+  // exactly as a persisted file would carry it, and
+  // cold-starts a new store with restoreSignedSnapshot()
+  // over a fetch that throws if called: the fetch count
+  // does not move, so the restored store provably
+  // performed no network access, and its freshness still
+  // counts from the original fetch. A detached copy of
+  // the envelope with one key's `x` value rewritten is
+  // then fed to the restored store's
+  // restoreSignedSnapshot() and rejected fail-closed
+  // with the pinned MAC mismatch message; only after
+  // that rejection does the segment verify through the
+  // restored store again, so the passing verification
+  // itself proves the failed restore left the good
+  // snapshot untouched. The segment key pair is a fresh
+  // ed25519 pair (generation is not printed); outside
+  // the printed lines the demo asserts every value
+  // above equals the hand-pinned
+  // DEMO_JWKS_SIGNED_SNAPSHOT_* expectations.
+  const jwksSignedSnapshotPair = generateEd25519KeyPair();
+  let jwksSignedSnapshotFetchCalls = 0;
+  const jwksSignedSnapshotFetchImpl = async () => {
+    jwksSignedSnapshotFetchCalls++;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        keys: [
+          {
+            ...exportPublicKeyJwk(jwksSignedSnapshotPair.publicKey),
+            kid: DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID,
+          },
+        ],
+      }),
+    };
+  };
+  const jwksSignedSnapshotStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: jwksSignedSnapshotFetchImpl,
+    now: () => DEMO_CREATED,
+  });
+  await jwksSignedSnapshotStore.refresh();
+  const jwksSignedSnapshotEnvelope =
+    jwksSignedSnapshotStore.exportSignedSnapshot(
+      DEMO_JWKS_SIGNED_SNAPSHOT_SECRET,
+    );
+  const jwksSignedSnapshotWire: unknown = JSON.parse(
+    JSON.stringify(jwksSignedSnapshotEnvelope),
+  );
+  const jwksSignedSnapshotRestored = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      throw new Error("fetch must not be called by signed snapshot restore");
+    },
+    now: () => DEMO_CREATED,
+  });
+  jwksSignedSnapshotRestored.restoreSignedSnapshot(
+    jwksSignedSnapshotWire,
+    DEMO_JWKS_SIGNED_SNAPSHOT_SECRET,
+  );
+  const jwksSignedSnapshotFetchCallsAfterRestore =
+    jwksSignedSnapshotFetchCalls;
+  const jwksSignedSnapshotSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID,
+      alg: "ed25519",
+      key: jwksSignedSnapshotPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_JWKS_SIGNED_SNAPSHOT_NONCE,
+    },
+  );
+  const jwksSignedSnapshotVerification = verifyRequest(
+    jwksSignedSnapshotSigned,
+    {
+      keyResolver: jwksSignedSnapshotRestored.resolve,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const jwksSignedSnapshotTampered = JSON.parse(
+    JSON.stringify(jwksSignedSnapshotEnvelope),
+  ) as {
+    snapshot: { keys: Array<Record<string, unknown>> };
+  };
+  const jwksSignedSnapshotOriginalX = String(
+    jwksSignedSnapshotTampered.snapshot.keys[0]?.["x"] ?? "",
+  );
+  jwksSignedSnapshotTampered.snapshot.keys[0] = {
+    ...jwksSignedSnapshotTampered.snapshot.keys[0]!,
+    x:
+      jwksSignedSnapshotOriginalX[0] === "A"
+        ? `B${jwksSignedSnapshotOriginalX.slice(1)}`
+        : `A${jwksSignedSnapshotOriginalX.slice(1)}`,
+  };
+  let jwksSignedSnapshotTamperError = "";
+  try {
+    jwksSignedSnapshotRestored.restoreSignedSnapshot(
+      jwksSignedSnapshotTampered,
+      DEMO_JWKS_SIGNED_SNAPSHOT_SECRET,
+    );
+  } catch (err) {
+    jwksSignedSnapshotTamperError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const jwksSignedSnapshotVerificationAfterTamper = verifyRequest(
+    jwksSignedSnapshotSigned,
+    {
+      keyResolver: jwksSignedSnapshotRestored.resolve,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const jwksSignedSnapshotRestoredSize = jwksSignedSnapshotRestored.size;
+  const jwksSignedSnapshotRestoredFetchedAtSec =
+    jwksSignedSnapshotRestored.lastRefreshedAt;
+  if (
+    jwksSignedSnapshotEnvelope.v !== 1 ||
+    jwksSignedSnapshotEnvelope.snapshot.fetchedAtSec !== DEMO_CREATED ||
+    jwksSignedSnapshotEnvelope.snapshot.keys.length !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT ||
+    jwksSignedSnapshotEnvelope.snapshot.keys[0]?.kid !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID ||
+    "d" in (jwksSignedSnapshotEnvelope.snapshot.keys[0] ?? {}) ||
+    jwksSignedSnapshotFetchCallsAfterRestore !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_FETCH_CALLS ||
+    jwksSignedSnapshotRestoredSize !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT ||
+    jwksSignedSnapshotRestoredFetchedAtSec !== DEMO_CREATED ||
+    !jwksSignedSnapshotVerification.ok ||
+    jwksSignedSnapshotVerification.label !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_LABEL ||
+    jwksSignedSnapshotVerification.keyId !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID ||
+    jwksSignedSnapshotVerification.alg !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_ALG ||
+    jwksSignedSnapshotVerification.nonce !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_NONCE ||
+    jwksSignedSnapshotTamperError !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_TAMPER_ERROR ||
+    !jwksSignedSnapshotVerificationAfterTamper.ok ||
+    jwksSignedSnapshotVerificationAfterTamper.label !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_LABEL ||
+    jwksSignedSnapshotVerificationAfterTamper.keyId !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID ||
+    jwksSignedSnapshotVerificationAfterTamper.nonce !==
+      DEMO_JWKS_SIGNED_SNAPSHOT_NONCE
+  ) {
+    throw new Error(
+      `demo fixture broken: JWKS signed snapshot restart gave envelope ` +
+        `v${jwksSignedSnapshotEnvelope.v}/fetchedAtSec=${jwksSignedSnapshotEnvelope.snapshot.fetchedAtSec}/` +
+        `${jwksSignedSnapshotEnvelope.snapshot.keys.length} keys with fetch count ` +
+        `${jwksSignedSnapshotFetchCallsAfterRestore}, restored ` +
+        `${jwksSignedSnapshotRestoredSize}/${jwksSignedSnapshotRestoredFetchedAtSec}, verification ` +
+        `${jwksSignedSnapshotVerification.ok}/${jwksSignedSnapshotVerification.ok ? jwksSignedSnapshotVerification.label : jwksSignedSnapshotVerification.code}/` +
+        `${jwksSignedSnapshotVerification.ok ? jwksSignedSnapshotVerification.keyId : "-"}/` +
+        `${jwksSignedSnapshotVerification.ok ? jwksSignedSnapshotVerification.nonce : "-"}, tamper error ` +
+        `${JSON.stringify(jwksSignedSnapshotTamperError)}, verification after tamper ` +
+        `${jwksSignedSnapshotVerificationAfterTamper.ok}/${jwksSignedSnapshotVerificationAfterTamper.ok ? jwksSignedSnapshotVerificationAfterTamper.label : jwksSignedSnapshotVerificationAfterTamper.code}, instead of the pinned ` +
+        `v1/fetchedAtSec=${DEMO_CREATED}/${DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT} keys with fetch count ` +
+        `${DEMO_JWKS_SIGNED_SNAPSHOT_FETCH_CALLS}, restored ` +
+        `${DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT}/${DEMO_CREATED}, verification ` +
+        `true/${DEMO_JWKS_SIGNED_SNAPSHOT_LABEL}/${DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID}/` +
+        `${DEMO_JWKS_SIGNED_SNAPSHOT_NONCE}, tamper error ` +
+        `${JSON.stringify(DEMO_JWKS_SIGNED_SNAPSHOT_TAMPER_ERROR)} and verification after tamper ` +
+        `true/${DEMO_JWKS_SIGNED_SNAPSHOT_LABEL}`,
+    );
+  }
 
   // JWKS observability segment: the refresh, snapshot and
   // rotation segments above each read one slice of a
@@ -11598,6 +11908,17 @@ export async function runDemo(): Promise<DemoResult> {
       : `JWKS verification through the restored store after the rejected restore: FAILED (code ${jwksSnapshotPersistVerification.code}: ${jwksSnapshotPersistVerification.reason})`,
     `JWKS snapshot export before any refresh: FAILED (${jwksSnapshotPersistUnrefreshedError})`,
     "",
+    "JWKS signed snapshot restart: JwksKeyStore.exportSignedSnapshot wraps the refreshed snapshot in an HMAC envelope so a restarted process verifies offline without trusting persisted bytes blindly — a rewritten key is caught at restore instead of silently trusted",
+    `JWKS signed snapshot export after one refresh (fetch count ${jwksSignedSnapshotFetchCallsAfterRestore}): exportSignedSnapshot() returned envelope v=${jwksSignedSnapshotEnvelope.v} holding ${jwksSignedSnapshotEnvelope.snapshot.keys.length} key (only the envelope version and the key count are printed — never the secret or the MAC)`,
+    `JWKS signed snapshot cold start: restoreSignedSnapshot() rebuilt a store holding ${jwksSignedSnapshotRestoredSize} key with fetch count still ${jwksSignedSnapshotFetchCallsAfterRestore} (zero network — restoring never fetches) and lastRefreshedAt=${jwksSignedSnapshotRestoredFetchedAtSec} (the original fetch time — restoring never renews freshness)`,
+    jwksSignedSnapshotVerification.ok
+      ? `JWKS signed snapshot verification through the restored store: OK (label ${jwksSignedSnapshotVerification.label}, keyid="${jwksSignedSnapshotVerification.keyId}", alg="${jwksSignedSnapshotVerification.alg}", nonce="${jwksSignedSnapshotVerification.nonce}")`
+      : `JWKS signed snapshot verification through the restored store: FAILED (code ${jwksSignedSnapshotVerification.code}: ${jwksSignedSnapshotVerification.reason})`,
+    `JWKS signed snapshot with one key rewritten: FAILED (${jwksSignedSnapshotTamperError})`,
+    jwksSignedSnapshotVerificationAfterTamper.ok
+      ? `JWKS verification through the restored store after the rejected signed restore: OK (label ${jwksSignedSnapshotVerificationAfterTamper.label}, keyid="${jwksSignedSnapshotVerificationAfterTamper.keyId}", alg="${jwksSignedSnapshotVerificationAfterTamper.alg}", nonce="${jwksSignedSnapshotVerificationAfterTamper.nonce}")`
+      : `JWKS verification through the restored store after the rejected signed restore: FAILED (code ${jwksSignedSnapshotVerificationAfterTamper.code}: ${jwksSignedSnapshotVerificationAfterTamper.reason})`,
+    "",
     "JWKS observability: JwksKeyStore exposes lastRefreshedAt, isStale() and stats() — the health view a gateway operator watches to decide whether its key cache is fresh, stale-but-serving, or missing keys",
     `JWKS observability before any refresh: lastRefreshedAt=${jwksObservabilityLastRefreshedBefore} (no refresh has succeeded yet), isStale()=${jwksObservabilityStaleBefore} (a never-refreshed store is stale)`,
     `JWKS observability after the first refresh at ${DEMO_CREATED}: lastRefreshedAt=${jwksObservabilityLastRefreshedAfter}, isStale()=${jwksObservabilityStaleAfterRefresh} (inside the ${DEMO_JWKS_OBSERVABILITY_TTL_SEC}s TTL), fetch count ${jwksObservabilityFetchCallsAfterRefresh}`,
@@ -12108,6 +12429,14 @@ export async function runDemo(): Promise<DemoResult> {
     jwksSnapshotPersistVerification,
     jwksSnapshotPersistPoisonError,
     jwksSnapshotPersistUnrefreshedError,
+    jwksSignedSnapshotEnvelope,
+    jwksSignedSnapshotFetchCallsAfterRestore,
+    jwksSignedSnapshotRestoredSize,
+    jwksSignedSnapshotRestoredFetchedAtSec,
+    jwksSignedSnapshotSigned,
+    jwksSignedSnapshotVerification,
+    jwksSignedSnapshotTamperError,
+    jwksSignedSnapshotVerificationAfterTamper,
     jwksObservabilityLastRefreshedBefore,
     jwksObservabilityStaleBefore,
     jwksObservabilityFetchCalls: jwksObservabilityFetchCallsAfterRefresh,

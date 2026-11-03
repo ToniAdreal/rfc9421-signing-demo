@@ -171,6 +171,14 @@ import {
   DEMO_JWKS_SNAPSHOT_NONCE,
   DEMO_JWKS_SNAPSHOT_POISON_D,
   DEMO_JWKS_SNAPSHOT_POISON_ERROR,
+  DEMO_JWKS_SIGNED_SNAPSHOT_ALG,
+  DEMO_JWKS_SIGNED_SNAPSHOT_FETCH_CALLS,
+  DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT,
+  DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID,
+  DEMO_JWKS_SIGNED_SNAPSHOT_LABEL,
+  DEMO_JWKS_SIGNED_SNAPSHOT_NONCE,
+  DEMO_JWKS_SIGNED_SNAPSHOT_SECRET,
+  DEMO_JWKS_SIGNED_SNAPSHOT_TAMPER_ERROR,
   DEMO_JWKS_OBSERVABILITY_ALG,
   DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC,
   DEMO_JWKS_OBSERVABILITY_FETCH_CALLS,
@@ -4016,6 +4024,278 @@ test("demo lines contain the JWKS snapshot persistence segment (export shape, of
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("JWKS snapshot persistence:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 6),
+    lines.slice(headerIdx, headerIdx + 6),
+  );
+});
+
+test("demo JWKS signed snapshot segment exports a signed envelope, cold-starts offline, rejects the rewritten key, and verifies after the rejection", async () => {
+  const {
+    jwksSignedSnapshotEnvelope,
+    jwksSignedSnapshotFetchCallsAfterRestore,
+    jwksSignedSnapshotRestoredSize,
+    jwksSignedSnapshotRestoredFetchedAtSec,
+    jwksSignedSnapshotSigned,
+    jwksSignedSnapshotVerification,
+    jwksSignedSnapshotTamperError,
+    jwksSignedSnapshotVerificationAfterTamper,
+  } = await runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_JWKS_SIGNED_SNAPSHOT_* and cross-checked
+  // against test/jwksSignedSnapshot.test.ts (its
+  // envelope case pins the shape and offline restore,
+  // its tamper case pins the MAC mismatch rejection).
+  // The test pins the literals again here so a drift in
+  // either place fails.
+  assert.equal(DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID, "demo-jwks-signed-snapshot-1");
+  assert.equal(
+    DEMO_JWKS_SIGNED_SNAPSHOT_NONCE,
+    "demo-nonce-jwks-signed-snapshot-001",
+  );
+  assert.equal(DEMO_JWKS_SIGNED_SNAPSHOT_LABEL, "sig1");
+  assert.equal(DEMO_JWKS_SIGNED_SNAPSHOT_ALG, "ed25519");
+  assert.equal(
+    DEMO_JWKS_SIGNED_SNAPSHOT_SECRET,
+    "demo-jwks-signed-snapshot-secret-001",
+  );
+  assert.equal(DEMO_JWKS_SIGNED_SNAPSHOT_FETCH_CALLS, 1);
+  assert.equal(DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT, 1);
+  assert.equal(
+    DEMO_JWKS_SIGNED_SNAPSHOT_TAMPER_ERROR,
+    "JwksKeyStore: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
+  );
+
+  // The envelope itself: v1, the original fetch time,
+  // exactly one public key under the pinned kid, no "d",
+  // and a 64-char lowercase hex MAC (its value is never
+  // printed, only its shape is pinned here).
+  assert.equal(jwksSignedSnapshotEnvelope.v, 1);
+  assert.equal(
+    jwksSignedSnapshotEnvelope.snapshot.fetchedAtSec,
+    DEMO_CREATED,
+  );
+  assert.equal(
+    jwksSignedSnapshotEnvelope.snapshot.keys.length,
+    DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT,
+  );
+  assert.equal(
+    jwksSignedSnapshotEnvelope.snapshot.keys[0]?.kid,
+    DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID,
+  );
+  assert.equal(jwksSignedSnapshotEnvelope.snapshot.keys[0]?.kty, "OKP");
+  assert.equal(
+    "d" in (jwksSignedSnapshotEnvelope.snapshot.keys[0] ?? {}),
+    false,
+  );
+  assert.match(jwksSignedSnapshotEnvelope.mac, /^[0-9a-f]{64}$/);
+
+  // No fetch for the signed cold start; the restored
+  // store holds the key and still counts its freshness
+  // from the original fetch.
+  assert.equal(
+    jwksSignedSnapshotFetchCallsAfterRestore,
+    DEMO_JWKS_SIGNED_SNAPSHOT_FETCH_CALLS,
+  );
+  assert.equal(
+    jwksSignedSnapshotRestoredSize,
+    DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT,
+  );
+  assert.equal(jwksSignedSnapshotRestoredFetchedAtSec, DEMO_CREATED);
+
+  assert.equal(
+    jwksSignedSnapshotSigned.headers["signature-input"],
+    `sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID}";alg="${DEMO_JWKS_SIGNED_SNAPSHOT_ALG}";nonce="${DEMO_JWKS_SIGNED_SNAPSHOT_NONCE}"`,
+  );
+  assert.equal(jwksSignedSnapshotVerification.ok, true);
+  assert.equal(
+    jwksSignedSnapshotVerification.label,
+    DEMO_JWKS_SIGNED_SNAPSHOT_LABEL,
+  );
+  assert.equal(
+    jwksSignedSnapshotVerification.keyId,
+    DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID,
+  );
+  assert.equal(
+    jwksSignedSnapshotVerification.alg,
+    DEMO_JWKS_SIGNED_SNAPSHOT_ALG,
+  );
+  assert.equal(
+    jwksSignedSnapshotVerification.nonce,
+    DEMO_JWKS_SIGNED_SNAPSHOT_NONCE,
+  );
+  assert.equal(
+    jwksSignedSnapshotTamperError,
+    DEMO_JWKS_SIGNED_SNAPSHOT_TAMPER_ERROR,
+  );
+  // Verification after the tampered restore attempt, so
+  // its success also proves the rejection was atomic.
+  assert.equal(jwksSignedSnapshotVerificationAfterTamper.ok, true);
+  assert.equal(
+    jwksSignedSnapshotVerificationAfterTamper.label,
+    DEMO_JWKS_SIGNED_SNAPSHOT_LABEL,
+  );
+  assert.equal(
+    jwksSignedSnapshotVerificationAfterTamper.keyId,
+    DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID,
+  );
+  assert.equal(
+    jwksSignedSnapshotVerificationAfterTamper.nonce,
+    DEMO_JWKS_SIGNED_SNAPSHOT_NONCE,
+  );
+
+  // Cross-check against the library called directly: a
+  // fresh pair behind a counting stub fetch refreshes
+  // once, exports the same envelope shape, restores from
+  // the JSON form into a store whose fetch always throws,
+  // verifies, rejects the same rewritten key with the
+  // same message (size unchanged), and verifies again.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  let directCalls = 0;
+  const directFetch = async () => {
+    directCalls++;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        keys: [
+          {
+            ...exportPublicKeyJwk(publicKey),
+            kid: DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID,
+          },
+        ],
+      }),
+    };
+  };
+  const directStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: directFetch,
+    now: () => DEMO_CREATED,
+  });
+  await directStore.refresh();
+  assert.equal(directCalls, DEMO_JWKS_SIGNED_SNAPSHOT_FETCH_CALLS);
+  const directEnvelope = directStore.exportSignedSnapshot(
+    DEMO_JWKS_SIGNED_SNAPSHOT_SECRET,
+  );
+  assert.equal(directEnvelope.v, jwksSignedSnapshotEnvelope.v);
+  assert.equal(
+    directEnvelope.snapshot.fetchedAtSec,
+    jwksSignedSnapshotEnvelope.snapshot.fetchedAtSec,
+  );
+  assert.equal(
+    directEnvelope.snapshot.keys.length,
+    jwksSignedSnapshotEnvelope.snapshot.keys.length,
+  );
+  const directRestored = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      throw new Error("fetch must not be called by signed snapshot restore");
+    },
+    now: () => DEMO_CREATED,
+  });
+  directRestored.restoreSignedSnapshot(
+    JSON.parse(JSON.stringify(directEnvelope)),
+    DEMO_JWKS_SIGNED_SNAPSHOT_SECRET,
+  );
+  assert.equal(directCalls, jwksSignedSnapshotFetchCallsAfterRestore);
+  assert.equal(directRestored.size, jwksSignedSnapshotRestoredSize);
+  assert.equal(
+    directRestored.lastRefreshedAt,
+    jwksSignedSnapshotRestoredFetchedAtSec,
+  );
+  const directSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_JWKS_SIGNED_SNAPSHOT_NONCE,
+    },
+  );
+  const directOk = verifyRequest(directSigned, {
+    keyResolver: directRestored.resolve,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(directOk.ok, true);
+  assert.equal(directOk.keyId, DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID);
+  assert.equal(directOk.alg, DEMO_JWKS_SIGNED_SNAPSHOT_ALG);
+  const directTampered = JSON.parse(JSON.stringify(directEnvelope)) as {
+    snapshot: { keys: Array<Record<string, unknown>> };
+  };
+  const directOriginalX = String(
+    directTampered.snapshot.keys[0]?.["x"] ?? "",
+  );
+  directTampered.snapshot.keys[0] = {
+    ...directTampered.snapshot.keys[0]!,
+    x:
+      directOriginalX[0] === "A"
+        ? `B${directOriginalX.slice(1)}`
+        : `A${directOriginalX.slice(1)}`,
+  };
+  let directTamperError = "";
+  try {
+    directRestored.restoreSignedSnapshot(
+      directTampered,
+      DEMO_JWKS_SIGNED_SNAPSHOT_SECRET,
+    );
+  } catch (err) {
+    directTamperError = err instanceof Error ? err.message : String(err);
+  }
+  assert.equal(directTamperError, jwksSignedSnapshotTamperError);
+  assert.equal(directRestored.size, DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT);
+  const directAfterTamper = verifyRequest(directSigned, {
+    keyResolver: directRestored.resolve,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(directAfterTamper.ok, true);
+  assert.equal(directCalls, jwksSignedSnapshotFetchCallsAfterRestore);
+});
+
+test("demo lines contain the JWKS signed snapshot restart segment (envelope shape, offline cold start, rewritten-key rejection, restored verification, followed by the JWKS observability segment)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /JWKS signed snapshot restart: JwksKeyStore\.exportSignedSnapshot/);
+  // The signed block sits after the unsigned snapshot
+  // persistence segment and before the observability
+  // segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS signed snapshot restart:"),
+  );
+  const snapshotIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS snapshot persistence:"),
+  );
+  const observabilityIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS observability:"),
+  );
+  assert.ok(
+    snapshotIdx !== -1 &&
+      headerIdx !== -1 &&
+      observabilityIdx !== -1 &&
+      snapshotIdx < headerIdx &&
+      headerIdx < observabilityIdx,
+  );
+  const expectedLines = [
+    "JWKS signed snapshot restart: JwksKeyStore.exportSignedSnapshot wraps the refreshed snapshot in an HMAC envelope so a restarted process verifies offline without trusting persisted bytes blindly — a rewritten key is caught at restore instead of silently trusted",
+    `JWKS signed snapshot export after one refresh (fetch count ${DEMO_JWKS_SIGNED_SNAPSHOT_FETCH_CALLS}): exportSignedSnapshot() returned envelope v=1 holding ${DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT} key (only the envelope version and the key count are printed — never the secret or the MAC)`,
+    `JWKS signed snapshot cold start: restoreSignedSnapshot() rebuilt a store holding ${DEMO_JWKS_SIGNED_SNAPSHOT_KEY_COUNT} key with fetch count still ${DEMO_JWKS_SIGNED_SNAPSHOT_FETCH_CALLS} (zero network — restoring never fetches) and lastRefreshedAt=${DEMO_CREATED} (the original fetch time — restoring never renews freshness)`,
+    `JWKS signed snapshot verification through the restored store: OK (label ${DEMO_JWKS_SIGNED_SNAPSHOT_LABEL}, keyid="${DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID}", alg="${DEMO_JWKS_SIGNED_SNAPSHOT_ALG}", nonce="${DEMO_JWKS_SIGNED_SNAPSHOT_NONCE}")`,
+    `JWKS signed snapshot with one key rewritten: FAILED (${DEMO_JWKS_SIGNED_SNAPSHOT_TAMPER_ERROR})`,
+    `JWKS verification through the restored store after the rejected signed restore: OK (label ${DEMO_JWKS_SIGNED_SNAPSHOT_LABEL}, keyid="${DEMO_JWKS_SIGNED_SNAPSHOT_KEY_ID}", alg="${DEMO_JWKS_SIGNED_SNAPSHOT_ALG}", nonce="${DEMO_JWKS_SIGNED_SNAPSHOT_NONCE}")`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), expectedLines);
+  // The printed block carries no secret or MAC bytes, so
+  // it is pinned constants, identical between runs even
+  // though the segment key pair itself is fresh per run.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("JWKS signed snapshot restart:"),
   );
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 6),

@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo JWKS signed snapshot restart segment (backlog
+  #848): the demo now shows the #842 HMAC envelope's
+  restart story — a store refreshes once through a counting
+  fake fetch, exports with `exportSignedSnapshot()` (only
+  the envelope version and key count are printed, never
+  the secret or the MAC), round-trips the envelope through
+  JSON text, and cold-starts a new store with
+  `restoreSignedSnapshot()` over a fetch that throws if
+  called, so the unchanged fetch count proves the restore
+  performed no network access. A detached envelope copy
+  with one key rewritten is rejected with the pinned MAC
+  mismatch message, and verification through the restored
+  store still passes afterwards, proving the failed
+  restore left the good snapshot untouched.
 - Benchmark `;sf` type-registry group (backlog #845):
   `bench/bench.ts` measures the fixed eight-value
   `SF_REGISTRY_FIXTURE` corpus (each value carrying its registered
