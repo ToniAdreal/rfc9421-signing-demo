@@ -896,6 +896,15 @@
  * still verifies. Only the loopback port (never printed) and
  * the key pairs are fresh per run, so the segment is
  * byte-identical between runs.
+ * The demo then runs an allowed-algs whitelist segment: the
+ * same request is signed twice, once with ed25519 and once
+ * with RSA-PSS, and both signatures are verified under
+ * `allowedAlgs: ["ed25519"]` — the ed25519 signature
+ * verifies, the RSA-PSS signature is rejected with
+ * `ALG_NOT_ALLOWED` before any cryptographic verification.
+ * Only keyids, algs and outcomes are printed, never
+ * signature bytes, so the segment is byte-identical
+ * between runs despite RSA-PSS signing being randomized.
  * The demo closes with a JWKS requireHttps segment: a real loopback
  * `http` server serves the scripted key's JWKS document, and a
  * `JwksKeyStore` built over that plaintext endpoint with
@@ -3756,6 +3765,28 @@ export const DEMO_DUAL_RESPONSE_GATEWAY_NONCE =
  */
 export const DEMO_DUAL_RESPONSE_TAMPER_CODE: VerifyFailureCode =
   "SIGNATURE_MISMATCH";
+/** Label both allowed-algs whitelist signatures carry (two separate signings of one request). */
+export const DEMO_ALLOWED_ALGS_LABEL = "sig1";
+/** URL of the single request signed twice in the allowed-algs whitelist segment. */
+export const DEMO_ALLOWED_ALGS_URL = "https://api.example.com/v1/payments";
+/** Key id the whitelisted ed25519 signature carries. */
+export const DEMO_ALLOWED_ALGS_ED_KEY_ID = "demo-allowed-algs-ed-1";
+/** Key id the RSA-PSS signature carries. */
+export const DEMO_ALLOWED_ALGS_RSA_KEY_ID = "demo-allowed-algs-rsa-1";
+/** Nonce the whitelisted ed25519 signature carries. */
+export const DEMO_ALLOWED_ALGS_ED_NONCE = "demo-allowed-algs-ed-nonce-1";
+/** Nonce the RSA-PSS signature carries. */
+export const DEMO_ALLOWED_ALGS_RSA_NONCE = "demo-allowed-algs-rsa-nonce-1";
+/** Verifier clock for the allowed-algs whitelist segment (60s after DEMO_CREATED). */
+export const DEMO_ALLOWED_ALGS_NOW = DEMO_CREATED + 60;
+/**
+ * Hand-pinned failure code for the allowed-algs segment's RSA-PSS
+ * signature under an ed25519-only whitelist (`ALG_NOT_ALLOWED`):
+ * the rejection happens before any cryptographic verification, so
+ * the RSA public key is never consulted for that signature.
+ */
+export const DEMO_ALLOWED_ALGS_REJECT_CODE: VerifyFailureCode =
+  "ALG_NOT_ALLOWED";
 
 export interface DemoResult {
   signed: SignedHttpRequest;
@@ -5360,6 +5391,17 @@ export interface DemoResult {
    * `DEMO_DUAL_RESPONSE_TAMPER_CODE`.
    */
   dualSignedResponseTamperedVerification: VerifyResult[];
+  /**
+   * Verification of the whitelisted ed25519 signature in the
+   * allowed-algs segment (ok under `allowedAlgs: ["ed25519"]`).
+   */
+  allowedAlgsEdVerification: VerifyResult;
+  /**
+   * Verification of the RSA-PSS signature in the allowed-algs
+   * segment (rejected with `DEMO_ALLOWED_ALGS_REJECT_CODE` under
+   * the same ed25519-only whitelist, before crypto).
+   */
+  allowedAlgsRsaVerification: VerifyResult;
   lines: string[];
 }
 
@@ -5436,6 +5478,29 @@ function rsaV15Pair(): {
     demoRsaV15Pair = generateRsaV15KeyPair();
   }
   return demoRsaV15Pair;
+}
+
+/**
+ * RSA key pair for the allowed-algs whitelist segment, generated
+ * once per process and reused across `runDemo()` calls — the
+ * same generate-once shape as {@link rsaJwkPair} above, for the
+ * same reason: the demo tests call `runDemo()` many times and
+ * must not pay RSA key generation on every call. Only the
+ * keyids, algs and verification outcomes are ever printed,
+ * never key bytes or signature bytes.
+ */
+let demoAllowedAlgsRsaPair: {
+  publicKey: KeyObject;
+  privateKey: KeyObject;
+} | null = null;
+function allowedAlgsRsaPair(): {
+  publicKey: KeyObject;
+  privateKey: KeyObject;
+} {
+  if (demoAllowedAlgsRsaPair === null) {
+    demoAllowedAlgsRsaPair = generateRsaPssKeyPair();
+  }
+  return demoAllowedAlgsRsaPair;
 }
 
 function formatLabelResult(prefix: string, result: VerifyResult): string {
@@ -9781,6 +9846,73 @@ export async function runDemo(): Promise<DemoResult> {
   // byte-identical between runs.
   const dualSignedResponse = await fetchDualSignedResponse();
 
+  // Allowed-algs whitelist segment: a gateway that only accepts
+  // ed25519 should not have to hand-roll a pre-check before
+  // verifying — `allowedAlgs: ["ed25519"]` (backlog #851) is
+  // that check, enforced before any cryptographic verification.
+  // The same request is signed twice, once with ed25519 and
+  // once with RSA-PSS, and both signatures are verified under
+  // the same ed25519-only whitelist: the ed25519 signature
+  // verifies, the RSA-PSS signature is rejected with
+  // `ALG_NOT_ALLOWED` even though its RSA public key is the
+  // correct key for that signature. Only keyids, algs and
+  // outcomes are printed, never signature bytes, so the
+  // segment's printed lines are byte-identical between runs
+  // despite RSA-PSS signing being randomized.
+  const allowedAlgsEdPair = generateEd25519KeyPair();
+  const allowedAlgsRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_ALLOWED_ALGS_URL,
+    headers: {},
+  };
+  const allowedAlgsEdSigned = signRequest(allowedAlgsRequest, {
+    label: DEMO_ALLOWED_ALGS_LABEL,
+    keyId: DEMO_ALLOWED_ALGS_ED_KEY_ID,
+    alg: "ed25519",
+    key: allowedAlgsEdPair.privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_ALLOWED_ALGS_ED_NONCE,
+  });
+  const allowedAlgsRsaSigned = signRequest(allowedAlgsRequest, {
+    label: DEMO_ALLOWED_ALGS_LABEL,
+    keyId: DEMO_ALLOWED_ALGS_RSA_KEY_ID,
+    alg: "rsa-pss-sha512",
+    key: allowedAlgsRsaPair().privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_ALLOWED_ALGS_RSA_NONCE,
+  });
+  const allowedAlgsEdVerification = verifyRequest(allowedAlgsEdSigned, {
+    key: allowedAlgsEdPair.publicKey,
+    allowedAlgs: ["ed25519"],
+    now: DEMO_ALLOWED_ALGS_NOW,
+  });
+  const allowedAlgsRsaVerification = verifyRequest(allowedAlgsRsaSigned, {
+    key: allowedAlgsRsaPair().publicKey,
+    allowedAlgs: ["ed25519"],
+    now: DEMO_ALLOWED_ALGS_NOW,
+  });
+  if (
+    !allowedAlgsEdVerification.ok ||
+    allowedAlgsEdVerification.label !== DEMO_ALLOWED_ALGS_LABEL ||
+    allowedAlgsEdVerification.keyId !== DEMO_ALLOWED_ALGS_ED_KEY_ID ||
+    allowedAlgsEdVerification.alg !== "ed25519" ||
+    allowedAlgsEdVerification.nonce !== DEMO_ALLOWED_ALGS_ED_NONCE ||
+    allowedAlgsRsaVerification.ok ||
+    allowedAlgsRsaVerification.label !== DEMO_ALLOWED_ALGS_LABEL ||
+    allowedAlgsRsaVerification.keyId !== DEMO_ALLOWED_ALGS_RSA_KEY_ID ||
+    allowedAlgsRsaVerification.alg !== "rsa-pss-sha512" ||
+    allowedAlgsRsaVerification.code !== DEMO_ALLOWED_ALGS_REJECT_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: allowedAlgs gave ed25519 ${allowedAlgsEdVerification.ok}/${allowedAlgsEdVerification.label}/` +
+        `${allowedAlgsEdVerification.keyId}/${allowedAlgsEdVerification.alg} and RSA-PSS ` +
+        `${allowedAlgsRsaVerification.ok}/${allowedAlgsRsaVerification.label}/` +
+        `${allowedAlgsRsaVerification.keyId}/${allowedAlgsRsaVerification.alg}/` +
+        `${allowedAlgsRsaVerification.code}, instead of ed25519 ok and RSA-PSS ` +
+        `${DEMO_ALLOWED_ALGS_REJECT_CODE}`,
+    );
+  }
+
   // JWKS requireHttps segment: the JWKS sections above fetch
   // over fake endpoints or restored snapshots, so none shows
   // the opt-in transport rule a production deployment turns
@@ -12115,6 +12247,14 @@ export async function runDemo(): Promise<DemoResult> {
       ? "Dual-signed response after gateway signature tampering: gateway OK (unexpected — the tampered gateway signature was not rejected), merchant OK"
       : `Dual-signed response after gateway signature tampering: gateway FAILED (code ${dualSignedResponse.tamperedVerification[1].code}: ${dualSignedResponse.tamperedVerification[1].reason}), merchant still OK (label ${dualSignedResponse.tamperedVerification[0].label}, keyid="${dualSignedResponse.tamperedVerification[0].keyId}", alg="${dualSignedResponse.tamperedVerification[0].alg}")`,
     "",
+    "Allowed-algs whitelist: a gateway that only accepts ed25519 verifies both signatures under allowedAlgs [\"ed25519\"] — the ed25519 signature verifies, the RSA-PSS signature is rejected with ALG_NOT_ALLOWED before any cryptographic verification, so a foreign algorithm never reaches the crypto path",
+    allowedAlgsEdVerification.ok
+      ? `Whitelisted algorithm verifies: the same request signed with ed25519 verified under allowedAlgs ["ed25519"]: OK (label ${allowedAlgsEdVerification.label}, keyid="${allowedAlgsEdVerification.keyId}", alg="${allowedAlgsEdVerification.alg}", nonce="${allowedAlgsEdVerification.nonce}")`
+      : `Whitelisted algorithm verifies: FAILED (code ${allowedAlgsEdVerification.code}: ${allowedAlgsEdVerification.reason})`,
+    allowedAlgsRsaVerification.ok
+      ? "Non-whitelisted algorithm rejected: the same request signed with RSA-PSS verified under allowedAlgs [\"ed25519\"]: OK (unexpected — the non-whitelisted algorithm was not rejected)"
+      : `Non-whitelisted algorithm rejected: the same request signed with RSA-PSS verified under allowedAlgs ["ed25519"]: FAILED (label ${allowedAlgsRsaVerification.label}, keyid="${allowedAlgsRsaVerification.keyId}", alg="${allowedAlgsRsaVerification.alg}", code ${allowedAlgsRsaVerification.code}: ${allowedAlgsRsaVerification.reason})`,
+    "",
     "JWKS requireHttps: JwksKeyStore requireHttps is an opt-in transport rule — a plaintext JWKS endpoint is rejected at construction, before any fetch, so a path attacker cannot substitute the key set",
     `JWKS requireHttps over a loopback http: endpoint (requireHttps true): construction FAILED (${jwksRequireHttpsError}) after ${jwksRequireHttpsRejectedFetchCalls} fetches — the check runs before any network`,
     "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule also intercepts a later https-to-http redirect when the response reports its final URL",
@@ -12539,6 +12679,8 @@ export async function runDemo(): Promise<DemoResult> {
     dualSignedResponseRequest: dualSignedResponse.requestLike,
     dualSignedResponseVerification: dualSignedResponse.verification,
     dualSignedResponseTamperedVerification: dualSignedResponse.tamperedVerification,
+    allowedAlgsEdVerification,
+    allowedAlgsRsaVerification,
     jwksRequireHttpsError,
     jwksRequireHttpsRejectedFetchCalls,
     jwksRequireHttpsHttpsConstruction,

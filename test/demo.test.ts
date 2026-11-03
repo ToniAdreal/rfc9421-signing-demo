@@ -75,6 +75,13 @@ import {
   DEMO_ALG_FALLBACK_SIGNATURE_INPUT,
   DEMO_ALG_FALLBACK_UNINFERRABLE_ERROR,
   DEMO_ALG_FALLBACK_URL,
+  DEMO_ALLOWED_ALGS_ED_KEY_ID,
+  DEMO_ALLOWED_ALGS_ED_NONCE,
+  DEMO_ALLOWED_ALGS_LABEL,
+  DEMO_ALLOWED_ALGS_NOW,
+  DEMO_ALLOWED_ALGS_REJECT_CODE,
+  DEMO_ALLOWED_ALGS_RSA_KEY_ID,
+  DEMO_ALLOWED_ALGS_RSA_NONCE,
   DEMO_BODY,
   DEMO_COVERED_COMPONENTS,
   DEMO_CREATED,
@@ -5611,9 +5618,85 @@ test("demo dual-signed response segment verifies both labels over loopback and f
     `Dual-signed response verification: merchant OK (label ${DEMO_DUAL_RESPONSE_MERCHANT_LABEL}, keyid="${DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_DUAL_RESPONSE_GATEWAY_LABEL}, keyid="${DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID}", alg="ed25519")`,
     `Dual-signed response after gateway signature tampering: gateway FAILED (code ${DEMO_DUAL_RESPONSE_TAMPER_CODE}: ${dualSignedResponseTamperedVerification[1].reason}), merchant still OK (label ${DEMO_DUAL_RESPONSE_MERCHANT_LABEL}, keyid="${DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID}", alg="ed25519")`,
   ]);
-  // The JWKS requireHttps segment follows the dual-signed segment.
+  // The allowed-algs whitelist segment follows the dual-signed segment.
   assert.equal(lines[headerIdx + 4], "");
-  assert.ok(lines[headerIdx + 5]!.startsWith("JWKS requireHttps:"));
+  assert.ok(lines[headerIdx + 5]!.startsWith("Allowed-algs whitelist:"));
+});
+
+test("demo allowed-algs whitelist segment verifies ed25519 and rejects RSA-PSS before crypto", async () => {
+  const {
+    lines,
+    allowedAlgsEdVerification,
+    allowedAlgsRsaVerification,
+  } = await runDemo();
+
+  // Pinned segment clock.
+  assert.equal(DEMO_ALLOWED_ALGS_NOW, DEMO_CREATED + 60);
+
+  // The whitelisted ed25519 signature verifies with its pinned identity.
+  assert.equal(allowedAlgsEdVerification.ok, true);
+  assert.equal(allowedAlgsEdVerification.label, DEMO_ALLOWED_ALGS_LABEL);
+  assert.equal(allowedAlgsEdVerification.keyId, DEMO_ALLOWED_ALGS_ED_KEY_ID);
+  assert.equal(allowedAlgsEdVerification.alg, "ed25519");
+  assert.equal(allowedAlgsEdVerification.nonce, DEMO_ALLOWED_ALGS_ED_NONCE);
+
+  // The RSA-PSS signature is rejected by policy, not by crypto:
+  // the wire alg is reported and the rejection code is exact, even
+  // though the RSA public key handed to the verifier is correct.
+  assert.equal(allowedAlgsRsaVerification.ok, false);
+  assert.equal(allowedAlgsRsaVerification.label, DEMO_ALLOWED_ALGS_LABEL);
+  assert.equal(
+    allowedAlgsRsaVerification.keyId,
+    DEMO_ALLOWED_ALGS_RSA_KEY_ID,
+  );
+  assert.equal(allowedAlgsRsaVerification.alg, "rsa-pss-sha512");
+  assert.equal(
+    allowedAlgsRsaVerification.nonce,
+    DEMO_ALLOWED_ALGS_RSA_NONCE,
+  );
+  assert.equal(allowedAlgsRsaVerification.code, DEMO_ALLOWED_ALGS_REJECT_CODE);
+  assert.equal(
+    allowedAlgsRsaVerification.reason,
+    'signature alg "rsa-pss-sha512" is not in the allowedAlgs whitelist',
+  );
+
+  // Printed lines: header + whitelisted ok + policy rejection —
+  // byte-exact, between the dual-signed segment and the
+  // JWKS requireHttps segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Allowed-algs whitelist:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), [
+    'Allowed-algs whitelist: a gateway that only accepts ed25519 verifies both signatures under allowedAlgs ["ed25519"] — the ed25519 signature verifies, the RSA-PSS signature is rejected with ALG_NOT_ALLOWED before any cryptographic verification, so a foreign algorithm never reaches the crypto path',
+    `Whitelisted algorithm verifies: the same request signed with ed25519 verified under allowedAlgs ["ed25519"]: OK (label ${DEMO_ALLOWED_ALGS_LABEL}, keyid="${DEMO_ALLOWED_ALGS_ED_KEY_ID}", alg="ed25519", nonce="${DEMO_ALLOWED_ALGS_ED_NONCE}")`,
+    `Non-whitelisted algorithm rejected: the same request signed with RSA-PSS verified under allowedAlgs ["ed25519"]: FAILED (label ${DEMO_ALLOWED_ALGS_LABEL}, keyid="${DEMO_ALLOWED_ALGS_RSA_KEY_ID}", alg="rsa-pss-sha512", code ${DEMO_ALLOWED_ALGS_REJECT_CODE}: ${allowedAlgsRsaVerification.reason})`,
+  ]);
+  // The JWKS requireHttps segment follows the allowed-algs segment.
+  assert.equal(lines[headerIdx + 3], "");
+  assert.ok(lines[headerIdx + 4]!.startsWith("JWKS requireHttps:"));
+});
+
+test("demo allowed-algs whitelist segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Allowed-algs whitelist:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("JWKS requireHttps:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // Only the RSA key pair is cached per process and the signatures
+  // themselves are never printed, so the segment's printed lines —
+  // including the blank separator before JWKS — are identical even
+  // though RSA-PSS signing is randomized.
+  assert.deepEqual(
+    second.lines.slice(b, bEnd),
+    first.lines.slice(a, aEnd),
+  );
 });
 
 test("demo signed-response segment prints byte-identical lines across runs", async () => {
