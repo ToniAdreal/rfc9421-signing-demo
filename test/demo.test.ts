@@ -5447,7 +5447,7 @@ test("demo lines contain the JWKS requireHttps segment (rejection, https constru
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
     "JWKS requireHttps: JwksKeyStore requireHttps is an opt-in transport rule — a plaintext JWKS endpoint is rejected at construction, before any fetch, so a path attacker cannot substitute the key set",
     `JWKS requireHttps over a loopback http: endpoint (requireHttps true): construction FAILED (${DEMO_JWKS_REQUIRE_HTTPS_ERROR}) after ${DEMO_JWKS_REQUIRE_HTTPS_REJECTED_FETCH_CALLS} fetches — the check runs before any network`,
-    "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule is a construction-time check only and does not intercept a later https-to-http redirect",
+    "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule also intercepts a later https-to-http redirect when the response reports its final URL",
     `JWKS requireHttps over the same loopback http: endpoint (default off): refresh() succeeded after ${DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS} fetch, the snapshot holds ${DEMO_JWKS_REQUIRE_HTTPS_SIZE} key and resolve("${DEMO_JWKS_REQUIRE_HTTPS_KEY_ID}") returned a key — plaintext is allowed only for loopback development and tests`,
   ]);
   // The per-label nonce requirement segment now closes the demo.

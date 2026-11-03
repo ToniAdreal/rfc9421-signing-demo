@@ -27,6 +27,16 @@ export interface JwksFetchResponse {
   ok: boolean;
   status: number;
   json(): Promise<unknown>;
+  /**
+   * Final URL the response was fetched from, after any redirects.
+   * The default fetch populates this from the native `Response.url`;
+   * a custom `fetchImpl` may omit it, in which case the
+   * `requireHttps` redirect check (see
+   * {@link JwksKeyStoreOptions.requireHttps}) cannot verify where
+   * the response finally landed and that path is left unchecked —
+   * the limitation is documented, not papered over.
+   */
+  url?: string;
 }
 
 /**
@@ -99,9 +109,19 @@ export interface JwksKeyStoreOptions {
    * only for loopback development and tests.
    *
    * Defaults to `false` (an `http:` endpoint is allowed, so no
-   * configuration change is zero behavior change). This is a
-   * construction-time check only: it does not intercept a fetch
-   * that is later redirected from https to http.
+   * configuration change is zero behavior change). When `true`,
+   * `refresh()` additionally intercepts a fetch that was redirected
+   * from https to http: if the response carries a final `url`
+   * (see {@link JwksFetchResponse.url}) whose protocol is `http:`,
+   * `refresh()` throws
+   * `JwksKeyStore: JWKS fetch redirected to insecure http: <url>`
+   * and leaves the previous snapshot and freshness timestamp
+   * untouched, counted as a refresh failure. A custom `fetchImpl`
+   * that does not report a final `url` cannot be checked on this
+   * path — such a response is passed through unchecked, not
+   * treated as verified — so the redirect guarantee holds only
+   * where the final URL is actually reported (the default fetch
+   * always reports it, via the native `Response.url`).
    */
   requireHttps?: boolean;
   /**
@@ -485,6 +505,8 @@ export class JwksKeyStore {
   private readonly usingDefaultFetch: boolean;
   /** Opt-in fetch timeout in milliseconds, or undefined when unset. */
   private readonly fetchTimeoutMs?: number;
+  /** Opt-in https-only enforcement, including the redirect check. */
+  private readonly requireHttps: boolean;
   /** Opt-in fetch retry count (0 = single attempt, the default). */
   private readonly fetchRetries: number;
   /** Fixed delay in milliseconds between fetch retry attempts. */
@@ -585,6 +607,7 @@ export class JwksKeyStore {
     if (sleepImpl !== undefined && typeof sleepImpl !== "function")
       throw new Error("JwksKeyStore: `sleepImpl` must be a function");
     this.url = url;
+    this.requireHttps = requireHttps === true;
     this.usingDefaultFetch = fetchImpl === undefined;
     this.fetchImpl = fetchImpl ?? ((u: string) => globalThis.fetch(u));
     this.fetchTimeoutMs = fetchTimeoutMs;
@@ -683,7 +706,9 @@ export class JwksKeyStore {
    * JSON, the document is not a `{ keys: [...] }` object, or any
    * `kid`-carrying entry is rejected by the JWK importers (wrong shape,
    * unsupported `kty`, or private `"d"` material) or declares an `alg`
-   * that disagrees with its key family. Entries with a
+   * that disagrees with its key family, or — with
+   * `requireHttps: true` — when the response's final `url` shows the
+   * fetch was redirected to plaintext `http:`. Entries with a
    * missing or empty `kid` are skipped (see class documentation).
    */
   refresh(): Promise<void> {
@@ -810,6 +835,26 @@ export class JwksKeyStore {
       throw new Error(
         `JwksKeyStore: fetch for ${this.url} did not return a response with a json() method`,
       );
+    // Redirect interception (requireHttps only): the default fetch
+    // follows redirects automatically, so an https endpoint that
+    // redirects to http would otherwise downgrade the whole key set
+    // to plaintext. Reject before parsing anything from the
+    // downgraded response, so the old snapshot stays untouched.
+    // A response with no final `url` (a custom fetchImpl that does
+    // not report one) cannot be checked and is passed through —
+    // see the requireHttps option documentation.
+    if (this.requireHttps && typeof res.url === "string" && res.url !== "") {
+      let finalProtocol: string | null = null;
+      try {
+        finalProtocol = new URL(res.url).protocol;
+      } catch {
+        finalProtocol = null;
+      }
+      if (finalProtocol === "http:")
+        throw new Error(
+          `JwksKeyStore: JWKS fetch redirected to insecure http: ${res.url}`,
+        );
+    }
     let doc: unknown;
     try {
       doc = await res.json();

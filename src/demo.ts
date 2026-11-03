@@ -11796,7 +11796,7 @@ export async function runDemo(): Promise<DemoResult> {
     "",
     "JWKS requireHttps: JwksKeyStore requireHttps is an opt-in transport rule — a plaintext JWKS endpoint is rejected at construction, before any fetch, so a path attacker cannot substitute the key set",
     `JWKS requireHttps over a loopback http: endpoint (requireHttps true): construction FAILED (${jwksRequireHttpsError}) after ${jwksRequireHttpsRejectedFetchCalls} fetches — the check runs before any network`,
-    "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule is a construction-time check only and does not intercept a later https-to-http redirect",
+    "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule also intercepts a later https-to-http redirect when the response reports its final URL",
     `JWKS requireHttps over the same loopback http: endpoint (default off): refresh() succeeded after ${jwksRequireHttpsDefaultFetchCalls} fetch, the snapshot holds ${jwksRequireHttpsSize} key and resolve("${DEMO_JWKS_REQUIRE_HTTPS_KEY_ID}") returned a key — plaintext is allowed only for loopback development and tests`,
     "",
     "Per-label nonce requirement: verifyAllLabels' requireNonceByLabel map demands a nonce only from the merchant signature — the gateway signature historically carries none, so it falls back to the unset global requireNonce — the per-label form of the required-nonce segment's global check, checked after the cryptographic check like the global one, so a forged nonce-less merchant signature still reports a signature failure rather than a policy violation",

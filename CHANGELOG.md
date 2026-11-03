@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore` with `requireHttps: true` now intercepts a fetch
+  redirected from https to http (backlog #836): `JwksFetchResponse`
+  gains an optional `url` (the final URL after redirects, populated
+  by the default fetch from the native `Response.url`), and
+  `fetchAndSwap` throws
+  `JwksKeyStore: JWKS fetch redirected to insecure http: <url>` before
+  parsing anything from the downgraded response, leaving the previous
+  snapshot and `lastRefreshedAt` untouched and counting one refresh
+  failure. A custom `fetchImpl` that reports no final `url` cannot be
+  checked on this path and passes through unchecked — documented as a
+  limitation, not treated as verified. `test/jwksHttpsRedirect.test.ts`
+  adds 8 cases: http redirect rejected with an empty snapshot and one
+  refresh failure, redirect failure over a prior good snapshot leaving
+  it and its timestamp untouched, https final URL passing, no-url
+  custom impl passing (honest exemption), guard-off and explicit
+  `requireHttps: false` passing, uppercase HTTP final URL intercepted,
+  and the construction-time http rejection regression. The README JWKS
+  section, SECURITY.md, and the CLI demo's requireHttps line are
+  rewritten from the old "construction-time only" claim to the new
+  redirect-interception semantics.
+
 - CLI demo gains a closing request-target override segment
   (backlog #833): the same URL is signed four times — default
   origin-form, explicit absolute-form, authority-form and

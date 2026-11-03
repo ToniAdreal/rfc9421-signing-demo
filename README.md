@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1306 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1314 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -682,8 +682,16 @@ before any fetch is attempted — whatever the endpoint serves becomes a
 verification key, and over plaintext a path attacker could substitute the
 entire key set, so this is the production posture when the endpoint is on
 the public internet. `http:` stays allowed by default (loopback development,
-tests), and `requireHttps` is construction-time only: it does not intercept
-a fetch that is later redirected from https to http.
+tests). `requireHttps` also intercepts a fetch that is later
+redirected from https to http: when the response reports a final URL
+(the default fetch reports the native `Response.url`) whose protocol
+is `http:`, `refresh()` throws
+`JwksKeyStore: JWKS fetch redirected to insecure http: <url>` and leaves
+the previous snapshot and `lastRefreshedAt` untouched, counted as a
+refresh failure. A custom `fetchImpl` that does not report a final URL
+cannot be checked on this path — such a response passes through
+unchecked, not treated as verified — so the redirect guarantee holds
+only where the final URL is actually reported.
 
 A failed `refresh()` (HTTP error, non-JSON body, a malformed JWKS
 document, or an entry carrying private `"d"` material) throws and leaves
@@ -3371,7 +3379,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1306 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1314 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

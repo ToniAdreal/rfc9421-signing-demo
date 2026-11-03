@@ -135,9 +135,11 @@ Read this before using it anywhere that matters.
   misconfigured endpoint serves becomes a verification key — point it
   only at trusted origins, over HTTPS. The opt-in `requireHttps: true`
   construction option makes that HTTPS expectation a fail-fast error
-  for plaintext `http:` endpoints (before any fetch is attempted), but
-  it is construction-time only and does not intercept a fetch that is
-  later redirected from https to http. For `keyid`-less rotation windows
+  for plaintext `http:` endpoints (before any fetch is attempted), and
+  it also rejects a fetch that was redirected from https to http when
+  the response reports its final URL (the default fetch always does,
+  via the native `Response.url`; a custom `fetchImpl` that reports no
+  final URL cannot be checked on this path). For `keyid`-less rotation windows
   (e.g. HMAC webhook secret rollover), `VerifyOptions.candidateKeys`
   tries an ordered key list and returns the first full pass; only
   `SIGNATURE_MISMATCH` advances, policy verdicts return immediately, and
