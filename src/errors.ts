@@ -18,6 +18,18 @@ export type VerifyFailureCode =
   | "MALFORMED_SIGNATURE"
   /** `alg` parameter names an unsupported algorithm. */
   | "UNSUPPORTED_ALG"
+  /**
+   * The signature's algorithm (the wire `alg`, or the effective
+   * algorithm when `alg` is absent: the legacy `"ed25519"` default, or
+   * the key-shape inference under `algFallback: "infer"`) is not in
+   * the verifier's `VerifyOptions.allowedAlgs` whitelist. Only
+   * possible when the caller opted in. Checked *before* any
+   * cryptographic work: a disallowed algorithm is a policy violation,
+   * not an authenticity verdict, so a forged signature carrying a
+   * disallowed `alg` reports this code rather than
+   * `SIGNATURE_MISMATCH`.
+   */
+  | "ALG_NOT_ALLOWED"
   /** The crypto layer itself threw (e.g. malformed key material). */
   | "VERIFICATION_ERROR"
   /** Cryptographic signature does not verify (wrong key or tampering). */

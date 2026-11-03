@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1342 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1359 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1041,6 +1041,18 @@ example above calls the adapter.
   and fails fast *before* any crypto work with
   `MISSING_REQUIRED_COMPONENT`; it composes with `verifyAllLabels`
   (checked per label).
+- **Algorithm whitelist**: `verifyRequest` can restrict which
+  algorithms it accepts (`VerifyOptions.allowedAlgs`) — a gateway
+  that only takes ed25519 sets `allowedAlgs: ["ed25519"]` instead of
+  hand-rolling a pre-check whose answer for a missing or misspelled
+  `alg` varies by caller. A signature outside the list fails fast
+  *before* any crypto work with `ALG_NOT_ALLOWED`; an alg-less
+  signature is judged by its effective algorithm (the legacy
+  `ed25519` default, or the key-shape inference under
+  `algFallback: "infer"`), never by the absence of the parameter. It
+  composes with `verifyAllLabels` via
+  `VerifyAllOptions.allowedAlgsByLabel` (a mapped list replaces the
+  global list for that label; unmapped labels fall back to it).
 - **Nonce (RFC 9421 §2.3)**: pass `nonce` to `signRequest` and it is
   emitted as a `nonce` signature-input parameter — part of the signed
   `@signature-params` line, so a forged nonce fails with
@@ -3374,6 +3386,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `SIGNATURE_BASE_BUILD_FAILED` | covered components could not be rebuilt from the request |
 | `MALFORMED_SIGNATURE` | `signature` present but unparseable |
 | `UNSUPPORTED_ALG` | `alg` parameter names an unsupported algorithm |
+| `ALG_NOT_ALLOWED` | signature's algorithm (wire `alg`, or the effective algorithm when `alg` is absent: legacy `ed25519` default or `algFallback: "infer"` inference) is outside the opt-in `VerifyOptions.allowedAlgs` whitelist (or, per label, `VerifyAllOptions.allowedAlgsByLabel`); checked before any crypto work |
 | `VERIFICATION_ERROR` | the crypto layer itself threw (e.g. malformed key material) |
 | `SIGNATURE_MISMATCH` | cryptographic signature does not verify (wrong key or tampering) |
 | `KEYID_MISMATCH` | signature's `keyid` does not match the verifier's `expectedKeyId` (or no `keyid` present) |
@@ -3409,7 +3422,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1342 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1359 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

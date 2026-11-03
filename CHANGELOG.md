@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `VerifyOptions.allowedAlgs` verification algorithm whitelist (backlog
+  #851): when set, only signatures whose algorithm is in the list
+  verify — any other algorithm fails with the new `ALG_NOT_ALLOWED`
+  error code, checked before any cryptographic work (a wire `alg`
+  outside the list is rejected after header parsing, before the
+  signature base is rebuilt or any key is resolved; an alg-less
+  signature is judged by its effective algorithm — the legacy
+  `ed25519` default, or the key-shape inference under
+  `algFallback: "infer"`). An empty list, a non-array, or an entry
+  naming an unimplemented algorithm is a caller configuration error
+  (throw); unset means the previous behavior (every implemented
+  algorithm accepted). `VerifyAllOptions.allowedAlgsByLabel` applies
+  the same rule per label (a mapped list replaces the global list
+  for that label; unmapped labels fall back to it), and a rejected
+  attempt never reaches the nonce replay cache. `src/verify.ts`
+  gains the option, the per-label map, and both validators;
+  `src/errors.ts` gains the code; the README error-code table and
+  feature list document it; `test/allowedAlgs.test.ts` adds 17
+  cases (whitelist pass / wire rejection / backwards-compatible
+  unconfigured pass / multi-alg list / four configuration-error
+  shapes / alg-less legacy and infer judgments / per-label
+  independence, fallback, replace-not-union, and malformed-map
+  errors / `verifyRequestOrThrow` code / nonce-cache non-pollution).
 - CLI demo JWKS signed snapshot restart segment (backlog
   #848): the demo now shows the #842 HMAC envelope's
   restart story — a store refreshes once through a counting

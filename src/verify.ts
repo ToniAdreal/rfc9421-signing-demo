@@ -18,6 +18,7 @@ import {
 } from "./components.js";
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
 import { assertHmacSecretLength, assertRsaModulusLength } from "./keys.js";
+import type { SignAlg } from "./sign.js";
 import type { NonceStore } from "./replay.js";
 import {
   assertStructuredFieldTypes,
@@ -254,6 +255,27 @@ export interface VerifyOptions {
    * `VerifyAllOptions.algFallbackByLabel`.
    */
   algFallback?: "infer" | false;
+  /**
+   * Optional algorithm whitelist (opt-in policy): when set, only
+   * signatures whose algorithm is in this list verify — any other
+   * algorithm fails with `ALG_NOT_ALLOWED`, checked *before* any
+   * cryptographic work. A gateway that only accepts ed25519, for
+   * example, sets `allowedAlgs: ["ed25519"]` instead of hand-rolling
+   * a pre-check whose answer for a missing or misspelled `alg`
+   * varies by caller. The check applies to the *effective*
+   * algorithm: the wire `alg` when present, the legacy `"ed25519"`
+   * default when `alg` is absent (without `algFallback: "infer"`),
+   * or the key-shape inference when `algFallback: "infer"` is set —
+   * so an alg-less signature is judged by the algorithm it would
+   * actually verify under, not by the absence of the parameter.
+   * An empty array, a non-array, or an entry naming an algorithm
+   * this library does not implement is a caller configuration error
+   * (throw). Defaults to unset: every implemented algorithm is
+   * accepted (backwards compatible). In `verifyAllLabels` a label
+   * in `VerifyAllOptions.allowedAlgsByLabel` is checked against its
+   * own list; any other label falls back to this global list.
+   */
+  allowedAlgs?: SignAlg[];
   /**
    * Optional nonce replay store (see `NonceStore`). When set and the
    * signature carries a non-empty `nonce`, the store is consulted *after*
@@ -551,6 +573,40 @@ function assertRequiredComponents(
   }
 }
 
+/** Every algorithm this library implements (the `SignAlg` union). */
+const KNOWN_ALGS: readonly string[] = [
+  "ed25519",
+  "hmac-sha256",
+  "hmac-sha512",
+  "ecdsa-p256-sha256",
+  "ecdsa-p384-sha384",
+  "ecdsa-p521-sha512",
+  "rsa-pss-sha512",
+  "rsa-v1_5-sha256",
+];
+
+/**
+ * Validate the `allowedAlgs` option. A malformed whitelist is a caller
+ * configuration error, not a verification failure, so it throws rather
+ * than returning `{ ok: false }`. An empty list is rejected for the
+ * same reason: a whitelist that accepts nothing is a misconfiguration
+ * (to reject everything, do not verify), not a policy — and silently
+ * treating it as "no check" would invert the caller's intent.
+ */
+function assertAllowedAlgs(algs: SignAlg[] | undefined): void {
+  if (algs === undefined) return;
+  if (!Array.isArray(algs) || algs.length === 0)
+    throw new Error(
+      "verifyRequest: `allowedAlgs` must be a non-empty array of algorithm names",
+    );
+  for (const alg of algs) {
+    if (typeof alg !== "string" || !KNOWN_ALGS.includes(alg))
+      throw new Error(
+        `verifyRequest: \`allowedAlgs\` entries must name an implemented algorithm, got ${typeof alg === "string" ? `"${alg}"` : typeof alg}`,
+      );
+  }
+}
+
 /**
  * Verify an RFC 9421 signed request: rebuild the signature base from the
  * covered components, check the cryptographic signature, then enforce
@@ -574,6 +630,7 @@ export function verifyRequest(
   assertCandidateKeys(opts.candidateKeys);
   assertMaxSignatureAgeSec(opts.maxSignatureAgeSec);
   assertRequiredComponents(opts.requiredComponents);
+  assertAllowedAlgs(opts.allowedAlgs);
   assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyRequest");
   const label = opts.label ?? "sig1";
   const now = opts.now ?? Math.floor(Date.now() / 1000);
@@ -641,6 +698,32 @@ export function verifyRequest(
       coveredComponents: [...parsed.componentIds],
       };
   }
+  // Algorithm whitelist (opt-in, fail-fast policy check): a signature
+  // whose wire `alg` is outside `allowedAlgs` is a policy violation,
+  // not an authenticity verdict, so it is rejected here — after the
+  // header parsed, before the signature base is rebuilt, before any
+  // key resolution, and before any crypto work. An alg-less signature
+  // passes this gate (there is no wire `alg` to judge yet) and is
+  // judged in `verifyWithKey` against its effective algorithm instead.
+  const wireAlg = parsed.params.alg;
+  if (
+    opts.allowedAlgs !== undefined &&
+    wireAlg !== undefined &&
+    !opts.allowedAlgs.includes(wireAlg as SignAlg)
+  )
+    return {
+      ok: false,
+      code: "ALG_NOT_ALLOWED",
+      reason: `signature alg "${wireAlg}" is not in the allowedAlgs whitelist`,
+      label,
+      keyId: parsed.params.keyid,
+      alg: wireAlg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
   try {
     base = buildSignatureBase(parsed.componentIds, req, parsed.params, {
       structuredFieldTypes: opts.structuredFieldTypes,
@@ -835,6 +918,33 @@ function verifyWithKey(
   ) {
     assertAlgMatchesKeyShape(effectiveAlg, key);
   }
+
+  // Algorithm whitelist, effective-algorithm half: this is the gate an
+  // alg-less signature reaches (the wire-`alg` gate in `verifyRequest`
+  // already rejected disallowed wire values, so this half only fires
+  // when `alg` was absent — the legacy `"ed25519"` default or the
+  // `algFallback: "infer"` inference). It still runs before any crypto
+  // work, so a disallowed effective algorithm is a policy verdict
+  // (`ALG_NOT_ALLOWED`), never a `SIGNATURE_MISMATCH`. A wire-`alg`
+  // signature that reaches here already passed the wire gate, so this
+  // is a no-op safety net for that path, not a second policy.
+  if (
+    opts.allowedAlgs !== undefined &&
+    !opts.allowedAlgs.includes(effectiveAlg as SignAlg)
+  )
+    return {
+      ok: false,
+      code: "ALG_NOT_ALLOWED",
+      reason: `signature alg "${effectiveAlg}" is not in the allowedAlgs whitelist`,
+      label,
+      keyId: parsed.params.keyid,
+      alg: effectiveAlg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
 
   // HMAC key-length enforcement happens *before* the crypto try/catch on
   // purpose: a weak configured secret is a caller configuration error
@@ -1443,6 +1553,24 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    */
   algFallbackByLabel?: Record<string, "infer" | false>;
   /**
+   * Per-label algorithm whitelists for multi-party signatures (e.g.
+   * a merchant signature restricted to ed25519 plus a payment-gateway
+   * signature restricted to hmac-sha256, on the same request): maps a
+   * signature label to that label's own `allowedAlgs` list. A label
+   * in the map is checked against its own list; any other label falls
+   * back to the global `allowedAlgs` (unset means no whitelist check
+   * for it). A mapped list replaces the global list for that label —
+   * it is not unioned with it. Each list follows the global list's
+   * rules (a non-empty array naming implemented algorithms, otherwise
+   * a configuration error); a disallowed algorithm reuses the global
+   * error code (`ALG_NOT_ALLOWED`) and the same pre-crypto check
+   * position, so a label that fails the whitelist never reaches the
+   * cryptographic check. A whitelist is not key selection, so it never
+   * joins the `keys`/`keyResolver`/`candidateKeys` mutual-exclusion
+   * rules.
+   */
+  allowedAlgsByLabel?: Record<string, SignAlg[]>;
+  /**
    * Per-label freshness-existence requirements for multi-party
    * signatures (e.g. a merchant signature that must carry `created`
    * and `expires`, plus a gateway signature that historically carries
@@ -1753,6 +1881,34 @@ function assertAlgFallbackByLabel(
 }
 
 /**
+ * Validate the per-label algorithm-whitelist map. Each list is
+ * validated with the same rules as the global `allowedAlgs` (reusing
+ * `assertAllowedAlgs`); a malformed map or list is a caller
+ * configuration error, so it throws rather than returning
+ * `{ ok: false }`. A mapped list is validated even when its label
+ * never appears in the request, matching the other per-label maps
+ * (fail-fast at call time, not at first use).
+ */
+function assertAllowedAlgsByLabel(
+  map: Record<string, SignAlg[]> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `allowedAlgsByLabel` must be a label→whitelist object",
+    );
+  for (const [label, algs] of Object.entries(map)) {
+    try {
+      assertAllowedAlgs(algs);
+    } catch (e) {
+      throw new Error(
+        `verifyAllLabels: \`allowedAlgsByLabel["${label}"]\` is invalid: ${(e as Error).message}`,
+      );
+    }
+  }
+}
+
+/**
  * Validate the per-label nonce replay store map. Each value must be a
  * `NonceStore` — duck-typed as an object (or function) carrying a
  * `check` function, the contract `ReplayCache` implements; a value
@@ -1832,6 +1988,7 @@ export function verifyAllLabels(
   assertExpiredToleranceSecByLabel(opts.expiredToleranceSecByLabel);
   assertRequiredComponentsByLabel(opts.requiredComponentsByLabel);
   assertAlgFallbackByLabel(opts.algFallbackByLabel);
+  assertAllowedAlgsByLabel(opts.allowedAlgsByLabel);
   assertRequireFlagByLabel("requireCreatedByLabel", opts.requireCreatedByLabel);
   assertRequireFlagByLabel("requireExpiresByLabel", opts.requireExpiresByLabel);
   assertRequireFlagByLabel("requireNonceByLabel", opts.requireNonceByLabel);
@@ -1924,6 +2081,14 @@ export function verifyAllLabels(
     // selection, so it never joins the mutual-exclusion checks.
     const algFallback =
       opts.algFallbackByLabel?.[label] ?? opts.algFallback;
+    // Per-label algorithm whitelist: a label in the map is checked
+    // against its own list; every other label falls back to the
+    // global `allowedAlgs` (unset means no whitelist check for it).
+    // A mapped list replaces the global list — it is not unioned
+    // with it. Like the policies above, a whitelist is not key
+    // selection, so it never joins the mutual-exclusion checks.
+    const allowedAlgs =
+      opts.allowedAlgsByLabel?.[label] ?? opts.allowedAlgs;
     // Per-label freshness-existence requirements: a label in the map
     // is checked against its own flag; every other label falls back
     // to the global flag (unset means no existence check for it).
@@ -1957,6 +2122,6 @@ export function verifyAllLabels(
     // object, never a falsy override to be skipped.
     const replayCache =
       opts.replayCacheByLabel?.[label] ?? opts.replayCache;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, requireCreated, requireExpires, requireNonce, requireTag, replayCache });
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, allowedAlgs, requireCreated, requireExpires, requireNonce, requireTag, replayCache });
   });
 }
