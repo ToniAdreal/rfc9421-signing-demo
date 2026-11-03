@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark `;sf` type-registry group (backlog #845):
+  `bench/bench.ts` measures the fixed eight-value
+  `SF_REGISTRY_FIXTURE` corpus (each value carrying its registered
+  type) under both routes — the default Dictionary → List → Item
+  trial order and the direct `canonicalizeStructuredFieldValueAs`
+  parse — with both routes self-checked outside timing against
+  hand-pinned RFC 8941 §4 serializations and a wrong registered
+  type failing closed, so a corrupted registry entry aborts the
+  bench run instead of timing a wrong result. The README
+  Benchmarks table is refreshed from one real run on 2026-11-03
+  (trial order over the registry corpus ~16,826 ops/sec, registry
+  direct ~87,755 ops/sec, machine-local numbers, not guarantees).
 - `JwksKeyStore` snapshot opt-in HMAC signed envelope (backlog
   #842): `exportSignedSnapshot(secret)` wraps the snapshot in
   `{ v: 1, snapshot, mac }`, where `mac` is HMAC-SHA256 (hex) over

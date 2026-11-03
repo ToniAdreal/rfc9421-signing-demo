@@ -573,7 +573,13 @@
  * self-checked on every measured pass against hand-pinned expected
  * serializations, so the parse-then-reserialize cost of the `;sf`
  * path is visible apart from the end-to-end `;sf` verify total that
- * bundles it, plus the throwing verify wrapper a middleware-style
+ * bundles it, plus the per-field `;sf` type-registry twin of that
+ * cost: the same eight-value corpus (each value carrying the
+ * registered type a gateway would pin for that field, see
+ * SF_REGISTRY_FIXTURE below) measured once under the default
+ * trial order and once under the direct registry parse, so the
+ * failed-trial attempts the registry skips are visible as the gap
+ * between the two rows, plus the throwing verify wrapper a middleware-style
  * caller actually uses: `verifyRequestOrThrow`, measured as two
  * separate rows — the success path (result unwrapping) over one
  * fixed valid ed25519 request and the failure path (VerifyError
@@ -742,6 +748,7 @@ import {
   assertRsaModulusLength,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
+  canonicalizeStructuredFieldValueAs,
   contentDigest,
   contentDigestAlgOf,
   exportPrivateKeyPem,
@@ -794,6 +801,7 @@ import {
   type SignatureParams,
   type SignAlg,
   type SignedHttpRequest,
+  type StructuredFieldType,
 } from "../src/index.js";
 
 const ITERATIONS = 3000;
@@ -12224,6 +12232,176 @@ function benchmarkCanonicalizeStructuredFieldValue(): number {
 }
 
 /**
+ * Fixed corpus for the `;sf` type-registry path — eight values, each
+ * carrying the registered type a gateway would pin for that field
+ * (see `structuredFieldTypes`, backlog #839), chosen so the two
+ * routes under comparison agree on the serialization while
+ * differing in the work paid:
+ * - dictionary values resolve on the first trial attempt under the
+ *   default order, so both routes pay one parse.
+ * - list values fail the Dictionary trial first, then succeed as
+ *   List — the default route pays two attempts, the registry route
+ *   pays one.
+ * - item values are the ambiguous cases: a bare token resolves as
+ *   a Dictionary bare key under the default order, while a lone
+ *   decimal and a leading-zero integer resolve as single-member
+ *   Lists — the registry pins the field's true Item type and
+ *   skips the trial order entirely, landing on the same
+ *   serialization.
+ * Every expected serialization is hand-pinned from the RFC 8941
+ * §4 strict-serialization rules and matches the values pinned
+ * independently in test/structuredFieldTypes.test.ts — never
+ * derived from either canonicalizer at bench time. A registered
+ * type that does not fit its value fails closed: `a=1` registered
+ * as "list" throws (asserted outside timing below), so a
+ * corrupted registry entry aborts the bench run instead of
+ * silently timing a wrong result.
+ */
+const SF_REGISTRY_FIXTURE: ReadonlyArray<{
+  name: string;
+  input: string;
+  registryType: StructuredFieldType;
+  expected: string;
+}> = [
+  {
+    name: "dict-decimal",
+    input: "limit=1500, remaining=1.5",
+    registryType: "dictionary",
+    expected: "limit=1500, remaining=1.500",
+  },
+  {
+    name: "dict-params-inner-list",
+    input: "a=1,  b=2;x=1;  y=2, c=(a   b  c)",
+    registryType: "dictionary",
+    expected: "a=1, b=2;x=1;y=2, c=(a b c)",
+  },
+  {
+    name: "list-strings",
+    input: '"a" ,  "b"',
+    registryType: "list",
+    expected: '"a", "b"',
+  },
+  {
+    name: "list-inner",
+    input: "(a b c)",
+    registryType: "list",
+    expected: "(a b c)",
+  },
+  {
+    name: "item-decimal",
+    input: "1.5",
+    registryType: "item",
+    expected: "1.500",
+  },
+  {
+    name: "item-token",
+    input: "a",
+    registryType: "item",
+    expected: "a",
+  },
+  {
+    name: "item-leading-zero-int",
+    input: "007",
+    registryType: "item",
+    expected: "7",
+  },
+  {
+    name: "dict-byte-sequence",
+    input: "sig=:aGVsbG8=:;x=?0",
+    registryType: "dictionary",
+    expected: "sig=:aGVsbG8=:;x=?0",
+  },
+];
+
+/**
+ * Shared self-check for both `;sf` registry-corpus rows: every
+ * entry must canonicalize to its pinned expectation under BOTH
+ * routes (default trial order and direct registry parse), and a
+ * value registered under a type that does not fit it must fail
+ * closed. Run outside timing by both benchmark functions, so a
+ * corrupted registry entry aborts the bench run before any
+ * number is printed.
+ */
+function checkSfRegistryFixture(): void {
+  for (const entry of SF_REGISTRY_FIXTURE) {
+    const viaTrial = canonicalizeStructuredFieldValue(entry.input);
+    if (viaTrial !== entry.expected)
+      throw new Error(
+        `benchmark self-check failed: ${entry.name} trial-order canonicalized to ${JSON.stringify(viaTrial)} ` +
+          `(expected ${JSON.stringify(entry.expected)})`,
+      );
+    const viaRegistry = canonicalizeStructuredFieldValueAs(
+      entry.input,
+      entry.registryType,
+    );
+    if (viaRegistry !== entry.expected)
+      throw new Error(
+        `benchmark self-check failed: ${entry.name} registry canonicalized to ${JSON.stringify(viaRegistry)} ` +
+          `(expected ${JSON.stringify(entry.expected)})`,
+      );
+  }
+  let wrongTypeThrown: unknown;
+  try {
+    canonicalizeStructuredFieldValueAs("a=1", "list");
+  } catch (e) {
+    wrongTypeThrown = e;
+  }
+  if (
+    !(wrongTypeThrown instanceof Error) ||
+    !wrongTypeThrown.message.includes("not a valid List")
+  )
+    throw new Error(
+      "benchmark self-check failed: wrong ;sf registry type did not fail closed",
+    );
+}
+
+/**
+ * Default trial order over the registry corpus: one measured call
+ * is one pass over all eight SF_REGISTRY_FIXTURE values (8
+ * canonicalizations per op), each paying the Dictionary-then-List-
+ * then-Item trial sequence. Self-checked outside timing by
+ * {@link checkSfRegistryFixture} and re-pinned on every pass.
+ */
+function benchmarkCanonicalizeStructuredFieldValueRegistryCorpus(): number {
+  checkSfRegistryFixture();
+  return measure(() => {
+    for (const entry of SF_REGISTRY_FIXTURE) {
+      const actual = canonicalizeStructuredFieldValue(entry.input);
+      if (actual !== entry.expected)
+        throw new Error(
+          `benchmark self-check failed: ${entry.name} trial-order canonicalization diverged from the pinned serialization`,
+        );
+    }
+  }, ITERATIONS);
+}
+
+/**
+ * Direct registry parse over the same corpus: one measured call
+ * is one pass over all eight SF_REGISTRY_FIXTURE values (8
+ * canonicalizations per op), each paying exactly one parse under
+ * its registered type — no failed trial attempts. The gap to the
+ * trial-order row above is the registry's saved work. Self-checked
+ * outside timing by {@link checkSfRegistryFixture} and re-pinned
+ * on every pass; a corrupted registered type throws in the
+ * self-check, so the row can never silently time a wrong parse.
+ */
+function benchmarkCanonicalizeStructuredFieldValueAsRegistry(): number {
+  checkSfRegistryFixture();
+  return measure(() => {
+    for (const entry of SF_REGISTRY_FIXTURE) {
+      const actual = canonicalizeStructuredFieldValueAs(
+        entry.input,
+        entry.registryType,
+      );
+      if (actual !== entry.expected)
+        throw new Error(
+          `benchmark self-check failed: ${entry.name} registry canonicalization diverged from the pinned serialization`,
+        );
+    }
+  }, ITERATIONS);
+}
+
+/**
  * Fixed corpus for the `serializeDictionaryMemberValue` path —
  * one multi-member Dictionary value written out literally here,
  * plus a fixed six-key extraction set covering the member shapes
@@ -14126,6 +14304,16 @@ results.push({
   alg: "canonicalizeStructuredFieldValue (6 values)",
   op: "canon",
   ops: benchmarkCanonicalizeStructuredFieldValue(),
+});
+results.push({
+  alg: "canonicalizeStructuredFieldValue (8 values, registry corpus)",
+  op: "canon",
+  ops: benchmarkCanonicalizeStructuredFieldValueRegistryCorpus(),
+});
+results.push({
+  alg: "canonicalizeStructuredFieldValueAs (8 values, registry)",
+  op: "canon",
+  ops: benchmarkCanonicalizeStructuredFieldValueAsRegistry(),
 });
 results.push({
   alg: "serializeDictionaryMemberValue (6 keys)",
