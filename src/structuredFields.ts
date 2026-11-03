@@ -15,17 +15,25 @@
  *
  * Type selection: RFC 9421 requires the application to know the
  * field's Structured Field type, but the `;sf` flag itself does not
- * carry it, and this library keeps no per-field type registry (see
- * the README's `;sf` notes). `canonicalizeStructuredFieldValue`
- * therefore tries Dictionary, then List, then Item, accepting the
- * first type that consumes the entire value. For values whose type
- * is unambiguous — the Dictionary/List/Item shapes gateways actually
- * sign — every candidate type that parses at all serializes to the
- * same strict bytes (a lone Token, Integer, or String parses
- * identically as a one-member List and as an Item; a bare Dictionary
- * key and a List Token coincide), so the precedence cannot change
- * the result for well-typed values. A value that is not a valid
- * Structured Field of any type is a hard error on both sides.
+ * carry it. By default `canonicalizeStructuredFieldValue` tries
+ * Dictionary, then List, then Item, accepting the first type that
+ * consumes the entire value. For values whose type is unambiguous —
+ * the Dictionary/List/Item shapes gateways actually sign — every
+ * candidate type that parses at all serializes to the same strict
+ * bytes (a lone Token, Integer, or String parses identically as a
+ * one-member List and as an Item; a bare Dictionary key and a List
+ * Token coincide), so the precedence cannot change the result for
+ * well-typed values. A value that is not a valid Structured Field
+ * of any type is a hard error on both sides.
+ *
+ * A caller that DOES know a field's type pins it with a per-field
+ * type registry (`SignOptions.structuredFieldTypes` /
+ * `VerifyOptions.structuredFieldTypes`, see components.ts): a
+ * registered field is parsed ONLY as its registered type, so a value
+ * that the trial order would have rescued via an earlier type
+ * (e.g. a Dictionary-shaped value registered as a List) fails
+ * closed instead of silently serializing under the wrong type.
+ * Unregistered fields keep the trial order above, unchanged.
  */
 
 type SfBareItem =
@@ -383,33 +391,88 @@ export function serializeDictionaryMemberValue(value: string, key: string): stri
   return serializeMember(entry.member);
 }
 
+/** A field's RFC 8941 Structured Field type, as pinned by a type registry. */
+export type StructuredFieldType = "dictionary" | "list" | "item";
+
+const STRUCTURED_FIELD_TYPES: ReadonlySet<string> = new Set([
+  "dictionary",
+  "list",
+  "item",
+]);
+
+function parseDictionaryValue(input: string): string {
+  const p = new SfParser(input);
+  const dict = p.parseDictionary();
+  p.skipOws();
+  if (!p.atEnd) throw new Error("trailing characters after dictionary");
+  return serializeDictionary(dict);
+}
+
+function parseListValue(input: string): string {
+  const p = new SfParser(input);
+  const list = p.parseList();
+  p.skipOws();
+  if (!p.atEnd) throw new Error("trailing characters after list");
+  return list.map(serializeMember).join(", ");
+}
+
+function parseItemValue(input: string): string {
+  const p = new SfParser(input);
+  const item = p.parseItem();
+  p.skipOws();
+  if (!p.atEnd) throw new Error("trailing characters after item");
+  return serializeMember(item);
+}
+
+/**
+ * Parse `value` as exactly one Structured Field type and return its
+ * strict serialization — the registry path. Unlike the trial order,
+ * no other type is attempted: a value that only parses as a different
+ * type is a hard error, so a gateway that knows a field is a List
+ * never silently signs it as a Dictionary.
+ *
+ * Throws a descriptive `Error` when `type` is not a supported type,
+ * when the value is empty, or when it does not parse as `type`.
+ */
+export function canonicalizeStructuredFieldValueAs(
+  value: string,
+  type: StructuredFieldType,
+): string {
+  const input = value.replace(/^[ \t]+|[ \t]+$/g, "");
+  if (input.length === 0) {
+    throw new Error("empty value is not a valid Structured Field");
+  }
+  const label =
+    type === "dictionary" ? "Dictionary" : type === "list" ? "List" : "Item";
+  try {
+    if (type === "dictionary") return parseDictionaryValue(input);
+    if (type === "list") return parseListValue(input);
+    if (type === "item") return parseItemValue(input);
+    throw new Error(
+      `invalid Structured Field type ${JSON.stringify(type)}: expected "dictionary" | "list" | "item"`,
+    );
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      err.message.startsWith("invalid Structured Field type")
+    ) {
+      throw err;
+    }
+    throw new Error(
+      `not a valid ${label} Structured Field value: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 export function canonicalizeStructuredFieldValue(value: string): string {
   const input = value.replace(/^[ \t]+|[ \t]+$/g, "");
   if (input.length === 0) {
     throw new Error("empty value is not a valid Structured Field");
   }
   const attempts: Array<() => string> = [
-    () => {
-      const p = new SfParser(input);
-      const dict = p.parseDictionary();
-      p.skipOws();
-      if (!p.atEnd) throw new Error("trailing characters after dictionary");
-      return serializeDictionary(dict);
-    },
-    () => {
-      const p = new SfParser(input);
-      const list = p.parseList();
-      p.skipOws();
-      if (!p.atEnd) throw new Error("trailing characters after list");
-      return list.map(serializeMember).join(", ");
-    },
-    () => {
-      const p = new SfParser(input);
-      const item = p.parseItem();
-      p.skipOws();
-      if (!p.atEnd) throw new Error("trailing characters after item");
-      return serializeMember(item);
-    },
+    () => parseDictionaryValue(input),
+    () => parseListValue(input),
+    () => parseItemValue(input),
   ];
   let firstError: Error | undefined;
   for (const attempt of attempts) {
@@ -422,4 +485,77 @@ export function canonicalizeStructuredFieldValue(value: string): string {
   throw new Error(
     `not a valid Structured Field value: ${firstError?.message ?? "parse failed"}`,
   );
+}
+
+/**
+ * Validate a per-field type registry (`field name → type`) as a
+ * caller configuration error: the registry must be an object, every
+ * field name must be a non-empty string, every type must be one of
+ * `"dictionary" | "list" | "item"`, and two keys that differ only by
+ * case (header field names are case-insensitive) must not map the
+ * same field to two types. `undefined` (no registry) is valid.
+ * `context` names the caller (e.g. `"signRequest"`), matching the
+ * library's other configuration-error wording.
+ */
+export function assertStructuredFieldTypes(
+  registry: Record<string, StructuredFieldType> | undefined,
+  context: string,
+): void {
+  if (registry === undefined) return;
+  if (
+    typeof registry !== "object" ||
+    registry === null ||
+    Array.isArray(registry)
+  ) {
+    throw new Error(
+      `${context}: \`structuredFieldTypes\` must be a field-name → type object, got ${registry === null ? "null" : Array.isArray(registry) ? "an array" : typeof registry}`,
+    );
+  }
+  const seen = new Set<string>();
+  for (const [field, type] of Object.entries(registry)) {
+    if (typeof field !== "string" || field.length === 0) {
+      throw new Error(
+        `${context}: \`structuredFieldTypes\` field names must be non-empty strings`,
+      );
+    }
+    const lowered = field.toLowerCase();
+    if (seen.has(lowered)) {
+      throw new Error(
+        `${context}: \`structuredFieldTypes\` maps field "${field}" twice (field names are case-insensitive)`,
+      );
+    }
+    seen.add(lowered);
+    if (typeof type !== "string" || !STRUCTURED_FIELD_TYPES.has(type)) {
+      throw new Error(
+        `${context}: \`structuredFieldTypes["${field}"]\` must be "dictionary" | "list" | "item", got ${typeof type === "string" ? JSON.stringify(type) : typeof type}`,
+      );
+    }
+  }
+}
+
+/**
+ * Look up one field's registered type, case-insensitively (header
+ * field names are case-insensitive). Returns `undefined` for an
+ * unregistered field. A registered entry with an invalid type throws
+ * rather than falling back to the trial order, so a direct
+ * `buildSignatureBase` caller that skips the sign/verify asserts
+ * still fails closed instead of silently ignoring its own registry.
+ */
+export function lookupStructuredFieldType(
+  registry: Record<string, StructuredFieldType> | undefined,
+  field: string,
+): StructuredFieldType | undefined {
+  if (registry === undefined) return undefined;
+  const want = field.toLowerCase();
+  for (const [name, type] of Object.entries(registry)) {
+    if (name.toLowerCase() === want) {
+      if (typeof type !== "string" || !STRUCTURED_FIELD_TYPES.has(type)) {
+        throw new Error(
+          `structuredFieldTypes: field "${name}" must be "dictionary" | "list" | "item", got ${typeof type === "string" ? JSON.stringify(type) : typeof type}`,
+        );
+      }
+      return type;
+    }
+  }
+  return undefined;
 }

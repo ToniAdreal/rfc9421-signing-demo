@@ -11,6 +11,36 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Per-field `;sf` type registry (backlog #839): `SignOptions` and
+  `VerifyOptions` gain optional `structuredFieldTypes` (a field name
+  → `"dictionary" | "list" | "item"` map, matched case-insensitively).
+  A registered field is parsed only as its registered type, so a
+  Dictionary-shaped value registered as a List fails fast on the sign
+  side and with `SIGNATURE_BASE_BUILD_FAILED` on the verify side
+  instead of being rescued by the default Dictionary → List → Item
+  trial order; unregistered fields keep that trial order unchanged.
+  An empty field name, a case-duplicate key, or an unknown type name
+  is a caller configuration error on both sides (thrown before any
+  crypto runs, and for `verifyAllLabels` before the per-label walk).
+  The registry is caller configuration, never wire data, and it
+  applies to `;sf` only: `;bs` (raw bytes) and `;key` (one Dictionary
+  member) keep their own rules, `;sf` combined with either still
+  fails closed, and `verifyAllLabels` applies the same registry to
+  every label (there is no per-label registry map). `src/
+  structuredFields.ts` gains `canonicalizeStructuredFieldValueAs`
+  and the exported `StructuredFieldType` type; `buildSignatureBase`
+  and `resolveComponent` accept the registry via
+  `ResolveComponentOptions`. `test/structuredFieldTypes.test.ts`
+  adds 14 cases (registered dictionary/list/item round-trips,
+  sign- and verify-side fail-closed mismatches, unregistered-field
+  trial order, case-insensitive keys, illegal registries on both
+  sides, `;req;sf` and `;tr;sf` combinations, unchanged `;key`/`;bs`
+  paths, per-label independent reporting in `verifyAllLabels`,
+  direct `buildSignatureBase` use, and no registry leakage into
+  `signature-input`). The README `;sf` section and Limitations now
+  describe the opt-in registry instead of the old "no registry"
+  claim, and both test-count mentions move 1314 → 1328.
+
 - `JwksKeyStore` with `requireHttps: true` now intercepts a fetch
   redirected from https to http (backlog #836): `JwksFetchResponse`
   gains an optional `url` (the final URL after redirects, populated

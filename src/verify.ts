@@ -19,6 +19,10 @@ import {
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
 import { assertHmacSecretLength, assertRsaModulusLength } from "./keys.js";
 import type { NonceStore } from "./replay.js";
+import {
+  assertStructuredFieldTypes,
+  type StructuredFieldType,
+} from "./structuredFields.js";
 
 export interface VerifyOptions {
   /**
@@ -299,6 +303,27 @@ export interface VerifyOptions {
    * `expectedKeyIds`.
    */
   requiredComponents?: string[];
+  /**
+   * Per-field Structured Field type registry for `;sf` covered
+   * components (RFC 9421 §2.1.1) — the verify-side twin of
+   * `SignOptions.structuredFieldTypes`: maps a header field name to
+   * `"dictionary"`, `"list"`, or `"item"`, and a registered field is
+   * parsed only as its registered type. A value that only parses as
+   * another type fails with `SIGNATURE_BASE_BUILD_FAILED` (the base
+   * cannot be rebuilt under the registered type), never by falling
+   * back to the trial order — so a signer and a verifier that agree
+   * on the registry agree on the base, and a signer that serialized
+   * under the wrong type is rejected rather than rescued. Field
+   * names match case-insensitively; an empty field name, a
+   * case-duplicate key, or an unknown type name is a caller
+   * configuration error (throw, before any crypto runs). Fields
+   * absent from the map keep the default Dictionary → List → Item
+   * trial order. In `verifyAllLabels` the same registry applies to
+   * every label (there is no per-label registry map: the registry
+   * describes the fields, not the signers). It affects only `;sf`
+   * components, exactly as on the sign side.
+   */
+  structuredFieldTypes?: Record<string, StructuredFieldType>;
 }
 
 export interface VerifyResult {
@@ -549,6 +574,7 @@ export function verifyRequest(
   assertCandidateKeys(opts.candidateKeys);
   assertMaxSignatureAgeSec(opts.maxSignatureAgeSec);
   assertRequiredComponents(opts.requiredComponents);
+  assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyRequest");
   const label = opts.label ?? "sig1";
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   const skew = opts.clockSkewToleranceSec ?? 60;
@@ -616,7 +642,9 @@ export function verifyRequest(
       };
   }
   try {
-    base = buildSignatureBase(parsed.componentIds, req, parsed.params);
+    base = buildSignatureBase(parsed.componentIds, req, parsed.params, {
+      structuredFieldTypes: opts.structuredFieldTypes,
+    });
   } catch (e) {
     return {
       ok: false,
@@ -1809,6 +1837,7 @@ export function verifyAllLabels(
   assertRequireFlagByLabel("requireNonceByLabel", opts.requireNonceByLabel);
   assertRequireFlagByLabel("requireTagByLabel", opts.requireTagByLabel);
   assertReplayCacheByLabel(opts.replayCacheByLabel);
+  assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyAllLabels");
   let labels: string[];
   try {
     labels = listSignatureLabels(sigInput);

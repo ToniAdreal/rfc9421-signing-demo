@@ -77,12 +77,15 @@ export {
 export type {
   ParsedSignatureInput,
   RequestLike,
+  ResolveComponentOptions,
   SignatureParams,
 } from "./components.js";
 export {
   canonicalizeStructuredFieldValue,
+  canonicalizeStructuredFieldValueAs,
   serializeDictionaryMemberValue,
 } from "./structuredFields.js";
+export type { StructuredFieldType } from "./structuredFields.js";
 export { fromNodeRequest, fromNodeResponse } from "./nodeHttp.js";
 export type {
   FromNodeRequestOptions,

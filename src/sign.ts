@@ -16,6 +16,10 @@ import {
 import { contentDigest, assertContentDigestAlg, contentDigestAlgOf } from "./digest.js";
 import type { ContentDigestAlg } from "./digest.js";
 import { assertHmacSecretLength, assertRsaModulusLength } from "./keys.js";
+import {
+  assertStructuredFieldTypes,
+  type StructuredFieldType,
+} from "./structuredFields.js";
 
 export type SignAlg =
   | "ed25519"
@@ -109,6 +113,28 @@ export interface SignOptions {
    * `verifyRequest` unchanged.
    */
   contentDigestAlg?: ContentDigestAlg;
+  /**
+   * Per-field Structured Field type registry for `;sf` covered
+   * components (RFC 9421 §2.1.1): maps a header field name to the
+   * one type that field's value is — `"dictionary"`, `"list"`, or
+   * `"item"`. A registered field is parsed only as its registered
+   * type: a Dictionary-shaped value registered as `"list"` fails
+   * fast on the sign side instead of silently serializing under the
+   * trial order's first match. Field names match case-insensitively
+   * (header names are case-insensitive); two keys differing only by
+   * case, an empty field name, or an unknown type name is a caller
+   * configuration error (throw, before any crypto runs). Fields
+   * absent from the map keep the default Dictionary → List → Item
+   * trial order, so omitting the option is fully backwards
+   * compatible. The verifier must be given the same registry for
+   * its own side (see `VerifyOptions.structuredFieldTypes`) —
+   * the registry is caller configuration, not wire data, so it is
+   * never emitted into `signature-input`. It affects only `;sf`
+   * components: `;bs` (raw bytes) and `;key` (one Dictionary member)
+   * keep their own rules, and `;sf` combined with either still
+   * fails closed.
+   */
+  structuredFieldTypes?: Record<string, StructuredFieldType>;
 }
 
 export interface SignedHttpRequest {
@@ -271,6 +297,7 @@ export function signRequest(
     );
   const digestAlg = opts.contentDigestAlg ?? "sha-512";
   assertContentDigestAlg(digestAlg);
+  assertStructuredFieldTypes(opts.structuredFieldTypes, "signRequest");
 
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(req.headers)) {
@@ -306,7 +333,9 @@ export function signRequest(
     // the override) could never match.
     requestTarget: req.requestTarget,
   };
-  const base = buildSignatureBase(covered, signingInput, params);
+  const base = buildSignatureBase(covered, signingInput, params, {
+    structuredFieldTypes: opts.structuredFieldTypes,
+  });
 
   let sig: Buffer;
   if (opts.alg === "ed25519") {

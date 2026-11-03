@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1314 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1328 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -911,11 +911,21 @@ example above calls the adapter.
   parameters); the RFC 9651 extensions (Date, Display String) are
   not, and a value that parses as no supported type fails closed on
   both sides. RFC 9421 expects the application to know the field's
-  type; this library keeps no per-field type registry — the parser
-  tries Dictionary, then List, then Item and takes the first type
-  that consumes the whole value, which yields the RFC's strict bytes
-  for every well-typed value (ambiguous shapes such as a lone token
-  serialize identically under each candidate type). `;sf` combines
+  type; by default the parser tries Dictionary, then List, then
+  Item and takes the first type that consumes the whole value,
+  which yields the RFC's strict bytes for every well-typed value
+  (ambiguous shapes such as a lone token serialize identically
+  under each candidate type). A caller that knows a field's type
+  pins it with the opt-in per-field registry
+  (`SignOptions.structuredFieldTypes` /
+  `VerifyOptions.structuredFieldTypes`, a field name →
+  `"dictionary" | "list" | "item"` map): a registered field is
+  parsed only as its registered type, so a value that only parses
+  as another type fails closed on the sign side and with
+  `SIGNATURE_BASE_BUILD_FAILED` on the verify side instead of
+  being rescued by the trial order; unregistered fields keep the
+  trial order, and the registry is caller configuration, never
+  wire data. `;sf` combines
   with `;req` (canonical wire form `;req;sf`), is rejected on derived
   components like `;bs`, and is incompatible with `;bs` (raw bytes
   vs. parsed value — the pair fails closed). The strict serializer
@@ -1286,8 +1296,9 @@ const dual = addSignature(merchantSigned, {
   keystores over HTTP. The `bs`, `sf`, `key`, and `tr` component parameters
   *are* implemented for header fields, and `;name` *is* implemented for
   the `@query-param` derived component (see "What it implements"; `;sf`
-  covers the RFC 8941 core types only, with no per-field type
-  registry, and `;key` selects Dictionary members of those same core
+  covers the RFC 8941 core types only, with an opt-in per-field type
+  registry (`structuredFieldTypes`) and the Dictionary → List → Item
+  trial order otherwise, and `;key` selects Dictionary members of those same core
   types; `;tr` reads the field value from caller-supplied
   `RequestLike.trailers` — this library does not parse raw HTTP
   trailer sections off the wire). `@request-target` *is* implemented
@@ -3379,7 +3390,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1314 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1328 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

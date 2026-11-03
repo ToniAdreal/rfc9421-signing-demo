@@ -24,7 +24,11 @@
  * before entering the signature base, so insignificant wire
  * whitespace canonicalizes identically on both sides (see
  * structuredFields.ts for the supported types and the honest
- * type-selection rule). `;sf` combines with `;req` (canonical wire
+ * type-selection rule). A caller that knows a field's type pins it
+ * with the per-field registry (`ResolveComponentOptions.
+ * structuredFieldTypes`, via `SignOptions`/`VerifyOptions`): a
+ * registered field is parsed only as its registered type, and a
+ * value that only parses as another type fails closed. `;sf` combines with `;req` (canonical wire
  * form `;req;sf`) but is incompatible with `;bs` — `;bs` binds the
  * raw field bytes while `;sf` binds the parsed value, so the pair
  * fails closed on both sides, as does `;sf` on a derived component.
@@ -96,8 +100,29 @@
 
 import {
   canonicalizeStructuredFieldValue,
+  canonicalizeStructuredFieldValueAs,
+  lookupStructuredFieldType,
   serializeDictionaryMemberValue,
+  type StructuredFieldType,
 } from "./structuredFields.js";
+
+export type { StructuredFieldType } from "./structuredFields.js";
+
+/**
+ * Options for component resolution that are not part of the wire
+ * signature parameters. `structuredFieldTypes` is the per-field
+ * `;sf` type registry (see `SignOptions.structuredFieldTypes`):
+ * a registered field is parsed only as its registered type, while
+ * unregistered fields keep the Dictionary → List → Item trial order.
+ * It affects only `;sf` components: `;bs` binds raw bytes and
+ * `;key` selects one Dictionary member by its own rule, so a
+ * registry entry for a field covered with `;bs` or `;key` changes
+ * neither of those paths, and `;sf` combined with `;bs`/`;key`
+ * still fails closed before any serialization runs.
+ */
+export interface ResolveComponentOptions {
+  structuredFieldTypes?: Record<string, StructuredFieldType>;
+}
 
 export interface RequestLike {
   method: string;
@@ -509,6 +534,7 @@ export function resolveComponent(
   id: string,
   req: RequestLike,
   params: SignatureParams,
+  options?: ResolveComponentOptions,
 ): string {
   const { base: cid, req: isReq, bs: isBs, sf: isSf, key: dictKey, tr: isTr, name: queryParamName } = parseComponentId(id);
   // RFC 9421 §2.4: a `;req` component resolves against the associated
@@ -563,6 +589,16 @@ export function resolveComponent(
     if (v === undefined)
       throw new Error(`covered ${fieldKind} field "${cid}" is missing from the request`);
     try {
+      const registered = lookupStructuredFieldType(
+        options?.structuredFieldTypes,
+        cid,
+      );
+      if (registered !== undefined) {
+        return canonicalizeStructuredFieldValueAs(
+          normalizeFieldValue(v),
+          registered,
+        );
+      }
       return canonicalizeStructuredFieldValue(normalizeFieldValue(v));
     } catch (err) {
       throw new Error(
@@ -702,9 +738,10 @@ export function buildSignatureBase(
   componentIds: string[],
   req: RequestLike,
   params: SignatureParams,
+  options?: ResolveComponentOptions,
 ): string {
   const lines = componentIds.map((id) => {
-    const value = resolveComponent(id, req, params);
+    const value = resolveComponent(id, req, params, options);
     return `${serializeComponentId(id)}: ${value}`;
   });
   lines.push(`"@signature-params": ${serializeSignatureParams(componentIds, params)}`);
