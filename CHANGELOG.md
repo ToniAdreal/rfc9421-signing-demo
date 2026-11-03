@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `signResponse` / `verifyResponse` response signing entry points
+  (backlog #854): thin wrappers over `signRequest` / `verifyRequest`
+  (zero new cryptography) taking the response shape directly
+  (`{ status, headers, body? }`), covering `@status` by default
+  (plus `content-digest` when a body is present); the sign side
+  returns a response shape with `coveredComponents` echoed, the
+  verify side returns the plain `VerifyResult`. Response components
+  only: a covered request-derived component (`@method`, `@scheme`,
+  `@authority`, `@path`, `@query`, `@query-param`, `@target-uri`,
+  `@request-target`) or a `;req` component is a caller configuration
+  error pointing at the request-side API, never a fabricated method
+  or URL.
 - `VerifyOptions.allowedAlgs` verification algorithm whitelist (backlog
   #851): when set, only signatures whose algorithm is in the list
   verify — any other algorithm fails with the new `ALG_NOT_ALLOWED`

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1359 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1372 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -837,6 +837,40 @@ when present, else `res.trailers`). On a real client the trailers are
 complete only after the response's `end` event — which is when the
 example above calls the adapter.
 
+Signing responses directly, without assembling a `RequestLike` —
+`signResponse` / `verifyResponse` (thin wrappers, zero new
+cryptography):
+
+```ts
+import { signResponse, verifyResponse } from "./dist/src/index.js";
+
+// Gateway side: sign the settlement response. `@status` is covered
+// by default (plus `content-digest` when the response has a body), so
+// the status code is bound without the caller naming it.
+const signed = signResponse(
+  { status: 200, headers: { "content-type": "application/json" }, body },
+  { key: gatewayPrivateKey, alg: "ed25519", created },
+);
+
+// Client side: verify it as a response. The result is the same
+// `VerifyResult` shape as `verifyRequest`, so one code path audits
+// both directions.
+const result = verifyResponse(signed, { key: gatewayPublicKey });
+if (!result.ok) {
+  throw new Error(`bad gateway signature: ${result.code}`);
+}
+```
+
+Honest limit: response signing covers response components only. A
+component that derives from the request (`@method`, `@scheme`,
+`@authority`, `@path`, `@query`, `@query-param`, `@target-uri`,
+`@request-target`) or that carries `;req` binds the signature to the
+triggering request, and this API has no request to bind to — covering
+one throws a configuration error instead of inventing a method or URL.
+For those, keep using the request-side API (`signRequest` /
+`verifyRequest` with `RequestLike.request` set, or `fromNodeResponse`
+with `opts.request`).
+
 ## What it implements
 
 - **Signature base** (§2.5): `"id": value` lines for each covered component,
@@ -1139,6 +1173,13 @@ example above calls the adapter.
   verifying gateway-signed responses — pass `opts.request` (the request
   you sent) to enable covered `;req` request-binding components. See
   the Quickstart response receive→verify example.
+- **Response signing entry points**: `signResponse(res, opts)` /
+  `verifyResponse(res, opts)` wrap the request-side API for the
+  response shape (`{ status, headers, body? }`), covering `@status`
+  by default (plus `content-digest` with a body). Response
+  components only — request-derived components and `;req` are
+  rejected with a pointer to the request-side API. See the
+  Quickstart response-signing example.
 - **Multi-signature verification**: `verifyAllLabels(req, { key, keys })`
   parses every label from the `Signature-Input` header and verifies each
   one with `verifyRequest`, returning one `VerifyResult` per label in wire
@@ -3422,7 +3463,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1359 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1372 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

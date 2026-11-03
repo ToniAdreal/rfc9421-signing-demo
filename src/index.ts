@@ -88,6 +88,13 @@ export {
 } from "./structuredFields.js";
 export type { StructuredFieldType } from "./structuredFields.js";
 export { fromNodeRequest, fromNodeResponse } from "./nodeHttp.js";
+export { signResponse, verifyResponse } from "./response.js";
+export type {
+  HttpResponseLike,
+  SignedHttpResponse,
+  SignResponseOptions,
+  VerifyResponseOptions,
+} from "./response.js";
 export type {
   FromNodeRequestOptions,
   FromNodeResponseOptions,
