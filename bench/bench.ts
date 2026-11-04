@@ -724,7 +724,18 @@
  * the two-missing-components plural reason,
  * case-insensitive requirement matching, the opt-in
  * default-off behaviour, and the malformed-entry
- * configuration error asserted outside timing.
+ * configuration error asserted outside timing, plus the
+ * algorithm-whitelist verify path a gateway runs to refuse
+ * a foreign algorithm before any cryptography:
+ * `verifyRequest` with `allowedAlgs` over one RSA-PSS
+ * fixture signed outside timing (see ALLOWED_ALGS_*
+ * below), measured twice — once with the whitelist
+ * hitting the wire algorithm (the full RSA-PSS
+ * verification cost) and once with a whitelist that
+ * misses it (the pre-cryptographic `ALG_NOT_ALLOWED`
+ * rejection cost) — with the opposite half pinned
+ * outside timing in each row, so neither row can be
+ * measuring an empty path.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -8687,6 +8698,149 @@ function benchmarkVerifyRequiredComponents(): number {
 }
 
 /**
+ * Pinned shape of the `verifyRequest` allowedAlgs
+ * benchmark: one RSA-PSS key pair (generated once, outside
+ * timing), a fixture signed outside timing with `created`
+ * pinned (the verifier's `now` injected at the `created`
+ * instant — see ALLOWED_ALGS_* below), and two measured
+ * rows over the same fixture shape. The hit row verifies
+ * with a whitelist containing the wire algorithm, so
+ * every measured call pays the full RSA-PSS verification;
+ * the miss row verifies with a whitelist containing only
+ * `ed25519`, so every measured call is rejected with
+ * `ALG_NOT_ALLOWED` after header parsing and before any
+ * cryptographic work. Outside timing, each row pins the
+ * opposite half: the hit row pins that the same fixture
+ * verifies with no whitelist (the whitelist is opt-in)
+ * and that the ed25519-only whitelist rejects it; the
+ * miss row pins that the same fixture verifies under the
+ * hitting whitelist, so the rejection cannot be a bad
+ * signature. Zero network, zero randomness in the
+ * measured assertions, no wall clock (every verify
+ * instant is injected).
+ */
+const ALLOWED_ALGS_CREATED = 1_700_000_000;
+const ALLOWED_ALGS_KID = "bench-allowed-algs-key-1";
+const ALLOWED_ALGS_HIT: SignAlg[] = ["rsa-pss-sha512"];
+const ALLOWED_ALGS_MISS: SignAlg[] = ["ed25519"];
+const ALLOWED_ALGS_CODE = "ALG_NOT_ALLOWED";
+const ALLOWED_ALGS_MISS_REASON =
+  'signature alg "rsa-pss-sha512" is not in the allowedAlgs whitelist';
+
+function allowedAlgsRsaFixture(): {
+  signed: SignedHttpRequest;
+  publicKey: ReturnType<typeof generateRsaPssKeyPair>["publicKey"];
+} {
+  const { publicKey, privateKey } = generateRsaPssKeyPair();
+  const signed = signRequest(fixture, {
+    keyId: ALLOWED_ALGS_KID,
+    alg: "rsa-pss-sha512",
+    key: privateKey,
+    created: ALLOWED_ALGS_CREATED,
+  });
+  return { signed, publicKey };
+}
+
+function benchmarkVerifyAllowedAlgsHit(): number {
+  const { signed, publicKey } = allowedAlgsRsaFixture();
+  const verifyOpts = {
+    key: publicKey,
+    now: ALLOWED_ALGS_CREATED,
+    allowedAlgs: ALLOWED_ALGS_HIT,
+  };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok || r.alg !== "rsa-pss-sha512" || r.keyId !== ALLOWED_ALGS_KID)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with allowedAlgs hit (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the fixture verifies under the
+  // hitting whitelist.
+  assertAccepted("outside timing");
+
+  // Outside timing: the same fixture is rejected under
+  // the missing whitelist, with the pinned code and
+  // reason — the hit row is not measuring a path that
+  // ignores the whitelist.
+  const missed = verifyRequest(signed, {
+    key: publicKey,
+    now: ALLOWED_ALGS_CREATED,
+    allowedAlgs: ALLOWED_ALGS_MISS,
+  });
+  if (
+    missed.ok ||
+    missed.code !== ALLOWED_ALGS_CODE ||
+    missed.reason !== ALLOWED_ALGS_MISS_REASON ||
+    missed.alg !== "rsa-pss-sha512"
+  )
+    throw new Error(
+      `benchmark self-check failed: allowedAlgs miss result ${JSON.stringify(missed)} ` +
+        "(expected ALG_NOT_ALLOWED)",
+    );
+
+  // Outside timing: without a whitelist the same
+  // fixture verifies — the whitelist is opt-in and the
+  // default behaviour is unchanged.
+  const defaulted = verifyRequest(signed, {
+    key: publicKey,
+    now: ALLOWED_ALGS_CREATED,
+  });
+  if (!defaulted.ok)
+    throw new Error(
+      `benchmark self-check failed: allowedAlgs default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+function benchmarkVerifyAllowedAlgsMiss(): number {
+  const { signed, publicKey } = allowedAlgsRsaFixture();
+  const verifyOpts = {
+    key: publicKey,
+    now: ALLOWED_ALGS_CREATED,
+    allowedAlgs: ALLOWED_ALGS_MISS,
+  };
+  const assertRejected = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (
+      r.ok ||
+      r.code !== ALLOWED_ALGS_CODE ||
+      r.reason !== ALLOWED_ALGS_MISS_REASON ||
+      r.alg !== "rsa-pss-sha512"
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with allowedAlgs miss (${where}) gave ${JSON.stringify(r)} ` +
+          "(expected ALG_NOT_ALLOWED)",
+      );
+  };
+
+  // Outside timing: the fixture is rejected under the
+  // missing whitelist.
+  assertRejected("outside timing");
+
+  // Outside timing: the same fixture verifies under the
+  // hitting whitelist, so the rejection is the whitelist
+  // and not a bad signature.
+  const hit = verifyRequest(signed, {
+    key: publicKey,
+    now: ALLOWED_ALGS_CREATED,
+    allowedAlgs: ALLOWED_ALGS_HIT,
+  });
+  if (!hit.ok || hit.alg !== "rsa-pss-sha512")
+    throw new Error(
+      `benchmark self-check failed: allowedAlgs hit gave ${JSON.stringify(hit)}`,
+    );
+
+  return measure(() => {
+    assertRejected("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `JwksKeyStore.refreshIfStale` benchmark store:
  * one ed25519 key (generated once, outside timing) published under
  * this kid by the counting fake fetch, a 120-second TTL, and an
@@ -14133,6 +14287,16 @@ results.push({
   alg: "verifyRequest requiredComponents",
   op: "verify",
   ops: benchmarkVerifyRequiredComponents(),
+});
+results.push({
+  alg: "verifyRequest allowedAlgs (hit, rsa-pss-sha512)",
+  op: "verify",
+  ops: benchmarkVerifyAllowedAlgsHit(),
+});
+results.push({
+  alg: "verifyRequest allowedAlgs (miss, rsa-pss-sha512)",
+  op: "reject",
+  ops: benchmarkVerifyAllowedAlgsMiss(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",

@@ -3767,6 +3767,16 @@ change type; no entry describes a feature that is not in the history.
   nonces under a deterministic fake clock (zero network), rotating
   over the whole prefilled set so the LRU recency refresh is
   exercised across entries, with self-checks on the stats counters.
+- The benchmark now also measures the `verifyRequest` × `allowedAlgs`
+  whitelist path (backlog #860): the same RSA-PSS fixture shape in
+  two rows — a hitting whitelist (`["rsa-pss-sha512"]`, full RSA-PSS
+  verification, ~15,602 ops/sec / 64.10 µs/op in this run) and a
+  missing whitelist (`["ed25519"]`, pre-cryptographic
+  `ALG_NOT_ALLOWED` rejection, ~195,686 ops/sec / 5.11 µs/op, about
+  12.5× the hit throughput) — each row self-checking every measured
+  pass and pinning the opposite half outside timing, with the README
+  Benchmarks table refreshed from the same run (Node v24.22.1 /
+  AMD EPYC 9D25 shared host).
 
 ### Changed
 
