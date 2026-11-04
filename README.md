@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1374 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1383 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -861,15 +861,27 @@ if (!result.ok) {
 }
 ```
 
-Honest limit: response signing covers response components only. A
-component that derives from the request (`@method`, `@scheme`,
-`@authority`, `@path`, `@query`, `@query-param`, `@target-uri`,
-`@request-target`) or that carries `;req` binds the signature to the
-triggering request, and this API has no request to bind to — covering
-one throws a configuration error instead of inventing a method or URL.
-For those, keep using the request-side API (`signRequest` /
-`verifyRequest` with `RequestLike.request` set, or `fromNodeResponse`
-with `opts.request`).
+Honest limit, with one opt-in exception: response signing covers
+response components only, unless the caller attaches the triggering
+request as the `request` option on both sides
+(`signResponse(res, { ..., request })` /
+`verifyResponse(signed, { ..., request })`). With a request attached,
+a covered `;req` component (`"@method";req`, `"@authority";req`, or a
+request header field with `;req`) resolves against that request, so
+the response signature is bound to the request that triggered it and
+cannot be transplanted onto another request — the gateway-callback
+shape where the response alone proves nothing about which charge it
+answers. A `;req` component with no request attached still throws a
+configuration error instead of inventing a method or URL, and a
+request-derived component WITHOUT `;req` (`@method`, `@scheme`, …)
+is always rejected here even with a request attached: without `;req`
+it would resolve against the response itself, which has no method or
+URL, so cover the `;req` form instead. The direction of the binding
+matters: a response `;req` component reads the triggering request
+itself (its method, authority, headers), not the request's signature
+values. Without a request to bind to, keep using the request-side API
+(`signRequest` / `verifyRequest` with `RequestLike.request` set, or
+`fromNodeResponse` with `opts.request`).
 
 ## What it implements
 
@@ -1177,8 +1189,10 @@ with `opts.request`).
   `verifyResponse(res, opts)` wrap the request-side API for the
   response shape (`{ status, headers, body? }`), covering `@status`
   by default (plus `content-digest` with a body). Response
-  components only — request-derived components and `;req` are
-  rejected with a pointer to the request-side API. See the
+  components only, except `;req` components when the triggering
+  request is attached via the `request` option on both sides —
+  request-derived components without `;req` are always rejected
+  with a pointer to the request-side API. See the
   Quickstart response-signing example.
 - **Multi-signature verification**: `verifyAllLabels(req, { key, keys })`
   parses every label from the `Signature-Input` header and verifies each
@@ -3482,7 +3496,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1374 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1383 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

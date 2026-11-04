@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `signResponse` / `verifyResponse` accept an opt-in `request` option
+  (backlog #861): with the triggering request attached on both sides,
+  a covered `;req` component resolves against it, binding the
+  response signature to that request so a gateway callback cannot be
+  transplanted onto another request; a `;req` component with no
+  request attached is still a configuration error, and a
+  request-derived component without `;req` is always rejected (it
+  would resolve against the response itself, which has no method or
+  URL — cover the `;req` form instead). A response `;req` component
+  reads the triggering request itself, not the request's signature
+  values.
 - `signResponse` / `verifyResponse` response signing entry points
   (backlog #854): thin wrappers over `signRequest` / `verifyRequest`
   (zero new cryptography) taking the response shape directly
@@ -20,9 +31,10 @@ change type; no entry describes a feature that is not in the history.
   verify side returns the plain `VerifyResult`. Response components
   only: a covered request-derived component (`@method`, `@scheme`,
   `@authority`, `@path`, `@query`, `@query-param`, `@target-uri`,
-  `@request-target`) or a `;req` component is a caller configuration
-  error pointing at the request-side API, never a fabricated method
-  or URL.
+  `@request-target`) or a `;req` component with no request attached
+  is a caller configuration error pointing at the request-side API,
+  never a fabricated method or URL (the opt-in `request` exception
+  arrived later, backlog #861, see the entry above).
 - `VerifyOptions.allowedAlgs` verification algorithm whitelist (backlog
   #851): when set, only signatures whose algorithm is in the list
   verify — any other algorithm fails with the new `ALG_NOT_ALLOWED`
