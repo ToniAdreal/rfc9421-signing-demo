@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side nonce replay-cache tests (backlog #883): new
+  `test/responseReplayCache.test.ts` pins that `verifyResponse`
+  inherits the request-side `replayCache` semantics through its
+  `verifyRequest` delegation — first verification passes and
+  records the nonce, a second verification returns `NONCE_REPLAY`,
+  failed verifications (tampered status, wrong key) never pollute
+  the cache, nonce-less responses bypass the cache, no cache
+  configured keeps the old accept-twice behaviour, distinct nonces
+  are tracked independently, and a nonce is reusable after its TTL
+  expires. Note recorded in the test file: no
+  `verifyResponseOrThrow` exists (the response API returns wire
+  failures, never throws them), so the backlog item's OrThrow
+  clause is covered by its result-code equivalent.
 - Benchmark rows for `verifyResponse` × `allowedAlgs` (backlog
   #880): the same ed25519 response fixture as the plain
   `verifyResponse` row, measured twice — a hitting whitelist
