@@ -735,7 +735,19 @@
  * misses it (the pre-cryptographic `ALG_NOT_ALLOWED`
  * rejection cost) — with the opposite half pinned
  * outside timing in each row, so neither row can be
- * measuring an empty path.
+ * measuring an empty path, plus the response-signing pair a
+ * gateway runs to sign and verify settlement callbacks:
+ * `signResponse` and `verifyResponse` over one ed25519 fixture
+ * signed outside timing with `created` pinned (see
+ * RESPONSE_BENCH_* below) — the sign row measures sign cost
+ * alone with the `@status`-binding shape re-pinned on every
+ * measured pass, the verify row measures verify cost alone
+ * with ok / alg / keyid / covered-components re-pinned on
+ * every measured pass, and a 200 -> 500 status tamper is
+ * pinned `SIGNATURE_MISMATCH` outside timing in both rows,
+ * so neither row can be measuring an unsigned path. Zero
+ * network here: the loopback `fromNodeResponse` rows already
+ * cover HTTP adaptation, these rows isolate the wrapper cost.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -801,10 +813,12 @@ import {
   serializeDictionaryMemberValue,
   serializeSignatureParams,
   signRequest,
+  signResponse,
   signatureInputValue,
   verifyAllLabels,
   verifyRequest,
   verifyRequestOrThrow,
+  verifyResponse,
   type ContentDigestAlg,
   type IncomingRequestLike,
   type JwksFetchImpl,
@@ -812,6 +826,7 @@ import {
   type SignatureParams,
   type SignAlg,
   type SignedHttpRequest,
+  type SignedHttpResponse,
   type StructuredFieldType,
 } from "../src/index.js";
 
@@ -8841,6 +8856,148 @@ function benchmarkVerifyAllowedAlgsMiss(): number {
 }
 
 /**
+ * Pinned shape of the `signResponse` / `verifyResponse` benchmark:
+ * one ed25519 key pair (generated once, outside timing), a 200
+ * response with a fixed JSON body, signed outside timing with
+ * `created` pinned (the verifier's `now` injected 60 seconds
+ * later, matching the response test's clock). The default covered
+ * components for a response with a body are `@status` plus
+ * `content-digest`, so the signed fixture's `coveredComponents`
+ * and its `signature-input` header both pin `@status` — a row
+ * that signed nothing, or signed without binding the status,
+ * cannot pass the per-iteration shape check. Zero network (the
+ * loopback `fromNodeResponse` rows already cover the HTTP
+ * adaptation cost; these rows isolate the wrapper cost alone),
+ * zero randomness in the measured assertions, no wall clock
+ * (every verify instant is injected).
+ */
+const RESPONSE_BENCH_CREATED = 1_700_000_000;
+const RESPONSE_BENCH_NOW = RESPONSE_BENCH_CREATED + 60;
+const RESPONSE_BENCH_KID = "bench-response-key-1";
+const RESPONSE_BENCH_BODY = JSON.stringify({ settled: true, amount: 100 });
+const RESPONSE_BENCH_COVERED = ["@status", "content-digest"] as const;
+
+function responseSigningFixture(): {
+  response: { status: number; headers: Record<string, string>; body: string };
+  signed: SignedHttpResponse;
+  publicKey: ReturnType<typeof generateEd25519KeyPair>["publicKey"];
+  privateKey: ReturnType<typeof generateEd25519KeyPair>["privateKey"];
+} {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const response = { status: 200, headers: {}, body: RESPONSE_BENCH_BODY };
+  const signed = signResponse(response, {
+    keyId: RESPONSE_BENCH_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: RESPONSE_BENCH_CREATED,
+  });
+  return { response, signed, publicKey, privateKey };
+}
+
+function assertSignedResponseShape(
+  signed: SignedHttpResponse,
+  where: string,
+): void {
+  if (
+    signed.status !== 200 ||
+    JSON.stringify(signed.coveredComponents) !==
+      JSON.stringify(RESPONSE_BENCH_COVERED) ||
+    !(signed.headers["signature-input"] as string).includes('"@status"') ||
+    signed.headers["signature"] === undefined
+  )
+    throw new Error(
+      `benchmark self-check failed: signResponse shape (${where}) gave ${JSON.stringify(signed)}`,
+    );
+}
+
+function assertVerifiedResponse(where: string, result: {
+  ok: boolean;
+  alg?: string;
+  keyId?: string;
+  coveredComponents?: readonly string[];
+}): void {
+  if (
+    !result.ok ||
+    result.alg !== "ed25519" ||
+    result.keyId !== RESPONSE_BENCH_KID ||
+    JSON.stringify(result.coveredComponents) !==
+      JSON.stringify(RESPONSE_BENCH_COVERED)
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyResponse (${where}) gave ${JSON.stringify(result)}`,
+    );
+}
+
+function assertResponseTamperRejected(
+  signed: SignedHttpResponse,
+  publicKey: ReturnType<typeof generateEd25519KeyPair>["publicKey"],
+): void {
+  const tampered = verifyResponse(
+    { ...signed, status: 500 },
+    { key: publicKey, now: RESPONSE_BENCH_NOW },
+  );
+  if (tampered.ok || tampered.code !== "SIGNATURE_MISMATCH")
+    throw new Error(
+      `benchmark self-check failed: tampered response status gave ${JSON.stringify(tampered)} ` +
+        "(expected SIGNATURE_MISMATCH)",
+    );
+}
+
+function benchmarkSignResponse(): number {
+  const { response, privateKey, publicKey } = responseSigningFixture();
+
+  // Outside timing: a freshly signed response verifies, and a
+  // status-code tamper (200 -> 500) is rejected — the measured
+  // sign row is not minting signatures nobody checks.
+  const fresh = signResponse(response, {
+    keyId: RESPONSE_BENCH_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: RESPONSE_BENCH_CREATED,
+  });
+  assertSignedResponseShape(fresh, "outside timing");
+  assertVerifiedResponse(
+    "outside timing",
+    verifyResponse(fresh, { key: publicKey, now: RESPONSE_BENCH_NOW }),
+  );
+  assertResponseTamperRejected(fresh, publicKey);
+
+  // Measured pass: sign cost alone, pinned to the @status-binding
+  // shape — no verify call inside timing, matching the
+  // `benchmarkSignRequest` pattern.
+  return measure(() => {
+    const signed = signResponse(response, {
+      keyId: RESPONSE_BENCH_KID,
+      alg: "ed25519",
+      key: privateKey,
+      created: RESPONSE_BENCH_CREATED,
+    });
+    assertSignedResponseShape(signed, "measured pass");
+  }, ITERATIONS);
+}
+
+function benchmarkVerifyResponse(): number {
+  const { signed, publicKey } = responseSigningFixture();
+  const verifyOpts = { key: publicKey, now: RESPONSE_BENCH_NOW };
+
+  // Outside timing: the fixture verifies, and a status-code
+  // tamper (200 -> 500) is rejected with SIGNATURE_MISMATCH —
+  // the measured verify row is not accepting an empty path.
+  assertVerifiedResponse(
+    "outside timing",
+    verifyResponse(signed, verifyOpts),
+  );
+  assertResponseTamperRejected(signed, publicKey);
+
+  return measure(() => {
+    assertVerifiedResponse(
+      "measured pass",
+      verifyResponse(signed, verifyOpts),
+    );
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `JwksKeyStore.refreshIfStale` benchmark store:
  * one ed25519 key (generated once, outside timing) published under
  * this kid by the counting fake fetch, a 120-second TTL, and an
@@ -14297,6 +14454,16 @@ results.push({
   alg: "verifyRequest allowedAlgs (miss, rsa-pss-sha512)",
   op: "reject",
   ops: benchmarkVerifyAllowedAlgsMiss(),
+});
+results.push({
+  alg: "signResponse (ed25519, @status)",
+  op: "sign",
+  ops: benchmarkSignResponse(),
+});
+results.push({
+  alg: "verifyResponse (ed25519, @status)",
+  op: "verify",
+  ops: benchmarkVerifyResponse(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",

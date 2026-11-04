@@ -11,6 +11,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark rows for `signResponse` / `verifyResponse` (backlog
+  #865): one ed25519 fixture signed outside timing with `created`
+  pinned, measured as a sign row and a verify row, each
+  self-checked per iteration (`@status` plus `content-digest`
+  covered; verify pins ok / alg / keyid / covered components)
+  with a 200 -> 500 status tamper pinned `SIGNATURE_MISMATCH`
+  outside timing; zero network, so the rows isolate the wrapper
+  cost from the loopback `fromNodeResponse` rows. README
+  Benchmarks table refreshed from one real run.
 - `signResponse` / `verifyResponse` accept an opt-in `request` option
   (backlog #861): with the triggering request attached on both sides,
   a covered `;req` component resolves against it, binding the
