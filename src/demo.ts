@@ -1218,10 +1218,12 @@ import {
   serializeDictionaryMemberValue,
   serializeSignatureParams,
   signRequest,
+  signResponse,
   signatureInputValue,
   verifyAllLabels,
   verifyRequest,
   verifyRequestOrThrow,
+  verifyResponse,
   type ContentDigestAlg,
   type Ed25519PublicJwk,
   type P256PublicJwk,
@@ -1238,6 +1240,7 @@ import {
   type RequestLike,
   type SignatureParams,
   type SignedHttpRequest,
+  type SignedHttpResponse,
   type VerifyError,
   type VerifyFailureCode,
   type VerifyResult,
@@ -3787,6 +3790,29 @@ export const DEMO_ALLOWED_ALGS_NOW = DEMO_CREATED + 60;
  */
 export const DEMO_ALLOWED_ALGS_REJECT_CODE: VerifyFailureCode =
   "ALG_NOT_ALLOWED";
+/** Label the response-signing segment's settlement response carries. */
+export const DEMO_RESPONSE_SIGNING_LABEL = "sig1";
+/** Key id the response-signing segment's settlement response carries. */
+export const DEMO_RESPONSE_SIGNING_KEY_ID = "demo-response-signing-1";
+/** Nonce the response-signing segment's settlement response carries. */
+export const DEMO_RESPONSE_SIGNING_NONCE = "demo-response-signing-nonce-1";
+/** Status the response-signing segment signs (a settled response). */
+export const DEMO_RESPONSE_SIGNING_STATUS = 200;
+/** Status the tampered response-signing copy presents (a downgraded settlement). */
+export const DEMO_RESPONSE_SIGNING_TAMPERED_STATUS = 500;
+/** Body the response-signing segment signs. */
+export const DEMO_RESPONSE_SIGNING_BODY = JSON.stringify({
+  settled: true,
+  amount: 100,
+});
+/**
+ * Hand-pinned failure code for the response-signing segment's
+ * status tamper (`SIGNATURE_MISMATCH`): `@status` is covered, so
+ * presenting 500 for a signature minted over 200 fails the
+ * cryptographic check, not a policy check.
+ */
+export const DEMO_RESPONSE_SIGNING_TAMPER_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
 
 export interface DemoResult {
   signed: SignedHttpRequest;
@@ -5402,6 +5428,21 @@ export interface DemoResult {
    * the same ed25519-only whitelist, before crypto).
    */
   allowedAlgsRsaVerification: VerifyResult;
+  /**
+   * The settlement response signed in the response-signing
+   * segment with `signResponse` (status
+   * `DEMO_RESPONSE_SIGNING_STATUS`, `@status` + `content-digest`
+   * covered by default).
+   */
+  responseSigningSigned: SignedHttpResponse;
+  /** Verification of `responseSigningSigned` (ok). */
+  responseSigningVerification: VerifyResult;
+  /**
+   * Verification of `responseSigningSigned` with its status
+   * flipped to `DEMO_RESPONSE_SIGNING_TAMPERED_STATUS` (rejected
+   * with `DEMO_RESPONSE_SIGNING_TAMPER_CODE`).
+   */
+  responseSigningTamperedVerification: VerifyResult;
   lines: string[];
 }
 
@@ -11750,6 +11791,65 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Response-signing segment (backlog #868): the direct
+  // `signResponse` / `verifyResponse` entry points, not the
+  // loopback gateway segment above (which signs through
+  // `signRequest` and adapts with `fromNodeResponse`). The same
+  // ed25519 key pair signs a settlement response with `@status`
+  // (plus `content-digest`, the default when a body is present);
+  // verification passes, and flipping the status 200 -> 500 is
+  // rejected with `DEMO_RESPONSE_SIGNING_TAMPER_CODE` — the
+  // status code is part of the signed bytes, so a downgraded
+  // settlement cannot pass as the signed one. Only key fields
+  // are printed, never signature bytes, so the segment is
+  // byte-identical between runs.
+  const responseSigningPair = generateEd25519KeyPair();
+  const responseSigningSigned = signResponse(
+    {
+      status: DEMO_RESPONSE_SIGNING_STATUS,
+      headers: { "content-type": "application/json" },
+      body: DEMO_RESPONSE_SIGNING_BODY,
+    },
+    {
+      label: DEMO_RESPONSE_SIGNING_LABEL,
+      keyId: DEMO_RESPONSE_SIGNING_KEY_ID,
+      alg: "ed25519",
+      key: responseSigningPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_RESPONSE_SIGNING_NONCE,
+    },
+  );
+  const responseSigningVerification = verifyResponse(responseSigningSigned, {
+    key: responseSigningPair.publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  const responseSigningTamperedVerification = verifyResponse(
+    { ...responseSigningSigned, status: DEMO_RESPONSE_SIGNING_TAMPERED_STATUS },
+    { key: responseSigningPair.publicKey, now: DEMO_CREATED + 60 },
+  );
+  if (
+    !responseSigningVerification.ok ||
+    responseSigningVerification.label !== DEMO_RESPONSE_SIGNING_LABEL ||
+    responseSigningVerification.keyId !== DEMO_RESPONSE_SIGNING_KEY_ID ||
+    responseSigningVerification.alg !== "ed25519" ||
+    responseSigningVerification.nonce !== DEMO_RESPONSE_SIGNING_NONCE ||
+    responseSigningVerification.coveredComponents?.join(" ") !==
+      "@status content-digest" ||
+    responseSigningSigned.status !== DEMO_RESPONSE_SIGNING_STATUS ||
+    responseSigningSigned.coveredComponents?.join(" ") !==
+      "@status content-digest" ||
+    responseSigningTamperedVerification.ok ||
+    responseSigningTamperedVerification.code !==
+      DEMO_RESPONSE_SIGNING_TAMPER_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: response signing gave ${responseSigningVerification.ok}/${responseSigningVerification.label}/` +
+        `${responseSigningVerification.keyId}/${responseSigningVerification.alg} and tampered ` +
+        `${responseSigningTamperedVerification.ok}/${responseSigningTamperedVerification.code}, instead of ok ed25519 ` +
+        `and tampered ${DEMO_RESPONSE_SIGNING_TAMPER_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -12439,6 +12539,15 @@ export async function runDemo(): Promise<DemoResult> {
     requestTargetTamperVerification.ok
       ? `Override tampered after signing (${DEMO_RT_ASTERISK_FORM} -> ${DEMO_RT_TAMPERED_FORM}): OK (unexpected — the changed override was not detected)`
       : `Override tampered after signing (${DEMO_RT_ASTERISK_FORM} -> ${DEMO_RT_TAMPERED_FORM}): FAILED (code ${requestTargetTamperVerification.code}: ${requestTargetTamperVerification.reason}) — the override is part of the signed bytes, so presenting a different target breaks the signature`,
+    "",
+    "Response signing: signResponse / verifyResponse sign a settlement response directly — the response-side entry points, not a request signed through signRequest and adapted with fromNodeResponse — covering @status plus content-digest by default, so the status code and the body digest are both part of the signed bytes",
+    `Response Signature-Input: ${responseSigningSigned.headers["signature-input"]}`,
+    responseSigningVerification.ok
+      ? `Response signing verification: OK (label ${responseSigningVerification.label}, keyid="${responseSigningVerification.keyId}", alg="${responseSigningVerification.alg}", nonce="${responseSigningVerification.nonce}", status ${DEMO_RESPONSE_SIGNING_STATUS}, covered "@status" "content-digest")`
+      : `Response signing verification: FAILED (code ${responseSigningVerification.code}: ${responseSigningVerification.reason})`,
+    responseSigningTamperedVerification.ok
+      ? "Response signing verification after status tampering (200 -> 500): OK (unexpected — the tampered status was not detected)"
+      : `Response signing verification after status tampering (200 -> 500): FAILED (code ${responseSigningTamperedVerification.code}: ${responseSigningTamperedVerification.reason})`,
   ];
 
   return {
@@ -12736,6 +12845,9 @@ export async function runDemo(): Promise<DemoResult> {
     requestTargetForms,
     requestTargetVerifications,
     requestTargetTamperVerification,
+    responseSigningSigned,
+    responseSigningVerification,
+    responseSigningTamperedVerification,
     lines,
   };
 }

@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo response-signing segment (backlog #868): the demo now
+  shows the direct `signResponse` / `verifyResponse` entry points
+  (not the loopback gateway segment, which signs through
+  `signRequest` and adapts with `fromNodeResponse`) — the same
+  ed25519 key pair signs a settlement response with `@status`
+  plus `content-digest` covered by default and verifies, and a
+  200 -> 500 status tamper is rejected with
+  `SIGNATURE_MISMATCH`; `DemoResult` carries the signed response
+  and both verifications, and the demo tests pin the new output
+  lines and their byte-identical double-run output. README test
+  count updated to the real 1385.
 - Benchmark rows for `signResponse` / `verifyResponse` (backlog
   #865): one ed25519 fixture signed outside timing with `created`
   pinned, measured as a sign row and a verify row, each

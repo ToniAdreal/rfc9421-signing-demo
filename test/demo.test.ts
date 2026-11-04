@@ -83,6 +83,13 @@ import {
   DEMO_ALLOWED_ALGS_RSA_KEY_ID,
   DEMO_ALLOWED_ALGS_RSA_NONCE,
   DEMO_BODY,
+  DEMO_RESPONSE_SIGNING_BODY,
+  DEMO_RESPONSE_SIGNING_KEY_ID,
+  DEMO_RESPONSE_SIGNING_LABEL,
+  DEMO_RESPONSE_SIGNING_NONCE,
+  DEMO_RESPONSE_SIGNING_STATUS,
+  DEMO_RESPONSE_SIGNING_TAMPERED_STATUS,
+  DEMO_RESPONSE_SIGNING_TAMPER_CODE,
   DEMO_COVERED_COMPONENTS,
   DEMO_CREATED,
   DEMO_DIGEST_GUARD_ACCEPTED,
@@ -5712,6 +5719,88 @@ test("demo signed-response segment prints byte-identical lines across runs", asy
   assert.deepEqual(second.lines.slice(b), first.lines.slice(a));
 });
 
+test("demo response-signing segment signs a response with @status and rejects a 200 -> 500 status tamper", async () => {
+  const {
+    lines,
+    responseSigningSigned,
+    responseSigningVerification,
+    responseSigningTamperedVerification,
+  } = await runDemo();
+
+  // Pinned segment constants.
+  assert.equal(DEMO_RESPONSE_SIGNING_LABEL, "sig1");
+  assert.equal(DEMO_RESPONSE_SIGNING_KEY_ID, "demo-response-signing-1");
+  assert.equal(DEMO_RESPONSE_SIGNING_STATUS, 200);
+  assert.equal(DEMO_RESPONSE_SIGNING_TAMPERED_STATUS, 500);
+  assert.equal(DEMO_RESPONSE_SIGNING_TAMPER_CODE, "SIGNATURE_MISMATCH");
+  assert.equal(
+    DEMO_RESPONSE_SIGNING_BODY,
+    JSON.stringify({ settled: true, amount: 100 }),
+  );
+
+  // The signed response carries the default response coverage:
+  // `@status` plus `content-digest` for the body, and the input
+  // response itself is not mutated into a request shape.
+  assert.equal(responseSigningSigned.status, DEMO_RESPONSE_SIGNING_STATUS);
+  assert.equal(responseSigningSigned.body, DEMO_RESPONSE_SIGNING_BODY);
+  assert.deepEqual(responseSigningSigned.coveredComponents, [
+    "@status",
+    "content-digest",
+  ]);
+
+  // Verification passes with the pinned identity and coverage.
+  assert.equal(responseSigningVerification.ok, true);
+  assert.equal(responseSigningVerification.label, DEMO_RESPONSE_SIGNING_LABEL);
+  assert.equal(
+    responseSigningVerification.keyId,
+    DEMO_RESPONSE_SIGNING_KEY_ID,
+  );
+  assert.equal(responseSigningVerification.alg, "ed25519");
+  assert.equal(
+    responseSigningVerification.nonce,
+    DEMO_RESPONSE_SIGNING_NONCE,
+  );
+  assert.deepEqual(responseSigningVerification.coveredComponents, [
+    "@status",
+    "content-digest",
+  ]);
+
+  // Flipping the status 200 -> 500 fails the cryptographic check:
+  // `@status` is part of the signed bytes.
+  assert.equal(responseSigningTamperedVerification.ok, false);
+  assert.equal(
+    responseSigningTamperedVerification.code,
+    DEMO_RESPONSE_SIGNING_TAMPER_CODE,
+  );
+
+  // Printed lines: header + Signature-Input + ok + tamper isolation
+  // — byte-exact, as the closing segment of the demo lines.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Response signing:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "Response signing: signResponse / verifyResponse sign a settlement response directly — the response-side entry points, not a request signed through signRequest and adapted with fromNodeResponse — covering @status plus content-digest by default, so the status code and the body digest are both part of the signed bytes",
+    `Response Signature-Input: ${responseSigningSigned.headers["signature-input"]}`,
+    `Response signing verification: OK (label ${DEMO_RESPONSE_SIGNING_LABEL}, keyid="${DEMO_RESPONSE_SIGNING_KEY_ID}", alg="ed25519", nonce="${DEMO_RESPONSE_SIGNING_NONCE}", status ${DEMO_RESPONSE_SIGNING_STATUS}, covered "@status" "content-digest")`,
+    `Response signing verification after status tampering (200 -> 500): FAILED (code ${DEMO_RESPONSE_SIGNING_TAMPER_CODE}: ${responseSigningTamperedVerification.reason})`,
+  ]);
+  // The segment closes the demo: nothing follows it.
+  assert.equal(lines[headerIdx + 4], undefined);
+});
+
+test("demo response-signing segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) => ls.findIndex((l) => l.startsWith("Response signing:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  assert.ok(a !== -1 && b !== -1);
+  // Only the key pair is fresh per run and signature bytes are
+  // never printed, so the closing segment's lines are identical.
+  assert.deepEqual(second.lines.slice(b), first.lines.slice(a));
+});
+
 test("demo JWKS requireHttps segment rejects a plaintext endpoint at construction and fetches it with the option off", async () => {
   const {
     jwksRequireHttpsError,
@@ -8177,7 +8266,7 @@ test("demo request-target segment pins all four forms, their base lines, and the
   assert.equal(tampered.code, DEMO_RT_REJECT_CODE);
 });
 
-test("demo lines contain the request-target segment (four forms plus tampered override, closing the demo)", async () => {
+test("demo lines contain the request-target segment (four forms plus tampered override, followed by the response-signing segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /Request-target override \(requestTarget\):/);
@@ -8193,9 +8282,11 @@ test("demo lines contain the request-target segment (four forms plus tampered ov
     `Asterisk-form: "@request-target": ${DEMO_RT_ASTERISK_FORM} — verified OK (label sig1, keyid="${DEMO_RT_KEY_ID}", alg="ed25519")`,
     `Override tampered after signing (${DEMO_RT_ASTERISK_FORM} -> ${DEMO_RT_TAMPERED_FORM}): FAILED (code ${DEMO_RT_REJECT_CODE}: signature mismatch) — the override is part of the signed bytes, so presenting a different target breaks the signature`,
   ]);
-  // The header plus its five lines are the demo's closing lines,
-  // with nothing after them.
-  assert.equal(headerIdx + 6, lines.length);
+  // The request-target segment is followed by the response-signing
+  // segment (blank separator, then its header), which now closes
+  // the demo.
+  assert.equal(lines[headerIdx + 6], "");
+  assert.ok(lines[headerIdx + 7]!.startsWith("Response signing:"));
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("Request-target override (requestTarget):"),
