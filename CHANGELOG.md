@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Per-label `;sf` type registries for `verifyAllLabels` (backlog
+  #886): `VerifyAllOptions.structuredFieldTypesByLabel` maps a
+  signature label to its own field-name → type registry, validated
+  per label with the same rules as the global
+  `structuredFieldTypes`; a mapped registry replaces the global one
+  for that label (not merged), unmapped labels fall back to the
+  global registry, and a malformed map or registry throws a caller
+  configuration error naming the label. New
+  `test/structuredFieldTypesByLabel.test.ts` (12 cases) pins the
+  routing both ways on one shared field, the replacement (not
+  union) semantics, the empty-registry case, the global fallback,
+  case-insensitive field matching, and the malformed-map errors;
+  mutation check (forcing the global registry for every label)
+  turns 6 of the 12 cases red, restored to full green.
 - Response-side nonce replay-cache tests (backlog #883): new
   `test/responseReplayCache.test.ts` pins that `verifyResponse`
   inherits the request-side `replayCache` semantics through its

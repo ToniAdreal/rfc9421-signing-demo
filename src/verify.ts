@@ -341,9 +341,11 @@ export interface VerifyOptions {
    * configuration error (throw, before any crypto runs). Fields
    * absent from the map keep the default Dictionary → List → Item
    * trial order. In `verifyAllLabels` the same registry applies to
-   * every label (there is no per-label registry map: the registry
-   * describes the fields, not the signers). It affects only `;sf`
-   * components, exactly as on the sign side.
+   * every label unless that label is mapped in
+   * `VerifyAllOptions.structuredFieldTypesByLabel`, whose registry
+   * replaces this global one for that label (it is not merged with
+   * it). It affects only `;sf` components, exactly as on the sign
+   * side.
    */
   structuredFieldTypes?: Record<string, StructuredFieldType>;
 }
@@ -1656,6 +1658,29 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * its own existence check.
    */
   requireTagByLabel?: Record<string, boolean>;
+  /**
+   * Per-label `;sf` type registries for multi-party signatures (e.g.
+   * a merchant signature that treats a shared header field as a
+   * Dictionary plus a payment-gateway signature that treats the same
+   * field as a List, on the same request): maps a signature label to
+   * that label's own field-name → type registry, validated per label
+   * with the same rules as the global `structuredFieldTypes`
+   * (non-empty field names, no case-duplicate keys, types limited to
+   * `"dictionary" | "list" | "item"`); a malformed map or registry
+   * is a caller configuration error (throw). A label in the map is
+   * verified with its own registry; any other label falls back to
+   * the global `structuredFieldTypes` (unset means the Dictionary →
+   * List → Item trial order for it). A mapped registry replaces
+   * the global registry for that label — it is not merged with it —
+   * so a field the global registry pins but the label's registry
+   * omits falls back to the trial order for that label. A registry
+   * is not key selection, so it never joins the
+   * `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+   */
+  structuredFieldTypesByLabel?: Record<
+    string,
+    Record<string, StructuredFieldType>
+  >;
 }
 
 /**
@@ -1742,6 +1767,37 @@ function assertCandidateKeysByLabel(
     } catch (e) {
       throw new Error(
         `verifyAllLabels: \`candidateKeysByLabel["${label}"]\` is invalid: ${(e as Error).message}`,
+      );
+    }
+  }
+}
+
+/**
+ * Validate the per-label `;sf` type-registry map. Each registry is
+ * validated with the same rules as the global `structuredFieldTypes`
+ * (reusing `assertStructuredFieldTypes`); a malformed map or registry
+ * is a caller configuration error, so it throws rather than returning
+ * `{ ok: false }`.
+ */
+function assertStructuredFieldTypesByLabel(
+  map:
+    | Record<string, Record<string, StructuredFieldType>>
+    | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      "verifyAllLabels: `structuredFieldTypesByLabel` must be a label→registry object",
+    );
+  for (const [label, registry] of Object.entries(map)) {
+    try {
+      assertStructuredFieldTypes(
+        registry,
+        `verifyAllLabels: structuredFieldTypesByLabel["${label}"]`,
+      );
+    } catch (e) {
+      throw new Error(
+        `verifyAllLabels: \`structuredFieldTypesByLabel["${label}"]\` is invalid: ${(e as Error).message}`,
       );
     }
   }
@@ -1995,6 +2051,7 @@ export function verifyAllLabels(
   assertRequireFlagByLabel("requireTagByLabel", opts.requireTagByLabel);
   assertReplayCacheByLabel(opts.replayCacheByLabel);
   assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyAllLabels");
+  assertStructuredFieldTypesByLabel(opts.structuredFieldTypesByLabel);
   let labels: string[];
   try {
     labels = listSignatureLabels(sigInput);
@@ -2122,6 +2179,14 @@ export function verifyAllLabels(
     // object, never a falsy override to be skipped.
     const replayCache =
       opts.replayCacheByLabel?.[label] ?? opts.replayCache;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, allowedAlgs, requireCreated, requireExpires, requireNonce, requireTag, replayCache });
+    // Per-label `;sf` type registry: a label in the map is verified
+    // with its own registry; every other label falls back to the
+    // global `structuredFieldTypes` (unset means the trial order for
+    // it). A mapped registry replaces the global one — it is not
+    // merged with it — so this must be passed explicitly: spreading
+    // `opts` alone would carry the global registry for every label.
+    const structuredFieldTypes =
+      opts.structuredFieldTypesByLabel?.[label] ?? opts.structuredFieldTypes;
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, allowedAlgs, requireCreated, requireExpires, requireNonce, requireTag, replayCache, structuredFieldTypes });
   });
 }

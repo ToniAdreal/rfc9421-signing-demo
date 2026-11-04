@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1410 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1422 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -558,6 +558,32 @@ const results = verifyAllLabels(dualSigned, {
 // gateway without tag → { ok: true } (falls back to global, unset)
 ```
 
+Per-label `;sf` type registries (a merchant signature that treats a
+shared header field as a Dictionary plus a gateway signature that
+treats the same field as a List, on the same request):
+`verifyAllLabels` accepts a `structuredFieldTypesByLabel` map with the
+same override/fallback semantics: a label in the map is verified with
+its own field-name → type registry; any other label falls back to the
+global `structuredFieldTypes` (unset means the Dictionary → List →
+Item trial order for it). A mapped registry replaces the global
+registry for that label — it is not merged with it — so a field the
+global registry pins but the label's registry omits falls back to the
+trial order for that label. Each registry follows the global
+registry's rules (a malformed map or registry is a caller
+configuration error), and a registry never joins the key-selection
+mutual-exclusion rules.
+
+```ts
+const results = verifyAllLabels(dualSigned, {
+  structuredFieldTypesByLabel: {
+    merchant: { "x-quota": "dictionary" },
+    gateway: { "x-quota": "list" },
+  },
+});
+// merchant (Dictionary-shaped field) → { ok: true }
+// gateway (same field, List registry) → { ok: false, code: "SIGNATURE_BASE_BUILD_FAILED" }
+```
+
 Timing honesty: the *number* of candidates tried is observable through
 verification latency — an observer can learn which secret (old vs new) a
 request used. If that must stay hidden, wrap the call so it always runs all
@@ -983,7 +1009,10 @@ values. Without a request to bind to, keep using the request-side API
   `SIGNATURE_BASE_BUILD_FAILED` on the verify side instead of
   being rescued by the trial order; unregistered fields keep the
   trial order, and the registry is caller configuration, never
-  wire data. `;sf` combines
+  wire data. In `verifyAllLabels`, `structuredFieldTypesByLabel`
+  maps a label to its own registry, replacing the global registry
+  for that label (not merged); unmapped labels fall back to the
+  global registry. `;sf` combines
   with `;req` (canonical wire form `;req;sf`), is rejected on derived
   components like `;bs`, and is incompatible with `;bs` (raw bytes
   vs. parsed value — the pair fails closed). The strict serializer
@@ -1379,8 +1408,10 @@ const dual = addSignature(merchantSigned, {
   *are* implemented for header fields, and `;name` *is* implemented for
   the `@query-param` derived component (see "What it implements"; `;sf`
   covers the RFC 8941 core types only, with an opt-in per-field type
-  registry (`structuredFieldTypes`) and the Dictionary → List → Item
-  trial order otherwise, and `;key` selects Dictionary members of those same core
+  registry (`structuredFieldTypes`, plus a per-label override
+  `structuredFieldTypesByLabel` in `verifyAllLabels`) and the
+  Dictionary → List → Item trial order otherwise, and `;key` selects
+  Dictionary members of those same core
   types; `;tr` reads the field value from caller-supplied
   `RequestLike.trailers` — this library does not parse raw HTTP
   trailer sections off the wire). `@request-target` *is* implemented
@@ -3529,7 +3560,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1410 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1422 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
