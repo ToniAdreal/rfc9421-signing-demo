@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark rows for `verifyResponse` × `allowedAlgs` (backlog
+  #880): the same ed25519 response fixture as the plain
+  `verifyResponse` row, measured twice — a hitting whitelist
+  (`["ed25519"]`, full ed25519 verification, ~3,953 ops/sec /
+  252.98 µs/op in this run) and a missing whitelist
+  (`["hmac-sha256"]`, pre-cryptographic `ALG_NOT_ALLOWED`
+  rejection, ~107,566 ops/sec / 9.30 µs/op, about 27.2× the hit
+  throughput) — each row self-checking every measured pass and
+  pinning the opposite half plus the no-whitelist default
+  outside timing, with the README Benchmarks table refreshed
+  from the same run (Node v24.22.1 / AMD EPYC 9D25 shared host).
 - CLI demo response-signing segment (backlog #868): the demo now
   shows the direct `signResponse` / `verifyResponse` entry points
   (not the loopback gateway segment, which signs through

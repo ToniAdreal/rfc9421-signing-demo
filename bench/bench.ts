@@ -745,7 +745,15 @@
  * with ok / alg / keyid / covered-components re-pinned on
  * every measured pass, and a 200 -> 500 status tamper is
  * pinned `SIGNATURE_MISMATCH` outside timing in both rows,
- * so neither row can be measuring an unsigned path. Zero
+ * so neither row can be measuring an unsigned path, plus the
+ * response-side whitelist pair over the same ed25519 response
+ * fixture: `verifyResponse` with `allowedAlgs` hitting the wire
+ * algorithm (the full ed25519 verification cost) and with a
+ * whitelist that misses it (the pre-cryptographic
+ * `ALG_NOT_ALLOWED` rejection cost) — with the opposite half
+ * pinned outside timing in each row and the no-whitelist
+ * default pinned verifying in both rows, so neither row can be
+ * measuring a path that ignores the whitelist. Zero
  * network here: the loopback `fromNodeResponse` rows already
  * cover HTTP adaptation, these rows isolate the wrapper cost.
  * Numbers
@@ -8998,6 +9006,133 @@ function benchmarkVerifyResponse(): number {
 }
 
 /**
+ * Pinned shape of the `verifyResponse` allowedAlgs benchmark:
+ * the same ed25519 response fixture as `benchmarkVerifyResponse`
+ * (see RESPONSE_BENCH_* above), measured twice. The hit row
+ * verifies with a whitelist containing the wire algorithm, so
+ * every measured call pays the full ed25519 verification; the
+ * miss row verifies with a whitelist containing only
+ * `hmac-sha256`, so every measured call is rejected with
+ * `ALG_NOT_ALLOWED` after header parsing and before any
+ * cryptographic work. Outside timing, each row pins the
+ * opposite half and the no-whitelist default verifying, so a
+ * rejection cannot be a bad signature and the hit cannot be a
+ * path that ignores the whitelist. Zero network, zero
+ * randomness in the measured assertions, no wall clock (every
+ * verify instant is injected).
+ */
+const RESPONSE_ALLOWED_ALGS_HIT: SignAlg[] = ["ed25519"];
+const RESPONSE_ALLOWED_ALGS_MISS: SignAlg[] = ["hmac-sha256"];
+const RESPONSE_ALLOWED_ALGS_CODE = "ALG_NOT_ALLOWED";
+const RESPONSE_ALLOWED_ALGS_MISS_REASON =
+  'signature alg "ed25519" is not in the allowedAlgs whitelist';
+
+function benchmarkVerifyResponseAllowedAlgsHit(): number {
+  const { signed, publicKey } = responseSigningFixture();
+  const verifyOpts = {
+    key: publicKey,
+    now: RESPONSE_BENCH_NOW,
+    allowedAlgs: RESPONSE_ALLOWED_ALGS_HIT,
+  };
+  const assertAccepted = (where: string): void => {
+    assertVerifiedResponse(where, verifyResponse(signed, verifyOpts));
+  };
+
+  // Outside timing: the fixture verifies under the hitting
+  // whitelist.
+  assertAccepted("outside timing");
+
+  // Outside timing: the same fixture is rejected under the
+  // missing whitelist, with the pinned code and reason — the
+  // hit row is not measuring a path that ignores the whitelist.
+  const missed = verifyResponse(signed, {
+    key: publicKey,
+    now: RESPONSE_BENCH_NOW,
+    allowedAlgs: RESPONSE_ALLOWED_ALGS_MISS,
+  });
+  if (
+    missed.ok ||
+    missed.code !== RESPONSE_ALLOWED_ALGS_CODE ||
+    missed.reason !== RESPONSE_ALLOWED_ALGS_MISS_REASON ||
+    missed.alg !== "ed25519"
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyResponse allowedAlgs miss result ${JSON.stringify(missed)} ` +
+        "(expected ALG_NOT_ALLOWED)",
+    );
+
+  // Outside timing: without a whitelist the same fixture
+  // verifies — the whitelist is opt-in and the default
+  // behaviour is unchanged.
+  const defaulted = verifyResponse(signed, {
+    key: publicKey,
+    now: RESPONSE_BENCH_NOW,
+  });
+  if (!defaulted.ok)
+    throw new Error(
+      `benchmark self-check failed: verifyResponse allowedAlgs default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+function benchmarkVerifyResponseAllowedAlgsMiss(): number {
+  const { signed, publicKey } = responseSigningFixture();
+  const verifyOpts = {
+    key: publicKey,
+    now: RESPONSE_BENCH_NOW,
+    allowedAlgs: RESPONSE_ALLOWED_ALGS_MISS,
+  };
+  const assertRejected = (where: string): void => {
+    const r = verifyResponse(signed, verifyOpts);
+    if (
+      r.ok ||
+      r.code !== RESPONSE_ALLOWED_ALGS_CODE ||
+      r.reason !== RESPONSE_ALLOWED_ALGS_MISS_REASON ||
+      r.alg !== "ed25519"
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyResponse allowedAlgs miss (${where}) gave ${JSON.stringify(r)} ` +
+          "(expected ALG_NOT_ALLOWED)",
+      );
+  };
+
+  // Outside timing: the fixture is rejected under the missing
+  // whitelist.
+  assertRejected("outside timing");
+
+  // Outside timing: the same fixture verifies under the hitting
+  // whitelist, so the rejection is the whitelist and not a bad
+  // signature.
+  assertVerifiedResponse(
+    "outside timing",
+    verifyResponse(signed, {
+      key: publicKey,
+      now: RESPONSE_BENCH_NOW,
+      allowedAlgs: RESPONSE_ALLOWED_ALGS_HIT,
+    }),
+  );
+
+  // Outside timing: without a whitelist the same fixture
+  // verifies — the whitelist is opt-in and the default
+  // behaviour is unchanged.
+  const defaulted = verifyResponse(signed, {
+    key: publicKey,
+    now: RESPONSE_BENCH_NOW,
+  });
+  if (!defaulted.ok)
+    throw new Error(
+      `benchmark self-check failed: verifyResponse allowedAlgs default gave ${JSON.stringify(defaulted)}`,
+    );
+
+  return measure(() => {
+    assertRejected("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `JwksKeyStore.refreshIfStale` benchmark store:
  * one ed25519 key (generated once, outside timing) published under
  * this kid by the counting fake fetch, a 120-second TTL, and an
@@ -14464,6 +14599,16 @@ results.push({
   alg: "verifyResponse (ed25519, @status)",
   op: "verify",
   ops: benchmarkVerifyResponse(),
+});
+results.push({
+  alg: "verifyResponse allowedAlgs (hit, ed25519)",
+  op: "verify",
+  ops: benchmarkVerifyResponseAllowedAlgsHit(),
+});
+results.push({
+  alg: "verifyResponse allowedAlgs (miss, ed25519)",
+  op: "reject",
+  ops: benchmarkVerifyResponseAllowedAlgsMiss(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",
