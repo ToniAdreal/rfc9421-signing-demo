@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1487 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1500 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1297,6 +1297,33 @@ const merchantSigned = signRequest(req, {
 });
 // payment gateway appends its own label without touching the merchant's
 const dual = addSignature(merchantSigned, {
+  keyId: "gateway-key-7",
+  alg: "hmac-sha256",
+  key: gatewaySecret,
+  label: "gateway",
+});
+```
+
+  The response side mirrors it: `addResponseSignature(signedRes, opts)`
+  appends a second party's signature to an already-signed response, with
+  the same rules — unique label, existing signature required, the wire
+  `content-digest` algorithm wins over `opts.contentDigestAlg`, input
+  never mutated. Each label verifies independently through
+  `verifyResponse` (one `label` at a time) or together through
+  `fromNodeResponse` + `verifyAllLabels`.
+
+```ts
+import { addResponseSignature, signResponse } from "./dist/src/index.js";
+
+// merchant signs the settlement response first with its own key
+const merchantSigned = signResponse(res, {
+  keyId: "merchant-key-1",
+  alg: "ed25519",
+  key: merchantPrivateKey,
+  label: "merchant",
+});
+// payment gateway appends its own label without touching the merchant's
+const dual = addResponseSignature(merchantSigned, {
   keyId: "gateway-key-7",
   alg: "hmac-sha256",
   key: gatewaySecret,
@@ -3562,7 +3589,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1487 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1500 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

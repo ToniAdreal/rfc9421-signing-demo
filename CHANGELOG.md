@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side multi-party signing (backlog #904): new
+  `addResponseSignature(signedRes, opts)` in `src/response.ts` mirrors
+  `addSignature` for responses — the second signature base is built
+  over the unsigned response (existing `signature-input` / `signature`
+  headers stripped), the label must be unique, appending to an
+  unsigned response fails fast, the wire `content-digest` algorithm
+  wins over `opts.contentDigestAlg` (a contradictory choice, or a
+  digest algorithm this library cannot emit, is a configuration
+  error), `;req` components are covered when the triggering request
+  is passed as `opts.request`, and the input response is never
+  mutated. New `test/addResponseSignature.test.ts` (13 cases) pins
+  merchant (ed25519) + gateway (hmac) dual labels verifying per label
+  through `verifyResponse` and together through `fromNodeResponse` +
+  `verifyAllLabels`, a real loopback server dual-signing a response
+  verified by an `http.get` client, label collision / empty label /
+  unsigned-input errors, digest-algorithm conflict and un-emittable
+  algorithm errors, a tampered gateway label leaving the merchant
+  label intact, a body-less `@status`-only double signing round-trip
+  with status tampering failing both labels, input immutability,
+  wire label order with a stable content-digest, and `;req` binding
+  for both labels (a swapped request fails both).
 - Response-side `structuredFieldTypes` type-registry coverage (backlog
   #900): new `test/responseStructuredFieldTypes.test.ts` (9 cases) pins
   that `verifyResponse` enforces `VerifyOptions.structuredFieldTypes`

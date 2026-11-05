@@ -44,9 +44,11 @@
 
 import {
   getHeader,
+  listSignatureLabels,
   parseSignatureInput,
   type RequestLike,
 } from "./components.js";
+import { contentDigestAlgOf } from "./digest.js";
 import { signRequest, type SignOptions } from "./sign.js";
 import { verifyRequest, type VerifyOptions, type VerifyResult } from "./verify.js";
 
@@ -334,4 +336,151 @@ export function verifyResponse(
     ...(request !== undefined ? { request } : {}),
   };
   return verifyRequest(req, verifyOpts);
+}
+
+/**
+ * Append a second party's signature to an already-signed response —
+ * the response-side twin of `addSignature`, producing a genuine
+ * multi-label RFC 9421 §2.4 dictionary. The canonical use case is
+ * multi-party settlement flows: a merchant signs the settlement
+ * response with its own key (e.g. ed25519), then a payment gateway
+ * appends its own signature (e.g. hmac) without touching the
+ * merchant's entries.
+ *
+ * The second signature base is built over the original response
+ * content (the existing `signature-input` / `signature` headers are
+ * stripped before signing), so both parties sign the same status,
+ * headers, and body. Parameters, covered components, key id, and
+ * nonce are taken from `opts` exactly as `signResponse` would apply
+ * them; `opts.label` names the appended entry (defaults to `"sig1"`
+ * like `signResponse`). A `;req` component in the appended
+ * signature is covered exactly as on the first sign: pass the
+ * triggering request as `opts.request`.
+ *
+ * One Content-Digest header constraint, identical to `addSignature`:
+ * a response carries a single `content-digest` header, and every
+ * label's signature base covers the wire value. If the existing
+ * response already has one, the second signature is built with the
+ * same digest algorithm — the algorithm of the existing header wins
+ * over `opts.contentDigestAlg` (an explicitly contradictory choice
+ * is a configuration error), and an existing header whose digest
+ * algorithm this library cannot emit is a configuration error too.
+ * Without this, the appended signature's base would cover a value
+ * that is never on the wire and `verifyAllLabels` would reject it.
+ *
+ * Fail-fast configuration errors (thrown, never embedded):
+ * - the input has no `signature-input`/`signature` headers (nothing
+ *   to append to — call `signResponse` first);
+ * - the existing `signature-input` header is malformed;
+ * - `opts.label` is empty or already present in the response
+ *   (RFC 9421 dictionary labels must be unique).
+ *
+ * The input response is not mutated; a new `SignedHttpResponse` is
+ * returned. The returned `coveredComponents` is the appended
+ * signature's own list (from the fresh sign), not a merge with the
+ * first signature's: each label's audit record stays attributable
+ * to the party that minted it.
+ */
+export function addResponseSignature(
+  signedRes: SignedHttpResponse,
+  opts: SignResponseOptions,
+): SignedHttpResponse {
+  const label = opts.label ?? "sig1";
+  if (label.length === 0)
+    throw new Error(
+      'addResponseSignature: "label" must be a non-empty string',
+    );
+
+  let existingInput: string | undefined;
+  let existingSig: string | undefined;
+  for (const [k, v] of Object.entries(signedRes.headers)) {
+    const lower = k.toLowerCase();
+    if (lower === "signature-input") existingInput = v;
+    else if (lower === "signature") existingSig = v;
+  }
+  if (existingInput === undefined || existingSig === undefined)
+    throw new Error(
+      "addResponseSignature: the response has no signature-input/signature headers; sign it with signResponse first",
+    );
+
+  let labels: string[];
+  try {
+    labels = listSignatureLabels(existingInput);
+  } catch (e) {
+    throw new Error(
+      `addResponseSignature: existing signature-input header is malformed (${(e as Error).message})`,
+    );
+  }
+  if (labels.includes(label))
+    throw new Error(
+      `addResponseSignature: label "${label}" is already present; every signature must use a distinct label`,
+    );
+
+  // Strip the signature dictionaries so the second base is computed over
+  // the original response content, exactly as the first signature was.
+  const unsignedHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(signedRes.headers)) {
+    const lower = k.toLowerCase();
+    if (lower === "signature-input" || lower === "signature") continue;
+    unsignedHeaders[k] = v;
+  }
+  // Pin the digest algorithm to the existing Content-Digest header, if
+  // any: the second signature's base must cover the value that stays on
+  // the wire (see the JSDoc above).
+  let digestAlg = opts.contentDigestAlg;
+  const existingDigest = Object.entries(unsignedHeaders).find(
+    ([k]) => k.toLowerCase() === "content-digest",
+  )?.[1];
+  if (existingDigest !== undefined) {
+    const wireAlg = contentDigestAlgOf(existingDigest);
+    if (wireAlg === undefined)
+      throw new Error(
+        `addResponseSignature: the response carries a content-digest header with a digest algorithm this library cannot emit (${JSON.stringify(existingDigest.slice(0, existingDigest.indexOf("="))) || JSON.stringify(existingDigest)}); the second signature cannot cover it`,
+      );
+    if (digestAlg !== undefined && digestAlg !== wireAlg)
+      throw new Error(
+        `addResponseSignature: the response already carries a content-digest header emitted with "${wireAlg}"; contentDigestAlg "${digestAlg}" would build the second signature base over a different value than the wire one`,
+      );
+    digestAlg = wireAlg;
+  }
+  const fresh = signResponse(
+    {
+      status: signedRes.status,
+      headers: unsignedHeaders,
+      ...(signedRes.body !== undefined ? { body: signedRes.body } : {}),
+      ...(signedRes.trailers !== undefined
+        ? { trailers: signedRes.trailers }
+        : {}),
+    },
+    { ...opts, contentDigestAlg: digestAlg },
+  );
+
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(signedRes.headers)) {
+    const lower = k.toLowerCase();
+    if (lower === "signature-input" || lower === "signature") continue;
+    out[k] = v;
+  }
+  out["signature-input"] = `${existingInput}, ${fresh.headers["signature-input"]}`;
+  out["signature"] = `${existingSig}, ${fresh.headers["signature"]}`;
+  if (
+    fresh.headers["content-digest"] !== undefined &&
+    out["content-digest"] === undefined
+  )
+    out["content-digest"] = fresh.headers["content-digest"];
+
+  return {
+    status: signedRes.status,
+    headers: out,
+    ...(signedRes.body !== undefined ? { body: signedRes.body } : {}),
+    ...(signedRes.trailers !== undefined
+      ? { trailers: signedRes.trailers }
+      : {}),
+    // The appended signature's own covered list (from `fresh`), not a
+    // merge with the first signature's: each label's audit record
+    // stays attributable to the party that minted it.
+    ...(fresh.coveredComponents !== undefined
+      ? { coveredComponents: [...fresh.coveredComponents] }
+      : {}),
+  };
 }
