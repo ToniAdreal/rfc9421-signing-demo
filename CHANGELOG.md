@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side `candidateKeys` rotation coverage (backlog #895):
+  new `test/responseCandidateKeys.test.ts` (10 cases) pins that
+  `verifyResponse` walks a `VerifyOptions.candidateKeys` rotation
+  list exactly as `verifyRequest` does — a signature minted with
+  the second candidate verifies with its keyid, alg, and covered
+  components pinned, a first-candidate hit verifies with its own
+  keyid, no matching candidate reports `SIGNATURE_MISMATCH` (not
+  `KEY_RESOLUTION_FAILED`), an empty list and non-KeyObject entries
+  throw configuration errors naming the offending index, `key` +
+  `candidateKeys` and `keyResolver` + `candidateKeys` together
+  throw the mutual-exclusion configuration error, an old key still
+  in the list keeps verifying during the rotation window while the
+  same key removed from the list is rejected, and a body-less
+  (`@status`-only) response walks the list the same way. No source
+  change: the forwarding already behaved correctly; this round
+  adds the missing response-side proof.
 - Response-side `keyResolver` gateway coverage (backlog #894):
   new `test/responseKeyResolver.test.ts` (9 cases) pins that
   `verifyResponse` resolves a response signature's keyid through
