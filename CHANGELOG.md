@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side `clockSkewToleranceSec` / `expiredToleranceSec`
+  clock-tolerance coverage (backlog #899): new
+  `test/responseClockTolerance.test.ts` (10 cases) pins that
+  `verifyResponse` enforces both clock-tolerance options exactly as
+  `verifyRequest` does — a future `created` inside the default 60s
+  skew verifies, one second past it fails with `CREATED_IN_FUTURE`
+  (reason pins the clock-skew wording), exactly at the default skew
+  boundary verifies (the check is a strict `>`), the same future
+  signature verifies under a wide tolerance and fails under a tight
+  one, an expired signature inside the `expiredToleranceSec` grace
+  verifies, one second past the grace fails with `EXPIRED`, exactly
+  at the grace boundary verifies, the default grace of 0 rejects an
+  expired signature one second past `expires`, a forgery still
+  reports `SIGNATURE_MISMATCH` rather than being masked by either
+  tolerance, and body-less (`@status`-only) responses follow the
+  same skew and grace rules. No source change: the forwarding already
+  behaved correctly; this round adds the missing response-side proof.
 - Response-side `maxSignatureAgeSec` age-cap coverage (backlog #898):
   new `test/responseMaxSignatureAge.test.ts` (8 cases) pins that
   `verifyResponse` enforces `VerifyOptions.maxSignatureAgeSec` exactly
