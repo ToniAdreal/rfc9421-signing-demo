@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1526 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1536 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1331,6 +1331,16 @@ const dual = addResponseSignature(merchantSigned, {
 });
 ```
 
+  The verify side has a throwing twin: `verifyAllLabelsOrThrow(req, opts)`
+  returns the per-label success results (label, keyid, alg, nonce, tag,
+  created, expires, coveredComponents) when every label verifies, and
+  otherwise throws a `VerifyError` carrying the first failing label's
+  stable `code` and `label` — for a webhook receiver that rejects the
+  whole request on the first bad signature instead of reporting
+  per-signer outcomes. An unsigned request returns `[]` without
+  throwing, exactly as `verifyAllLabels` does, and caller configuration
+  errors (mutually exclusive key options) still throw a plain `Error`.
+
 ## FAQ (honest)
 
 - **Can I use this in production?**
@@ -1610,7 +1620,13 @@ most also appear in [Limitations](#limitations)):
 - **Multiple signatures.** `verifyRequest` checks one label per call; for
   multi-party flows, `verifyAllLabels` verifies every label in the request
   (one `VerifyResult` per label, and a failing label never blocks the
-  remaining labels). Per-label key material is still caller-supplied via
+  remaining labels). Callers that prefer exception flow use
+  `verifyAllLabelsOrThrow`, which returns the same per-label success
+  results when every label verifies and otherwise throws a `VerifyError`
+  carrying the first failing label's stable `code` and `label` (an
+  unsigned request still returns `[]` without throwing, so callers
+  that must reject unsigned requests check the returned length).
+  Per-label key material is still caller-supplied via
   the optional `keys` map or the optional `keyResolvers`/`keyResolver`
   keyid→key lookup — a peer that expects automatic per-label key
   discovery will need keys wired up manually.
@@ -3589,7 +3605,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1526 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1536 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

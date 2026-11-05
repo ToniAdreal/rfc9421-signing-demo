@@ -2190,3 +2190,49 @@ export function verifyAllLabels(
     return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, allowedAlgs, requireCreated, requireExpires, requireNonce, requireTag, replayCache, structuredFieldTypes });
   });
 }
+
+/**
+ * Throwing variant of `verifyAllLabels`, for callers that prefer
+ * exception flow over per-label result inspection (e.g. a webhook
+ * receiver that rejects the whole request on the first bad
+ * signature instead of reporting per-signer outcomes).
+ *
+ * Calls `verifyAllLabels` and throws a `VerifyError` carrying the
+ * first failing label's stable `code` and `label` (plus the wire
+ * fields `keyId` / `alg` / `nonce` / `tag` / `created` / `expires`
+ * the failure result reported, mirroring `verifyRequestOrThrow`).
+ * When every label verifies, returns the per-label success results
+ * (`label` / `keyId` / `alg` / `nonce` / `tag` / `created` /
+ * `expires` / `coveredComponents`, same fields
+ * `verifyRequestOrThrow` returns on success) in wire order.
+ *
+ * A request with no `signature-input` header returns `[]` without
+ * throwing, exactly as `verifyAllLabels` does — callers that must
+ * reject unsigned requests should check the returned length
+ * themselves. Caller configuration errors (mutually exclusive key
+ * options, malformed per-label maps) still throw a plain `Error`,
+ * never a `VerifyError`.
+ */
+export function verifyAllLabelsOrThrow(
+  req: RequestLike,
+  opts: VerifyAllOptions,
+): VerifyResult[] {
+  const results = verifyAllLabels(req, opts);
+  for (const res of results) {
+    if (!res.ok)
+      throw new VerifyError(
+        res.code ?? "VERIFICATION_ERROR",
+        res.reason ?? "verification failed",
+        {
+          label: res.label,
+          keyId: res.keyId,
+          alg: res.alg,
+          nonce: res.nonce,
+          tag: res.tag,
+          created: res.created,
+          expires: res.expires,
+        },
+      );
+  }
+  return results;
+}

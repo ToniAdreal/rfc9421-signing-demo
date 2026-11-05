@@ -1,6 +1,6 @@
 export { addSignature, signRequest } from "./sign.js";
 export type { SignAlg, SignedHttpRequest, SignOptions } from "./sign.js";
-export { verifyAllLabels, verifyRequest, verifyRequestOrThrow } from "./verify.js";
+export { verifyAllLabels, verifyAllLabelsOrThrow, verifyRequest, verifyRequestOrThrow } from "./verify.js";
 export type { VerifyAllOptions, VerifyOptions, VerifyResult } from "./verify.js";
 export { isVerifyError, VerifyError } from "./errors.js";
 export type { VerifyErrorOptions, VerifyFailureCode } from "./errors.js";

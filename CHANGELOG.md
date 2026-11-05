@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Throwing multi-label verification (backlog #914): new
+  `verifyAllLabelsOrThrow(req, opts)` in `src/verify.ts` returns the
+  per-label success results when every label verifies and otherwise
+  throws a `VerifyError` carrying the first failing label's stable
+  `code` and `label` (plus the wire fields `keyId` / `alg` / `nonce` /
+  `tag` / `created` / `expires` the failure result reported, mirroring
+  `verifyRequestOrThrow`); an unsigned request returns `[]` without
+  throwing, exactly as `verifyAllLabels` does, and caller
+  configuration errors (mutually exclusive key options) still throw a
+  plain `Error`. New `test/verifyAllLabelsOrThrow.test.ts` (10 cases)
+  pins the shape: both-label success with `coveredComponents`, a
+  tampered label throwing `SIGNATURE_MISMATCH` for that label, an
+  expired label throwing `EXPIRED`, a replayed nonce throwing
+  `NONCE_REPLAY` on the second verify, first-failure-wins across two
+  differently failing labels, malformed `signature-input` throwing
+  `MALFORMED_SIGNATURE_INPUT`, and the `[]` / config-error paths.
 - Response-side `content-digest` sha-256 coverage (backlog #906): new
   `test/responseContentDigestSha256.test.ts` (8 cases) pins that
   `signResponse` / `verifyResponse` inherit the request-side digest
