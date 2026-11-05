@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side `maxSignatureAgeSec` age-cap coverage (backlog #898):
+  new `test/responseMaxSignatureAge.test.ts` (8 cases) pins that
+  `verifyResponse` enforces `VerifyOptions.maxSignatureAgeSec` exactly
+  as `verifyRequest` does — a response signature inside the 300s cap
+  verifies, one second past it fails with `SIGNATURE_TOO_OLD`
+  (reason pins the measured age), exactly at the cap verifies (the
+  check is a strict `>`), a hand-built response signature with no
+  `created` bypasses the age check entirely, a bogus window (negative,
+  NaN, Infinity, non-number) throws a configuration error, a forged
+  old signature still reports `SIGNATURE_MISMATCH` rather than being
+  masked by the age check, a body-less (`@status`-only) response is
+  aged the same way, and with the cap unset an old response signature
+  still verifies for backwards compatibility. No source change: the
+  forwarding already behaved correctly; this round adds the missing
+  response-side proof.
 - Response-side `memoizeKeyResolver` cache coverage (backlog #897):
   new `test/responseMemoizeKeyResolver.test.ts` (8 cases) pins that
   a `memoizeKeyResolver`-wrapped resolver passed to `verifyResponse`
