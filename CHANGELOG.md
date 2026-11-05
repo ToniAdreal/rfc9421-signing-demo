@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Signed-snapshot benchmark rows (backlog #891): `bench/bench.ts`
+  now measures `JwksKeyStore.exportSignedSnapshot` and
+  `JwksKeyStore.restoreSignedSnapshot` (JSON round-trip) over a
+  pinned three-shape store (ed25519 / P-256 / RSA) and fixed
+  secret — export ~8,105 ops/sec (123.38 µs/op), restore
+  ~7,280 ops/sec (137.35 µs/op) on this run. Every measured call
+  re-pins the envelope (version, fetch time, kid order, per-shape
+  `kty`, public-only JWK fields, 64-hex MAC, no secret in the
+  persisted JSON) or the restore contract (size, original fetch
+  time, pinned-kid resolution); the full three-shape
+  `verifyRequest` round-trip over the restored keys and the
+  tampered-envelope / wrong-secret rejections (old store
+  untouched, re-exported envelope identical) are pinned outside
+  timing. The README Benchmarks table is refreshed from this
+  run (113 rows, 2026-11-05); mutation check (expected restored
+  size forced wrong) fails the bench self-check, restored to
+  full green.
 - Per-label `;sf` type registries for `verifyAllLabels` (backlog
   #886): `VerifyAllOptions.structuredFieldTypesByLabel` maps a
   signature label to its own field-name → type registry, validated

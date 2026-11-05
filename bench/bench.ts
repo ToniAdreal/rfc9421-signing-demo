@@ -37,7 +37,17 @@
  * TTL boundary in the target's clock restores stale), with the
  * corrupt-envelope rejections (unsupported version, malformed
  * kid) and the fail-closed unchanged-store assertions outside
- * timing, plus the key-resolution verify path a gateway runs
+ * timing, plus the signed-snapshot path a gateway runs across a
+ * restart during a JWKS outage: `JwksKeyStore.exportSignedSnapshot`
+ * over a three-shape store and `JwksKeyStore.restoreSignedSnapshot`
+ * over its JSON round-trip (the canonical-JSON sort plus HMAC
+ * cost a restart pays), self-checked on every measured pass
+ * (envelope version, fetch time, kid order, per-shape `kty`,
+ * public-only JWK fields, 64-hex MAC, restored size, fetch time
+ * and pinned-kid resolution), with the full `verifyRequest`
+ * round-trip over all three restored keys and the tampered-envelope
+ * / wrong-secret rejections (old store untouched, re-exported
+ * envelope identical) asserted outside timing, plus the key-resolution verify path a gateway runs
  * on every request whose keys rotate by keyid: `verifyRequest`
  * with a `keyResolver` over a pinned two-keyid Map keystore
  * (two ed25519 fixtures signed outside timing with `created`
@@ -1404,6 +1414,354 @@ async function benchmarkJwksRestoreSnapshot(): Promise<number> {
       throw new Error(
         "benchmark self-check failed: restored store does not resolve the pinned kid",
       );
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `JwksKeyStore` signed-snapshot benchmark:
+ * the three key shapes the store supports (ed25519 / P-256 / RSA),
+ * one freshly generated key pair per shape (generated once, outside
+ * timing), under these kids at this fetch time, wrapped with this
+ * fixed secret. The secret is a bench fixture only — it is never a
+ * real signing secret, and the envelope assertions below pin that
+ * it never appears in the persisted JSON.
+ */
+const JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC = 1_700_000_000;
+const JWKS_SIGNED_SNAPSHOT_TTL_SEC = 300;
+const JWKS_SIGNED_SNAPSHOT_SECRET = "bench-signed-snapshot-secret-32-bytes-ok";
+const JWKS_SIGNED_SNAPSHOT_KIDS = [
+  "bench-signed-ed25519",
+  "bench-signed-p256",
+  "bench-signed-rsa",
+] as const;
+const JWKS_SIGNED_SNAPSHOT_KTYS = ["OKP", "EC", "RSA"] as const;
+/** Pinned MAC-mismatch refusal for a tampered envelope / wrong secret. */
+const JWKS_SIGNED_SNAPSHOT_MAC_MISMATCH =
+  "JwksKeyStore: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong";
+
+/**
+ * Pin one signed envelope against the hand-written expectation:
+ * envelope version 1, snapshot version 1, the pinned fetch time,
+ * exactly the three pinned kids in order, the per-shape `kty`
+ * dispatch (OKP / EC / RSA, the EC entry naming P-256),
+ * public-only JWK material (no entry may carry a private `"d"`),
+ * a 64-character lowercase hex HMAC, and no trace of the secret
+ * in the persisted JSON.
+ */
+function assertJwksSignedSnapshotEnvelope(
+  envelope: ReturnType<JwksKeyStore["exportSignedSnapshot"]>,
+): void {
+  if (envelope.v !== 1)
+    throw new Error(
+      `benchmark self-check failed: exportSignedSnapshot envelope v ${String(envelope.v)} (expected 1)`,
+    );
+  const snapshot = envelope.snapshot;
+  if (snapshot.v !== 1)
+    throw new Error(
+      `benchmark self-check failed: signed snapshot v ${String(snapshot.v)} (expected 1)`,
+    );
+  if (snapshot.fetchedAtSec !== JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC)
+    throw new Error(
+      `benchmark self-check failed: signed snapshot fetchedAtSec ${snapshot.fetchedAtSec} ` +
+        `(expected ${JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC})`,
+    );
+  if (snapshot.keys.length !== JWKS_SIGNED_SNAPSHOT_KIDS.length)
+    throw new Error(
+      `benchmark self-check failed: signed snapshot carries ${snapshot.keys.length} keys ` +
+        `(expected ${JWKS_SIGNED_SNAPSHOT_KIDS.length})`,
+    );
+  for (let i = 0; i < JWKS_SIGNED_SNAPSHOT_KIDS.length; i++) {
+    const key = snapshot.keys[i]!;
+    if (key.kid !== JWKS_SIGNED_SNAPSHOT_KIDS[i])
+      throw new Error(
+        `benchmark self-check failed: signed snapshot keys[${i}].kid ${JSON.stringify(key.kid)} ` +
+          `(expected ${JSON.stringify(JWKS_SIGNED_SNAPSHOT_KIDS[i])})`,
+      );
+    if (key.kty !== JWKS_SIGNED_SNAPSHOT_KTYS[i])
+      throw new Error(
+        `benchmark self-check failed: signed snapshot keys[${i}].kty ${JSON.stringify(key.kty)} ` +
+          `(expected ${JSON.stringify(JWKS_SIGNED_SNAPSHOT_KTYS[i])})`,
+      );
+    if ("d" in key)
+      throw new Error(
+        `benchmark self-check failed: signed snapshot keys[${i}] carries private "d" material`,
+      );
+  }
+  const ecCrv = (snapshot.keys[1] as { crv?: unknown }).crv;
+  if (ecCrv !== "P-256")
+    throw new Error(
+      `benchmark self-check failed: signed snapshot EC crv ${JSON.stringify(ecCrv)} (expected "P-256")`,
+    );
+  if (!/^[0-9a-f]{64}$/.test(envelope.mac))
+    throw new Error(
+      "benchmark self-check failed: signed snapshot mac is not a 64-character lowercase hex digest",
+    );
+  if (JSON.stringify(envelope).includes(JWKS_SIGNED_SNAPSHOT_SECRET))
+    throw new Error(
+      "benchmark self-check failed: signed snapshot envelope leaks the secret",
+    );
+}
+
+/**
+ * Pin one signed-snapshot restore against the hand-written
+ * expectation: the restored store holds exactly the three pinned
+ * keys, its freshness timestamp is the envelope's original fetch
+ * time (restoring never renews freshness), and every pinned kid
+ * resolves.
+ */
+function assertJwksSignedSnapshotRestored(store: JwksKeyStore): void {
+  if (store.size !== JWKS_SIGNED_SNAPSHOT_KIDS.length)
+    throw new Error(
+      `benchmark self-check failed: restored signed snapshot size ${store.size} ` +
+        `(expected ${JWKS_SIGNED_SNAPSHOT_KIDS.length})`,
+    );
+  if (store.lastRefreshedAt !== JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC)
+    throw new Error(
+      `benchmark self-check failed: restored signed snapshot lastRefreshedAt ${store.lastRefreshedAt} ` +
+        `(expected ${JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC})`,
+    );
+  for (const kid of JWKS_SIGNED_SNAPSHOT_KIDS) {
+    if (store.resolve(kid) === undefined)
+      throw new Error(
+        `benchmark self-check failed: restored signed snapshot does not resolve ${kid}`,
+      );
+  }
+}
+
+/**
+ * Verify one signed fixture per restored key shape through the
+ * restored store's resolver: the ed25519 / P-256 / RSA fixtures
+ * are signed outside timing with `created` pinned at the fetch
+ * instant, and the verifier's injected `now` is that same instant.
+ * This is the end-to-end proof that a restored snapshot actually
+ * verifies — it runs outside timing (see below) so the timed
+ * restore row stays the restore cost alone, not a verify cost.
+ */
+function verifyJwksSignedSnapshotRestored(
+  keys: {
+    ed: ReturnType<typeof generateEd25519KeyPair>;
+    p256: ReturnType<typeof generateP256KeyPair>;
+    rsa: ReturnType<typeof generateRsaPssKeyPair>;
+  },
+  restored: JwksKeyStore,
+): void {
+  const cases = [
+    {
+      kid: JWKS_SIGNED_SNAPSHOT_KIDS[0],
+      alg: "ed25519" as const,
+      key: keys.ed.privateKey,
+    },
+    {
+      kid: JWKS_SIGNED_SNAPSHOT_KIDS[1],
+      alg: "ecdsa-p256-sha256" as const,
+      key: keys.p256.privateKey,
+    },
+    {
+      kid: JWKS_SIGNED_SNAPSHOT_KIDS[2],
+      alg: "rsa-pss-sha512" as const,
+      key: keys.rsa.privateKey,
+    },
+  ] as const;
+  for (const { kid, alg, key } of cases) {
+    const signed = signRequest(fixture, {
+      keyId: kid,
+      alg,
+      key,
+      created: JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC,
+    });
+    const res = verifyRequest(signed, {
+      keyResolver: restored.resolve,
+      now: JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC,
+    });
+    if (!res.ok || res.keyId !== kid)
+      throw new Error(
+        `benchmark self-check failed: restored signed snapshot does not verify ${kid}: ${JSON.stringify(res)}`,
+      );
+  }
+}
+
+/**
+ * Build the three-shape store for the signed-export benchmark,
+ * entirely offline: restored from a hand-built snapshot (the same
+ * offline pattern as {@link offlineJwksExportStore}), with a fetch
+ * implementation that throws if it is ever called — the export
+ * benchmark performs zero network I/O. The private keys are kept
+ * so the exported envelope can be proven end to end outside timing.
+ */
+function offlineJwksSignedSnapshotStore(): {
+  store: JwksKeyStore;
+  keys: {
+    ed: ReturnType<typeof generateEd25519KeyPair>;
+    p256: ReturnType<typeof generateP256KeyPair>;
+    rsa: ReturnType<typeof generateRsaPssKeyPair>;
+  };
+} {
+  const ed = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const rsa = generateRsaPssKeyPair();
+  const snapshot = {
+    v: 1 as const,
+    fetchedAtSec: JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC,
+    keys: [
+      { ...exportPublicKeyJwk(ed.publicKey), kid: JWKS_SIGNED_SNAPSHOT_KIDS[0] },
+      { ...exportPublicKeyJwkP256(p256.publicKey), kid: JWKS_SIGNED_SNAPSHOT_KIDS[1] },
+      { ...exportPublicKeyJwkRsa(rsa.publicKey), kid: JWKS_SIGNED_SNAPSHOT_KIDS[2] },
+    ],
+  };
+  const store = JwksKeyStore.restore(
+    snapshot,
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: async () => {
+        throw new Error("benchmark must not fetch (offline store)");
+      },
+      now: () => JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC,
+    },
+  );
+  return { store, keys: { ed, p256, rsa } };
+}
+
+/**
+ * `JwksKeyStore.exportSignedSnapshot` steady state: every measured
+ * call re-exports the three-shape store and re-pins the whole
+ * envelope (see {@link assertJwksSignedSnapshotEnvelope}) — the
+ * unsigned export plus the canonical-JSON sort and HMAC a gateway
+ * pays when it persists a restart-proof snapshot. Outside timing,
+ * the envelope is proven end to end once: a JSON round-trip
+ * restores it into a fresh store, the restored store holds the
+ * pinned size and fetch time, resolves every pinned kid, and
+ * verifies one fixture per key shape through its resolver.
+ */
+function benchmarkJwksExportSignedSnapshot(): number {
+  const { store, keys } = offlineJwksSignedSnapshotStore();
+  assertJwksSignedSnapshotEnvelope(
+    store.exportSignedSnapshot(JWKS_SIGNED_SNAPSHOT_SECRET),
+  );
+  const persisted = JSON.parse(
+    JSON.stringify(store.exportSignedSnapshot(JWKS_SIGNED_SNAPSHOT_SECRET)),
+  ) as unknown;
+  const restored = new JwksKeyStore(
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: async () => {
+        throw new Error("benchmark must not fetch (offline store)");
+      },
+      now: () => JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC,
+    },
+  );
+  restored.restoreSignedSnapshot(persisted, JWKS_SIGNED_SNAPSHOT_SECRET);
+  assertJwksSignedSnapshotRestored(restored);
+  verifyJwksSignedSnapshotRestored(keys, restored);
+  return measure(() => {
+    assertJwksSignedSnapshotEnvelope(
+      store.exportSignedSnapshot(JWKS_SIGNED_SNAPSHOT_SECRET),
+    );
+  }, ITERATIONS);
+}
+
+/**
+ * `JwksKeyStore.restoreSignedSnapshot` steady state: every measured
+ * call parses the persisted JSON envelope and restores it into the
+ * target store, then re-pins the restore contract (size, original
+ * fetch time, pinned-kid resolution). The MAC check inside the
+ * restore IS the per-call authenticity verification — a tampered
+ * envelope throws instead of restoring — so the timed region is
+ * the JSON round-trip plus canonical-JSON recomputation and HMAC
+ * comparison a cold start pays, not a `verifyRequest` cost (the
+ * full three-shape `verifyRequest` round-trip is pinned outside
+ * timing, below). Outside timing, the fail-closed half is pinned
+ * once: a tampered key and a wrong secret are each rejected with
+ * the pinned MAC-mismatch message, and after both rejections the
+ * old store is untouched (same size, same fetch time, same
+ * resolved kids, and the same re-exported envelope).
+ */
+async function benchmarkJwksRestoreSignedSnapshot(): Promise<number> {
+  const ed = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const rsa = generateRsaPssKeyPair();
+  const keys = { ed, p256, rsa };
+  const sourceDoc = {
+    keys: [
+      { ...exportPublicKeyJwk(ed.publicKey), kid: JWKS_SIGNED_SNAPSHOT_KIDS[0] },
+      { ...exportPublicKeyJwkP256(p256.publicKey), kid: JWKS_SIGNED_SNAPSHOT_KIDS[1] },
+      { ...exportPublicKeyJwkRsa(rsa.publicKey), kid: JWKS_SIGNED_SNAPSHOT_KIDS[2] },
+    ],
+  };
+  let sourceFetches = 0;
+  const sourceFetch: JwksFetchImpl = async () => {
+    sourceFetches++;
+    return { ok: true, status: 200, json: async () => sourceDoc };
+  };
+  const source = new JwksKeyStore(
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: sourceFetch,
+      ttlSec: JWKS_SIGNED_SNAPSHOT_TTL_SEC,
+      now: () => JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC,
+    },
+  );
+  await source.refresh();
+  if (sourceFetches !== 1)
+    throw new Error(
+      `benchmark self-check failed: signed snapshot source made ${sourceFetches} fetches (expected 1)`,
+    );
+  const envelope = source.exportSignedSnapshot(JWKS_SIGNED_SNAPSHOT_SECRET);
+  assertJwksSignedSnapshotEnvelope(envelope);
+
+  const target = new JwksKeyStore(
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: async () => {
+        throw new Error("benchmark must not fetch (offline store)");
+      },
+      ttlSec: JWKS_SIGNED_SNAPSHOT_TTL_SEC,
+      now: () => JWKS_SIGNED_SNAPSHOT_FETCHED_AT_SEC,
+    },
+  );
+  target.restoreSignedSnapshot(
+    JSON.parse(JSON.stringify(envelope)),
+    JWKS_SIGNED_SNAPSHOT_SECRET,
+  );
+  assertJwksSignedSnapshotRestored(target);
+  verifyJwksSignedSnapshotRestored(keys, target);
+  const goodEnvelope = JSON.parse(JSON.stringify(envelope)) as unknown;
+
+  // Outside timing: tamper and wrong secret are rejected, old store untouched.
+  const tampered = JSON.parse(JSON.stringify(envelope)) as {
+    snapshot: { keys: Array<Record<string, unknown>> };
+  };
+  tampered.snapshot.keys[0]!["kid"] = "bench-signed-tampered";
+  for (const attempt of [
+    { envelope: tampered as unknown, secret: JWKS_SIGNED_SNAPSHOT_SECRET },
+    { envelope: goodEnvelope, secret: "wrong-bench-secret" },
+  ]) {
+    let refusal: string | undefined;
+    try {
+      target.restoreSignedSnapshot(attempt.envelope, attempt.secret);
+    } catch (err) {
+      refusal = err instanceof Error ? err.message : String(err);
+    }
+    if (refusal !== JWKS_SIGNED_SNAPSHOT_MAC_MISMATCH)
+      throw new Error(
+        `benchmark self-check failed: signed snapshot tamper refusal ${JSON.stringify(refusal)} ` +
+          `(expected ${JSON.stringify(JWKS_SIGNED_SNAPSHOT_MAC_MISMATCH)})`,
+      );
+    assertJwksSignedSnapshotRestored(target);
+    if (
+      JSON.stringify(target.exportSignedSnapshot(JWKS_SIGNED_SNAPSHOT_SECRET)) !==
+      JSON.stringify(envelope)
+    )
+      throw new Error(
+        "benchmark self-check failed: a rejected signed restore changed the store",
+      );
+  }
+
+  return measure(() => {
+    target.restoreSignedSnapshot(
+      JSON.parse(JSON.stringify(envelope)),
+      JWKS_SIGNED_SNAPSHOT_SECRET,
+    );
+    assertJwksSignedSnapshotRestored(target);
   }, ITERATIONS);
 }
 
@@ -14394,6 +14752,16 @@ results.push({
   alg: "JwksKeyStore.restoreSnapshot (3 keys)",
   op: "restore",
   ops: await benchmarkJwksRestoreSnapshot(),
+});
+results.push({
+  alg: "JwksKeyStore.exportSignedSnapshot (3 keys)",
+  op: "export",
+  ops: benchmarkJwksExportSignedSnapshot(),
+});
+results.push({
+  alg: "JwksKeyStore.restoreSignedSnapshot (3 keys)",
+  op: "restore",
+  ops: await benchmarkJwksRestoreSignedSnapshot(),
 });
 results.push({
   alg: "verifyRequest keyResolver (2 keyids)",
