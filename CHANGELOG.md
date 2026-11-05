@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side `structuredFieldTypes` type-registry coverage (backlog
+  #900): new `test/responseStructuredFieldTypes.test.ts` (9 cases) pins
+  that `verifyResponse` enforces `VerifyOptions.structuredFieldTypes`
+  exactly as `verifyRequest` does — a registered List header
+  (`x-scopes: "read", "write"`) and a registered Dictionary header
+  (`scope=read, level=2`) each round-trip through `signResponse` /
+  `verifyResponse` with `@status` covered alongside, the sign side
+  throws when a Dictionary-shaped value is registered as a List, the
+  verify side fails closed with `SIGNATURE_BASE_BUILD_FAILED` when a
+  signature minted without a registry is verified under a mismatched
+  List registry, an unregistered `;sf` field keeps the default trial
+  order next to a registered one, registry field names match
+  case-insensitively, a malformed registry (unknown type name,
+  non-object, empty field name) is a configuration error on both
+  sides, a forgery still reports `SIGNATURE_MISMATCH` rather than
+  being masked by the registry, and a body-less (`@status`-only)
+  response with a `;sf` header verifies the same way. No source
+  change: the forwarding already behaved correctly; this round adds
+  the missing response-side proof.
 - Response-side `clockSkewToleranceSec` / `expiredToleranceSec`
   clock-tolerance coverage (backlog #899): new
   `test/responseClockTolerance.test.ts` (10 cases) pins that
