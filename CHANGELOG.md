@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side `memoizeKeyResolver` cache coverage (backlog #897):
+  new `test/responseMemoizeKeyResolver.test.ts` (8 cases) pins that
+  a `memoizeKeyResolver`-wrapped resolver passed to `verifyResponse`
+  survives the response path's fresh internal RequestLike rebuild —
+  the same keyid verified twice costs one underlying call, different
+  keyids have independent entries, a throwing resolver is not cached
+  (a retry re-invokes it and then verifies), an unknown keyid is
+  never cached, TTL expiry re-invokes the resolver, a cache hit does
+  not extend the TTL, a cache-hit result matches the direct resolver
+  result field for field, and a body-less (`@status`-only) response
+  is cached the same way. No source change: the forwarding already
+  behaved correctly; this round adds the missing response-side proof.
 - Response-side presence-gate and keyid-binding coverage (backlog #896):
   new `test/responsePresenceBinding.test.ts` (11 cases) pins that
   `verifyResponse` enforces `VerifyOptions.requireTag`,
