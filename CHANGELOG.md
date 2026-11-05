@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side `algFallback: "infer"` coverage (backlog #905): new
+  `test/responseAlgFallback.test.ts` (10 cases) pins that
+  `verifyResponse` enforces `VerifyOptions.algFallback` exactly as
+  `verifyRequest` does — hand-built response signatures that omit the
+  optional `alg` parameter verify under `algFallback: "infer"` for
+  both ed25519 and hmac-sha256 (with `alg`, `keyId`, and `created`
+  echoed back), the same hmac wire fails with `VERIFICATION_ERROR`
+  without the opt-in and with an explicit `algFallback: false` (the
+  legacy default is ed25519), an ed25519 wire without `alg` still
+  verifies without the opt-in (the default IS ed25519), a wrong key
+  or secret still reports `SIGNATURE_MISMATCH` rather than being
+  masked by the inference, and body-less (`@status`-only) responses
+  follow the same infer/default split. No source change: the
+  forwarding already behaved correctly; this round adds the missing
+  response-side proof.
 - Response-side multi-party signing (backlog #904): new
   `addResponseSignature(signedRes, opts)` in `src/response.ts` mirrors
   `addSignature` for responses — the second signature base is built
