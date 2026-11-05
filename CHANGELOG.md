@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side presence-gate and keyid-binding coverage (backlog #896):
+  new `test/responsePresenceBinding.test.ts` (11 cases) pins that
+  `verifyResponse` enforces `VerifyOptions.requireTag`,
+  `requireNonce`, and `expectedKeyId` exactly as `verifyRequest`
+  does — an untagged response is rejected with `MISSING_TAG`, a
+  nonce-less response with `MISSING_NONCE`, a wrong keyid and a
+  keyid-less signature with `KEYID_MISMATCH`, a fully conforming
+  signature passes all three gates with tag, nonce, and keyid
+  echoed, the same batch verifies with all gates off, a forged
+  signature still reports `SIGNATURE_MISMATCH` rather than being
+  masked by a policy gate, and a body-less (`@status`-only)
+  response is gated the same way. No source change: the forwarding
+  already behaved correctly; this round adds the missing
+  response-side proof.
 - Response-side `candidateKeys` rotation coverage (backlog #895):
   new `test/responseCandidateKeys.test.ts` (10 cases) pins that
   `verifyResponse` walks a `VerifyOptions.candidateKeys` rotation
