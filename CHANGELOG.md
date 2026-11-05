@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side `keyResolver` gateway coverage (backlog #894):
+  new `test/responseKeyResolver.test.ts` (9 cases) pins that
+  `verifyResponse` resolves a response signature's keyid through
+  `VerifyOptions.keyResolver` exactly as `verifyRequest` does —
+  both rotating keyids verify, an unknown keyid reports
+  `KEY_RESOLUTION_FAILED`, a keyid-less signature reports the same
+  code, a resolver returning the wrong key still reports
+  `SIGNATURE_MISMATCH`, `key` + `keyResolver` together throws the
+  mutual-exclusion configuration error, a throwing resolver
+  surfaces `VERIFICATION_ERROR` without escaping, a retired keyid
+  is rejected while the new keyid verifies, and a body-less
+  (`@status`-only) response resolves the same way. No source
+  change: the forwarding already behaved correctly; this round
+  adds the missing response-side proof.
 - Signed-snapshot benchmark rows (backlog #891): `bench/bench.ts`
   now measures `JwksKeyStore.exportSignedSnapshot` and
   `JwksKeyStore.restoreSignedSnapshot` (JSON round-trip) over a
