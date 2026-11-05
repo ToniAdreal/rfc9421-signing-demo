@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side `content-digest` sha-256 coverage (backlog #906): new
+  `test/responseContentDigestSha256.test.ts` (8 cases) pins that
+  `signResponse` / `verifyResponse` inherit the request-side digest
+  semantics — `contentDigestAlg: "sha-256"` emits the sha-256 wire
+  shape and verifies end-to-end, a tampered body reports
+  `BODY_DIGEST_MISMATCH`, a hand-built dual-algorithm header
+  (sha-512 + sha-256) verifies with sha-512 preferred (a tampered
+  sha-256 entry still verifies, a tampered sha-512 entry reports
+  `BODY_DIGEST_MISMATCH`), a sha-256-only header verifies via the
+  fallback, and a body-less (`@status`-only) response carries no
+  digest and verifies. No source change: the forwarding already
+  behaved correctly; this round adds the missing response-side proof.
 - Response-side `algFallback: "infer"` coverage (backlog #905): new
   `test/responseAlgFallback.test.ts` (10 cases) pins that
   `verifyResponse` enforces `VerifyOptions.algFallback` exactly as
