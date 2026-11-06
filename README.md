@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1536 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1542 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -625,9 +625,12 @@ the same refusal of private (`"d"`) material. One JWK serves both RSA
 algorithms (`rsa-pss-sha512` and `rsa-v1_5-sha256`): the JWK carries no
 `alg`, so the distinction lives only in each signature's `alg` parameter. One honest
 caveat documented in code: node:crypto's RSA JWK importer is lenient, so a
-structurally-valid but degenerate modulus (e.g. all-zero `n`) is accepted
-at import time and fails only at the crypto layer when used — verification
-still fails closed, never silently accepts.
+structurally-valid but degenerate modulus (e.g. all-zero `n`) would be accepted
+by node itself — this library enforces the 2048-bit modulus floor at import
+instead, so a 1024-bit or degenerate RSA JWK is refused with an `invalid JWK:`
+error and never reaches a JWKS snapshot. What import still does not check is
+modulus primality: a 2048-bit composite modulus would be imported and would
+only fail when used to verify a real signature.
 
 Stable `keyid` derivation for those JWKs: `jwkThumbprint(jwk)` computes
 the RFC 7638 thumbprint (required members only, lexicographic canonical
@@ -3605,7 +3608,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1536 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1542 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

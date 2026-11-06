@@ -697,10 +697,12 @@ export function importPublicKeyJwkP521(jwk: unknown): KeyObject {
  *
  * Honest caveat: node:crypto's JWK importer is lenient about the RSA
  * modulus — a structurally-valid but cryptographically degenerate `n`
- * (e.g. all-zero) is accepted at import time and only fails later, at
- * the crypto layer, when used to verify a real signature. This helper
- * validates shape (`kty`/`n`/`e` present, no private material); modulus
- * *quality* (size, primality) is the caller's responsibility.
+ * (e.g. all-zero) would be accepted by node itself. This helper
+ * enforces the 2048-bit modulus floor at import (see
+ * {@link importPublicKeyJwkRsa}), so a sub-floor key is refused here
+ * instead of failing later at the crypto layer. What import still does
+ * not check is modulus *primality*: a 2048-bit composite modulus would
+ * be imported and would only fail when used to verify a real signature.
  */
 export interface RsaPublicJwk {
   kty: "RSA";
@@ -760,6 +762,11 @@ export function exportPublicKeyJwkRsa(key: KeyObject): RsaPublicJwk {
  * private material (`"d"` or other private RSA parameters) are refused
  * outright: this helper is public-key distribution only, and silently
  * accepting a private JWK would encourage shipping secrets around.
+ * After node:crypto accepts the JWK, the 2048-bit modulus floor
+ * ({@link MIN_RSA_MODULUS_BITS}, via {@link assertRsaModulusLength}) is
+ * enforced, so a 1024-bit or degenerate (e.g. all-zero) modulus is
+ * refused at import with an `invalid JWK:` error instead of being
+ * parked in a JWKS snapshot until a verify happens to use it.
  */
 export function importPublicKeyJwkRsa(jwk: unknown): KeyObject {
   const fail = (why: string): never => {
@@ -790,8 +797,9 @@ export function importPublicKeyJwkRsa(jwk: unknown): KeyObject {
     throw new Error(
       `importPublicKeyJwkRsa: invalid JWK: missing or empty "e" (the base64url public exponent)`,
     );
+  let key: KeyObject;
   try {
-    return createPublicKey({
+    key = createPublicKey({
       key: { kty: "RSA", n, e },
       format: "jwk",
     });
@@ -802,6 +810,22 @@ export function importPublicKeyJwkRsa(jwk: unknown): KeyObject {
       }`,
     );
   }
+  // The 2048-bit floor is enforced here, at import — a JWKS endpoint
+  // publishing a 1024-bit (or degenerate, e.g. all-zero) RSA key must
+  // fail loudly at refresh time, never be imported and parked in the
+  // snapshot until a verify happens to use it. The guard's message
+  // already carries this function's name as its caller context, so
+  // strip that prefix before wrapping it in the usual `invalid JWK:`
+  // style to avoid repeating the name.
+  try {
+    assertRsaModulusLength(key, "importPublicKeyJwkRsa");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `importPublicKeyJwkRsa: invalid JWK: ${detail.replace(/^importPublicKeyJwkRsa: /, "")}`,
+    );
+  }
+  return key;
 }
 
 /**

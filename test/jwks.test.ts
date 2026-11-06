@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import type { KeyObject } from "node:crypto";
+import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import {
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -224,6 +224,116 @@ test("JwksKeyStore: a JWKS entry carrying private \"d\" material makes refresh t
   assert.ok(store.resolve("rsa-key-1") !== undefined);
 });
 
+test("JwksKeyStore: a JWKS document with a 1024-bit RSA entry makes refresh throw and keeps the old snapshot", async () => {
+  const keys = keyMaterial();
+  const weak = generateKeyPairSync("rsa", { modulusLength: 1024 });
+  let doc: unknown = jwksDocument(keys);
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => doc }),
+  });
+  await store.refresh();
+  assert.equal(store.size, 3);
+  const before = store.resolve("rsa-key-1");
+  assert.ok(before !== undefined);
+  const refreshedAt = store.lastRefreshedAt;
+
+  // Gateway rotates rsa-key-1 to a 1024-bit key: the whole refresh must
+  // fail — the weak key is refused at import, not parked in the snapshot.
+  doc = {
+    keys: [
+      { ...exportPublicKeyJwk(keys.ed.publicKey), kid: "ed-key-1" },
+      { ...exportPublicKeyJwkP256(keys.p256.publicKey), kid: "p256-key-1" },
+      { ...exportPublicKeyJwkRsa(weak.publicKey), kid: "rsa-key-1" },
+    ],
+  };
+  await assert.rejects(
+    () => store.refresh(),
+    /entry for kid "rsa-key-1": importPublicKeyJwkRsa: invalid JWK: RSA modulus must be at least 2048 bits, got 1024 bits/,
+  );
+  // Old snapshot and freshness timestamp untouched: the old 2048-bit
+  // RSA key still resolves and still verifies; the weak key never
+  // entered the store, so a signature under it fails resolution-side.
+  assert.equal(store.size, 3);
+  assert.equal(store.resolve("rsa-key-1"), before);
+  assert.equal(store.lastRefreshedAt, refreshedAt);
+  const oldSigned = signAs("rsa-key-1", "rsa-pss-sha512", keys.rsa.privateKey);
+  assert.equal(
+    verifyRequest(oldSigned, { keyResolver: store.resolve, now: CREATED }).ok,
+    true,
+  );
+  // (No signature is attempted under the weak key: the library's own
+  // sign path refuses sub-floor keys too, and the identity check above
+  // already proves the weak key never entered the snapshot.)
+});
+
+test("JwksKeyStore: a mixed JWKS document fails atomically — a good new key is not imported when a sibling RSA entry is sub-floor", async () => {
+  const keys = keyMaterial();
+  const rotated = generateEd25519KeyPair();
+  const weak = generateKeyPairSync("rsa", { modulusLength: 1024 });
+  let doc: unknown = jwksDocument(keys);
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => doc }),
+  });
+  await store.refresh();
+  assert.equal(store.size, 3);
+
+  // New ed-key-2 is good, but its sibling RSA entry is 1024-bit: the
+  // refresh must fail as a whole, importing neither key.
+  doc = {
+    keys: [
+      { ...exportPublicKeyJwk(rotated.publicKey), kid: "ed-key-2" },
+      { ...exportPublicKeyJwkRsa(weak.publicKey), kid: "rsa-key-2" },
+    ],
+  };
+  await assert.rejects(
+    () => store.refresh(),
+    /RSA modulus must be at least 2048 bits, got 1024 bits/,
+  );
+  assert.equal(store.size, 3);
+  assert.equal(store.resolve("ed-key-2"), undefined);
+  assert.equal(store.resolve("rsa-key-2"), undefined);
+  assert.ok(store.resolve("ed-key-1") !== undefined);
+
+  // Recovery: a clean document refreshes fine afterwards — the failed
+  // refresh did not poison the store.
+  doc = {
+    keys: [{ ...exportPublicKeyJwk(rotated.publicKey), kid: "ed-key-2" }],
+  };
+  await store.refresh();
+  assert.equal(store.size, 1);
+  assert.ok(store.resolve("ed-key-2") !== undefined);
+  const newSigned = signAs("ed-key-2", "ed25519", rotated.privateKey);
+  assert.equal(
+    verifyRequest(newSigned, { keyResolver: store.resolve, now: CREATED }).ok,
+    true,
+  );
+});
+
+test("JwksKeyStore: an all-zero-modulus RSA entry makes refresh throw and keeps the old snapshot", async () => {
+  const keys = keyMaterial();
+  let doc: unknown = jwksDocument(keys);
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => doc }),
+  });
+  await store.refresh();
+  assert.equal(store.size, 3);
+  const refreshedAt = store.lastRefreshedAt;
+
+  doc = {
+    keys: [
+      { ...exportPublicKeyJwk(keys.ed.publicKey), kid: "ed-key-1" },
+      { kty: "RSA", n: "AAAA", e: "AQAB", kid: "rsa-degen" },
+    ],
+  };
+  await assert.rejects(
+    () => store.refresh(),
+    /entry for kid "rsa-degen": importPublicKeyJwkRsa: invalid JWK: RSA modulus must be at least 2048 bits, got 0 bits/,
+  );
+  assert.equal(store.size, 3);
+  assert.equal(store.resolve("rsa-degen"), undefined);
+  assert.equal(store.lastRefreshedAt, refreshedAt);
+  assert.ok(store.resolve("rsa-key-1") !== undefined);
+});
 test("JwksKeyStore: non-JWKS JSON documents throw a clear error", async () => {
   const cases: Array<[string, unknown, RegExp]> = [
     ["array document", [], /expected an object with a "keys" array/],

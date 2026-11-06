@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import {
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -129,16 +130,74 @@ test("importPublicKeyJwkRsa rejects malformed JWK shapes", () => {
   );
 });
 
-test("a cryptographically degenerate modulus fails closed at verify time", () => {
+test("importPublicKeyJwkRsa rejects a 1024-bit RSA JWK at import time", () => {
+  const { publicKey: weakPub } = generateKeyPairSync("rsa", {
+    modulusLength: 1024,
+  });
+  const weakJwk = exportPublicKeyJwkRsa(weakPub);
+  // Verbatim message: the floor rejection is wrapped in the usual
+  // `invalid JWK:` style, and no key is returned (the throw is the
+  // whole outcome — the caller never holds a weak key).
+  try {
+    importPublicKeyJwkRsa(weakJwk);
+    assert.fail("expected importPublicKeyJwkRsa to throw for a 1024-bit key");
+  } catch (err) {
+    assert.ok(err instanceof Error);
+    assert.equal(
+      err.message,
+      "importPublicKeyJwkRsa: invalid JWK: RSA modulus must be at least 2048 bits, got 1024 bits",
+    );
+  }
+  // The same JWK arriving over the wire as JSON text is refused identically.
+  const received = JSON.parse(JSON.stringify(weakJwk)) as unknown;
+  assert.throws(
+    () => importPublicKeyJwkRsa(received),
+    /invalid JWK: RSA modulus must be at least 2048 bits, got 1024 bits/,
+  );
+});
+
+test("importPublicKeyJwkRsa rejects degenerate moduli at import time", () => {
+  // All-zero modulus: node:crypto accepts the JWK, but the guard reads
+  // modulusLength 0 and the import refuses it here, not at verify time.
+  assert.throws(
+    () => importPublicKeyJwkRsa({ kty: "RSA", n: "AAAA", e: "AQAB" }),
+    /invalid JWK: RSA modulus must be at least 2048 bits, got 0 bits/,
+  );
+  // Tiny non-zero modulus (n = 0x010001 = 65537, 17 bits) is likewise
+  // refused at import.
+  assert.throws(
+    () => importPublicKeyJwkRsa({ kty: "RSA", n: "AQAB", e: "AQAB" }),
+    /invalid JWK: RSA modulus must be at least 2048 bits, got 17 bits/,
+  );
+});
+
+test("a 2048-bit and a 3072-bit RSA JWK still import and verify", () => {
+  for (const bits of [2048, 3072]) {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: bits,
+    });
+    const jwk = exportPublicKeyJwkRsa(publicKey);
+    const received = JSON.parse(JSON.stringify(jwk)) as unknown;
+    const imported = importPublicKeyJwkRsa(received);
+    assert.equal(
+      imported.export({ format: "pem", type: "spki" }).toString(),
+      publicKey.export({ format: "pem", type: "spki" }).toString(),
+    );
+    const signed = signRsaPss(privateKey);
+    const result = verifyRequest(signed, { key: imported, now: CREATED });
+    assert.equal(result.ok, true, `${bits}-bit RSA JWK must verify`);
+  }
+});
+
+test("a cryptographically degenerate modulus fails closed at import time", () => {
   // node:crypto's RSA JWK importer is lenient: a zero-length modulus is
-  // accepted at import. The failure must therefore surface at verify time,
-  // as a verification failure — never a silent ok:true.
-  const { privateKey } = generateRsaPssKeyPair();
-  const degen = importPublicKeyJwkRsa({ kty: "RSA", n: "AAAA", e: "AQAB" });
-  const signed = signRsaPss(privateKey);
-  const result = verifyRequest(signed, { key: degen, now: CREATED });
-  assert.equal(result.ok, false);
-  assert.equal(result.code, "SIGNATURE_MISMATCH");
+  // accepted by node itself. The failure must therefore surface at
+  // import time, as a configuration error — never a silent ok:true at
+  // verify time, and never a weak key parked in a JWKS snapshot.
+  assert.throws(
+    () => importPublicKeyJwkRsa({ kty: "RSA", n: "AAAA", e: "AQAB" }),
+    /invalid JWK: RSA modulus must be at least 2048 bits, got 0 bits/,
+  );
 });
 
 test("imported RSA key composes with keyResolver", () => {

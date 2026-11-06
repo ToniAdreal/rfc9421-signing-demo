@@ -4108,6 +4108,25 @@ change type; no entry describes a feature that is not in the history.
   JWKS network behavior, replay limits, and key management. It
   restates existing documented facts only and adds no new claims.
 
+### Fixed
+
+- RSA JWK import now enforces the 2048-bit modulus floor (backlog
+  #917): `importPublicKeyJwkRsa` in `src/keys.ts` calls
+  `assertRsaModulusLength` after node:crypto accepts the JWK, so a
+  1024-bit or degenerate (e.g. all-zero) RSA modulus is refused at
+  import with an `invalid JWK: RSA modulus must be at least 2048
+  bits, got N bits` error instead of being parked until a verify
+  happens to use it. `JwksKeyStore.refresh()` inherits the check, so
+  a JWKS document containing a sub-floor RSA entry fails the whole
+  refresh atomically and the previous snapshot stays untouched. New
+  `test/rsaJwk.test.ts` cases (verbatim 1024-bit rejection, JSON-wire
+  variant, all-zero and tiny moduli, 2048/3072-bit import-and-verify)
+  and `test/jwks.test.ts` cases (1024-bit entry refresh failure with
+  old snapshot intact, mixed-document atomicity plus recovery,
+  all-zero-modulus entry refresh failure) pin the behavior; the
+  `RsaPublicJwk` caveat and the README JWK section now state the
+  floor is enforced at import (modulus primality remains unchecked).
+
 ## [0.1.0]
 
 The only version declared in `package.json`. Entries cover the commit
