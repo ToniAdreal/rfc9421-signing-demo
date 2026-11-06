@@ -261,8 +261,13 @@ test("JwksKeyStore: kid-less entry with a mismatched alg is skipped, not fatal",
 });
 
 test("JwksKeyStore: unknown kty still fails as unsupported, not as an alg error", async () => {
+  // "AKP" is not a kty this library imports ("oct" is one since
+  // #933, so it no longer serves as the unknown-kty fixture). The
+  // declared alg must not shadow the kty error: expectedJwkAlgs
+  // returns null for an unknown kty, so the alg check passes through
+  // and the importer reports the unsupported kty.
   const doc = {
-    keys: [{ kty: "oct", k: "AAECAwQFBgcICQoLDA0ODw", kid: "sym-key-1", alg: "HS256" }],
+    keys: [{ kty: "AKP", k: "AAECAwQFBgcICQoLDA0ODw", kid: "sym-key-1", alg: "HS256" }],
   };
   const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
     fetchImpl: stubFetch(doc),

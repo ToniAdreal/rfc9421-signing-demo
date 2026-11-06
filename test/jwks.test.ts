@@ -343,7 +343,9 @@ test("JwksKeyStore: non-JWKS JSON documents throw a clear error", async () => {
     ["entry not an object", { keys: ["nope"] }, /must be a JWK object/],
     [
       "unsupported kty",
-      { keys: [{ kty: "oct", kid: "sym-1", k: "AAAA" }] },
+      // "AKP" is not a kty this library imports ("oct" is one since
+      // #933, so it no longer serves as the unknown-kty fixture).
+      { keys: [{ kty: "AKP", kid: "sym-1", k: "AAAA" }] },
       /unsupported kty/,
     ],
   ];

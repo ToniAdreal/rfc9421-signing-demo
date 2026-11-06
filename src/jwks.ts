@@ -5,12 +5,15 @@ import {
   exportPublicKeyJwkP384,
   exportPublicKeyJwkP521,
   exportPublicKeyJwkRsa,
+  exportSymmetricKeyJwk,
   importPublicKeyJwk,
   importPublicKeyJwkP256,
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
+  importSymmetricKeyJwk,
   type Ed25519PublicJwk,
+  type HmacJwk,
   type P256PublicJwk,
   type P384PublicJwk,
   type P521PublicJwk,
@@ -194,19 +197,23 @@ export interface JwksKeyStoreStats {
 }
 
 /**
- * One key in a {@link JwksKeyStoreSnapshot}: a public-key-only JWK in
- * exactly one of the five shapes this library's JWK importers accept
- * (ed25519 / P-256 / P-384 / P-521 / RSA), tagged with the `kid` it
- * resolves under.
- * Private material never appears here — the store only ever holds
- * imported *public* keys, and the exporters refuse anything else.
+ * One key in a {@link JwksKeyStoreSnapshot}: a JWK in exactly one of
+ * the six shapes this library's JWK importers accept (ed25519 /
+ * P-256 / P-384 / P-521 / RSA public keys, plus HMAC `oct` shared
+ * secrets), tagged with the `kid` it resolves under.
+ * The five public-key shapes carry public material only, but an
+ * `oct` entry carries the shared secret itself — whoever holds a
+ * snapshot containing one can sign as that key's owner, so a
+ * snapshot with `oct` keys needs the same protection as the secret
+ * (see {@link JwksKeyStoreSnapshot}).
  */
 export type JwksSnapshotKey =
   | (Ed25519PublicJwk & { kid: string })
   | (P256PublicJwk & { kid: string })
   | (P384PublicJwk & { kid: string })
   | (P521PublicJwk & { kid: string })
-  | (RsaPublicJwk & { kid: string });
+  | (RsaPublicJwk & { kid: string })
+  | (HmacJwk & { kid: string });
 
 /**
  * Import one JWK object from a JWKS document or a persisted snapshot.
@@ -214,14 +221,18 @@ export type JwksSnapshotKey =
  * dispatched by `crv` (`P-256` / `P-384` / `P-521`); any other curve —
  * or a missing `crv` — is an explicit `Error`, never a silent skip:
  * dropping a key the publisher expects verifiers to use would be a
- * nastier surprise than a loud setup error. Callers wrap the thrown
- * error with their own document/kid context.
+ * nastier surprise than a loud setup error. `oct` entries import as
+ * HMAC shared secrets (see {@link importSymmetricKeyJwk}): the
+ * secret-length floor is enforced at import, so a JWKS publisher
+ * cannot slip a brute-forceable secret into the store. Callers wrap
+ * the thrown error with their own document/kid context.
  */
 function importJwkEntry(entry: unknown): KeyObject {
   const o = entry as Record<string, unknown>;
   const kty = o["kty"];
   if (kty === "OKP") return importPublicKeyJwk(entry);
   if (kty === "RSA") return importPublicKeyJwkRsa(entry);
+  if (kty === "oct") return importSymmetricKeyJwk(entry);
   if (kty === "EC") {
     const crv = o["crv"];
     if (crv === "P-256") return importPublicKeyJwkP256(entry);
@@ -232,16 +243,17 @@ function importJwkEntry(entry: unknown): KeyObject {
     );
   }
   throw new Error(
-    `unsupported kty ${JSON.stringify(kty)} (supported: "OKP", "EC", "RSA")`,
+    `unsupported kty ${JSON.stringify(kty)} (supported: "OKP", "EC", "RSA", "oct")`,
   );
 }
 
 /**
  * The `alg` values this library's verify side accepts for each JWKS
  * key family, in JWA naming: an ed25519 (OKP) key is `EdDSA`, the
- * three NIST curves are `ES256` / `ES384` / `ES512`, and an RSA key
+ * three NIST curves are `ES256` / `ES384` / `ES512`, an RSA key
  * is `PS512` (rsa-pss-sha512) or `RS256` (rsa-v1_5-sha256) — the two
- * RSA algorithms the verify side supports.
+ * RSA algorithms the verify side supports — and an HMAC (`oct`) key
+ * is `HS256` (hmac-sha256) or `HS512` (hmac-sha512).
  *
  * Returns the expected list for a family the importers recognize, or
  * `null` for an unknown `kty` / `crv`, so an unrecognized family keeps
@@ -252,6 +264,7 @@ function expectedJwkAlgs(entry: Record<string, unknown>): string[] | null {
   const kty = entry["kty"];
   if (kty === "OKP") return ["EdDSA"];
   if (kty === "RSA") return ["PS512", "RS256"];
+  if (kty === "oct") return ["HS256", "HS512"];
   if (kty === "EC") {
     const crv = entry["crv"];
     if (crv === "P-256") return ["ES256"];
@@ -303,7 +316,12 @@ function assertJwkEntryAlg(entry: Record<string, unknown>): void {
  *   timestamp, so restoring never renews freshness: a snapshot taken
  *   just before its TTL expires is stale almost immediately after a
  *   restart, exactly as if no restart had happened.
- * - `keys`: the snapshot's public keys, each carrying its `kid`.
+ * - `keys`: the snapshot's keys, each carrying its `kid` — public
+ *   keys for the five asymmetric shapes, and the shared secret
+ *   itself for an `oct` entry (a snapshot round-trip must preserve
+ *   it). A snapshot containing an `oct` entry therefore needs the
+ *   same protection as the secret: anyone who can read the persisted
+ *   snapshot learns the signing secret, not just a verification key.
  *
  * The snapshot is plain JSON data (`JSON.stringify` it to persist
  * it), but it is **not signed and not integrity-protected**: anyone
@@ -350,10 +368,11 @@ export interface JwksKeyStoreSnapshot {
  * rejected, so a caller cannot smuggle extra data (including a
  * secret) past restore. The MAC is integrity protection only — it
  * proves the snapshot was not rewritten by anyone without the
- * secret — not confidentiality: the keys inside are public keys, and
- * the envelope itself is plain JSON. A caller that needs the
- * snapshot kept private must encrypt it separately; this envelope
- * does not.
+ * secret — not confidentiality: the public keys inside are public,
+ * but an `oct` entry inside is a shared secret, and the envelope
+ * itself is plain JSON, so anyone who can read it learns that
+ * secret. A caller that needs the snapshot kept private must
+ * encrypt it separately; this envelope does not.
  */
 export interface JwksSignedSnapshotEnvelope {
   v: 1;
@@ -517,8 +536,8 @@ function parseJwksSnapshot(snapshot: unknown): {
  * This is the layer that was missing between the JWK importers
  * (`importPublicKeyJwk` / `importPublicKeyJwkP256` /
  * `importPublicKeyJwkP384` / `importPublicKeyJwkP521` /
- * `importPublicKeyJwkRsa` in `keys.ts`, which convert one JWK each) and
- * `VerifyOptions.keyResolver` (which maps a claimed `keyid` to a key,
+ * `importPublicKeyJwkRsa` / `importSymmetricKeyJwk` in `keys.ts`,
+ * which convert one JWK each) and `VerifyOptions.keyResolver` (which maps a claimed `keyid` to a key,
  * synchronously, in-process). Gateways and webhook receivers publish
  * their signing keys as JWKS precisely so verifiers can pick up key
  * rotation without a redeploy; this store is that pick-up mechanism:
@@ -552,20 +571,23 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   their well-formed siblings still import.
  * - **Supported key types** are exactly the ones the importers support:
  *   `kty: "OKP"` (ed25519), `kty: "EC"` with `crv: "P-256"`, `"P-384"`,
- *   or `"P-521"`, and `kty: "RSA"`. Any other `kty` — or an `EC` entry
- *   with an unsupported or missing `crv` — makes `refresh()` throw:
- *   silently dropping a key the publisher expects verifiers to use
- *   would be a nastier surprise than a loud setup error.
+ *   or `"P-521"`, `kty: "RSA"`, and `kty: "oct"` (an HMAC shared
+ *   secret — the secret-length floor is enforced at import, and the
+ *   entry's `alg`, when present, must be `HS256` or `HS512`). Any
+ *   other `kty` — or an `EC` entry with an unsupported or missing
+ *   `crv` — makes `refresh()` throw: silently dropping a key the
+ *   publisher expects verifiers to use would be a nastier surprise
+ *   than a loud setup error.
  * - **A carried `alg` must agree with the key family.** When a JWKS
  *   entry declares `alg`, `refresh()` checks it against the family
  *   table (OKP → `EdDSA`; P-256 → `ES256`; P-384 → `ES384`;
- *   P-521 → `ES512`; RSA → `PS512` or `RS256`) and throws on a
- *   mismatch or a non-string value, leaving the previous snapshot
- *   untouched. An entry with no `alg` is unchecked: the field is
- *   optional in JWKS, and the verify side keys off the
- *   signature-input `alg`, not the entry's. Snapshot restore does
- *   not re-check `alg` — a snapshot is this store's own export
- *   format and carries no `alg`.
+ *   P-521 → `ES512`; RSA → `PS512` or `RS256`; `oct` → `HS256` or
+ *   `HS512`) and throws on a mismatch or a non-string value, leaving
+ *   the previous snapshot untouched. An entry with no `alg` is
+ *   unchecked: the field is optional in JWKS, and the verify side
+ *   keys off the signature-input `alg`, not the entry's. Snapshot
+ *   restore does not re-check `alg` — a snapshot is this store's own
+ *   export format and carries no `alg`.
  * - **Duplicate `kid`s** within one document: the later entry wins
  *   (ordinary dictionary semantics).
  * - **Refreshes are single-flight.** Concurrent `refresh()` calls —
@@ -593,22 +615,29 @@ function parseJwksSnapshot(snapshot: unknown): {
  * this store performs no TLS pinning, no response-signature check, and
  * no allow-listing beyond requiring an `http:`/`https:` URL; whatever
  * the endpoint serves becomes a verification key, so only point it at
- * origins you trust, over HTTPS. Rotation works by re-fetching: a
- * revoked key keeps verifying until the next successful `refresh()`
- * replaces the snapshot, bounded by how often the caller refreshes
- * (see `ttlSec` / `isStale()`). The snapshot is per-process and
- * in-memory only; multiple verifier processes each keep their own. A
- * single process *can* carry its snapshot across its own restart —
- * `exportSnapshot()` before shutdown, `JwksKeyStore.restore()` at
- * startup — so a cold start during a JWKS outage can still verify
- * with the last fetched keys (staleness still counted from the
- * original fetch time; see {@link JwksKeyStoreSnapshot}). This
- * library never writes the snapshot anywhere itself: persisting it
- * is the caller's job, and protecting its integrity is opt-in —
- * the unsigned snapshot is trusted configuration (see
- * {@link JwksKeyStoreSnapshot}), while `exportSignedSnapshot()` /
- * `restoreSignedSnapshot()` wrap it in an HMAC envelope that
- * catches a rewritten snapshot at restore time.
+ * origins you trust, over HTTPS. An `oct` entry raises the stakes
+ * further: it is a shared secret, not a public key, so fetching it
+ * hands the endpoint the power to make the verifier trust any
+ * signature it chooses — and anyone who can read the response, or a
+ * persisted snapshot containing it, learns the secret itself. Only
+ * fetch `oct` keys from an endpoint you trust with the secret, over
+ * HTTPS (`requireHttps: true` is the production posture), and store
+ * a snapshot containing one like a secret. Rotation works by
+ * re-fetching: a revoked key keeps verifying until the next
+ * successful `refresh()` replaces the snapshot, bounded by how often
+ * the caller refreshes (see `ttlSec` / `isStale()`). The snapshot is
+ * per-process and in-memory only; multiple verifier processes each
+ * keep their own. A single process *can* carry its snapshot across
+ * its own restart — `exportSnapshot()` before shutdown,
+ * `JwksKeyStore.restore()` at startup — so a cold start during a
+ * JWKS outage can still verify with the last fetched keys (staleness
+ * still counted from the original fetch time; see
+ * {@link JwksKeyStoreSnapshot}). This library never writes the
+ * snapshot anywhere itself: persisting it is the caller's job, and
+ * protecting its integrity is opt-in — the unsigned snapshot is
+ * trusted configuration (see {@link JwksKeyStoreSnapshot}), while
+ * `exportSignedSnapshot()` / `restoreSignedSnapshot()` wrap it in an
+ * HMAC envelope that catches a rewritten snapshot at restore time.
  */
 export class JwksKeyStore {
   private readonly url: string;
@@ -1069,9 +1098,11 @@ export class JwksKeyStore {
    * with the last fetched keys instead of being unable to verify
    * until its first successful `refresh()`.
    *
-   * Only public key material is exported — the store holds nothing
-   * else — each key re-exported through the same JWK exporter for
-   * its `kty` and tagged with its `kid`. The returned object
+   * Public key material is exported for the five asymmetric shapes,
+   * and the shared secret itself for an `oct` entry — a snapshot
+   * round-trip must preserve it, and the store holds nothing else —
+   * each key re-exported through the same JWK exporter for its
+   * `kty` and tagged with its `kid`. The returned object
    * (including every key) is a fresh copy: mutating it does not
    * affect this store.
    *
@@ -1090,7 +1121,9 @@ export class JwksKeyStore {
       );
     const keys: JwksSnapshotKey[] = [];
     for (const [kid, key] of this.keysByKid) {
-      if (key.asymmetricKeyType === "ed25519")
+      if (key.type === "secret")
+        keys.push({ ...exportSymmetricKeyJwk(key), kid });
+      else if (key.asymmetricKeyType === "ed25519")
         keys.push({ ...exportPublicKeyJwk(key), kid });
       else if (key.asymmetricKeyType === "ec") {
         // The store imports P-256/P-384/P-521 by crv; export by the same

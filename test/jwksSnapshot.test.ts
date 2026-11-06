@@ -200,7 +200,9 @@ test("JwksKeyStore snapshot: unknown kty and unsupported curve are rejected", as
   assert.throws(
     () =>
       JwksKeyStore.restore(
-        { ...base, keys: [{ kty: "oct", kid: "sym-1", k: "AAAA" }] },
+        // "AKP" is not a kty this library imports ("oct" is one since
+        // #933, so it no longer serves as the unknown-kty fixture).
+        { ...base, keys: [{ kty: "AKP", kid: "sym-1", k: "AAAA" }] },
         URL,
       ),
     /unsupported kty/,

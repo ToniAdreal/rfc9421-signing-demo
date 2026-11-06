@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1595 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1610 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -663,6 +663,24 @@ error and never reaches a JWKS snapshot. What import still does not check is
 modulus primality: a 2048-bit composite modulus would be imported and would
 only fail when used to verify a real signature.
 
+HMAC gateways get the same treatment for shared secrets:
+`exportSymmetricKeyJwk` / `importSymmetricKeyJwk` handle the RFC 7518
+`oct` shape (`{ kty: "oct", k }`) for `hmac-sha256` / `hmac-sha512`
+verifiers, and `JwksKeyStore` imports `oct` entries from a JWKS
+document the same way it imports public keys. The secret-length
+floor is enforced on both sides, reusing `assertHmacSecretLength`
+(≥ 32 bytes for `HS256`, ≥ 64 bytes for `HS512` — declared via the
+JWK's `alg`, or the export option), so a JWKS publisher cannot slip
+a brute-forceable secret into the store. One honest difference from
+the public-key shapes above: an `oct` JWK *is* the secret, so it
+must only travel over a channel already trusted for the secret
+itself (an HTTPS JWKS endpoint you trust, `requireHttps: true` —
+never a public directory), and a snapshot containing one must be
+stored like a secret. `jwkThumbprint` deliberately does not cover
+`oct`: a thumbprint is an identifier derived from public material,
+and hashing a secret into one would encourage shipping secrets
+around.
+
 Stable `keyid` derivation for those JWKs: `jwkThumbprint(jwk)` computes
 the RFC 7638 thumbprint (required members only, lexicographic canonical
 JSON, SHA-256, base64url) of any of the three public JWK shapes above, so
@@ -677,7 +695,7 @@ public key can compute it.
 Network key discovery (JWKS): when a signer's keys live behind a JWKS
 endpoint — the gateway/webhook standard for public-key distribution and
 rotation — `JwksKeyStore` fetches the document, imports every key by
-`kid` (ed25519 / P-256 / P-384 / P-521 / RSA, the five JWK shapes above), and exposes a
+`kid` (ed25519 / P-256 / P-384 / P-521 / RSA / HMAC `oct`, the six JWK shapes above), and exposes a
 synchronous `resolve` that drops straight into `keyResolver`:
 
 ```ts
@@ -766,8 +784,9 @@ SECURITY.md).
 When a JWKS entry declares `alg`, `refresh()` checks it against its key
 family and throws (leaving the previous snapshot untouched) on a
 mismatch: OKP (ed25519) only accepts `EdDSA`, P-256 only `ES256`, P-384
-only `ES384`, P-521 only `ES512`, and RSA only `PS512` or `RS256` (the
-two RSA algorithms the verify side supports). An entry with no `alg`
+only `ES384`, P-521 only `ES512`, RSA only `PS512` or `RS256` (the
+two RSA algorithms the verify side supports), and `oct` only `HS256`
+or `HS512`. An entry with no `alg`
 is not checked — the field is optional in a JWKS document, and the
 verify side keys off the signature-input `alg` anyway — and snapshot
 restore does not re-check `alg`, since a snapshot is this store's own
@@ -775,8 +794,9 @@ export format and carries no `alg`.
 
 Snapshot export/restore: a single process can carry its fetched keys
 across its own restart — `store.exportSnapshot()` returns a detached,
-JSON-serializable `{ v: 1, fetchedAtSec, keys }` of public-key JWKs
-(each tagged with its `kid`), and `JwksKeyStore.restore(snapshot, url)`
+JSON-serializable `{ v: 1, fetchedAtSec, keys }` of JWKs (public keys
+for the five asymmetric shapes, the shared secret itself for an `oct`
+entry — each tagged with its `kid`), and `JwksKeyStore.restore(snapshot, url)`
 (or `store.restoreSnapshot(snapshot)`) rebuilds a store that resolves
 offline, with no fetch:
 
@@ -2106,7 +2126,7 @@ snapshot-persistence CLI demo segment, which walks the same
 path once for readability. One measured op is one export of a
 fixed three-key store (ed25519, P-256 and RSA — the historical
 fixture predates P-384/P-521 JWKS support; the store now imports
-all five shapes), generated once outside timing and restored
+all six shapes), generated once outside timing and restored
 offline under hand-pinned kids at a pinned `fetchedAtSec` of
 1700000000 — the bench performs zero network I/O). Every
 measured pass re-pins the whole exported envelope against
@@ -2136,7 +2156,7 @@ and from the snapshot-persistence CLI demo segment, which
 walks the same restore once for readability. One measured
 op is one restore of a pinned three-key envelope (ed25519, P-256
 and RSA — the historical fixture predates P-384/P-521 JWKS
-support; the store now imports all five shapes), generated once
+support; the store now imports all six shapes), generated once
 outside timing and exported outside timing from a source
 store refreshed once through a counting fake fetch at a
 pinned `fetchedAtSec` of 1700000000 under a 120-second TTL)
@@ -3670,7 +3690,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1595 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1610 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

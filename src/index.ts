@@ -35,6 +35,7 @@ export {
   exportPublicKeyJwkP521,
   exportPublicKeyJwkRsa,
   exportPublicKeyPem,
+  exportSymmetricKeyJwk,
   generateEd25519KeyPair,
   generateNonce,
   generateP256KeyPair,
@@ -49,6 +50,7 @@ export {
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
+  importSymmetricKeyJwk,
   jwkThumbprint,
   memoizeKeyResolver,
   MIN_HMAC_SECRET_BYTES,
@@ -58,6 +60,8 @@ export {
 } from "./keys.js";
 export type {
   Ed25519PublicJwk,
+  ExportSymmetricKeyJwkOptions,
+  HmacJwk,
   MemoizeKeyResolverOptions,
   P256PublicJwk,
   P384PublicJwk,

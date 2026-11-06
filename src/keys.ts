@@ -829,6 +829,184 @@ export function importPublicKeyJwkRsa(jwk: unknown): KeyObject {
 }
 
 /**
+ * Symmetric-key JWK view of an HMAC shared secret, exactly as produced
+ * by {@link exportSymmetricKeyJwk}. RFC 7518 §6.4: symmetric keys
+ * carry `kty: "oct"` and a base64url `k` holding the raw secret bytes.
+ *
+ * Unlike the public-key JWK shapes above, this one *is* secret
+ * material: whoever holds the JWK can sign as the key's owner, so it
+ * must only ever travel over a channel the signer already trusts for
+ * the secret itself (an HTTPS JWKS endpoint the verifier trusts, a
+ * signed snapshot envelope — never a public directory). `kid` and
+ * `alg` are optional metadata: `kid` selects the key in a JWKS
+ * document, `alg` pins the HMAC use (`"HS256"` / `"HS512"`).
+ */
+export interface HmacJwk {
+  kty: "oct";
+  /** Base64url-encoded shared secret bytes (no padding). */
+  k: string;
+  kid?: string;
+  alg?: "HS256" | "HS512";
+}
+
+/** Options for {@link exportSymmetricKeyJwk}. */
+export interface ExportSymmetricKeyJwkOptions {
+  /**
+   * The HMAC use the exported key is intended for, in JWA naming.
+   * Sets the secret-length floor enforced at export
+   * (`"HS256"` → ≥ 32 bytes, `"HS512"` → ≥ 64 bytes, via
+   * {@link assertHmacSecretLength}) and is recorded as the JWK's
+   * `alg` member so an importer (and `JwksKeyStore.refresh()`) can
+   * enforce the same floor. Defaults to `"HS256"` when omitted, and
+   * the `alg` member is then omitted from the JWK as well.
+   */
+  alg?: "HS256" | "HS512";
+  /**
+   * Key id to record as the JWK's `kid` member, so the key can be
+   * selected by `keyid` in a JWKS document. Must be a non-empty
+   * string when given.
+   */
+  kid?: string;
+}
+
+/**
+ * Export an HMAC shared secret as a plain-object JWK (RFC 7518 §6.4),
+ * ready to `JSON.stringify` and ship to a verifier — the symmetric
+ * counterpart of {@link exportPublicKeyJwk} / {@link exportPublicKeyJwkRsa},
+ * for gateway/webhook deployments that distribute HMAC keys as JSON
+ * (a JWKS `oct` entry) instead of PEM.
+ *
+ * The secret-length floor is enforced per declared use, reusing
+ * {@link assertHmacSecretLength}: ≥ 32 bytes for `"HS256"` (the
+ * default), ≥ 64 bytes for `"HS512"` (RFC 2104 §3: the key SHOULD be
+ * at least as long as the hash output). Uses node:crypto's native
+ * JWK support — no third-party dependencies.
+ *
+ * Throws a caller-configuration `Error` for anything that is not a
+ * secret KeyObject (public/private asymmetric keys) or for a secret
+ * below the floor for its declared use. This helper exports secret
+ * material by design — unlike the public-key exporters — so callers
+ * must treat the returned object like the secret itself: only ship
+ * it to verifiers over a trusted channel (see {@link HmacJwk}).
+ */
+export function exportSymmetricKeyJwk(
+  key: KeyObject,
+  opts: ExportSymmetricKeyJwkOptions = {},
+): HmacJwk {
+  const { alg, kid } = opts;
+  if (alg !== undefined && alg !== "HS256" && alg !== "HS512")
+    throw new Error(
+      `exportSymmetricKeyJwk: \`alg\` must be "HS256" or "HS512", got ${JSON.stringify(alg)}`,
+    );
+  if (kid !== undefined && (typeof kid !== "string" || kid.length === 0))
+    throw new Error(
+      `exportSymmetricKeyJwk: \`kid\` must be a non-empty string, got ${JSON.stringify(kid)}`,
+    );
+  if (key.type !== "secret")
+    throw new Error(
+      `exportSymmetricKeyJwk: expected a secret (symmetric) KeyObject, got ` +
+        `type=${String(key.type)} ` +
+        `asymmetricKeyType=${String(key.asymmetricKeyType)} ` +
+        `(JWK support here is HMAC shared secrets only — public keys use exportPublicKeyJwk*)`,
+    );
+  assertHmacSecretLength(key, alg === "HS512" ? "hmac-sha512" : "hmac-sha256");
+  const raw = key.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  // Node emits exactly { kty: "oct", k: "<base64url>" }.
+  if (raw["kty"] !== "oct" || typeof raw["k"] !== "string")
+    throw new Error(
+      "exportSymmetricKeyJwk: node:crypto returned an unexpected JWK shape " +
+        `for a secret key: ${JSON.stringify(Object.keys(raw))}`,
+    );
+  const jwk: HmacJwk = { kty: "oct", k: raw["k"] };
+  if (kid !== undefined) jwk.kid = kid;
+  if (alg !== undefined) jwk.alg = alg;
+  return jwk;
+}
+
+/**
+ * Import an HMAC shared secret from a JWK object (RFC 7518 §6.4), as
+ * produced by {@link exportSymmetricKeyJwk} and typically received
+ * over the wire as JSON (a JWKS `oct` entry).
+ *
+ * Strictly validates before touching node:crypto: the input must be a
+ * plain object with `kty: "oct"` and a non-empty base64url `k`. The
+ * decoded secret must satisfy the floor for its declared use, reusing
+ * {@link assertHmacSecretLength}: a JWK declaring `alg: "HS512"` needs
+ * ≥ 64 bytes, anything else (including no `alg`) needs ≥ 32 bytes.
+ * An `alg` value other than `"HS256"` / `"HS512"` is refused, and a
+ * non-canonical `k` (characters outside the base64url alphabet,
+ * padding, or a length that does not re-encode identically) is
+ * refused too — a truncated or mistyped secret must fail here, at
+ * setup, never silently become a different key.
+ *
+ * Anything malformed throws a descriptive `Error` — never a
+ * verification failure, since this is key setup, not signature
+ * checking. A JWK carrying a `"d"` member is refused outright: `oct`
+ * keys have no `"d"`, so its presence means the wrong JWK shape was
+ * passed in.
+ */
+export function importSymmetricKeyJwk(jwk: unknown): KeyObject {
+  const fail = (why: string): never => {
+    throw new Error(`importSymmetricKeyJwk: invalid JWK: ${why}`);
+  };
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk))
+    fail(
+      `expected a JWK object, got ${
+        Array.isArray(jwk) ? "an array" : jwk === null ? "null" : typeof jwk
+      }`,
+    );
+  const o = jwk as Record<string, unknown>;
+  if ("d" in o)
+    fail(
+      'unexpected "d" member: oct JWKs carry the secret in "k" only ' +
+        "(a JWK with \"d\" is an asymmetric private key, not an HMAC secret)",
+    );
+  if (!("kty" in o)) fail(`missing "kty" parameter`);
+  if (o["kty"] !== "oct")
+    fail(`expected kty "oct", got ${JSON.stringify(o["kty"])}`);
+  const k = o["k"];
+  if (typeof k !== "string" || k.length === 0)
+    throw new Error(
+      `importSymmetricKeyJwk: invalid JWK: missing or empty "k" (the base64url shared secret)`,
+    );
+  if (!/^[A-Za-z0-9_-]+$/.test(k))
+    fail(
+      `"k" must be unpadded base64url (characters A-Z a-z 0-9 - _ only, no "=" padding)`,
+    );
+  const bytes = Buffer.from(k, "base64url");
+  if (bytes.toString("base64url") !== k)
+    fail(`"k" is not canonical base64url (decodes to ${bytes.length} bytes but does not re-encode identically)`);
+  const alg = o["alg"];
+  let signAlg: "hmac-sha256" | "hmac-sha512" = "hmac-sha256";
+  if (alg !== undefined) {
+    if (alg === "HS256") signAlg = "hmac-sha256";
+    else if (alg === "HS512") signAlg = "hmac-sha512";
+    else
+      fail(
+        `unsupported "alg" ${JSON.stringify(alg)} for an oct key (supported: "HS256", "HS512")`,
+      );
+  }
+  const key = createSecretKey(bytes);
+  // The floor is the same one the sign/verify paths enforce, so a key
+  // imported here can never be weaker than a key the library would
+  // accept from `secretKey`. The guard's message already carries its
+  // own function name, so strip that prefix before wrapping it in
+  // the usual `invalid JWK:` style (same pattern as the RSA importer).
+  try {
+    assertHmacSecretLength(key, signAlg);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `importSymmetricKeyJwk: invalid JWK: ${detail.replace(/^assertHmacSecretLength: /, "")}`,
+    );
+  }
+  return key;
+}
+
+/**
  * Required JWK members per `kty` for the RFC 7638 thumbprint
  * computation (RFC 7638 §3.2, with the member sets defined by
  * RFC 7517/7518 and RFC 8037/8038). Only these members — plus `kty`
