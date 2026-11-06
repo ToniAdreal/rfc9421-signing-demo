@@ -1171,6 +1171,7 @@ import {
   type KeyObject,
 } from "node:crypto";
 import {
+  addResponseSignature,
   addSignature,
   assertContentDigestAlg,
   assertHmacSecretLength,
@@ -3768,6 +3769,29 @@ export const DEMO_DUAL_RESPONSE_GATEWAY_NONCE =
  */
 export const DEMO_DUAL_RESPONSE_TAMPER_CODE: VerifyFailureCode =
   "SIGNATURE_MISMATCH";
+/** Label of the merchant signature in the addResponseSignature demo segment. */
+export const DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL = "merchant";
+/** Label of the gateway signature in the addResponseSignature demo segment. */
+export const DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL = "gateway";
+/** Key id the addResponseSignature segment's merchant signature carries. */
+export const DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID =
+  "demo-add-response-sig-merchant-1";
+/** Key id the addResponseSignature segment's gateway signature carries. */
+export const DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID =
+  "demo-add-response-sig-gateway-1";
+/** Nonce the addResponseSignature segment's merchant signature carries. */
+export const DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE =
+  "demo-add-response-sig-merchant-nonce-1";
+/** Nonce the addResponseSignature segment's gateway signature carries. */
+export const DEMO_ADD_RESPONSE_SIG_GATEWAY_NONCE =
+  "demo-add-response-sig-gateway-nonce-1";
+/**
+ * Hand-pinned failure code for the addResponseSignature segment's
+ * gateway-signature tamper (`SIGNATURE_MISMATCH`): only the gateway
+ * label fails, the merchant label still verifies.
+ */
+export const DEMO_ADD_RESPONSE_SIG_TAMPER_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
 /** Label both allowed-algs whitelist signatures carry (two separate signings of one request). */
 export const DEMO_ALLOWED_ALGS_LABEL = "sig1";
 /** URL of the single request signed twice in the allowed-algs whitelist segment. */
@@ -5418,6 +5442,22 @@ export interface DemoResult {
    */
   dualSignedResponseTamperedVerification: VerifyResult[];
   /**
+   * The client's adapted `RequestLike` for the addResponseSignature
+   * segment's settlement response: the same `DEMO_GATEWAY_RESPONSE_*`
+   * settlement response, signed by the merchant label with
+   * `signResponse` and appended by the gateway label with
+   * `addResponseSignature` (hmac-sha256).
+   */
+  addResponseSignatureResponseRequest: RequestLike;
+  /** Per-label results for the addResponseSignature response (both ok). */
+  addResponseSignatureResponseVerification: VerifyResult[];
+  /**
+   * Per-label results after the gateway label's signature bytes are
+   * tampered: merchant still ok, gateway rejected with
+   * `DEMO_ADD_RESPONSE_SIG_TAMPER_CODE`.
+   */
+  addResponseSignatureResponseTamperedVerification: VerifyResult[];
+  /**
    * Verification of the whitelisted ed25519 signature in the
    * allowed-algs segment (ok under `allowedAlgs: ["ed25519"]`).
    */
@@ -5886,6 +5926,218 @@ async function fetchDualSignedResponse(): Promise<DualSignedResponseFixture> {
         `demo fixture broken: dual-signed response segment gateway-signature ` +
           `tamper gave ${JSON.stringify(tamperedVerification)} instead of ` +
           `merchant ok and gateway ${DEMO_DUAL_RESPONSE_TAMPER_CODE}`,
+      );
+    }
+    return { requestLike, verification, tamperedVerification };
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * The addResponseSignature segment's loopback fixture: the
+ * response-side counterpart of `fetchDualSignedResponse` — a real
+ * `http` server on 127.0.0.1 plays the payment gateway serving the
+ * same settlement response (`DEMO_GATEWAY_RESPONSE_*`), but the
+ * second label is appended with the response entry points: the
+ * merchant label first via `signResponse` (ed25519, covering
+ * `@status` + `content-digest` by default), the gateway label
+ * appended via `addResponseSignature` (hmac-sha256 over the shared
+ * demo secret `DEMO_GATEWAY_SECRET`, the wire content-digest
+ * algorithm pinned by the helper). The client fetches it with
+ * `http.get`, buffers the body, adapts the response with
+ * `fromNodeResponse(res, body, { request })` and verifies both
+ * labels with `verifyAllLabels`, each label against its own key.
+ *
+ * A second verification tampers the gateway label's signature
+ * bytes in the adapted headers (one base64 character flipped):
+ * the merchant label still verifies and only the gateway label
+ * is rejected with `DEMO_ADD_RESPONSE_SIG_TAMPER_CODE` — the
+ * per-label failure isolation `test/addResponseSignature.test.ts`
+ * pins for the helper, here shown end to end over loopback.
+ * Nothing about the wire form is printed except through fixed
+ * literals, so the printed segment is byte-identical between
+ * runs even though the port and the merchant key pair are fresh
+ * per run (the HMAC signature itself is deterministic over the
+ * fixed demo secret).
+ */
+interface AddResponseSignatureFixture {
+  /** The client's adapted `RequestLike` for the dual-signed response. */
+  requestLike: RequestLike;
+  /** Per-label results for the dual-signed response (both ok). */
+  verification: VerifyResult[];
+  /**
+   * Per-label results after the gateway label's signature bytes
+   * are tampered: merchant ok, gateway rejected with
+   * `DEMO_ADD_RESPONSE_SIG_TAMPER_CODE`.
+   */
+  tamperedVerification: VerifyResult[];
+}
+
+async function fetchAddResponseSignatureResponse(): Promise<AddResponseSignatureFixture> {
+  const merchant = generateEd25519KeyPair();
+  const gatewaySecret = secretKey(DEMO_GATEWAY_SECRET);
+  const server = createServer((req, res) => {
+    const merchantSigned = signResponse(
+      {
+        status: DEMO_GATEWAY_RESPONSE_STATUS,
+        headers: { "content-type": "application/json" },
+        body: DEMO_GATEWAY_RESPONSE_BODY,
+      },
+      {
+        keyId: DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID,
+        alg: "ed25519",
+        key: merchant.privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE,
+        label: DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+      },
+    );
+    const dual = addResponseSignature(merchantSigned, {
+      keyId: DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID,
+      alg: "hmac-sha256",
+      key: gatewaySecret,
+      created: DEMO_CREATED,
+      nonce: DEMO_ADD_RESPONSE_SIG_GATEWAY_NONCE,
+      label: DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+    });
+    res.writeHead(DEMO_GATEWAY_RESPONSE_STATUS, {
+      "content-type": "application/json",
+      // The merchant signature covers `@status` + `content-digest`
+      // by default, so the digest header must ride the wire too —
+      // unlike the `signRequest` / `addSignature` dual-signed
+      // segment above, whose bases cover `@status` only.
+      "content-digest": dual.headers["content-digest"] as string,
+      "signature-input": dual.headers["signature-input"] as string,
+      signature: dual.headers["signature"] as string,
+    });
+    res.end(DEMO_GATEWAY_RESPONSE_BODY);
+  });
+  try {
+    const { port } = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    });
+    const url = `http://127.0.0.1:${port}${DEMO_GATEWAY_RESPONSE_PATH}`;
+    const request: RequestLike = {
+      method: "GET",
+      url,
+      headers: { host: `127.0.0.1:${port}` },
+    };
+    const { res, body } = await new Promise<{
+      res: IncomingMessage;
+      body: Buffer;
+    }>((resolve, reject) => {
+      get(url, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => resolve({ res, body: Buffer.concat(chunks) }));
+        res.on("error", reject);
+      }).on("error", reject);
+    });
+    const requestLike = fromNodeResponse(res, body, { request });
+    const verifyOptions = {
+      keys: {
+        [DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL]: merchant.publicKey,
+        [DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL]: gatewaySecret,
+      },
+      now: DEMO_CREATED + 60,
+      requiredComponents: ["@status"],
+    };
+    const verification = verifyAllLabels(requestLike, verifyOptions);
+    // Flip one base64 character of the gateway label's signature
+    // bytes: any byte change must break that label alone.
+    const wireSignature = getHeader(requestLike.headers, "signature");
+    if (wireSignature === undefined) {
+      throw new Error(
+        "demo fixture broken: addResponseSignature segment adapted " +
+          "headers carry no signature",
+      );
+    }
+    const marker = `${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}=:`;
+    const at = wireSignature.indexOf(marker);
+    if (at === -1) {
+      throw new Error(
+        `demo fixture broken: addResponseSignature segment signature ` +
+          `header carries no ${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL} entry`,
+      );
+    }
+    const first = wireSignature[at + marker.length];
+    if (first === undefined || first === "=") {
+      throw new Error(
+        "demo fixture broken: addResponseSignature segment gateway " +
+          "signature entry has no flippable first base64 character",
+      );
+    }
+    const tamperedSignature =
+      wireSignature.slice(0, at + marker.length) +
+      (first === "A" ? "B" : "A") +
+      wireSignature.slice(at + marker.length + 1);
+    const tamperedVerification = verifyAllLabels(
+      {
+        ...requestLike,
+        headers: { ...requestLike.headers, signature: tamperedSignature },
+      },
+      verifyOptions,
+    );
+    if (
+      requestLike.status !== DEMO_GATEWAY_RESPONSE_STATUS ||
+      body.toString() !== DEMO_GATEWAY_RESPONSE_BODY
+    ) {
+      throw new Error(
+        `demo fixture broken: addResponseSignature segment adapted status ` +
+          `${requestLike.status} / body ${JSON.stringify(body.toString())} ` +
+          `instead of ${DEMO_GATEWAY_RESPONSE_STATUS} / the pinned settlement body`,
+      );
+    }
+    const expected: ReadonlyArray<{
+      label: string;
+      keyId: string;
+      alg: string;
+      nonce: string;
+    }> = [
+      {
+        label: DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+        keyId: DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID,
+        alg: "ed25519",
+        nonce: DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE,
+      },
+      {
+        label: DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+        keyId: DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID,
+        alg: "hmac-sha256",
+        nonce: DEMO_ADD_RESPONSE_SIG_GATEWAY_NONCE,
+      },
+    ];
+    if (
+      verification.length !== 2 ||
+      !verification.every(
+        (r, i) =>
+          r.ok &&
+          r.label === expected[i].label &&
+          r.keyId === expected[i].keyId &&
+          r.alg === expected[i].alg &&
+          r.nonce === expected[i].nonce,
+      )
+    ) {
+      throw new Error(
+        `demo fixture broken: addResponseSignature segment verification gave ` +
+          `${JSON.stringify(verification)} instead of both labels ok with ` +
+          `the pinned label/keyid/alg/nonce`,
+      );
+    }
+    if (
+      tamperedVerification.length !== 2 ||
+      tamperedVerification[0].ok !== true ||
+      tamperedVerification[1].ok !== false ||
+      tamperedVerification[1].code !== DEMO_ADD_RESPONSE_SIG_TAMPER_CODE
+    ) {
+      throw new Error(
+        `demo fixture broken: addResponseSignature segment gateway-signature ` +
+          `tamper gave ${JSON.stringify(tamperedVerification)} instead of ` +
+          `merchant ok and gateway ${DEMO_ADD_RESPONSE_SIG_TAMPER_CODE}`,
       );
     }
     return { requestLike, verification, tamperedVerification };
@@ -9887,6 +10139,22 @@ export async function runDemo(): Promise<DemoResult> {
   // byte-identical between runs.
   const dualSignedResponse = await fetchDualSignedResponse();
 
+  // addResponseSignature segment (client direction): the
+  // response-entry-point sequel to the dual-signed response
+  // segment above — the same loopback settlement response, but
+  // the second label is appended with `addResponseSignature`
+  // (hmac-sha256) onto a `signResponse` merchant signature,
+  // instead of the request-side `signRequest` / `addSignature`
+  // pair. Adapted with `fromNodeResponse` and verified with
+  // `verifyAllLabels`; tampering the gateway label's signature
+  // bytes fails only that label. The helper's fail-fast asserts
+  // already pinned every outcome outside the printed lines;
+  // only the port (never printed) and the merchant key pair are
+  // fresh per run, so the segment's printed lines are
+  // byte-identical between runs.
+  const addResponseSignatureResponse =
+    await fetchAddResponseSignatureResponse();
+
   // Allowed-algs whitelist segment: a gateway that only accepts
   // ed25519 should not have to hand-roll a pre-check before
   // verifying — `allowedAlgs: ["ed25519"]` (backlog #851) is
@@ -12347,6 +12615,15 @@ export async function runDemo(): Promise<DemoResult> {
       ? "Dual-signed response after gateway signature tampering: gateway OK (unexpected — the tampered gateway signature was not rejected), merchant OK"
       : `Dual-signed response after gateway signature tampering: gateway FAILED (code ${dualSignedResponse.tamperedVerification[1].code}: ${dualSignedResponse.tamperedVerification[1].reason}), merchant still OK (label ${dualSignedResponse.tamperedVerification[0].label}, keyid="${dualSignedResponse.tamperedVerification[0].keyId}", alg="${dualSignedResponse.tamperedVerification[0].alg}")`,
     "",
+    "addResponseSignature multi-party response: the same loopback settlement response signed with the response entry points — the merchant signs with signResponse and the gateway appends its hmac-sha256 label with addResponseSignature — fromNodeResponse adapts it and verifyAllLabels verifies each label against its own key, so tampering one label's signature fails only that label",
+    `addResponseSignature response status: ${addResponseSignatureResponse.requestLike.status}`,
+    addResponseSignatureResponse.verification.every((r) => r.ok)
+      ? `addResponseSignature verification: merchant OK (label ${addResponseSignatureResponse.verification[0].label}, keyid="${addResponseSignatureResponse.verification[0].keyId}", alg="${addResponseSignatureResponse.verification[0].alg}"), gateway OK (label ${addResponseSignatureResponse.verification[1].label}, keyid="${addResponseSignatureResponse.verification[1].keyId}", alg="${addResponseSignatureResponse.verification[1].alg}")`
+      : `addResponseSignature verification: FAILED (merchant ${addResponseSignatureResponse.verification[0].ok ? "OK" : `code ${addResponseSignatureResponse.verification[0].code}: ${addResponseSignatureResponse.verification[0].reason}`}, gateway ${addResponseSignatureResponse.verification[1].ok ? "OK" : `code ${addResponseSignatureResponse.verification[1].code}: ${addResponseSignatureResponse.verification[1].reason}`})`,
+    addResponseSignatureResponse.tamperedVerification[1].ok
+      ? "addResponseSignature after gateway signature tampering: gateway OK (unexpected — the tampered gateway signature was not rejected), merchant OK"
+      : `addResponseSignature after gateway signature tampering: gateway FAILED (code ${addResponseSignatureResponse.tamperedVerification[1].code}: ${addResponseSignatureResponse.tamperedVerification[1].reason}), merchant still OK (label ${addResponseSignatureResponse.tamperedVerification[0].label}, keyid="${addResponseSignatureResponse.tamperedVerification[0].keyId}", alg="${addResponseSignatureResponse.tamperedVerification[0].alg}")`,
+    "",
     "Allowed-algs whitelist: a gateway that only accepts ed25519 verifies both signatures under allowedAlgs [\"ed25519\"] — the ed25519 signature verifies, the RSA-PSS signature is rejected with ALG_NOT_ALLOWED before any cryptographic verification, so a foreign algorithm never reaches the crypto path",
     allowedAlgsEdVerification.ok
       ? `Whitelisted algorithm verifies: the same request signed with ed25519 verified under allowedAlgs ["ed25519"]: OK (label ${allowedAlgsEdVerification.label}, keyid="${allowedAlgsEdVerification.keyId}", alg="${allowedAlgsEdVerification.alg}", nonce="${allowedAlgsEdVerification.nonce}")`
@@ -12788,6 +13065,12 @@ export async function runDemo(): Promise<DemoResult> {
     dualSignedResponseRequest: dualSignedResponse.requestLike,
     dualSignedResponseVerification: dualSignedResponse.verification,
     dualSignedResponseTamperedVerification: dualSignedResponse.tamperedVerification,
+    addResponseSignatureResponseRequest:
+      addResponseSignatureResponse.requestLike,
+    addResponseSignatureResponseVerification:
+      addResponseSignatureResponse.verification,
+    addResponseSignatureResponseTamperedVerification:
+      addResponseSignatureResponse.tamperedVerification,
     allowedAlgsEdVerification,
     allowedAlgsRsaVerification,
     jwksRequireHttpsError,

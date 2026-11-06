@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo gains an `addResponseSignature` multi-party response
+  segment (backlog #929): `src/demo.ts` signs the loopback
+  settlement response with `signResponse` (merchant label,
+  ed25519) and appends the gateway label with
+  `addResponseSignature` (hmac-sha256, a different key), then
+  adapts it with `fromNodeResponse` and verifies both labels
+  with `verifyAllLabels`; tampering the gateway label's
+  signature bytes fails only that label. `DemoResult` gains
+  `addResponseSignatureResponseRequest` /
+  `addResponseSignatureResponseVerification` /
+  `addResponseSignatureResponseTamperedVerification`. New
+  `test/demo.test.ts` cases (2) pin the segment's structure
+  and byte-identical printed lines across runs.
 - `;sf` supports the RFC 9651 Date and Display String types
   (backlog #926): `src/structuredFields.ts` adds `parseDate` (`@` +
   an integer number of seconds, §3.3.7 — a negative delta is a valid

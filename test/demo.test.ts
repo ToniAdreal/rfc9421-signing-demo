@@ -110,6 +110,13 @@ import {
   DEMO_DUAL_RESPONSE_MERCHANT_LABEL,
   DEMO_DUAL_RESPONSE_MERCHANT_NONCE,
   DEMO_DUAL_RESPONSE_TAMPER_CODE,
+  DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID,
+  DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+  DEMO_ADD_RESPONSE_SIG_GATEWAY_NONCE,
+  DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID,
+  DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+  DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE,
+  DEMO_ADD_RESPONSE_SIG_TAMPER_CODE,
   DEMO_INBOUND_COVERED_COMPONENTS,
   DEMO_INBOUND_HOST,
   DEMO_INBOUND_NONCE,
@@ -5625,9 +5632,139 @@ test("demo dual-signed response segment verifies both labels over loopback and f
     `Dual-signed response verification: merchant OK (label ${DEMO_DUAL_RESPONSE_MERCHANT_LABEL}, keyid="${DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_DUAL_RESPONSE_GATEWAY_LABEL}, keyid="${DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID}", alg="ed25519")`,
     `Dual-signed response after gateway signature tampering: gateway FAILED (code ${DEMO_DUAL_RESPONSE_TAMPER_CODE}: ${dualSignedResponseTamperedVerification[1].reason}), merchant still OK (label ${DEMO_DUAL_RESPONSE_MERCHANT_LABEL}, keyid="${DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID}", alg="ed25519")`,
   ]);
-  // The allowed-algs whitelist segment follows the dual-signed segment.
+  // The addResponseSignature segment follows the dual-signed segment.
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(
+    lines[headerIdx + 5]!.startsWith(
+      "addResponseSignature multi-party response:",
+    ),
+  );
+});
+
+test("demo addResponseSignature segment signs the response with signResponse and appends the gateway label with addResponseSignature", async () => {
+  const {
+    lines,
+    addResponseSignatureResponseRequest,
+    addResponseSignatureResponseVerification,
+    addResponseSignatureResponseTamperedVerification,
+  } = await runDemo();
+
+  // Structure: the same settlement response, adapted with both wire
+  // labels — and the content-digest header the merchant signature
+  // covers by default must ride the wire too.
+  assert.equal(
+    addResponseSignatureResponseRequest.status,
+    DEMO_GATEWAY_RESPONSE_STATUS,
+  );
+  assert.equal(addResponseSignatureResponseRequest.method, "GET");
+  assert.match(
+    addResponseSignatureResponseRequest.url,
+    new RegExp(
+      `^http://127\\.0\\.0\\.1:\\d+${DEMO_GATEWAY_RESPONSE_PATH}$`,
+    ),
+  );
+  assert.equal(
+    addResponseSignatureResponseRequest.body?.toString(),
+    DEMO_GATEWAY_RESPONSE_BODY,
+  );
+  assert.equal(
+    addResponseSignatureResponseRequest.headers["content-type"],
+    "application/json",
+  );
+  assert.match(
+    addResponseSignatureResponseRequest.headers["content-digest"] as string,
+    /^sha-512=:/,
+  );
+  assert.equal(addResponseSignatureResponseRequest.request?.method, "GET");
+  assert.equal(
+    addResponseSignatureResponseRequest.request?.url,
+    addResponseSignatureResponseRequest.url,
+  );
+
+  // Both labels verify with their own pinned keyids/algs/nonces —
+  // the merchant with ed25519, the gateway with hmac-sha256.
+  assert.equal(addResponseSignatureResponseVerification.length, 2);
+  assert.deepEqual(
+    addResponseSignatureResponseVerification.map((r) => [
+      r.label,
+      r.ok,
+      r.keyId,
+      r.alg,
+      r.nonce,
+    ]),
+    [
+      [
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+        true,
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID,
+        "ed25519",
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE,
+      ],
+      [
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+        true,
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID,
+        "hmac-sha256",
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_NONCE,
+      ],
+    ],
+  );
+  // Tampering the gateway signature bytes fails only that label.
+  assert.equal(addResponseSignatureResponseTamperedVerification.length, 2);
+  assert.equal(addResponseSignatureResponseTamperedVerification[0].ok, true);
+  assert.equal(
+    addResponseSignatureResponseTamperedVerification[0].label,
+    DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+  );
+  assert.equal(addResponseSignatureResponseTamperedVerification[1].ok, false);
+  assert.equal(
+    addResponseSignatureResponseTamperedVerification[1].label,
+    DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+  );
+  assert.equal(
+    addResponseSignatureResponseTamperedVerification[1].code,
+    DEMO_ADD_RESPONSE_SIG_TAMPER_CODE,
+  );
+
+  // Printed lines: header + status + dual ok + tamper isolation —
+  // byte-exact, between the dual-signed segment and the
+  // allowed-algs whitelist segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("addResponseSignature multi-party response:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 4), [
+    `addResponseSignature response status: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
+    `addResponseSignature verification: merchant OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
+    `addResponseSignature after gateway signature tampering: gateway FAILED (code ${DEMO_ADD_RESPONSE_SIG_TAMPER_CODE}: ${addResponseSignatureResponseTamperedVerification[1].reason}), merchant still OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519")`,
+  ]);
+  // The allowed-algs whitelist segment follows the addResponseSignature segment.
   assert.equal(lines[headerIdx + 4], "");
   assert.ok(lines[headerIdx + 5]!.startsWith("Allowed-algs whitelist:"));
+});
+
+test("demo addResponseSignature segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) =>
+      l.startsWith("addResponseSignature multi-party response:"),
+    );
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Allowed-algs whitelist:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // Only the merchant ed25519 key pair is fresh per run and the
+  // signatures themselves are never printed, so the segment's
+  // printed lines — header, status, both verifications and the
+  // tamper isolation — are byte-identical between runs.
+  assert.deepEqual(
+    first.lines.slice(a, aEnd),
+    second.lines.slice(b, bEnd),
+  );
 });
 
 test("demo allowed-algs whitelist segment verifies ed25519 and rejects RSA-PSS before crypto", async () => {
