@@ -26,8 +26,10 @@ export type {
 export { assertContentDigestAlg, contentDigest, contentDigestAlgOf } from "./digest.js";
 export type { ContentDigestAlg } from "./digest.js";
 export {
+  algMatchesKeyShape,
   assertHmacSecretLength,
   assertRsaModulusLength,
+  describeKey,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,

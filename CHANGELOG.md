@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `signRequest` / `signResponse` fail fast on an algorithm/key-type
+  mismatch (backlog #936): the shape predicate behind the verify
+  side's `algFallback: "infer"` check (`verify.ts`
+  `assertAlgMatchesKeyShape`) moved to `keys.ts` as the shared
+  `algMatchesKeyShape` / `describeKey` (both exported), and
+  `signRequest` calls it before building the signature base or
+  touching any crypto — an RSA key paired with `alg: "ed25519"`
+  (or any other swapped pair, including a P-256 key on the P-384
+  curve) now throws `signRequest: alg "…" is incompatible with the
+  key (…)` instead of a cryptic node:crypto error.
+  `signResponse`, `addSignature`, and `addResponseSignature`
+  inherit the check through `signRequest`. New
+  `test/algKeyMismatch.test.ts` cases (14) cover every alg ×
+  wrong-key pairing, the RSA `rsa-v1_5-sha256` positive control,
+  all eight correct pairings round-tripping, the check firing
+  before base building, and all three inherited paths. One
+  existing `test/rsaV15.test.ts` expectation was updated to the
+  new uniform sign-side message (the verify-side wording is
+  unchanged).
+
 - Demo gains an `addResponseSignature` multi-party response
   segment (backlog #929): `src/demo.ts` signs the loopback
   settlement response with `signResponse` (merchant label,

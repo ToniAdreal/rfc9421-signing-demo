@@ -15,7 +15,7 @@ import {
 } from "./components.js";
 import { contentDigest, assertContentDigestAlg, contentDigestAlgOf } from "./digest.js";
 import type { ContentDigestAlg } from "./digest.js";
-import { assertHmacSecretLength, assertRsaModulusLength } from "./keys.js";
+import { algMatchesKeyShape, assertHmacSecretLength, assertRsaModulusLength, describeKey } from "./keys.js";
 import {
   assertStructuredFieldTypes,
   type StructuredFieldType,
@@ -258,6 +258,13 @@ function assertLabelShape(label: string): void {
  *   whose keys contain them.
  * - `contentDigestAlg` must be `"sha-512"` or `"sha-256"` — anything else
  *   would emit a digest the verifier cannot name.
+ * - `alg` must match the shape of `key` (ed25519 needs an Ed25519 key,
+ *   `hmac-*` a secret key, each `ecdsa-p*-*` the EC key on the matching
+ *   curve, `rsa-*` an RSA key) — checked here, before the signature
+ *   base is built and before any crypto runs, so a swapped key or alg
+ *   is a clear configuration error instead of a cryptic node:crypto
+ *   complaint. `signResponse`, `addSignature`, and
+ *   `addResponseSignature` inherit this check through `signRequest`.
  */
 export function signRequest(
   req: RequestLike,
@@ -298,6 +305,17 @@ export function signRequest(
   const digestAlg = opts.contentDigestAlg ?? "sha-512";
   assertContentDigestAlg(digestAlg);
   assertStructuredFieldTypes(opts.structuredFieldTypes, "signRequest");
+  // Fail fast on an alg/key mismatch before the signature base is
+  // built or any crypto runs: without this, an RSA key paired with
+  // `alg: "ed25519"` (or any other swapped pair) surfaces as a
+  // cryptic node:crypto error that says nothing about which of the
+  // two is wrong. The shape predicate is shared with the verify
+  // side (`keys.algMatchesKeyShape`), so the two sides can never
+  // disagree about which alg goes with which key.
+  if (!algMatchesKeyShape(opts.alg, opts.key))
+    throw new Error(
+      `signRequest: alg "${opts.alg}" is incompatible with the key (${describeKey(opts.key)}) — pass a key of the matching type for the algorithm`,
+    );
 
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(req.headers)) {

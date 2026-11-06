@@ -267,6 +267,10 @@ test("relabeling the declared alg flips verification to failure in both directio
 test("a P-256 key paired with rsa-v1_5-sha256 is a clear configuration error on both sides, not a crash", () => {
   const { publicKey: p256Pub, privateKey: p256Priv } = generateP256KeyPair();
 
+  // Backlog #936: the sign side now fails fast with the uniform
+  // alg/key shape error (the old `assertRsaModulusLength` wording
+  // survives on the verify side, where the shape check only runs
+  // under `algFallback: "infer"`).
   assert.throws(
     () =>
       signRequest(REQ, {
@@ -275,7 +279,7 @@ test("a P-256 key paired with rsa-v1_5-sha256 is a clear configuration error on 
         key: p256Priv,
         created: CREATED,
       }),
-    /signRequest: alg "rsa-v1_5-sha256": expected an RSA key/,
+    /signRequest: alg "rsa-v1_5-sha256" is incompatible with the key \(an asymmetric ec key \(prime256v1\)\)/,
   );
 
   const { signed } = signV15();

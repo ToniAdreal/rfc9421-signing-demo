@@ -17,7 +17,7 @@ import {
   type RequestLike,
 } from "./components.js";
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
-import { assertHmacSecretLength, assertRsaModulusLength } from "./keys.js";
+import { assertHmacSecretLength, assertRsaModulusLength, algMatchesKeyShape, describeKey } from "./keys.js";
 import type { SignAlg } from "./sign.js";
 import type { NonceStore } from "./replay.js";
 import {
@@ -483,18 +483,6 @@ type SupportedAlg =
   | "rsa-v1_5-sha256";
 
 /**
- * Human-readable description of a KeyObject's shape, used in caller
- * configuration error messages.
- */
-function describeKey(key: KeyObject): string {
-  if (key.type === "secret") return "a secret (symmetric) key";
-  const curve = key.asymmetricKeyDetails?.namedCurve;
-  return `an asymmetric ${key.asymmetricKeyType ?? "unknown"} key${
-    curve ? ` (${curve})` : ""
-  }`;
-}
-
-/**
  * Infer the signature algorithm from the resolved key's shape. Used only
  * under the explicit `algFallback: "infer"` opt-in, when the
  * signature-input carries no `alg` parameter. An unmappable key shape is
@@ -530,25 +518,12 @@ function inferAlgFromKeyShape(key: KeyObject): SupportedAlg {
  * `alg="ed25519"` with a `secret` key) is a caller configuration error
  * (throw) rather than a confusing `VERIFICATION_ERROR` from the crypto
  * layer. Unknown `alg` values are left alone: they still fail with
- * `UNSUPPORTED_ALG` in the crypto dispatch below.
+ * `UNSUPPORTED_ALG` in the crypto dispatch below. The shape predicate
+ * itself lives in `keys.ts` and is shared with the sign side, so the
+ * two sides can never disagree about which alg goes with which key.
  */
 function assertAlgMatchesKeyShape(alg: SupportedAlg, key: KeyObject): void {
-  const ok =
-    (alg === "ed25519" && key.asymmetricKeyType === "ed25519") ||
-    (alg === "hmac-sha256" && key.type === "secret") ||
-    (alg === "hmac-sha512" && key.type === "secret") ||
-    (alg === "ecdsa-p256-sha256" &&
-      key.asymmetricKeyType === "ec" &&
-      key.asymmetricKeyDetails?.namedCurve === "prime256v1") ||
-    (alg === "ecdsa-p384-sha384" &&
-      key.asymmetricKeyType === "ec" &&
-      key.asymmetricKeyDetails?.namedCurve === "secp384r1") ||
-    (alg === "ecdsa-p521-sha512" &&
-      key.asymmetricKeyType === "ec" &&
-      key.asymmetricKeyDetails?.namedCurve === "secp521r1") ||
-    (alg === "rsa-pss-sha512" && key.asymmetricKeyType === "rsa") ||
-    (alg === "rsa-v1_5-sha256" && key.asymmetricKeyType === "rsa");
-  if (ok) return;
+  if (algMatchesKeyShape(alg, key)) return;
   throw new Error(
     `verifyRequest: wire alg "${alg}" is incompatible with the configured key (${describeKey(key)}) — pass a matching key or remove the algFallback "infer" opt-in`,
   );

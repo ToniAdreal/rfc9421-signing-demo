@@ -199,6 +199,49 @@ export function assertHmacSecretLength(
 }
 
 /**
+ * Human-readable description of a KeyObject's shape, used in caller
+ * configuration error messages on both the sign and verify sides.
+ */
+export function describeKey(key: KeyObject): string {
+  if (key.type === "secret") return "a secret (symmetric) key";
+  const curve = key.asymmetricKeyDetails?.namedCurve;
+  return `an asymmetric ${key.asymmetricKeyType ?? "unknown"} key${
+    curve ? ` (${curve})` : ""
+  }`;
+}
+
+/**
+ * Whether an algorithm name is compatible with a key's shape:
+ * `ed25519` needs an Ed25519 key, `hmac-*` a secret key, each
+ * `ecdsa-p*-*` the EC key on the matching curve, `rsa-*` an RSA key.
+ * The shared predicate behind the sign-side and verify-side
+ * fail-fast checks, so the two sides can never drift apart: the
+ * sign side throws before any crypto runs, the verify side (under
+ * the `algFallback: "infer"` opt-in) throws instead of handing
+ * node:crypto a mismatched pair. An unknown `alg` value is not
+ * this predicate's job — it still fails with `UNSUPPORTED_ALG` /
+ * `unsupported alg` in the dispatch below.
+ */
+export function algMatchesKeyShape(alg: string, key: KeyObject): boolean {
+  return (
+    (alg === "ed25519" && key.asymmetricKeyType === "ed25519") ||
+    (alg === "hmac-sha256" && key.type === "secret") ||
+    (alg === "hmac-sha512" && key.type === "secret") ||
+    (alg === "ecdsa-p256-sha256" &&
+      key.asymmetricKeyType === "ec" &&
+      key.asymmetricKeyDetails?.namedCurve === "prime256v1") ||
+    (alg === "ecdsa-p384-sha384" &&
+      key.asymmetricKeyType === "ec" &&
+      key.asymmetricKeyDetails?.namedCurve === "secp384r1") ||
+    (alg === "ecdsa-p521-sha512" &&
+      key.asymmetricKeyType === "ec" &&
+      key.asymmetricKeyDetails?.namedCurve === "secp521r1") ||
+    (alg === "rsa-pss-sha512" && key.asymmetricKeyType === "rsa") ||
+    (alg === "rsa-v1_5-sha256" && key.asymmetricKeyType === "rsa")
+  );
+}
+
+/**
  * Wrap a shared secret for HMAC signing. Enforces the `hmac-sha256` floor
  * (≥ {@link MIN_HMAC_SECRET_BYTES} bytes); a ≥ 64-byte secret produced here
  * also satisfies the `hmac-sha512` floor
