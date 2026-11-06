@@ -304,6 +304,34 @@ function assertJwkEntryAlg(entry: Record<string, unknown>): void {
 }
 
 /**
+ * Whether a JWKS entry declares itself for a purpose other than
+ * signature verification, used only by the `refresh()` path (see
+ * `fetchAndSwap`). RFC 7517 §4.2 `use` and §4.3 `key_ops` describe
+ * what a key is for: a key the publisher labels `use: "enc"` (or any
+ * `use` other than `"sig"`), or whose `key_ops` does not list
+ * `"verify"`, is not a verification key — importing it would let
+ * `resolve()` hand an encryption key (or a signing-only key) to a
+ * verifier. Such entries are skipped, like kid-less entries: the
+ * document may legitimately publish keys for other protocols, and
+ * skipping keeps the well-formed verification keys importable.
+ * Entries carrying neither field are kept (both fields are optional
+ * in a JWKS document, and most published verification keys declare
+ * neither). A malformed value — a non-string `use`, a non-array
+ * `key_ops` — is likewise skipped rather than coerced: the
+ * fail-closed direction for a key that would otherwise become a
+ * verification key. Snapshot restore does not re-apply this filter:
+ * a snapshot is this store's own export format and carries no
+ * `use` / `key_ops`.
+ */
+function isNonSigningJwkEntry(entry: Record<string, unknown>): boolean {
+  const use = entry["use"];
+  if (use !== undefined && use !== "sig") return true;
+  const keyOps = entry["key_ops"];
+  if (keyOps === undefined) return false;
+  return !(Array.isArray(keyOps) && keyOps.includes("verify"));
+}
+
+/**
  * Serializable snapshot of a {@link JwksKeyStore}, produced by
  * `exportSnapshot()` and consumed by `JwksKeyStore.restore()` /
  * `JwksKeyStore.fromSnapshot()` / `restoreSnapshot()`.
@@ -569,6 +597,15 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   may publish keys for other protocols that carry no `kid`; they
  *   simply cannot be selected by `keyid`, so they are ignored while
  *   their well-formed siblings still import.
+ * - **Entries not meant for signature verification are skipped, not
+ *   fatal.** A JWKS entry whose `use` is present and is not `"sig"`
+ *   (RFC 7517 §4.2 — e.g. `use: "enc"`), or whose `key_ops` is
+ *   present and does not list `"verify"` (§4.3), is not a
+ *   verification key and is ignored while its siblings still import.
+ *   Entries declaring neither field are kept: both are optional in a
+ *   JWKS document. Snapshot restore does not re-apply this filter —
+ *   a snapshot is this store's own export format and carries no
+ *   `use` / `key_ops`.
  * - **Supported key types** are exactly the ones the importers support:
  *   `kty: "OKP"` (ed25519), `kty: "EC"` with `crv: "P-256"`, `"P-384"`,
  *   or `"P-521"`, `kty: "RSA"`, and `kty: "oct"` (an HMAC shared
@@ -856,7 +893,9 @@ export class JwksKeyStore {
    * that disagrees with its key family, or — with
    * `requireHttps: true` — when the response's final `url` shows the
    * fetch was redirected to plaintext `http:`. Entries with a
-   * missing or empty `kid` are skipped (see class documentation).
+   * missing or empty `kid` — and entries that declare a non-signing
+   * purpose (`use` / `key_ops`, see class documentation) — are
+   * skipped.
    */
   refresh(): Promise<void> {
     if (this.inFlightRefresh !== null) return this.inFlightRefresh;
@@ -1032,6 +1071,7 @@ export class JwksKeyStore {
       const o = entry as Record<string, unknown>;
       const kid = o["kid"];
       if (typeof kid !== "string" || kid.length === 0) continue; // skipped, not fatal
+      if (isNonSigningJwkEntry(o)) continue; // non-signing purpose, skipped not fatal
       let key: KeyObject;
       try {
         assertJwkEntryAlg(o);
@@ -1110,8 +1150,8 @@ export class JwksKeyStore {
    * meaningful `fetchedAtSec` for keys that were never fetched, and
    * exporting an empty placeholder would let a caller persist a
    * keyless snapshot that looks legitimate. (A store whose refresh
-   * succeeded but imported zero keys — every entry was kid-less —
-   * exports a valid snapshot with `keys: []`.)
+   * succeeded but imported zero keys — every entry was kid-less or
+   * non-signing — exports a valid snapshot with `keys: []`.)
    */
   exportSnapshot(): JwksKeyStoreSnapshot {
     if (this.lastRefreshAtSec === null)

@@ -504,3 +504,177 @@ test("JwksKeyStore: a network-level fetch failure throws and preserves the snaps
   assert.equal(store.size, 3);
   assert.ok(store.resolve("ed-key-1") !== undefined);
 });
+
+test("JwksKeyStore: a `use: \"enc\"` entry is skipped, its signing siblings still import and verify", async () => {
+  const keys = keyMaterial();
+  const doc = {
+    keys: [
+      { ...exportPublicKeyJwk(keys.ed.publicKey), kid: "ed-enc-key", use: "enc" },
+      { ...exportPublicKeyJwkP256(keys.p256.publicKey), kid: "p256-key-1", use: "sig" },
+      { ...exportPublicKeyJwkRsa(keys.rsa.publicKey), kid: "rsa-key-1" },
+    ],
+  };
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: stubFetch(doc),
+  });
+  await store.refresh(); // must not throw
+  assert.equal(store.size, 2);
+  assert.equal(store.resolve("ed-enc-key"), undefined);
+  assert.ok(store.resolve("p256-key-1") !== undefined);
+  const signed = signAs("p256-key-1", "ecdsa-p256-sha256", keys.p256.privateKey);
+  assert.equal(
+    verifyRequest(signed, { keyResolver: store.resolve, now: CREATED }).ok,
+    true,
+  );
+});
+
+test("JwksKeyStore: `use: \"sig\"` entries are kept", async () => {
+  const keys = keyMaterial();
+  const doc = {
+    keys: [
+      { ...exportPublicKeyJwk(keys.ed.publicKey), kid: "ed-key-1", use: "sig" },
+      { ...exportPublicKeyJwkP256(keys.p256.publicKey), kid: "p256-key-1", use: "sig" },
+      { ...exportPublicKeyJwkRsa(keys.rsa.publicKey), kid: "rsa-key-1", use: "sig" },
+    ],
+  };
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: stubFetch(doc),
+  });
+  await store.refresh();
+  assert.equal(store.size, 3);
+  const signed = signAs("ed-key-1", "ed25519", keys.ed.privateKey);
+  assert.equal(
+    verifyRequest(signed, { keyResolver: store.resolve, now: CREATED }).ok,
+    true,
+  );
+});
+
+test("JwksKeyStore: `key_ops` without \"verify\" is skipped, including malformed `use` / `key_ops` values", async () => {
+  const keys = keyMaterial();
+  const doc = {
+    keys: [
+      { ...exportPublicKeyJwk(keys.ed.publicKey), kid: "ed-sign-only", key_ops: ["sign"] },
+      { ...exportPublicKeyJwkP256(keys.p256.publicKey), kid: "p256-no-ops", key_ops: [] },
+      { ...exportPublicKeyJwkRsa(keys.rsa.publicKey), kid: "rsa-string-ops", key_ops: "verify" },
+      { ...exportPublicKeyJwk(keys.ed.publicKey), kid: "ed-bad-use", use: 42 },
+      { ...exportPublicKeyJwkRsa(keys.rsa.publicKey), kid: "rsa-key-1" },
+    ],
+  };
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: stubFetch(doc),
+  });
+  await store.refresh(); // must not throw
+  assert.equal(store.size, 1);
+  assert.equal(store.resolve("ed-sign-only"), undefined);
+  assert.equal(store.resolve("p256-no-ops"), undefined);
+  assert.equal(store.resolve("rsa-string-ops"), undefined);
+  assert.equal(store.resolve("ed-bad-use"), undefined);
+  assert.ok(store.resolve("rsa-key-1") !== undefined);
+  const signed = signAs("rsa-key-1", "rsa-pss-sha512", keys.rsa.privateKey);
+  assert.equal(
+    verifyRequest(signed, { keyResolver: store.resolve, now: CREATED }).ok,
+    true,
+  );
+});
+
+test("JwksKeyStore: `key_ops` containing \"verify\" is kept", async () => {
+  const keys = keyMaterial();
+  const doc = {
+    keys: [
+      { ...exportPublicKeyJwk(keys.ed.publicKey), kid: "ed-key-1", key_ops: ["verify"] },
+      { ...exportPublicKeyJwkP256(keys.p256.publicKey), kid: "p256-key-1", key_ops: ["sign", "verify"] },
+      { ...exportPublicKeyJwkRsa(keys.rsa.publicKey), kid: "rsa-key-1" },
+    ],
+  };
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: stubFetch(doc),
+  });
+  await store.refresh();
+  assert.equal(store.size, 3);
+  const signed = signAs("p256-key-1", "ecdsa-p256-sha256", keys.p256.privateKey);
+  assert.equal(
+    verifyRequest(signed, { keyResolver: store.resolve, now: CREATED }).ok,
+    true,
+  );
+});
+
+test("JwksKeyStore: entries with neither `use` nor `key_ops` are kept", async () => {
+  const keys = keyMaterial();
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: stubFetch(jwksDocument(keys)),
+  });
+  await store.refresh();
+  assert.equal(store.size, 3);
+  for (const kid of ["ed-key-1", "p256-key-1", "rsa-key-1"])
+    assert.ok(store.resolve(kid) !== undefined, kid);
+});
+
+test("JwksKeyStore: a skipped `use: \"enc\"` entry does not shadow a later `use: \"sig\"` entry with the same kid", async () => {
+  const encKey = generateEd25519KeyPair();
+  const sigKey = generateEd25519KeyPair();
+  const doc = {
+    keys: [
+      { ...exportPublicKeyJwk(encKey.publicKey), kid: "shared-key", use: "enc" },
+      { ...exportPublicKeyJwk(sigKey.publicKey), kid: "shared-key", use: "sig" },
+    ],
+  };
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: stubFetch(doc),
+  });
+  await store.refresh();
+  assert.equal(store.size, 1);
+  const resolved = store.resolve("shared-key");
+  assert.ok(resolved !== undefined);
+  assert.equal(
+    exportPublicKeyJwk(resolved).x,
+    exportPublicKeyJwk(sigKey.publicKey).x,
+  );
+  const signedBySig = signAs("shared-key", "ed25519", sigKey.privateKey);
+  assert.equal(
+    verifyRequest(signedBySig, { keyResolver: store.resolve, now: CREATED }).ok,
+    true,
+  );
+  const signedByEnc = signAs("shared-key", "ed25519", encKey.privateKey);
+  const res = verifyRequest(signedByEnc, { keyResolver: store.resolve, now: CREATED });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "SIGNATURE_MISMATCH");
+});
+
+test("JwksKeyStore: a skipped key's kid is unresolvable, so verification fails with KEY_RESOLUTION_FAILED", async () => {
+  const keys = keyMaterial();
+  const doc = {
+    keys: [
+      { ...exportPublicKeyJwk(keys.ed.publicKey), kid: "enc-key-1", use: "enc" },
+      { ...exportPublicKeyJwkP256(keys.p256.publicKey), kid: "p256-key-1" },
+    ],
+  };
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: stubFetch(doc),
+  });
+  await store.refresh();
+  assert.equal(store.size, 1);
+  assert.equal(store.resolve("enc-key-1"), undefined);
+  const signed = signAs("enc-key-1", "ed25519", keys.ed.privateKey);
+  const res = verifyRequest(signed, { keyResolver: store.resolve, now: CREATED });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "KEY_RESOLUTION_FAILED");
+});
+
+test("JwksKeyStore: a document of only non-signing entries refreshes to an empty snapshot", async () => {
+  const keys = keyMaterial();
+  const doc = {
+    keys: [
+      { ...exportPublicKeyJwk(keys.ed.publicKey), kid: "ed-key-1", use: "enc" },
+      { ...exportPublicKeyJwkP256(keys.p256.publicKey), kid: "p256-key-1", key_ops: ["sign"] },
+      { ...exportPublicKeyJwkRsa(keys.rsa.publicKey), kid: "rsa-key-1", use: "enc", key_ops: ["encrypt"] },
+    ],
+  };
+  const store = new JwksKeyStore("https://gateway.example.com/jwks.json", {
+    fetchImpl: stubFetch(doc),
+  });
+  await store.refresh(); // must not throw
+  assert.equal(store.size, 0);
+  const snapshot = store.exportSnapshot();
+  assert.deepEqual(snapshot.keys, []);
+  assert.equal(typeof snapshot.fetchedAtSec, "number");
+});

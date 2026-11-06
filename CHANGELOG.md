@@ -11,7 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
-- `signRequest` / `signResponse` reject a repeated covered component
+- `JwksKeyStore.refresh()` skips entries that declare a non-signing
+  purpose (backlog #940): a JWKS entry whose `use` is present and is
+  not `"sig"` (RFC 7517 §4.2 — e.g. `use: "enc"`), or whose
+  `key_ops` is present and does not list `"verify"` (§4.3), is not a
+  verification key and is now skipped, like kid-less entries, while
+  its siblings still import — before this, such an entry was imported
+  and `resolve()` could hand an encryption key to a verifier.
+  Entries declaring neither field are kept (both are optional in a
+  JWKS document), a malformed value (non-string `use`, non-array
+  `key_ops`) is likewise skipped rather than coerced, and a skipped
+  entry never shadows a later same-`kid` signing entry. Snapshot
+  restore is unchanged (a snapshot carries no `use` / `key_ops`).
+  New `test/jwks.test.ts` entries (8 tests) cover the `use: "enc"`
+  skip with a verifying sibling, `use: "sig"` kept, `key_ops`
+  without `"verify"` skipped (including empty and malformed values),
+  `key_ops` with `"verify"` kept, neither-field entries kept, the
+  same-`kid` non-shadowing case, the skipped kid resolving to
+  `KEY_RESOLUTION_FAILED`, and an all-non-signing document refreshing
+  to an empty snapshot.
   (backlog #939): a shared `assertNoDuplicateCoveredComponents`
   guard (exported, with its `coveredComponentKey` normalizer) runs
   before the signature base is built and before any crypto —
