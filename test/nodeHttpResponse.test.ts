@@ -114,6 +114,105 @@ test("missing statusCode fails fast", () => {
   );
 });
 
+// A string "200" used to slip through the adapter and verify as status
+// 200 (@status resolution stringifies whatever it is given), while
+// signResponse/verifyResponse reject non-integer statuses outright —
+// the adapter now enforces the integer rule at the boundary.
+test("a string statusCode fails fast instead of verifying as 200", () => {
+  assert.throws(
+    () =>
+      fromNodeResponse(
+        incomingResponse({
+          statusCode: "200" as unknown as number,
+          headers: {},
+        }),
+        "body",
+        { method: "GET", url: URL },
+      ),
+    /fromNodeResponse: res\.statusCode must be an integer HTTP status code, got 200/,
+  );
+});
+
+test("a float statusCode fails fast", () => {
+  assert.throws(
+    () =>
+      fromNodeResponse(
+        incomingResponse({ statusCode: 200.5, headers: {} }),
+        "body",
+        { method: "GET", url: URL },
+      ),
+    /fromNodeResponse: res\.statusCode must be an integer HTTP status code, got 200\.5/,
+  );
+});
+
+test("a NaN statusCode fails fast", () => {
+  assert.throws(
+    () =>
+      fromNodeResponse(
+        incomingResponse({ statusCode: NaN, headers: {} }),
+        "body",
+        { method: "GET", url: URL },
+      ),
+    /fromNodeResponse: res\.statusCode must be an integer HTTP status code, got NaN/,
+  );
+});
+
+test("a boolean statusCode fails fast", () => {
+  assert.throws(
+    () =>
+      fromNodeResponse(
+        incomingResponse({
+          statusCode: true as unknown as number,
+          headers: {},
+        }),
+        "body",
+        { method: "GET", url: URL },
+      ),
+    /fromNodeResponse: res\.statusCode must be an integer HTTP status code, got true/,
+  );
+});
+
+test("a null statusCode fails fast (it is not the missing case)", () => {
+  assert.throws(
+    () =>
+      fromNodeResponse(
+        incomingResponse({
+          statusCode: null as unknown as number,
+          headers: {},
+        }),
+        "body",
+        { method: "GET", url: URL },
+      ),
+    /fromNodeResponse: res\.statusCode must be an integer HTTP status code, got null/,
+  );
+});
+
+test("an integer 404 statusCode still verifies end-to-end", () => {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(
+    { method: "GET", url: URL, headers: {}, body: BODY, status: 404 },
+    {
+      keyId: "k1",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      coveredComponents: ["@status"],
+    },
+  );
+  const reqLike = fromNodeResponse(
+    incomingResponse({ statusCode: 404, headers: wireHeaders(signed) }),
+    BODY,
+    { method: "GET", url: URL },
+  );
+  assert.equal(reqLike.status, 404);
+  const result = verifyRequest(reqLike, {
+    key: publicKey,
+    now: NOW,
+    requiredComponents: ["@status"],
+  });
+  assert.equal(result.ok, true);
+});
+
 test("neither opts.request nor the explicit method+url pair fails fast", () => {
   assert.throws(
     () => fromNodeResponse(incomingResponse({ headers: {} }), "body"),

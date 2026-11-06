@@ -4189,6 +4189,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `fromNodeResponse` now rejects a non-integer `res.statusCode` at the
+  adapter boundary (backlog #931): it previously checked only for a
+  missing status, so a string `"200"` slipped through and verified as
+  status 200 (`@status` resolution stringifies whatever it is given)
+  while `signResponse` / `verifyResponse` reject non-integer statuses
+  outright. A non-integer status now throws a descriptive
+  configuration `Error` (`res.statusCode must be an integer HTTP
+  status code, got …`); floats, `NaN`, booleans and `null` are refused
+  the same way instead of surfacing as an opaque
+  `SIGNATURE_MISMATCH`. New `test/nodeHttpResponse.test.ts` cases (6)
+  pin the five rejections and an integer-404 end-to-end verification.
 - RSA JWK import now enforces the 2048-bit modulus floor (backlog
   #917): `importPublicKeyJwkRsa` in `src/keys.ts` calls
   `assertRsaModulusLength` after node:crypto accepts the JWK, so a

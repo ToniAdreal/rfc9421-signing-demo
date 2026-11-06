@@ -117,6 +117,13 @@ export interface FromNodeResponseOptions {
  * Throws a descriptive `Error` on a missing `res.statusCode`: `@status`
  * is the whole point of response verification, so a response without a
  * status is a caller configuration mistake, never silently defaulted.
+ * The same fail-fast applies to a non-integer `statusCode` (a string
+ * `"200"`, a float, `NaN`, a boolean): `signResponse` /
+ * `verifyResponse` reject non-integer statuses outright
+ * (`assertStatus` in `response.ts`), and `@status` resolution
+ * stringifies whatever it is given — without this check a string
+ * `"200"` would verify as status 200, so the adapter is the boundary
+ * where the integer rule is enforced.
  */
 export function fromNodeResponse(
   res: IncomingResponseLike,
@@ -127,6 +134,10 @@ export function fromNodeResponse(
   if (status === undefined)
     throw new Error(
       "fromNodeResponse: res.statusCode is missing — @status verification needs the response status",
+    );
+  if (typeof status !== "number" || !Number.isInteger(status))
+    throw new Error(
+      `fromNodeResponse: res.statusCode must be an integer HTTP status code, got ${String(status)}`,
     );
 
   let method: string | undefined;
