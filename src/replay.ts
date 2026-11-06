@@ -1,3 +1,5 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
+
 /**
  * In-memory nonce replay cache (zero dependencies).
  *
@@ -17,6 +19,14 @@
  * implementation; a deployment with multiple verifier processes should
  * implement `NonceStore` over shared storage (e.g. Redis) for real
  * replay protection — see SECURITY.md.
+ *
+ * The unsigned snapshot is trusted configuration only: anyone who can
+ * rewrite the persisted snapshot can delete tracked nonces and reopen
+ * the replay window. For an integrity-protected form, use the signed
+ * envelope instead (see {@link ReplayCacheSignedSnapshotEnvelope} and
+ * `ReplayCache.exportSignedSnapshot()` /
+ * `ReplayCache.restoreSignedSnapshot()`): the unsigned snapshot stays
+ * unsigned, the envelope is the opt-in that catches a rewrite.
  */
 
 /**
@@ -100,14 +110,136 @@ export interface ReplayCacheStats {
  * part of the snapshot: a restored cache starts them at zero.
  *
  * The snapshot is plain JSON data (`JSON.stringify` it to persist it),
- * but it is not a shared store: two processes restoring the same
- * snapshot afterwards diverge, and nonces recorded by one are invisible
- * to the other. Multi-instance deployments still need shared storage
- * behind the `NonceStore` interface.
+ * but it is **not signed and not integrity-protected**: anyone who can
+ * rewrite the persisted snapshot can delete tracked nonces and reopen
+ * the replay window for them. Treat it as trusted configuration —
+ * store and transport it only where you would store the verifier's own
+ * trust decision — and for an integrity-protected form, use the signed
+ * envelope instead (see {@link ReplayCacheSignedSnapshotEnvelope} and
+ * `ReplayCache.exportSignedSnapshot()` /
+ * `ReplayCache.restoreSignedSnapshot()`): the unsigned snapshot stays
+ * unsigned, the envelope is the opt-in that catches a rewrite.
+ *
+ * A snapshot covers a single process across its own restart only:
+ * two processes restoring the same snapshot afterwards diverge, and
+ * nonces recorded by one are invisible to the other. Multi-instance
+ * deployments still need shared storage behind the `NonceStore`
+ * interface.
  */
 export interface ReplayCacheSnapshot {
   v: 1;
   entries: Array<[nonce: string, seenAt: number]>;
+}
+
+/**
+ * Integrity-protected form of a {@link ReplayCacheSnapshot}, produced
+ * by `ReplayCache.exportSignedSnapshot(secret)` and consumed by
+ * `ReplayCache.restoreSignedSnapshot(envelope, secret, opts?)` (see
+ * those methods for the exact contract). Same envelope shape as the
+ * JWKS signed snapshot (`JwksSignedSnapshotEnvelope`).
+ *
+ * - `v`: envelope format version. Only `1` exists; restore rejects
+ *   any other value (including a missing `v`) instead of guessing.
+ * - `snapshot`: the wrapped {@link ReplayCacheSnapshot}, exactly as
+ *   `exportSnapshot()` produces it (live nonces only, with their
+ *   original first-seen timestamps).
+ * - `mac`: lowercase hex HMAC-SHA256 over the canonical JSON of
+ *   `snapshot` (object keys sorted recursively, array order
+ *   preserved) under the caller's secret.
+ *
+ * The envelope carries no secret: the secret is caller configuration,
+ * never persisted in the envelope, and the same secret must be
+ * supplied at restore time. An envelope with any other field is
+ * rejected, so a caller cannot smuggle extra data (including a
+ * secret) past restore. The MAC is integrity protection only — it
+ * proves the snapshot was not rewritten by anyone without the
+ * secret — not confidentiality: the nonces inside are not secrets
+ * (they are wire-visible values from signed requests), and the
+ * envelope itself is plain JSON. A caller that needs the snapshot
+ * kept private must encrypt it separately; this envelope does not.
+ */
+export interface ReplayCacheSignedSnapshotEnvelope {
+  v: 1;
+  snapshot: ReplayCacheSnapshot;
+  mac: string;
+}
+
+/**
+ * Canonical JSON for snapshot MACing: object keys sorted
+ * recursively (so a JSON round-trip that reorders keys still
+ * verifies), array order preserved (reordering entries would change
+ * which nonce wins a duplicate, so it must change the MAC), and
+ * primitives via `JSON.stringify`. A non-JSON value (notably
+ * `undefined`, which `JSON.stringify` would silently drop) throws
+ * instead of being silently normalized — a MAC computed over a
+ * silently altered document would be worse than no MAC.
+ * Same semantics as the JWKS signed snapshot's canonical form.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new Error(
+        "ReplayCache: cannot canonicalize a non-finite number for snapshot signing",
+      );
+    return JSON.stringify(value);
+  }
+  if (typeof value === "string" || typeof value === "boolean")
+    return JSON.stringify(value);
+  if (Array.isArray(value))
+    return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  throw new Error(
+    `ReplayCache: cannot canonicalize a non-JSON value of type ${typeof value} for snapshot signing`,
+  );
+}
+
+/**
+ * Validate a signed-snapshot secret and return its bytes. A secret
+ * is a non-empty string (UTF-8) or a non-empty `Buffer` — the same
+ * input shapes as `keys.secretKey`, but deliberately without that
+ * helper's 32-byte floor: this MAC is integrity protection for a
+ * list of already wire-visible nonces, and the backlog contract for
+ * this helper rejects only an empty secret, so a shorter caller
+ * secret is the caller's risk to take (use a long random secret;
+ * the envelope never records how long it was). An empty or
+ * wrongly typed secret is a caller-configuration error, thrown
+ * before any cache state is touched.
+ */
+function signedSnapshotSecretBytes(secret: unknown): Buffer {
+  if (typeof secret === "string") {
+    if (secret.length === 0)
+      throw new Error(
+        "ReplayCache: signed snapshot secret must not be empty",
+      );
+    return Buffer.from(secret, "utf8");
+  }
+  if (Buffer.isBuffer(secret)) {
+    if (secret.length === 0)
+      throw new Error(
+        "ReplayCache: signed snapshot secret must not be empty",
+      );
+    return secret;
+  }
+  throw new Error(
+    `ReplayCache: signed snapshot secret must be a non-empty string or Buffer, got ${typeof secret}`,
+  );
+}
+
+/** HMAC-SHA256 (hex) over the canonical JSON of a snapshot. */
+function computeSnapshotMac(
+  snapshot: ReplayCacheSnapshot,
+  secretBytes: Buffer,
+): string {
+  return createHmac("sha256", secretBytes)
+    .update(canonicalJson(snapshot), "utf8")
+    .digest("hex");
 }
 
 export class ReplayCache implements NonceStore {
@@ -218,6 +350,32 @@ export class ReplayCache implements NonceStore {
   }
 
   /**
+   * Export the current snapshot wrapped in an HMAC-signed envelope
+   * (see {@link ReplayCacheSignedSnapshotEnvelope}): `{ v: 1, snapshot,
+   * mac }` where `mac` is HMAC-SHA256 over the canonical JSON of
+   * the snapshot under `secret`. Persist the envelope (plain JSON)
+   * before a restart and restore it with
+   * {@link ReplayCache.restoreSignedSnapshot} — a process that
+   * restarts keeps rejecting nonces seen inside their TTL, and anyone
+   * who rewrites the persisted entries without the secret is caught
+   * at restore instead of silently reopening the replay window.
+   *
+   * The secret is never written into the envelope, and the envelope
+   * is integrity protection only, not encryption: the nonces inside
+   * are wire-visible values, so the envelope itself needs no secrecy,
+   * but the secret must be kept where the snapshot writer keeps its
+   * other signing-side secrets. An empty secret is a
+   * caller-configuration error. The unsigned `exportSnapshot()`
+   * path is unchanged: this envelope is opt-in, and a caller that
+   * never signs keeps the old trusted-configuration semantics.
+   */
+  exportSignedSnapshot(secret: string | Buffer): ReplayCacheSignedSnapshotEnvelope {
+    const secretBytes = signedSnapshotSecretBytes(secret);
+    const snapshot = this.exportSnapshot();
+    return { v: 1, snapshot, mac: computeSnapshotMac(snapshot, secretBytes) };
+  }
+
+  /**
    * Rebuild a cache from a snapshot produced by `exportSnapshot()`
    * (typically after a `JSON.parse` of the persisted form). `opts`
    * configures the *new* cache (`maxEntries`/`ttlSec`/`now`) and is
@@ -303,6 +461,88 @@ export class ReplayCache implements NonceStore {
   /** Alias of {@link ReplayCache.restore} (snapshot naming). */
   static fromSnapshot(snapshot: unknown, opts: ReplayCacheOptions = {}): ReplayCache {
     return ReplayCache.restore(snapshot, opts);
+  }
+
+  /**
+   * Rebuild a cache from a signed envelope produced by
+   * {@link ReplayCache.exportSignedSnapshot} (typically after a
+   * `JSON.parse` of the persisted form). `opts` configures the *new*
+   * cache (`maxEntries`/`ttlSec`/`now`) and is validated exactly
+   * like the constructor's. The returned cache is a fresh object —
+   * nothing is installed into any existing cache, so a failed
+   * restore leaves the caller's caches untouched.
+   *
+   * Restore is fail-closed in the same order as the unsigned path,
+   * with authenticity checked first: an envelope with an unknown
+   * field (including a smuggled `secret`), a version other than
+   * `1`, a malformed `mac`, or a MAC that does not match the
+   * snapshot under `secret` throws a descriptive configuration
+   * `Error` and no cache is produced — a tampered entry, a tampered
+   * `seenAt`, or a wrong secret all fail here, before any snapshot
+   * parsing, so a tampered envelope can never partially install. A
+   * MAC-valid envelope whose snapshot is itself malformed then
+   * fails through the same strict snapshot validation as
+   * {@link ReplayCache.restore}, again with no cache produced. The
+   * MAC comparison is constant-time over equal-length hex digests; a
+   * wrong-length `mac` is rejected as malformed before comparison.
+   *
+   * On success the semantics are exactly {@link ReplayCache.restore}'s:
+   * expired entries are dropped, over-capacity snapshots keep the
+   * newest entries, TTLs keep counting from each entry's original
+   * `seenAt`, and the observability counters start at zero.
+   */
+  static restoreSignedSnapshot(
+    envelope: unknown,
+    secret: string | Buffer,
+    opts: ReplayCacheOptions = {},
+  ): ReplayCache {
+    const secretBytes = signedSnapshotSecretBytes(secret);
+    const fail = (detail: string): never => {
+      throw new Error(`ReplayCache: invalid signed snapshot envelope: ${detail}`);
+    };
+    if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope))
+      fail("expected an object of the form { v: 1, snapshot, mac }");
+    const record = envelope as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key !== "v" && key !== "snapshot" && key !== "mac")
+        fail(`unknown field "${key}"`);
+    }
+    if (record.v !== 1)
+      fail(
+        `unsupported envelope version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1)`,
+      );
+    const mac = record.mac;
+    if (typeof mac !== "string" || !/^[0-9a-f]{64}$/.test(mac))
+      throw new Error(
+        "ReplayCache: invalid signed snapshot envelope: mac must be a 64-character lowercase hex HMAC-SHA256 digest",
+      );
+    const snapshot = record.snapshot;
+    if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot))
+      fail('"snapshot" must be an object');
+    const expectedMac = computeSnapshotMac(
+      snapshot as ReplayCacheSnapshot,
+      secretBytes,
+    );
+    const macBytes = Buffer.from(mac, "hex");
+    const expectedBytes = Buffer.from(expectedMac, "hex");
+    if (
+      macBytes.length !== expectedBytes.length ||
+      !timingSafeEqual(macBytes, expectedBytes)
+    )
+      throw new Error(
+        "ReplayCache: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
+      );
+    // MAC verified — now the same strict structural validation as restore().
+    return ReplayCache.restore(snapshot, opts);
+  }
+
+  /** Alias of {@link ReplayCache.restoreSignedSnapshot} (snapshot naming). */
+  static fromSignedSnapshot(
+    envelope: unknown,
+    secret: string | Buffer,
+    opts: ReplayCacheOptions = {},
+  ): ReplayCache {
+    return ReplayCache.restoreSignedSnapshot(envelope, secret, opts);
   }
 
   /**

@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- HMAC-signed `ReplayCache` snapshot envelope (backlog #920): new
+  `ReplayCacheSignedSnapshotEnvelope` (`{ v: 1, snapshot, mac }`) in
+  `src/replay.ts`, mirroring the JWKS signed snapshot format —
+  `exportSignedSnapshot(secret)` (HMAC-SHA256 hex over the snapshot's
+  canonical JSON; the secret is never written into the envelope) and
+  `static restoreSignedSnapshot(envelope, secret, opts?)` (verifies
+  the MAC with a constant-time comparison before parsing the snapshot;
+  a tampered entry, a tampered `seenAt`, or a wrong secret is rejected
+  and installs nothing, and a MAC-valid but structurally broken
+  snapshot still fails the strict snapshot validation), plus the
+  `fromSignedSnapshot` alias. The unsigned `exportSnapshot()` /
+  `restore()` path is unchanged and remains trusted-configuration
+  only. New `test/replaySignedSnapshot.test.ts` (14 cases) pins the
+  shape: signed JSON round-trip with replay still reported
+  (`NONCE_REPLAY`) end-to-end through `verifyRequest`, tampered entry
+  / `seenAt` / wrong secret all rejected, empty and non-string secrets
+  fail fast on both sides, key-reordered JSON still verifies (canonical
+  MAC) while reordered entries fail it, MAC-valid malformed snapshots
+  rejected, Buffer secrets equivalent to the same string secret, and
+  expired entries excluded from the signed snapshot.
 - Throwing multi-label verification (backlog #914): new
   `verifyAllLabelsOrThrow(req, opts)` in `src/verify.ts` returns the
   per-label success results when every label verifies and otherwise

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1542 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1556 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1177,7 +1177,18 @@ values. Without a request to bind to, keep using the request-side API
   at startup instead of silently disabling replay protection). Expired
   entries are dropped at load, an over-capacity snapshot keeps the
   newest entries, TTLs keep counting from first sight rather than from
-  the restore, and the observability counters restart at zero.
+  the restore, and the observability counters restart at zero. The
+  unsigned snapshot is trusted configuration only — anyone who can
+  rewrite the persisted file can delete tracked nonces and reopen the
+  replay window. For an integrity-protected form, use the opt-in signed
+  envelope instead: `cache.exportSignedSnapshot(secret)` returns
+  `{ v: 1, snapshot, mac }` (HMAC-SHA256 over the snapshot's canonical
+  JSON; the secret is never written into the envelope), and
+  `ReplayCache.restoreSignedSnapshot(envelope, secret, opts)` verifies
+  the MAC before parsing the snapshot, so a tampered entry, a tampered
+  `seenAt`, or a wrong secret is rejected at restore and installs
+  nothing (a MAC-valid but structurally broken snapshot still fails
+  the strict snapshot validation).
 - **Application tag (RFC 9421 §2.3)**: pass `tag` to `signRequest` and it
   is emitted as a `tag` signature-input parameter — part of the signed
   `@signature-params` line, so a forged tag fails with
@@ -1484,7 +1495,11 @@ const dual = addResponseSignature(merchantSigned, {
   can survive its *own* process's restart — export a snapshot before
   shutdown and restore it at startup — but it is not shared between
   verifier instances, and two processes restoring the same snapshot
-  diverge immediately afterwards. If you run multiple verifiers,
+  diverge immediately afterwards. The unsigned snapshot is trusted
+  configuration only (a rewrite can delete tracked nonces); the
+  opt-in signed envelope, `exportSignedSnapshot` /
+  `restoreSignedSnapshot`, catches a rewritten snapshot at restore
+  time. If you run multiple verifiers,
   deduplicate nonces in a shared store
   (e.g. Redis) instead of (or in addition to) this cache.
 - **Demo-grade key management.** Keys are passed in directly, resolved via a
@@ -3608,7 +3623,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1542 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1556 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

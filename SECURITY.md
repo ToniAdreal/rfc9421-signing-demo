@@ -58,7 +58,16 @@ Read this before using it anywhere that matters.
   `exportSnapshot()` / `ReplayCache.restore()` (the snapshot is
   strictly validated at load, TTLs keep counting from each nonce's
   original first-seen time, and the observability counters restart at
-  zero), but it is not shared across verifier instances, so a
+  zero). The unsigned snapshot is trusted configuration only: anyone
+  who can rewrite the persisted snapshot can delete tracked nonces
+  and reopen the replay window. For an integrity-protected form, use
+  the opt-in signed envelope instead —
+  `exportSignedSnapshot(secret)` /
+  `ReplayCache.restoreSignedSnapshot(envelope, secret)` (HMAC-SHA256
+  over the snapshot's canonical JSON; the secret is never written
+  into the envelope): a tampered entry, a tampered `seenAt`, or a
+  wrong secret is rejected at restore and installs nothing. The
+  cache is not shared across verifier instances, so a
   multi-instance deployment should implement `NonceStore` over shared
   storage:
   ```ts

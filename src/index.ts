@@ -8,6 +8,7 @@ export { ReplayCache } from "./replay.js";
 export type {
   NonceStore,
   ReplayCacheOptions,
+  ReplayCacheSignedSnapshotEnvelope,
   ReplayCacheSnapshot,
   ReplayCacheStats,
 } from "./replay.js";
