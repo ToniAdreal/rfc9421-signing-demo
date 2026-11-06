@@ -49,7 +49,7 @@ import {
   type RequestLike,
 } from "./components.js";
 import { contentDigestAlgOf } from "./digest.js";
-import { signRequest, type SignOptions } from "./sign.js";
+import { signRequest, assertNoDuplicateCoveredComponents, type SignOptions } from "./sign.js";
 import { verifyRequest, type VerifyOptions, type VerifyResult } from "./verify.js";
 
 /**
@@ -239,6 +239,10 @@ export function signResponse(
   assertStatus("signResponse", res.status);
   const covered =
     opts.coveredComponents ?? defaultResponseCoveredComponents(res.body !== undefined);
+  // Same duplicate guard as the request side, naming this entry
+  // point; the delegated signRequest call would reject it too, but
+  // with the wrong caller in the message.
+  assertNoDuplicateCoveredComponents("signResponse", covered);
   const offending = findRequestComponent(covered, opts.request !== undefined);
   if (offending !== undefined)
     throw new Error(

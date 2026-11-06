@@ -199,6 +199,76 @@ function defaultCoveredComponents(hasBody: boolean): string[] {
 }
 
 /**
+ * Canonical identity of one covered-component entry for duplicate
+ * detection: the base identifier lowercased (component ids are
+ * case-insensitive, RFC 9421 §2.1) with surrounding quotes stripped,
+ * plus each parameter name lowercased, in listed order. Parameter
+ * values are kept verbatim — Dictionary keys (`;key="a"` vs
+ * `;key="b"`) and query-param names are case-sensitive, so two
+ * entries differing only in a parameter value name different
+ * components.
+ *
+ * The parameters are part of the key on purpose: a parameter
+ * reroutes what the component binds, so `"@method"` and
+ * `"@method";req` are distinct identifiers — the first binds this
+ * message's method, the second the associated request's method
+ * (RFC 9421 §2.2.7), and covering both is legitimate (pinned by
+ * `test/reqComponent.test.ts`: same base, `@method` vs `@method;req`,
+ * coexists). What is rejected is the same identifier twice:
+ * `"@method"` + `"@method"`, or case/quoting variants of it
+ * (`"@METHOD"`, `"@method";req` + `"@METHOD";REQ`), which would
+ * mint a signature base with the identical line twice — a silent
+ * non-standard signature the verifier would rebuild identically
+ * and accept. Entries this helper cannot split (malformed) fall
+ * through to `buildSignatureBase`, which reports them properly;
+ * the key is only used for equality, never for parsing.
+ */
+export function coveredComponentKey(entry: string): string {
+  const input = entry.trim();
+  const semi = input.indexOf(";");
+  let base = (semi === -1 ? input : input.slice(0, semi)).trim().toLowerCase();
+  if (base.length >= 2 && base.startsWith('"') && base.endsWith('"'))
+    base = base.slice(1, -1);
+  if (semi === -1) return base;
+  const params = input
+    .slice(semi + 1)
+    .split(";")
+    .map((p) => {
+      const eq = p.indexOf("=");
+      const name = (eq === -1 ? p : p.slice(0, eq)).trim().toLowerCase();
+      return eq === -1 ? name : `${name}=${p.slice(eq + 1).trim()}`;
+    })
+    .join(";");
+  return `${base};${params}`;
+}
+
+/**
+ * Fail fast on a repeated covered component, before the signature
+ * base is built and before any crypto runs. Without this,
+ * `["@method", "@method"]` mints a base with the `@method` line
+ * twice — the verifier rebuilds the identical base, so the
+ * malformed signature verifies silently. `signResponse` calls this
+ * with its own name (it delegates the actual signing to
+ * `signRequest`, so the message names the entry point the caller
+ * used); `addSignature` / `addResponseSignature` inherit the
+ * guard through `signRequest` / `signResponse`.
+ */
+export function assertNoDuplicateCoveredComponents(
+  caller: "signRequest" | "signResponse",
+  covered: string[],
+): void {
+  const seen = new Set<string>();
+  for (const entry of covered) {
+    const key = coveredComponentKey(entry);
+    if (seen.has(key))
+      throw new Error(
+        `${caller}: coveredComponents must not repeat a component, got ${JSON.stringify(entry)} twice`,
+      );
+    seen.add(key);
+  }
+}
+
+/**
  * `created`/`expires` are Unix seconds on the wire, and the verifier's
  * `signature-input` parser only recognizes the `-?\d+` integer shape.
  * Reject anything else here so the signer can never emit a timestamp the
@@ -241,6 +311,14 @@ function assertLabelShape(label: string): void {
  *
  * Fail-fast configuration errors (thrown, not embedded in the signature):
  * - `coveredComponents: []` signs nothing, so it is rejected;
+ * - a covered component listed twice (same identifier after
+ *   lowercasing the base and parameter names, parameters included —
+ *   `"@method"` + `"@method"`, or `"@method";req` + `"@METHOD";REQ`)
+ *   is rejected: it would mint a base with the identical line twice,
+ *   a silent non-standard signature the verifier would rebuild
+ *   identically and accept. `"@method"` + `"@method";req` is NOT a
+ *   duplicate — `;req` reroutes the component to the associated
+ *   request, so the two bind different values;
  * - `created` / `expires` must be finite integers (Unix seconds) — the
  *   verifier's `signature-input` parser only recognizes integer values, so
  *   a fractional timestamp would silently diverge between signer and
@@ -302,6 +380,7 @@ export function signRequest(
     throw new Error(
       'signRequest: "coveredComponents" must cover at least one component; an empty list would sign nothing',
     );
+  assertNoDuplicateCoveredComponents("signRequest", covered);
   const digestAlg = opts.contentDigestAlg ?? "sha-512";
   assertContentDigestAlg(digestAlg);
   assertStructuredFieldTypes(opts.structuredFieldTypes, "signRequest");

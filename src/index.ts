@@ -1,4 +1,9 @@
-export { addSignature, signRequest } from "./sign.js";
+export {
+  addSignature,
+  assertNoDuplicateCoveredComponents,
+  coveredComponentKey,
+  signRequest,
+} from "./sign.js";
 export type { SignAlg, SignedHttpRequest, SignOptions } from "./sign.js";
 export { verifyAllLabels, verifyAllLabelsOrThrow, verifyRequest, verifyRequestOrThrow } from "./verify.js";
 export type { VerifyAllOptions, VerifyOptions, VerifyResult } from "./verify.js";

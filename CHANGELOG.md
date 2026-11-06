@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `signRequest` / `signResponse` reject a repeated covered component
+  (backlog #939): a shared `assertNoDuplicateCoveredComponents`
+  guard (exported, with its `coveredComponentKey` normalizer) runs
+  before the signature base is built and before any crypto —
+  `["@method", "@method"]` threw nothing before and minted a base
+  with the `@method` line twice, which the verifier rebuilds
+  identically and accepts. The comparison lowercases the base and
+  parameter names and strips surrounding quotes, and the parameter
+  suffix counts: `"@method"` + `"@METHOD"` and `"@method";req` +
+  `"@METHOD";REQ` are rejected, while `"@method"` + `"@method";req`
+  stays legal — `;req` reroutes the component to the associated
+  request, so the two bind different values (the coexistence the
+  `reqComponent` "same base" test pins). `addSignature` /
+  `addResponseSignature` inherit the guard through `signRequest` /
+  `signResponse`; the verify side is unchanged, so a foreign
+  signature minted over a duplicated list still verifies. New
+  `test/duplicateCoveredComponent.test.ts` (9 tests) covers the
+  exact / case-variant / quoted / same-parameter-case-variant
+  rejections, the `;req` non-duplicate, the clean-list round-trip,
+  both append paths, and the unchanged verify behavior.
+
 - Benchmark row for the `addResponseSignature` dual-label
   response path (backlog #938): `bench/bench.ts` gains
   `benchmarkAddResponseSignature`, the response-side mirror of
