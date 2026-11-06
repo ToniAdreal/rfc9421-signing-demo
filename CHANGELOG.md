@@ -11,7 +11,34 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
-- `verifyAllLabels` gains `VerifyAllOptions.requiredLabels`
+- `;sf` supports the RFC 9651 Date and Display String types
+  (backlog #926): `src/structuredFields.ts` adds `parseDate` (`@` +
+  an integer number of seconds, §3.3.7 — a negative delta is a valid
+  pre-epoch timestamp per the RFC, and a Decimal Date fails closed)
+  and `parseDisplayString` (`%` + a double-quoted run, §3.3.8 —
+  percent-escapes take lowercase hex only, the accumulated bytes
+  must decode as strict UTF-8, and there are no backslash escapes),
+  with strict serialization (Date as canonical `@<int>`; Display
+  String re-encoded per §4.1.11, percent-encoding `%`, DQUOTE, and
+  bytes outside printable ASCII with lowercase hex). No registry
+  change was needed: the type is determined by the first character,
+  so the Dictionary → List → Item trial order and
+  `canonicalizeStructuredFieldValueAs` cover the new types, and
+  `;key` member selection serializes Date and Display String members
+  strictly too. A foreign signer covering a Date or Display String
+  header with `;sf` previously failed with
+  `SIGNATURE_BASE_BUILD_FAILED` even when the signature was valid.
+  New `test/structuredFieldDateDisplayString.test.ts` (19 cases)
+  pins the shape: Date round-trip and canonical form, negative Dates,
+  Dates in Dictionaries/Lists/Inner Lists/parameters, invalid Dates
+  (decimal, non-numeric, empty, 16-digit), Display String ASCII and
+  non-ASCII round-trips, DQUOTE/backslash via `%22`/`%5c`, uppercase
+  and malformed percent-escapes rejected, non-UTF-8 bytes rejected,
+  raw non-ASCII/control characters rejected, backslash-literal
+  behaviour, RFC 8941 core types unaffected, and `;sf` sign→verify
+  round-trips for Date, Display String, and a Date Dictionary member
+  via `;key`, plus a tampered Date failing with
+  `SIGNATURE_MISMATCH`.
   (backlog #923): labels that must be present on the request for
   multi-party verification to pass — every required label that never
   appears on the wire is appended as a synthetic failure (`{ ok: false,

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1568 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1587 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1011,17 +1011,23 @@ values. Without a request to bind to, keep using the request-side API
   ", " before encoding.
 - **Strict Structured Field serialization (§2.1.1 `;sf`)**: a header
   field component may carry `;sf` — `"x-quota";sf` — in which case the
-  field value is parsed as an HTTP Structured Field (RFC 8941) and
-  re-serialized with the strict rules of RFC 8941 §4 before entering
+  field value is parsed as an HTTP Structured Field (RFC 9651) and
+  re-serialized with the strict rules of RFC 9651 §4 before entering
   the signature base: separator whitespace collapses to the canonical
   form and decimals gain their three-digit fraction, so a value and
   its re-spaced wire twin verify identically under `;sf` (without it
-  they are different signatures). Honest scope: the RFC 8941 core
-  types are supported (Dictionary, List, Item and Inner List;
-  Integer, Decimal, String, Token, Byte Sequence, Boolean, and
-  parameters); the RFC 9651 extensions (Date, Display String) are
-  not, and a value that parses as no supported type fails closed on
-  both sides. RFC 9421 expects the application to know the field's
+  they are different signatures). Honest scope: the RFC 9651 types
+  are supported (Dictionary, List, Item and Inner List; Integer,
+  Decimal, String, Token, Byte Sequence, Boolean, Date, Display
+  String, and parameters), and a value that parses as no supported
+  type fails closed on both sides. Dates are `@` + an integer number
+  of seconds from the epoch (RFC 9651 §3.3.7 — a negative delta is a
+  valid pre-epoch timestamp, and a Decimal Date fails closed);
+  Display Strings are `%` + a double-quoted run whose non-ASCII
+  content travels as percent-encoded UTF-8 (§3.3.8 — percent-escapes
+  take lowercase hex only, the bytes must decode as strict UTF-8,
+  and there are no backslash escapes, so `"` and `\` inside a value
+  travel as `%22` / `%5c`). RFC 9421 expects the application to know the field's
   type; by default the parser tries Dictionary, then List, then
   Item and takes the first type that consumes the whole value,
   which yields the RFC's strict bytes for every well-typed value
@@ -1406,7 +1412,8 @@ const dual = addResponseSignature(merchantSigned, {
   parameters besides those, and generic keystores over HTTP (JWKS
   fetching via `JwksKeyStore` *is* implemented — see below).
   Narrower limits also apply inside what is implemented — `;sf`
-  covers the RFC 8941 core types only, `;tr` reads caller-supplied
+  covers the RFC 9651 types (including Date and Display String),
+  `;tr` reads caller-supplied
   `RequestLike.trailers` rather than parsing raw trailer sections
   off the wire, and `@request-target` is reconstructed in origin
   form unless the caller sets an explicit `RequestLike.requestTarget`
@@ -1491,7 +1498,7 @@ const dual = addResponseSignature(merchantSigned, {
   registry (`structuredFieldTypes`, plus a per-label override
   `structuredFieldTypesByLabel` in `verifyAllLabels`) and the
   Dictionary → List → Item trial order otherwise, and `;key` selects
-  Dictionary members of those same core
+  Dictionary members of those same RFC 9651
   types; `;tr` reads the field value from caller-supplied
   `RequestLike.trailers` — this library does not parse raw HTTP
   trailer sections off the wire). `@request-target` *is* implemented
@@ -3653,7 +3660,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1568 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1587 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

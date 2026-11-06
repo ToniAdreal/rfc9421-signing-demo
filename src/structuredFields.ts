@@ -1,17 +1,19 @@
 /**
- * Minimal RFC 8941 (HTTP Structured Fields) parser and strict
+ * Minimal RFC 9651 (HTTP Structured Fields) parser and strict
  * serializer, used only for the RFC 9421 §2.1.1 `;sf` component
  * parameter: a covered header field's value is parsed as a Structured
  * Field and re-serialized with the formal serialization rules of
- * RFC 8941 §4, so insignificant whitespace and formatting differences
+ * RFC 9651 §4, so insignificant whitespace and formatting differences
  * in the wire value canonicalize to identical signature-base bytes on
  * the signer and the verifier.
  *
- * Scope (honest): this implements the RFC 8941 core data types —
- * Integer, Decimal, String, Token, Byte Sequence, Boolean, plus
- * Parameters, Inner Lists, Lists, and Dictionaries. The RFC 9651
- * extensions (Date `@…`, Display String `%…`) are NOT supported and
- * fail closed, as does any value that parses as none of the types.
+ * Scope (honest): this implements the RFC 9651 data types — Integer,
+ * Decimal, String, Token, Byte Sequence, Boolean, Date, and Display
+ * String, plus Parameters, Inner Lists, Lists, and Dictionaries.
+ * A value that parses as none of the types fails closed, as does any
+ * value that violates the strict parsing rules of RFC 9651 §4.2
+ * (e.g. a Decimal Date, an uppercase percent-escape in a Display
+ * String, or percent-encoded bytes that are not valid UTF-8).
  *
  * Type selection: RFC 9421 requires the application to know the
  * field's Structured Field type, but the `;sf` flag itself does not
@@ -20,11 +22,11 @@
  * consumes the entire value. For values whose type is unambiguous —
  * the Dictionary/List/Item shapes gateways actually sign — every
  * candidate type that parses at all serializes to the same strict
- * bytes (a lone Token, Integer, or String parses identically as a
- * one-member List and as an Item; a bare Dictionary key and a List
- * Token coincide), so the precedence cannot change the result for
- * well-typed values. A value that is not a valid Structured Field
- * of any type is a hard error on both sides.
+ * bytes (a lone Token, Integer, String, Date, or Display String
+ * parses identically as a one-member List and as an Item; a bare
+ * Dictionary key and a List Token coincide), so the precedence cannot
+ * change the result for well-typed values. A value that is not a
+ * valid Structured Field of any type is a hard error on both sides.
  *
  * A caller that DOES know a field's type pins it with a per-field
  * type registry (`SignOptions.structuredFieldTypes` /
@@ -42,7 +44,9 @@ type SfBareItem =
   | { kind: "string"; value: string }
   | { kind: "token"; value: string }
   | { kind: "bytes"; base64: string }
-  | { kind: "bool"; value: boolean };
+  | { kind: "bool"; value: boolean }
+  | { kind: "date"; text: string }
+  | { kind: "display-string"; value: string };
 
 /** A parameter value, or `null` for a bare `;name` flag (Boolean true). */
 type SfParamValue = SfBareItem | null;
@@ -197,6 +201,80 @@ class SfParser {
     return { kind: "bool", value: c === "1" };
   }
 
+  /**
+   * Parse a Date (RFC 9651 §3.3.7 / §4.2.9): `@` followed by an
+   * Integer. A Date is a (possibly negative) delta in seconds from
+   * 1970-01-01T00:00:00Z, so a leading `-` is valid and the
+   * 15-digit Integer bound applies; a Decimal (`@1.5`) fails closed.
+   * The canonical text reuses the Integer normalization (leading
+   * zeros dropped, `-0` becomes `0`).
+   */
+  private parseDate(): SfBareItem {
+    this.pos++; // "@"
+    const parsed = this.parseIntegerOrDecimal();
+    if (parsed.kind !== "int") {
+      throw this.fail("date must be an integer number of seconds, not a decimal");
+    }
+    return { kind: "date", text: parsed.text };
+  }
+
+  /**
+   * Parse a Display String (RFC 9651 §3.3.8 / §4.2.10): `%` followed
+   * by a DQUOTE-delimited run in which non-ASCII content travels as
+   * percent-encoded UTF-8 bytes. Strictness, per the algorithm:
+   * raw control or non-ASCII characters fail; a `%` escape needs
+   * exactly two following characters in `0-9`/`a-f` (lowercase hex
+   * ONLY — uppercase `%C3` fails); the accumulated bytes must decode
+   * as strict UTF-8 when the closing DQUOTE is reached. There are no
+   * backslash escapes in Display Strings: a `\` is a literal byte,
+   * so `%"a\"b"` ends the string at the `"` after the backslash and
+   * the trailing `b"` fails at the top level.
+   */
+  private parseDisplayString(): SfBareItem {
+    this.pos++; // "%"
+    if (this.peek() !== '"') {
+      throw this.fail('display string must start with %"');
+    }
+    this.pos++; // opening DQUOTE
+    const bytes: number[] = [];
+    for (;;) {
+      const c = this.peek();
+      if (c === undefined) throw this.fail("unterminated display string");
+      const code = c.charCodeAt(0);
+      if (code < 0x20 || code >= 0x7f) {
+        throw this.fail("control or non-ASCII character in display string (non-ASCII must be percent-encoded)");
+      }
+      if (c === "%") {
+        const h1 = this.input[this.pos + 1];
+        const h2 = this.input[this.pos + 2];
+        if (
+          h1 === undefined ||
+          h2 === undefined ||
+          !/[0-9a-f]/.test(h1) ||
+          !/[0-9a-f]/.test(h2)
+        ) {
+          throw this.fail("invalid percent-escape in display string (expected two lowercase hex digits)");
+        }
+        bytes.push(parseInt(h1 + h2, 16));
+        this.pos += 3;
+        continue;
+      }
+      if (c === '"') {
+        this.pos++;
+        try {
+          const value = new TextDecoder("utf-8", { fatal: true }).decode(
+            new Uint8Array(bytes),
+          );
+          return { kind: "display-string", value };
+        } catch {
+          throw this.fail("display string percent-encoded bytes are not valid UTF-8");
+        }
+      }
+      bytes.push(code);
+      this.pos++;
+    }
+  }
+
   parseBareItem(): SfBareItem {
     const c = this.peek();
     if (c === undefined) throw this.fail("expected a value");
@@ -204,11 +282,8 @@ class SfParser {
     if (c === '"') return this.parseString();
     if (c === "?") return this.parseBoolean();
     if (c === ":") return this.parseByteSequence();
-    if (c === "@" || c === "%") {
-      throw this.fail(
-        `unsupported Structured Field type starting with "${c}" (RFC 9651 Date/Display String are not supported)`,
-      );
-    }
+    if (c === "@") return this.parseDate();
+    if (c === "%") return this.parseDisplayString();
     if (TOKEN_START.test(c)) return this.parseToken();
     throw this.fail(`unexpected character "${c}"`);
   }
@@ -298,8 +373,43 @@ class SfParser {
 }
 
 // ---------------------------------------------------------------------------
-// Strict serialization (RFC 8941 §4)
+// Strict serialization (RFC 9651 §4)
 // ---------------------------------------------------------------------------
+
+/**
+ * Serialize a Display String (RFC 9651 §4.1.11): UTF-8 encode the
+ * decoded value, then percent-encode `%`, DQUOTE, and every byte
+ * outside printable ASCII (`%x00-1f`, `%x7f-ff`) with lowercase hex;
+ * all other bytes travel literally. A backslash is NOT escaped — it
+ * is a printable ASCII byte, so it round-trips raw. Lone surrogates
+ * are not Unicode scalar values and fail serialization.
+ */
+function serializeDisplayString(value: string): string {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        i++;
+        continue;
+      }
+      throw new Error("display string contains a lone surrogate");
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) {
+      throw new Error("display string contains a lone surrogate");
+    }
+  }
+  const bytes = Buffer.from(value, "utf8");
+  let out = '%"';
+  for (const b of bytes) {
+    if (b === 0x25 || b === 0x22 || b < 0x20 || b >= 0x7f) {
+      out += `%${b.toString(16).padStart(2, "0")}`;
+    } else {
+      out += String.fromCharCode(b);
+    }
+  }
+  return `${out}"`;
+}
 
 function serializeBareItem(bare: SfBareItem): string {
   switch (bare.kind) {
@@ -315,6 +425,10 @@ function serializeBareItem(bare: SfBareItem): string {
       return `:${bare.base64}:`;
     case "bool":
       return bare.value ? "?1" : "?0";
+    case "date":
+      return `@${bare.text}`;
+    case "display-string":
+      return serializeDisplayString(bare.value);
   }
 }
 
@@ -347,7 +461,7 @@ function serializeDictionary(entries: SfDictEntry[]): string {
 
 /**
  * Parse `value` as an HTTP Structured Field and return its strict
- * (canonical) serialization per RFC 8941 §4 — the component value a
+ * (canonical) serialization per RFC 9651 §4 — the component value a
  * `;sf` covered component contributes to the signature base.
  *
  * Throws a descriptive `Error` when the value is empty or is not a
@@ -391,7 +505,7 @@ export function serializeDictionaryMemberValue(value: string, key: string): stri
   return serializeMember(entry.member);
 }
 
-/** A field's RFC 8941 Structured Field type, as pinned by a type registry. */
+/** A field's RFC 9651 Structured Field type, as pinned by a type registry. */
 export type StructuredFieldType = "dictionary" | "list" | "item";
 
 const STRUCTURED_FIELD_TYPES: ReadonlySet<string> = new Set([

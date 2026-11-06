@@ -208,8 +208,10 @@ test("a field value that is not a valid Structured Field fails closed on both si
   );
   assert.throws(() => canonicalizeStructuredFieldValue("a b c"), /not a valid Structured Field value/);
   assert.throws(() => canonicalizeStructuredFieldValue(""), /empty value/);
-  // RFC 9651 Date is a Structured Field extension this library does not do.
-  assert.throws(() => canonicalizeStructuredFieldValue("@1700000000"), /not a valid Structured Field value/);
+  // RFC 9651 Date is supported now (backlog #926): a Date canonicalizes
+  // instead of failing closed, while a Decimal Date still fails.
+  assert.equal(canonicalizeStructuredFieldValue("@1700000000"), "@1700000000");
+  assert.throws(() => canonicalizeStructuredFieldValue("@1.5"), /not a valid Structured Field value/);
   const { publicKey, signed } = signSf();
   const broken = {
     ...signed,

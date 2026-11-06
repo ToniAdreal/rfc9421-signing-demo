@@ -20,7 +20,7 @@
  * (`"@method";bs`, …) is rejected on both sides. Header field
  * components may also carry the §2.1.1 `;sf` (strict serialization)
  * parameter: the field value is parsed as an HTTP Structured Field
- * (RFC 8941) and re-serialized with the strict rules of RFC 8941 §4
+ * (RFC 9651) and re-serialized with the strict rules of RFC 9651 §4
  * before entering the signature base, so insignificant wire
  * whitespace canonicalizes identically on both sides (see
  * structuredFields.ts for the supported types and the honest
