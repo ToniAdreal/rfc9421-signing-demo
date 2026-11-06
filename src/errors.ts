@@ -126,7 +126,17 @@ export type VerifyFailureCode =
    * caller opted in. Checked *before* the cryptographic check: a missing
    * component is a policy violation, not an authenticity verdict.
    */
-  | "MISSING_REQUIRED_COMPONENT";
+  | "MISSING_REQUIRED_COMPONENT"
+  /**
+   * A signature label demanded by `VerifyAllOptions.requiredLabels`
+   * is absent from the request entirely (no entry for it in the
+   * `signature-input` header, or no `signature-input` header at all).
+   * Only possible when the caller opted in. Reported as a synthetic
+   * per-label failure appended after the labels actually present on
+   * the wire, so a label-stripping downgrade can never pass a bare
+   * `results.every((r) => r.ok)` check.
+   */
+  | "MISSING_REQUIRED_LABEL";
 
 export interface VerifyErrorOptions {
   label: string;

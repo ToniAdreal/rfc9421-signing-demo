@@ -1535,6 +1535,27 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    */
   requiredComponentsByLabel?: Record<string, string[]>;
   /**
+   * Labels that must be present on the request for multi-party
+   * verification to pass (e.g. a receiver policy that requires both
+   * the merchant and the payment-gateway co-signature). After the
+   * labels on the wire are verified, every required label that never
+   * appeared is appended as a synthetic failure result (`{ ok: false,
+   * code: "MISSING_REQUIRED_LABEL", label }`), in `requiredLabels`
+   * order after the wire-order results — including when the request
+   * carries no `signature-input` header at all, which otherwise
+   * yields `[]` and would pass a bare
+   * `results.every((r) => r.ok)` check. Without this option,
+   * `verifyAllLabels` only verifies the labels it finds: a stripped
+   * label is silently absent, not a failure. This is a label set,
+   * not a per-label policy map — no `requiredLabelsByLabel` exists.
+   * An empty array means "no check" (same as unset). Duplicate or
+   * empty-string entries are a caller configuration error (throw),
+   * validated before any verification runs, even for unsigned
+   * requests. Not key selection, so it never joins the
+   * `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+   */
+  requiredLabels?: string[];
+  /**
    * Per-label `alg` fallback strategies for multi-party signatures
    * (e.g. a merchant signature from a foreign signer that omits the
    * optional `alg` parameter and must be inferred from the key shape,
@@ -1913,6 +1934,35 @@ function assertRequiredComponentsByLabel(
 }
 
 /**
+ * Validate the `requiredLabels` option. A malformed list is a caller
+ * configuration error, not a verification failure, so it throws rather
+ * than returning `{ ok: false }`. An empty array is valid and means
+ * "no check" (same as unset); duplicates are rejected because the
+ * same required label must never produce two synthetic failures.
+ * Validated before any verification runs, even for unsigned requests,
+ * so a misconfigured policy cannot silently pass as "no labels".
+ */
+function assertRequiredLabels(labels: string[] | undefined): void {
+  if (labels === undefined) return;
+  if (!Array.isArray(labels))
+    throw new Error(
+      "verifyAllLabels: `requiredLabels` must be an array of label names",
+    );
+  const seen = new Set<string>();
+  for (const label of labels) {
+    if (typeof label !== "string" || label === "")
+      throw new Error(
+        `verifyAllLabels: \`requiredLabels\` entries must be non-empty strings, got ${typeof label === "string" ? '""' : typeof label}`,
+      );
+    if (seen.has(label))
+      throw new Error(
+        `verifyAllLabels: \`requiredLabels\` must not repeat a label, got "${label}" twice`,
+      );
+    seen.add(label);
+  }
+}
+
+/**
  * Validate the per-label `alg` fallback map. Each value must be
  * exactly `"infer"` or `false` — the same two values the global
  * `algFallback` accepts; a mapped `false` is a real strict choice,
@@ -2022,19 +2072,40 @@ function assertRequireFlagByLabel(
  * `verifyRequest`, returning one `VerifyResult` per label in wire order.
  * A failing label never blocks the remaining labels.
  *
+ * With `opts.requiredLabels`, every required label that never appears
+ * on the wire is appended as a synthetic failure (`{ ok: false, code:
+ * "MISSING_REQUIRED_LABEL", label }`) after the wire-order results, in
+ * `requiredLabels` order. That closes the empty-array trap: without
+ * this option, a request with no `Signature-Input` header returns `[]`
+ * and passes a bare `results.every((r) => r.ok)` check.
+ *
  * Returns an empty array when the request has no `Signature-Input`
- * header. When the header is present but cannot even be split into
- * labels, returns a single-element array with `ok: false` and code
- * `MALFORMED_SIGNATURE_INPUT` (the header carries no usable label).
- * Like `verifyRequest`, this function never throws on malformed input.
- * Duplicate labels are verified once (first occurrence).
+ * header and no labels are required. When the header is present but
+ * cannot even be split into labels, returns a single-element array
+ * with `ok: false` and code `MALFORMED_SIGNATURE_INPUT` (the header
+ * carries no usable label) — that failure already fails any
+ * `every((r) => r.ok)` check, so no synthetic entries are added
+ * there. Like `verifyRequest`, this function never throws on malformed
+ * input. Duplicate labels are verified once (first occurrence).
  */
 export function verifyAllLabels(
   req: RequestLike,
   opts: VerifyAllOptions,
 ): VerifyResult[] {
+  // `requiredLabels` is validated first, before the unsigned-request
+  // early return below: a misconfigured policy must throw even for an
+  // unsigned request, and an unsigned request with required labels
+  // must report synthetic failures instead of `[]`.
+  assertRequiredLabels(opts.requiredLabels);
   const sigInput = getHeader(req.headers, "signature-input");
-  if (sigInput === undefined) return [];
+  if (sigInput === undefined) {
+    return (opts.requiredLabels ?? []).map((label) => ({
+      ok: false,
+      code: "MISSING_REQUIRED_LABEL",
+      reason: `required signature label "${label}" is missing: request carries no signature-input header`,
+      label,
+    }));
+  }
   assertExpectedKeyIds(opts.expectedKeyIds);
   assertExpectedTags(opts.expectedTags);
   assertKeyResolvers(opts.keyResolvers);
@@ -2065,7 +2136,7 @@ export function verifyAllLabels(
       },
     ];
   }
-  return labels.map((label) => {
+  const results = labels.map((label) => {
     const key = opts.keys?.[label] ?? opts.key;
     // Per-label resolver: the label's dedicated resolver wins; any
     // other label falls back to the global `keyResolver`.
@@ -2189,6 +2260,23 @@ export function verifyAllLabels(
       opts.structuredFieldTypesByLabel?.[label] ?? opts.structuredFieldTypes;
     return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, allowedAlgs, requireCreated, requireExpires, requireNonce, requireTag, replayCache, structuredFieldTypes });
   });
+  // Required-label fail-closed: every required label that never
+  // appeared on the wire is appended as a synthetic failure, in
+  // `requiredLabels` order after the wire-order results. A stripped
+  // co-signature is a policy failure, not a silent absence.
+  const required = opts.requiredLabels ?? [];
+  if (required.length === 0) return results;
+  const present = new Set(labels);
+  for (const label of required) {
+    if (!present.has(label))
+      results.push({
+        ok: false,
+        code: "MISSING_REQUIRED_LABEL",
+        reason: `required signature label "${label}" is missing from the signature-input header`,
+        label,
+      });
+  }
+  return results;
 }
 
 /**
@@ -2209,9 +2297,12 @@ export function verifyAllLabels(
  * A request with no `signature-input` header returns `[]` without
  * throwing, exactly as `verifyAllLabels` does — callers that must
  * reject unsigned requests should check the returned length
- * themselves. Caller configuration errors (mutually exclusive key
- * options, malformed per-label maps) still throw a plain `Error`,
- * never a `VerifyError`.
+ * themselves, or pass `requiredLabels` (with required labels set, an
+ * unsigned request yields `MISSING_REQUIRED_LABEL` failures and this
+ * function throws a `VerifyError` carrying that code). Caller
+ * configuration errors (mutually exclusive key options, malformed
+ * per-label maps, malformed `requiredLabels`) still throw a plain
+ * `Error`, never a `VerifyError`.
  */
 export function verifyAllLabelsOrThrow(
   req: RequestLike,

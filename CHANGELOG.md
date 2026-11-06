@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifyAllLabels` gains `VerifyAllOptions.requiredLabels`
+  (backlog #923): labels that must be present on the request for
+  multi-party verification to pass — every required label that never
+  appears on the wire is appended as a synthetic failure (`{ ok: false,
+  code: "MISSING_REQUIRED_LABEL", label }`, new failure code) after
+  the wire-order results, in `requiredLabels` order, including when
+  the request carries no `signature-input` header at all (which
+  otherwise yields `[]` and would pass a bare
+  `results.every((r) => r.ok)` check). An empty list means "no
+  check"; duplicate or empty-string entries are a configuration
+  error, validated before any verification runs, even for unsigned
+  requests. A present-but-failing label keeps its real failure code
+  with no synthetic entry. New `test/requiredLabels.test.ts` (12
+  cases) pins the shape: both labels present, stripped gateway label,
+  unsigned request, empty list, duplicate/empty/non-array/non-string
+  configuration errors (including on unsigned requests), present-but-
+  failing label, synthetic-entry ordering, `verifyRequest` path
+  unaffected, and `verifyAllLabelsOrThrow` throwing
+  `MISSING_REQUIRED_LABEL`.
 - HMAC-signed `ReplayCache` snapshot envelope (backlog #920): new
   `ReplayCacheSignedSnapshotEnvelope` (`{ v: 1, snapshot, mac }`) in
   `src/replay.ts`, mirroring the JWKS signed snapshot format —

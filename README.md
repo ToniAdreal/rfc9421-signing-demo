@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1556 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1568 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -347,6 +347,30 @@ const results = verifyAllLabels(dualSigned, {
     gateway: [gatewayNewSecret, gatewayOldSecret], // mid-rollover
   },
 });
+```
+
+Required co-signatures (a merchant signature plus a payment-gateway
+signature, where a stripped gateway label is a downgrade attack, not
+a missing optional): `verifyAllLabels` accepts a `requiredLabels`
+list. Every required label that never appears on the wire is appended
+as a synthetic failure (`{ ok: false, code: "MISSING_REQUIRED_LABEL",
+label }`) after the wire-order results, in `requiredLabels` order —
+including when the request carries no `signature-input` header at all,
+which otherwise yields `[]` and passes a bare
+`results.every((r) => r.ok)` check. A label that is present but fails
+crypto keeps its real failure code; no synthetic entry is added for
+it. An empty list means "no check" (same as unset); duplicate or
+empty-string entries are a configuration error. This is a label set,
+not a per-label policy map — there is no `requiredLabelsByLabel`.
+
+```ts
+const results = verifyAllLabels(dualSigned, {
+  keys: { merchant: merchantPublicKey, gateway: gatewayPublicKey },
+  requiredLabels: ["merchant", "gateway"],
+});
+// gateway label stripped → results[1] is
+// { ok: false, code: "MISSING_REQUIRED_LABEL", label: "gateway" }
+// unsigned request → one such failure per required label, never []
 ```
 
 Per-label freshness windows (a merchant signature that must stay young
@@ -1264,7 +1288,12 @@ values. Without a request to bind to, keep using the request-side API
   merchant candidate cannot widen the gateway's rotation surface.
   `keys`/`key` cannot be combined with either resolver or with any
   candidate list (configuration error). Duplicate labels are verified once (first occurrence); a
-  request with no `Signature-Input` header yields an empty array.
+  request with no `Signature-Input` header yields an empty array — and
+  an empty array passes a bare `results.every((r) => r.ok)` check, so
+  a receiver policy that requires a co-signature must opt into the
+  `requiredLabels` list (see below): each missing required label is
+  appended as a `{ ok: false, code: "MISSING_REQUIRED_LABEL", label }`
+  failure instead of being silently absent.
   First occurrence wins in full: the second occurrence's covered
   components and signature bytes are never verified, so tampering with
   them alone cannot change the verdict (and a duplicate label on the
@@ -3605,6 +3634,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 | `MISSING_NONCE` | `requireNonce` is set but the signature carries no `nonce` (or an empty-string one) |
 | `MISSING_TAG` | `requireTag` is set but the signature carries no `tag` (or an empty-string one) |
 | `MISSING_REQUIRED_COMPONENT` | the signature omits a component required by `VerifyOptions.requiredComponents` (or, per label, by `VerifyAllOptions.requiredComponentsByLabel`) |
+| `MISSING_REQUIRED_LABEL` | a label required by `VerifyAllOptions.requiredLabels` never appears on the wire (no entry for it in `signature-input`, or no `signature-input` header at all); reported as a synthetic per-label failure appended after the wire-order results |
 
 ```ts
 import { verifyRequestOrThrow, isVerifyError } from "rfc9421-signing-demo";
@@ -3623,7 +3653,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1556 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1568 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
