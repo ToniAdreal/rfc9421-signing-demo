@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for the `addResponseSignature` dual-label
+  response path (backlog #938): `bench/bench.ts` gains
+  `benchmarkAddResponseSignature`, the response-side mirror of
+  `benchmarkMultiLabel` — the merchant signs the settlement
+  response with `signResponse` (ed25519) and the gateway appends
+  its hmac-sha256 label with `addResponseSignature`, both with
+  `created` pinned, and every measured pass verifies both labels
+  per label with `verifyResponse` (no loopback adapter), pinning
+  each label's alg / keyid / covered components; a flipped
+  gateway-signature byte is pinned outside timing to fail exactly
+  the gateway label with `SIGNATURE_MISMATCH` while the merchant
+  label still verifies. The new row measured ~5,306 ops/sec
+  (188.47 µs/op) in this run, close to the request-side
+  `verifyAllLabels (2 labels)` row, as expected for a path whose
+  cost is dominated by the ed25519 merchant verification. The
+  README Benchmarks table was refreshed from the same run (Node
+  v24.22.1, shared host).
+
 - `signRequest` / `signResponse` fail fast on an algorithm/key-type
   mismatch (backlog #936): the shape predicate behind the verify
   side's `algFallback: "infer"` check (`verify.ts`

@@ -756,6 +756,18 @@
  * every measured pass, and a 200 -> 500 status tamper is
  * pinned `SIGNATURE_MISMATCH` outside timing in both rows,
  * so neither row can be measuring an unsigned path, plus the
+ * dual-label response path a gateway runs to verify a
+ * merchant-plus-gateway double-signed settlement response:
+ * `signResponse` (merchant ed25519) with `addResponseSignature`
+ * appending the gateway hmac-sha256 label, built outside timing
+ * with `created` pinned — the measured pass verifies both labels
+ * per round with `verifyResponse` (one call per label, no
+ * loopback adapter), self-checked on every measured pass (each
+ * label ok with its pinned alg / keyid / covered components),
+ * and a flipped gateway-signature byte is pinned to fail
+ * exactly the gateway label with `SIGNATURE_MISMATCH` (merchant
+ * still ok) outside timing, so the row cannot be measuring a
+ * path that ignores the second signature, plus the
  * response-side whitelist pair over the same ed25519 response
  * fixture: `verifyResponse` with `allowedAlgs` hitting the wire
  * algorithm (the full ed25519 verification cost) and with a
@@ -783,6 +795,7 @@ import { cpus } from "node:os";
 import { createServer, get, request, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
+  addResponseSignature,
   addSignature,
   assertContentDigestAlg,
   assertHmacSecretLength,
@@ -975,6 +988,122 @@ function benchmarkMultiLabel(): number {
         `benchmark self-check failed: ${JSON.stringify(results)}`,
       );
     }
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the dual-label response verification: the merchant
+ * signs the settlement response with its ed25519 key and the payment
+ * gateway appends its own hmac-sha256 signature with
+ * `addResponseSignature` (see RESPONSE_BENCH_* above), both with
+ * `created` pinned. Each label is verified per label with
+ * `verifyResponse`, the response-side entry point — no loopback
+ * adapter, so this row isolates the in-process dual-label response
+ * cost the `fromNodeResponse + verifyAllLabels` loopback row does
+ * not.
+ */
+function assertDualResponseLabelsOk(
+  dual: SignedHttpResponse,
+  merchantPublic: ReturnType<typeof generateEd25519KeyPair>["publicKey"],
+  gatewaySecret: ReturnType<typeof secretKey>,
+  where: string,
+): void {
+  assertVerifiedResponse(
+    where,
+    verifyResponse(dual, {
+      key: merchantPublic,
+      now: RESPONSE_BENCH_NOW,
+      label: "merchant",
+    }),
+  );
+  const gateway = verifyResponse(dual, {
+    key: gatewaySecret,
+    now: RESPONSE_BENCH_NOW,
+    label: "gateway",
+  });
+  if (
+    !gateway.ok ||
+    gateway.alg !== "hmac-sha256" ||
+    gateway.keyId !== RESPONSE_BENCH_GATEWAY_KID ||
+    JSON.stringify(gateway.coveredComponents) !==
+      JSON.stringify(RESPONSE_BENCH_COVERED)
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyResponse gateway (${where}) gave ${JSON.stringify(gateway)}`,
+    );
+}
+
+/**
+ * The response-side mirror of `benchmarkMultiLabel`: the merchant
+ * signs the settlement response with its ed25519 key, then the
+ * payment gateway appends its own hmac-sha256 signature under a
+ * second label with `addResponseSignature`. Measures the steady-state
+ * throughput of verifying both labels per round (`verifyResponse`
+ * once per label), self-checked on every measured pass (each label
+ * ok with its pinned alg / keyid / covered components).
+ */
+function benchmarkAddResponseSignature(): number {
+  const { publicKey: merchantPublic, privateKey: merchantPrivate } =
+    generateEd25519KeyPair();
+  const gatewaySecret = secretKey("gateway-shared-secret-32-bytes-0!");
+
+  const merchantSigned = signResponse(
+    { status: 200, headers: {}, body: RESPONSE_BENCH_BODY },
+    {
+      keyId: RESPONSE_BENCH_KID,
+      alg: "ed25519",
+      key: merchantPrivate,
+      created: RESPONSE_BENCH_CREATED,
+      label: "merchant",
+    },
+  );
+  const dual = addResponseSignature(merchantSigned, {
+    keyId: RESPONSE_BENCH_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    created: RESPONSE_BENCH_CREATED,
+    label: "gateway",
+  });
+
+  // Outside timing: the appended dual verifies on both labels, and
+  // flipping one base64 character of the gateway label's signature
+  // bytes fails exactly that label with SIGNATURE_MISMATCH while
+  // the merchant label still verifies — the measured row is not
+  // accepting a path that ignores the second signature.
+  assertDualResponseLabelsOk(dual, merchantPublic, gatewaySecret, "outside timing");
+  const tampered: SignedHttpResponse = {
+    ...dual,
+    headers: {
+      ...dual.headers,
+      signature: (dual.headers["signature"] as string).replace(
+        /((?:^|,)\s*gateway\s*=:)([A-Za-z0-9+/])/,
+        (_m, prefix: string, p1: string) =>
+          `${prefix}${p1 === "A" ? "B" : "A"}`,
+      ),
+    },
+  };
+  const merchantAfterTamper = verifyResponse(tampered, {
+    key: merchantPublic,
+    now: RESPONSE_BENCH_NOW,
+    label: "merchant",
+  });
+  const gatewayAfterTamper = verifyResponse(tampered, {
+    key: gatewaySecret,
+    now: RESPONSE_BENCH_NOW,
+    label: "gateway",
+  });
+  if (
+    !merchantAfterTamper.ok ||
+    gatewayAfterTamper.ok ||
+    gatewayAfterTamper.code !== "SIGNATURE_MISMATCH"
+  )
+    throw new Error(
+      `benchmark self-check failed: tampered gateway signature gave merchant ${JSON.stringify(merchantAfterTamper)} / gateway ${JSON.stringify(gatewayAfterTamper)} ` +
+        "(expected merchant ok, gateway SIGNATURE_MISMATCH)",
+    );
+
+  return measure(() => {
+    assertDualResponseLabelsOk(dual, merchantPublic, gatewaySecret, "measured pass");
   }, ITERATIONS);
 }
 
@@ -9240,6 +9369,7 @@ function benchmarkVerifyAllowedAlgsMiss(): number {
 const RESPONSE_BENCH_CREATED = 1_700_000_000;
 const RESPONSE_BENCH_NOW = RESPONSE_BENCH_CREATED + 60;
 const RESPONSE_BENCH_KID = "bench-response-key-1";
+const RESPONSE_BENCH_GATEWAY_KID = "bench-response-gateway-key-1";
 const RESPONSE_BENCH_BODY = JSON.stringify({ settled: true, amount: 100 });
 const RESPONSE_BENCH_COVERED = ["@status", "content-digest"] as const;
 
@@ -14967,6 +15097,11 @@ results.push({
   alg: "verifyResponse (ed25519, @status)",
   op: "verify",
   ops: benchmarkVerifyResponse(),
+});
+results.push({
+  alg: "addResponseSignature + verifyResponse (2 labels)",
+  op: "verify",
+  ops: benchmarkAddResponseSignature(),
 });
 results.push({
   alg: "verifyResponse allowedAlgs (hit, ed25519)",
