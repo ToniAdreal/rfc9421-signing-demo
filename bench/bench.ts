@@ -416,6 +416,22 @@
  * with no nonce requirement, the wrong-global-pin fallback half, the same
  * nonce-less dual's acceptance with no option passed, and an explicit
  * `merchant: false` map entry letting it through asserted outside timing, plus
+ * the per-label structured-field-types verify path a multi-party receiver
+ * runs when two signers disagree about one header's Structured Field
+ * type: `verifyAllLabels` with `structuredFieldTypesByLabel` over a dual
+ * ed25519 fixture signed outside timing with `created` pinned, the merchant
+ * label covering a list-shaped `x-quota` header under a `"list"` registry
+ * while the gateway label covers the same header under the default
+ * Dictionary → List → Item trial order (see SF_TYPES_BY_LABEL_* below),
+ * self-checked on every measured pass (both results are ok, in wire order,
+ * each returned `keyId` equals its label's pinned value, and both labels'
+ * covered lists include `"x-quota;sf"`), with the wrong-type registry
+ * halves pinned outside timing (a `"dictionary"` pin on the merchant fails
+ * exactly that label with `SIGNATURE_BASE_BUILD_FAILED` while the gateway
+ * still verifies, and the same pin on the gateway fails exactly the gateway
+ * while the merchant still verifies, so a map entry binds only its own
+ * label) and a tampered header value failing both labels exactly
+ * `SIGNATURE_MISMATCH` with the pinned reason asserted outside timing, plus
  * the algorithm-inference verify path a
  * receiver runs for foreign signers that omit the optional
  * `alg` parameter: `verifyRequest` with
@@ -874,6 +890,7 @@ import {
   type SignedHttpRequest,
   type SignedHttpResponse,
   type StructuredFieldType,
+  type VerifyAllOptions,
 } from "../src/index.js";
 
 const ITERATIONS = 3000;
@@ -4390,6 +4407,178 @@ function benchmarkVerifyAllContentDigest(): number {
   )
     throw new Error(
       `benchmark self-check failed: header-swapped result ${JSON.stringify(headerSwapped)} (expected SIGNATURE_MISMATCH on both labels)`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabels` structuredFieldTypesByLabel
+ * benchmark: two ed25519 key pairs (generated once, outside timing),
+ * one dual-label fixture signed outside timing with `created` pinned
+ * under two pinned keyids (merchant / gateway, the canonical
+ * multi-party labels), both labels covering `@method` and the
+ * list-shaped `x-quota` header as `x-quota;sf` — the merchant side
+ * signed with the field registered as `"list"`, the gateway side
+ * signed with no registry (the default Dictionary → List → Item trial
+ * order parses the list-shaped value as a List, so both signers build
+ * the same base line), and the verifier's injected `now` 60 seconds
+ * past `created`. The verifier maps only the merchant label to the
+ * `"list"` registry; the gateway label is unmapped and falls back to
+ * the trial order, so the measured pass exercises the per-label
+ * registry lookup on one label and the default path on the other.
+ */
+const SF_TYPES_BY_LABEL_CREATED = 1_700_000_000;
+const SF_TYPES_BY_LABEL_NOW = SF_TYPES_BY_LABEL_CREATED + 60;
+const SF_TYPES_BY_LABEL_MERCHANT_KID =
+  "bench-sf-types-by-label-merchant-1";
+const SF_TYPES_BY_LABEL_GATEWAY_KID =
+  "bench-sf-types-by-label-gateway-1";
+const SF_TYPES_BY_LABEL_VALUE = '"a", "b"';
+const SF_TYPES_BY_LABEL_TAMPERED_VALUE = '"a", "c"';
+const SF_TYPES_BY_LABEL_SIGNATURE_MISMATCH_REASON =
+  "signature mismatch";
+
+/**
+ * `verifyAllLabels` with `structuredFieldTypesByLabel` steady state:
+ * the dual-signature form a multi-party receiver uses when the merchant
+ * and the gateway disagree about one header's Structured Field type —
+ * every measured call runs the per-label registry lookup plus the
+ * crypto check for both labels, which the plain `verifyAllLabels` rows
+ * above never pay in this combination, because their fixtures carry no
+ * per-label registry to consult. One measured op verifies the
+ * dual-label fixture and re-pins that both results are ok, in wire
+ * order, that each returned `keyId` equals its label's pinned value,
+ * and that both labels' covered lists include `x-quota;sf`. Outside
+ * timing, the two registry-mutation halves are pinned once, exactly as
+ * #911 pins them: a `"dictionary"` pin on the merchant fails exactly
+ * that label with `SIGNATURE_BASE_BUILD_FAILED` — the list-shaped value
+ * cannot rebuild a base as a Dictionary — while the gateway still
+ * verifies, and the same pin on the gateway fails exactly the gateway
+ * while the merchant still verifies, so a map entry binds only its own
+ * label; a tampered header value fails both labels exactly
+ * `SIGNATURE_MISMATCH` with the pinned reason, because the field value
+ * is part of both signature bases. Zero network, zero randomness in the
+ * measured assertions, no wall clock (every verify instant is injected).
+ */
+function benchmarkVerifyAllStructuredFieldTypesByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const { publicKey: gatewayPublic, privateKey: gatewayPrivate } =
+    generateEd25519KeyPair();
+  const merchantSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/charge",
+      headers: { "x-quota": SF_TYPES_BY_LABEL_VALUE },
+    },
+    {
+      keyId: SF_TYPES_BY_LABEL_MERCHANT_KID,
+      alg: "ed25519",
+      key: merchantPrivate,
+      label: "merchant",
+      created: SF_TYPES_BY_LABEL_CREATED,
+      coveredComponents: ["@method", "x-quota;sf"],
+      structuredFieldTypes: { "x-quota": "list" },
+    },
+  );
+  const dual = addSignature(merchantSigned, {
+    keyId: SF_TYPES_BY_LABEL_GATEWAY_KID,
+    alg: "ed25519",
+    key: gatewayPrivate,
+    label: "gateway",
+    created: SF_TYPES_BY_LABEL_CREATED,
+    coveredComponents: ["@method", "x-quota;sf"],
+  });
+  const keys = { merchant: merchantPublic, gateway: gatewayPublic };
+  const verifyOpts: VerifyAllOptions = {
+    keys,
+    now: SF_TYPES_BY_LABEL_NOW,
+    structuredFieldTypesByLabel: { merchant: { "x-quota": "list" } },
+  };
+  const assertAccepted = (where: string): void => {
+    const results = verifyAllLabels(dual, verifyOpts);
+    if (
+      results.length !== 2 ||
+      results[0].label !== "merchant" ||
+      !results[0].ok ||
+      results[0].keyId !== SF_TYPES_BY_LABEL_MERCHANT_KID ||
+      !results[0].coveredComponents?.includes("x-quota;sf") ||
+      results[1].label !== "gateway" ||
+      !results[1].ok ||
+      results[1].keyId !== SF_TYPES_BY_LABEL_GATEWAY_KID ||
+      !results[1].coveredComponents?.includes("x-quota;sf")
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels x structuredFieldTypesByLabel (${where}) gave ${JSON.stringify(results)}`,
+      );
+  };
+  assertAccepted("outside timing");
+
+  // Outside timing: a "dictionary" pin on the merchant fails exactly
+  // that label with SIGNATURE_BASE_BUILD_FAILED — the list-shaped value
+  // cannot rebuild a base as a Dictionary — while the gateway, unmapped
+  // here, still verifies under the trial order.
+  const merchantWrongType = verifyAllLabels(dual, {
+    keys,
+    now: SF_TYPES_BY_LABEL_NOW,
+    structuredFieldTypesByLabel: { merchant: { "x-quota": "dictionary" } },
+  });
+  if (
+    merchantWrongType.length !== 2 ||
+    merchantWrongType[0].ok ||
+    merchantWrongType[0].code !== "SIGNATURE_BASE_BUILD_FAILED" ||
+    !merchantWrongType[1].ok
+  )
+    throw new Error(
+      `benchmark self-check failed: merchant wrong-type registry gave ${JSON.stringify(merchantWrongType)} (expected merchant SIGNATURE_BASE_BUILD_FAILED, gateway ok)`,
+    );
+
+  // Outside timing: the same pin on the gateway fails exactly the
+  // gateway while the merchant, unmapped here, still verifies under the
+  // trial order — a map entry binds only its own label.
+  const gatewayWrongType = verifyAllLabels(dual, {
+    keys,
+    now: SF_TYPES_BY_LABEL_NOW,
+    structuredFieldTypesByLabel: { gateway: { "x-quota": "dictionary" } },
+  });
+  if (
+    gatewayWrongType.length !== 2 ||
+    !gatewayWrongType[0].ok ||
+    gatewayWrongType[1].ok ||
+    gatewayWrongType[1].code !== "SIGNATURE_BASE_BUILD_FAILED"
+  )
+    throw new Error(
+      `benchmark self-check failed: gateway wrong-type registry gave ${JSON.stringify(gatewayWrongType)} (expected merchant ok, gateway SIGNATURE_BASE_BUILD_FAILED)`,
+    );
+
+  // Outside timing: swapping the field value fails both labels exactly
+  // SIGNATURE_MISMATCH with the pinned reason.
+  const valueSwapped = verifyAllLabels(
+    {
+      ...dual,
+      headers: {
+        ...dual.headers,
+        "x-quota": SF_TYPES_BY_LABEL_TAMPERED_VALUE,
+      },
+    },
+    verifyOpts,
+  );
+  if (
+    valueSwapped.length !== 2 ||
+    valueSwapped.some(
+      (r) =>
+        r.ok ||
+        r.code !== "SIGNATURE_MISMATCH" ||
+        r.reason !== SF_TYPES_BY_LABEL_SIGNATURE_MISMATCH_REASON,
+    )
+  )
+    throw new Error(
+      `benchmark self-check failed: value-swapped result ${JSON.stringify(valueSwapped)} (expected SIGNATURE_MISMATCH on both labels)`,
     );
 
   return measure(() => {
@@ -15117,6 +15306,11 @@ results.push({
   alg: "verifyAllLabels content-digest (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllContentDigest(),
+});
+results.push({
+  alg: "verifyAllLabels structuredFieldTypesByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllStructuredFieldTypesByLabel(),
 });
 results.push({
   alg: "verifyAllLabels requireNonceByLabel (2 labels)",
