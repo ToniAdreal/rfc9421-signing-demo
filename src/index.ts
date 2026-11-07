@@ -9,11 +9,12 @@ export { verifyAllLabels, verifyAllLabelsOrThrow, verifyRequest, verifyRequestOr
 export type { VerifyAllOptions, VerifyOptions, VerifyResult } from "./verify.js";
 export { isVerifyError, VerifyError } from "./errors.js";
 export type { VerifyErrorOptions, VerifyFailureCode } from "./errors.js";
-export { ReplayCache } from "./replay.js";
+export { exportSignedSnapshotsByLabel, ReplayCache } from "./replay.js";
 export type {
   NonceStore,
   ReplayCacheOptions,
   ReplayCacheSignedSnapshotEnvelope,
+  ReplayCacheSignedSnapshotsByLabelOptions,
   ReplayCacheSnapshot,
   ReplayCacheStats,
 } from "./replay.js";

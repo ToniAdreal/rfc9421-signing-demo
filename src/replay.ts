@@ -165,6 +165,73 @@ export interface ReplayCacheSignedSnapshotEnvelope {
 }
 
 /**
+ * Options for {@link ReplayCache.restoreSignedSnapshotsByLabel}:
+ * the {@link ReplayCacheOptions} of every restored cache, plus an
+ * optional expected label set.
+ *
+ * - `expectedLabels`: when provided, the envelope map must contain
+ *   exactly these labels. An unknown/extra label, or a missing
+ *   expected label, fails the whole restore. This is the label
+ *   binding the per-label MAC cannot provide on its own: the MAC
+ *   covers a label's snapshot, not the label name, so without an
+ *   expected set a persisted file could gain a copied envelope
+ *   under a label the deployment never had (the copied MAC still
+ *   verifies). When omitted, any label set is accepted — each label
+ *   is still individually MAC-verified, so a forged label cannot be
+ *   smuggled in without the secret.
+ */
+export interface ReplayCacheSignedSnapshotsByLabelOptions
+  extends ReplayCacheOptions {
+  expectedLabels?: readonly string[];
+}
+
+/**
+ * Export the signed snapshot envelope of every cache in `caches`,
+ * keyed by the same labels (`VerifyAllOptions.replayCacheByLabel`
+ * shape): `{ [label]: ReplayCacheSignedSnapshotEnvelope }`. A
+ * multi-signature deployment persists one envelope per label and
+ * restores them together with
+ * {@link ReplayCache.restoreSignedSnapshotsByLabel} — a rewritten
+ * entry in any label's persisted snapshot is caught at restore
+ * instead of silently reopening that label's replay window.
+ *
+ * The input is caller configuration and is validated strictly: a
+ * non-object map, an empty label, or a value that is not a
+ * `ReplayCache` throws a configuration `Error` before any envelope
+ * is produced. The secret is validated the same way as
+ * {@link ReplayCache.exportSignedSnapshot} (non-empty string or
+ * `Buffer`). An empty map exports to an empty map.
+ */
+export function exportSignedSnapshotsByLabel(
+  caches: Record<string, ReplayCache>,
+  secret: string | Buffer,
+): Record<string, ReplayCacheSignedSnapshotEnvelope> {
+  const secretBytes = signedSnapshotSecretBytes(secret);
+  if (
+    typeof caches !== "object" ||
+    caches === null ||
+    Array.isArray(caches)
+  )
+    throw new Error(
+      "ReplayCache: signed snapshot export expects a label -> ReplayCache object",
+    );
+  const envelopes: Record<string, ReplayCacheSignedSnapshotEnvelope> = {};
+  for (const label of Object.keys(caches)) {
+    if (label === "")
+      throw new Error(
+        "ReplayCache: signed snapshot label must be a non-empty string",
+      );
+    const cache = caches[label];
+    if (!(cache instanceof ReplayCache))
+      throw new Error(
+        `ReplayCache: signed snapshot export: caches["${label}"] must be a ReplayCache`,
+      );
+    envelopes[label] = cache.exportSignedSnapshot(secretBytes);
+  }
+  return envelopes;
+}
+
+/**
  * Canonical JSON for snapshot MACing: object keys sorted
  * recursively (so a JSON round-trip that reorders keys still
  * verifies), array order preserved (reordering entries would change
@@ -543,6 +610,106 @@ export class ReplayCache implements NonceStore {
     opts: ReplayCacheOptions = {},
   ): ReplayCache {
     return ReplayCache.restoreSignedSnapshot(envelope, secret, opts);
+  }
+
+  /**
+   * Rebuild one cache per label from a map of signed envelopes
+   * produced by {@link exportSignedSnapshotsByLabel} (typically
+   * after a `JSON.parse` of the persisted form): `{ [label]:
+   * ReplayCache }`, ready to plug back into
+   * `VerifyAllOptions.replayCacheByLabel`. `opts` configures every
+   * restored cache (`maxEntries`/`ttlSec`/`now`, validated exactly
+   * like the constructor's) and may additionally pin
+   * `expectedLabels` (see
+   * {@link ReplayCacheSignedSnapshotsByLabelOptions}).
+   *
+   * The restore is atomic: every label's envelope is MAC-verified
+   * and restored into a scratch map first, and the map is only
+   * returned when every label succeeded — any label failure (a
+   * tampered entry, a tampered `seenAt`, a wrong secret, a malformed
+   * envelope, an unknown/extra or missing label against
+   * `expectedLabels`) throws a descriptive configuration `Error`
+   * and installs nothing, so a failed restore can never partially
+   * reopen one label's replay window while leaving another
+   * protected. Per-label failures surface the same errors as
+   * {@link ReplayCache.restoreSignedSnapshot}; map-level failures
+   * (a non-object map, an empty label, an unexpected/missing label)
+   * are reported as `invalid signed snapshot envelopes`. An empty
+   * map restores to an empty map.
+   *
+   * On success the semantics are exactly
+   * {@link ReplayCache.restoreSignedSnapshot}'s per label: expired
+   * entries are dropped, over-capacity snapshots keep the newest
+   * entries, TTLs keep counting from each entry's original
+   * `seenAt`, and the observability counters start at zero.
+   */
+  static restoreSignedSnapshotsByLabel(
+    envelopes: unknown,
+    secret: string | Buffer,
+    opts: ReplayCacheSignedSnapshotsByLabelOptions = {},
+  ): Record<string, ReplayCache> {
+    const secretBytes = signedSnapshotSecretBytes(secret);
+    const fail = (detail: string): never => {
+      throw new Error(
+        `ReplayCache: invalid signed snapshot envelopes: ${detail}`,
+      );
+    };
+    if (
+      typeof envelopes !== "object" ||
+      envelopes === null ||
+      Array.isArray(envelopes)
+    )
+      fail("expected an object mapping label -> signed snapshot envelope");
+    const record = envelopes as Record<string, unknown>;
+    const labels = Object.keys(record);
+    for (const label of labels) {
+      if (label === "")
+        fail("label must be a non-empty string");
+    }
+    const expected = opts.expectedLabels;
+    if (expected !== undefined) {
+      if (
+        !Array.isArray(expected) ||
+        expected.some(
+          (label) => typeof label !== "string" || label === "",
+        )
+      )
+        throw new Error(
+          "ReplayCache: expectedLabels must be an array of non-empty label strings",
+        );
+      if (new Set(expected).size !== expected.length)
+        throw new Error(
+          "ReplayCache: expectedLabels must not contain duplicates",
+        );
+      const expectedSet = new Set(expected);
+      for (const label of labels) {
+        if (!expectedSet.has(label)) fail(`unexpected label "${label}"`);
+      }
+      for (const label of expected) {
+        if (!Object.prototype.hasOwnProperty.call(record, label))
+          fail(`missing expected label "${label}"`);
+      }
+    }
+    // Restore into a scratch map: any label failure throws before
+    // anything is returned, so a failed restore installs nothing.
+    const restored: Record<string, ReplayCache> = {};
+    for (const label of labels) {
+      restored[label] = ReplayCache.restoreSignedSnapshot(
+        record[label],
+        secretBytes,
+        opts,
+      );
+    }
+    return restored;
+  }
+
+  /** Alias of {@link ReplayCache.restoreSignedSnapshotsByLabel} (snapshot naming). */
+  static fromSignedSnapshotsByLabel(
+    envelopes: unknown,
+    secret: string | Buffer,
+    opts: ReplayCacheSignedSnapshotsByLabelOptions = {},
+  ): Record<string, ReplayCache> {
+    return ReplayCache.restoreSignedSnapshotsByLabel(envelopes, secret, opts);
   }
 
   /**

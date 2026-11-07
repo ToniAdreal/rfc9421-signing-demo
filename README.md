@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1658 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1675 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1287,7 +1287,19 @@ values. Without a request to bind to, keep using the request-side API
   the MAC before parsing the snapshot, so a tampered entry, a tampered
   `seenAt`, or a wrong secret is rejected at restore and installs
   nothing (a MAC-valid but structurally broken snapshot still fails
-  the strict snapshot validation).
+  the strict snapshot validation). A multi-signature deployment
+  keeps one cache per label in `replayCacheByLabel`, so the same
+  treatment exists per label: `exportSignedSnapshotsByLabel(caches,
+  secret)` returns one signed envelope per label, and
+  `ReplayCache.restoreSignedSnapshotsByLabel(envelopes, secret,
+  opts)` MAC-verifies and restores every label atomically — any
+  label failing rejects the whole batch and installs nothing. The
+  unsigned per-label snapshot is trusted configuration only, like
+  the single-cache one. `opts.expectedLabels` optionally pins the
+  label set: an unknown/extra label (including a copied envelope
+  filed under a label the deployment never had — the MAC covers a
+  label's snapshot, not its name) or a missing expected label fails
+  the restore.
 - **Application tag (RFC 9421 §2.3)**: pass `tag` to `signRequest` and it
   is emitted as a `tag` signature-input parameter — part of the signed
   `@signature-params` line, so a forged tag fails with
@@ -3770,7 +3782,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1658 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1675 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

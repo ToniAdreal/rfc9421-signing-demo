@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Per-label signed replay-cache snapshots (backlog #952):
+  `exportSignedSnapshotsByLabel(caches, secret)` exports one
+  HMAC-SHA256 envelope per label of a `replayCacheByLabel` map, and
+  `ReplayCache.restoreSignedSnapshotsByLabel(envelopes, secret,
+  opts)` (plus the `fromSignedSnapshotsByLabel` alias) MAC-verifies
+  and restores every label atomically — any label failing rejects
+  the whole batch and installs nothing. `opts.expectedLabels`
+  optionally pins the label set: an unknown/extra label (including
+  a copied envelope filed under a label the deployment never had —
+  the MAC covers a label's snapshot, not its name) or a missing
+  expected label fails the restore. The unsigned per-label snapshot
+  stays trusted configuration only, like the single-cache one.
 - Demo gains an HMAC `oct` JWK key-distribution segment (backlog
   #944): a fixed 32-byte HMAC secret is exported with
   `exportSymmetricKeyJwk` (HS256 + kid `hmac-key-1`), read back

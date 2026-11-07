@@ -66,7 +66,15 @@ Read this before using it anywhere that matters.
   `ReplayCache.restoreSignedSnapshot(envelope, secret)` (HMAC-SHA256
   over the snapshot's canonical JSON; the secret is never written
   into the envelope): a tampered entry, a tampered `seenAt`, or a
-  wrong secret is rejected at restore and installs nothing. The
+  wrong secret is rejected at restore and installs nothing. Per-label
+  caches (`replayCacheByLabel`) get the same treatment one envelope
+  per label — `exportSignedSnapshotsByLabel(caches, secret)` /
+  `ReplayCache.restoreSignedSnapshotsByLabel(envelopes, secret,
+  opts)` — with an atomic restore (any label failing rejects the
+  whole batch) and an optional `expectedLabels` pin, since the MAC
+  covers a label's snapshot but not the label name; the unsigned
+  per-label snapshot is trusted configuration only, like the
+  single-cache one. The
   cache is not shared across verifier instances, so a
   multi-instance deployment should implement `NonceStore` over shared
   storage:
