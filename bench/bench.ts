@@ -535,6 +535,19 @@
  * a JWKS document actually distributes for ed25519), with a full
  * sign → verify over the re-imported public key asserted
  * outside timing (see the ed25519 JWK round-trip section below),
+ * plus the same round trip for the symmetric half of JWK key
+ * distribution: `exportSymmetricKeyJwk` → JSON stringify/parse →
+ * `importSymmetricKeyJwk` over two fixed HMAC secrets (32 bytes
+ * for HS256, 64 bytes for HS512 — the per-use floors the
+ * exporters enforce), self-checked on every measured pass
+ * against the hand-pinned `oct` JWK shape (`kty` oct, a
+ * non-empty base64url `k`, the pinned `kid` and `alg`) with the
+ * re-imported key's `k` compared byte-for-byte against the
+ * exported one, with a full sign → verify over the re-imported
+ * HS256 key asserted outside timing (see the symmetric JWK
+ * round-trip section below), so the JSON key-distribution cost
+ * of the HMAC gateway path is visible apart from the asymmetric
+ * rows above,
  * plus the PEM (SPKI / PKCS#8) round trip a signer /
  * verifier pays when keys are handed over as PEM files — the
  * standard encoding for gateways, KMS tooling and peer verifiers:
@@ -812,6 +825,7 @@ import {
   exportPublicKeyJwkP521,
   exportPublicKeyJwkRsa,
   exportPublicKeyPem,
+  exportSymmetricKeyJwk,
   fromNodeRequest,
   fromNodeResponse,
   generateEd25519KeyPair,
@@ -830,6 +844,7 @@ import {
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
+  importSymmetricKeyJwk,
   isVerifyError,
   JwksKeyStore,
   joinHeaderValues,
@@ -12471,6 +12486,136 @@ function benchmarkJwkRoundTripEd25519(): number {
   );
 }
 
+/** Fixed `created` for the symmetric JWK path's outside-timing sign → verify. */
+const SYMMETRIC_JWK_CREATED = 1_700_000_000;
+
+/**
+ * Hand-pinned shape of the HMAC `oct` JWK the symmetric exporters
+ * must produce on every call: exactly the RFC 7518 §6.4 form a JWKS
+ * document distributes for an HMAC shared secret — `kty` "oct", a
+ * non-empty base64url `k`, the pinned `kid` and `alg`, and no `d`
+ * member (`oct` keys carry the secret in `k` only). Written out
+ * here, never derived from the exported value the bench is checking.
+ */
+function checkSymmetricJwk(
+  jwk: unknown,
+  alg: "HS256" | "HS512",
+  kid: string,
+): void {
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk))
+    throw new Error(
+      `benchmark self-check failed: ${alg} oct JWK round trip exported a non-object JWK`,
+    );
+  const o = jwk as Record<string, unknown>;
+  if (o["kty"] !== "oct")
+    throw new Error(
+      `benchmark self-check failed: ${alg} oct JWK kty ${JSON.stringify(o["kty"])} (expected "oct")`,
+    );
+  if (typeof o["k"] !== "string" || o["k"].length === 0)
+    throw new Error(
+      `benchmark self-check failed: ${alg} oct JWK k is missing or empty`,
+    );
+  if (!/^[A-Za-z0-9_-]+$/.test(o["k"]))
+    throw new Error(
+      `benchmark self-check failed: ${alg} oct JWK k is not unpadded base64url`,
+    );
+  if ("d" in o)
+    throw new Error(
+      `benchmark self-check failed: ${alg} oct JWK carries a "d" member`,
+    );
+  if (o["kid"] !== kid)
+    throw new Error(
+      `benchmark self-check failed: ${alg} oct JWK kid ${JSON.stringify(o["kid"])} (expected ${JSON.stringify(kid)})`,
+    );
+  if (o["alg"] !== alg)
+    throw new Error(
+      `benchmark self-check failed: ${alg} oct JWK alg ${JSON.stringify(o["alg"])} (expected ${JSON.stringify(alg)})`,
+    );
+}
+
+/**
+ * One HMAC `oct` JWK round trip over a fixed secret: export → JSON
+ * stringify/parse → import, pinning the exported shape via
+ * {@link checkSymmetricJwk} and the recovered secret bytes — the
+ * re-imported key's JWK `k` must equal the exported one
+ * byte-for-byte (the same byte-identity assertion
+ * `test/hmacJwk.test.ts` makes). Returns the re-imported key so the
+ * caller can additionally sign → verify with it outside timing.
+ */
+function symmetricJwkRoundTripOnce(
+  secret: KeyObject,
+  alg: "HS256" | "HS512",
+  kid: string,
+): KeyObject {
+  const jwk = exportSymmetricKeyJwk(secret, { alg, kid });
+  checkSymmetricJwk(jwk, alg, kid);
+  const revived = importSymmetricKeyJwk(JSON.parse(JSON.stringify(jwk)));
+  const revivedJwk = revived.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  if (revivedJwk["k"] !== jwk.k)
+    throw new Error(
+      `benchmark self-check failed: ${alg} oct JWK round trip changed the secret ` +
+        `(re-imported k differs from the exported k)`,
+    );
+  return revived;
+}
+
+/**
+ * Symmetric JWK round-trip steady state: the HMAC counterpart of
+ * the per-curve rows above — `exportSymmetricKeyJwk` → JSON
+ * stringify/parse → `importSymmetricKeyJwk` over two fixed secrets,
+ * 32 bytes under HS256 and 64 bytes under HS512 (the per-use floors
+ * `assertHmacSecretLength` enforces, so the measured path can never
+ * be a below-floor key), in one measured pass — the key-distribution
+ * work a gateway pays when it ships an HMAC secret to a verifier as
+ * a JWKS `oct` entry and the verifier pays when it loads it, for
+ * both HMAC uses the library supports.
+ *
+ * Fixture caliber (fixed, stated here as the backlog requires):
+ * two secrets built once before timing with `secretKey` over
+ * `Buffer.alloc` bytes (`0x42` × 32, `0x43` × 64) — deterministic,
+ * no randomness, no wall clock, no network.
+ *
+ * Self-checks: every measured pass re-exports both JWKs and re-pins
+ * their shapes item by item via {@link checkSymmetricJwk} before
+ * re-importing, and compares each re-imported key's `k` against the
+ * exported one (see {@link symmetricJwkRoundTripOnce}); outside
+ * timing, the re-imported HS256 key must complete a sign → verify
+ * over the shared fixture (created pinned at
+ * SYMMETRIC_JWK_CREATED, verified at created+60).
+ */
+function benchmarkSymmetricJwkRoundTrip(): number {
+  const secret256 = secretKey(Buffer.alloc(32, 0x42));
+  const secret512 = secretKey(Buffer.alloc(64, 0x43));
+  const revived256 = symmetricJwkRoundTripOnce(
+    secret256,
+    "HS256",
+    "bench-hmac-256",
+  );
+  symmetricJwkRoundTripOnce(secret512, "HS512", "bench-hmac-512");
+  const signed = signRequest(fixture, {
+    keyId: "bench-hmac",
+    alg: "hmac-sha256",
+    key: revived256,
+    created: SYMMETRIC_JWK_CREATED,
+  });
+  const verified = verifyRequest(signed, {
+    key: revived256,
+    now: SYMMETRIC_JWK_CREATED + 60,
+  });
+  if (!verified.ok)
+    throw new Error(
+      `benchmark self-check failed: symmetric JWK round-trip sign → verify gave ` +
+        `${verified.code}: ${verified.reason}`,
+    );
+  return measure(() => {
+    symmetricJwkRoundTripOnce(secret256, "HS256", "bench-hmac-256");
+    symmetricJwkRoundTripOnce(secret512, "HS512", "bench-hmac-512");
+  }, ITERATIONS);
+}
+
 /**
  * Hand-pinned first lines (PEM type headers) for the PEM round-trip
  * path: `exportPublicKeyPem` exports in SPKI form, whose PEM header
@@ -15248,6 +15393,11 @@ results.push({
   alg: "JWK round-trip ed25519",
   op: "roundtrip",
   ops: benchmarkJwkRoundTripEd25519(),
+});
+results.push({
+  alg: "JWK round-trip HMAC oct (HS256 + HS512)",
+  op: "roundtrip",
+  ops: benchmarkSymmetricJwkRoundTrip(),
 });
 results.push({
   alg: "PEM round-trip ed25519",
