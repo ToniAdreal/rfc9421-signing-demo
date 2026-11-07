@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Two new JWKS refresh benchmark rows (backlog #969): a serial
+  `JwksKeyStore.refresh` row over a real loopback `http` server
+  serving a fixed three-shape JWKS document (ed25519 / P-256 / RSA)
+  through the store's default fetch — one measured op builds a fresh
+  store and refreshes it once, self-checking that all three pinned
+  kids resolve with exactly one `stats().refreshes` and zero
+  failures — and a `JwksKeyStore.refreshIfStale` row on a fresh
+  snapshot, self-checking that the call reports no refresh, fetches
+  nothing, and still resolves the pinned kid. The stale
+  `refreshIfStale` row this item also contemplated already existed
+  (added after the item was written), so no duplicate row was added.
+  In the 2026-11-07 run the loopback row measured ~774.2 ops/sec
+  (~1291.66 µs/op) and the fresh row ~3,181,964 ops/sec (~0.31
+  µs/op); the README Benchmarks table was refreshed from the same
+  run (118 rows).
 - `JwksKeyStore.clear()` (backlog #964): drops the cached key snapshot
   and the freshness timestamp at once (`size` 0, `lastRefreshedAt`
   `null`, `isStale()` `true`) and resets the `stats()` counters to

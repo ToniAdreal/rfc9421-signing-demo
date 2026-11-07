@@ -474,7 +474,18 @@
  * kid resolves afterwards), with the terminal-4xx case (one fetch,
  * zero sleeps, pinned HTTP 404 error) and the exhausted-retries
  * case (three fetches, two sleeps, pinned HTTP 500 error, exactly
- * one `stats().refreshFailures`) asserted outside timing, plus the key-management
+ * one `stats().refreshFailures`) asserted outside timing, plus the serial refresh path a gateway runs at cold start /
+ * rotation time: `JwksKeyStore.refresh` over a real loopback `http`
+ * server serving a fixed three-shape JWKS document (ed25519 / P-256
+ * / RSA) through the store's default fetch — a fresh store is built
+ * on every measured pass and must fetch once and resolve all three
+ * kids afterwards — with the served document's kid set pinned
+ * outside timing, plus the fresh-check path a gateway pays on every
+ * request while its snapshot is still valid: `JwksKeyStore.refreshIfStale` on a fresh store (a counting fake fetch
+ * serves one pinned JWKS document — zero network), self-checked on
+ * every measured pass (the call must report no refresh, the fetch
+ * count must not move, and the pinned kid must still resolve), with
+ * the priming refresh asserted outside timing, plus the key-management
  * derivation a JWKS publisher runs for every key at publish/rotation
  * time: `jwkThumbprint` (RFC 7638) over a fixed three-shape fixture
  * (ed25519 / P-256 / RSA public JWKs, one derivation per shape per
@@ -10269,6 +10280,172 @@ async function benchmarkJwksFetchRetries(): Promise<number> {
   return ops;
 }
 
+/**
+ * Pinned shape of the `JwksKeyStore.refresh` loopback benchmark
+ * document: the three key shapes the store supports (ed25519 /
+ * P-256 / RSA), one freshly generated key pair per shape
+ * (generated once, outside timing), published under these kids by
+ * a real loopback `http` server.
+ */
+const JWKS_REFRESH_LOOPBACK_KIDS = [
+  "bench-refresh-loopback-ed25519",
+  "bench-refresh-loopback-p256",
+  "bench-refresh-loopback-rsa",
+] as const;
+
+/**
+ * `JwksKeyStore.refresh` over a real loopback endpoint: the serial
+ * refresh direction the fake-fetch refresh rows never pay — the
+ * store's default fetch (global `fetch`, zero configuration)
+ * against a loopback `http` server serving a fixed three-shape
+ * JWKS document, plus JWK import and index rebuild by kid for all
+ * three shapes. A fresh store is built on every measured pass, so
+ * the number prices one cold refresh end to end (construction,
+ * fetch, import, index). Outside timing, the served document's kid
+ * set is pinned by fetching the endpoint directly, and one priming
+ * refresh pins that all three kids resolve with exactly one
+ * `stats().refreshes` and zero failures. Every measured pass
+ * self-checks the same three pins on its fresh store.
+ */
+async function benchmarkJwksRefreshLoopback(): Promise<number> {
+  const ed25519 = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const rsa = generateRsaPssKeyPair();
+  const doc = {
+    keys: [
+      {
+        ...exportPublicKeyJwk(ed25519.publicKey),
+        kid: JWKS_REFRESH_LOOPBACK_KIDS[0],
+      },
+      {
+        ...exportPublicKeyJwkP256(p256.publicKey),
+        kid: JWKS_REFRESH_LOOPBACK_KIDS[1],
+      },
+      {
+        ...exportPublicKeyJwkRsa(rsa.publicKey),
+        kid: JWKS_REFRESH_LOOPBACK_KIDS[2],
+      },
+    ],
+  };
+  const body = JSON.stringify(doc);
+  const server = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(body);
+  });
+  try {
+    const url = await new Promise<string>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => {
+        const port = (server.address() as AddressInfo).port;
+        resolve(`http://127.0.0.1:${port}/.well-known/jwks.json`);
+      });
+      server.on("error", reject);
+    });
+    // Outside timing: the endpoint serves exactly the pinned kids.
+    const served = (await (await fetch(url)).json()) as {
+      keys?: { kid?: unknown }[];
+    };
+    const servedKids = (served.keys ?? []).map((k) => k.kid);
+    if (
+      servedKids.length !== JWKS_REFRESH_LOOPBACK_KIDS.length ||
+      JWKS_REFRESH_LOOPBACK_KIDS.some((kid, i) => servedKids[i] !== kid)
+    )
+      throw new Error(
+        `benchmark self-check failed: loopback JWKS served kids ${JSON.stringify(servedKids)} (expected ${JSON.stringify([...JWKS_REFRESH_LOOPBACK_KIDS])})`,
+      );
+    // Outside timing: one priming refresh pins the three-kid resolve.
+    const primed = new JwksKeyStore(url);
+    await primed.refresh();
+    if (
+      JWKS_REFRESH_LOOPBACK_KIDS.some(
+        (kid) => primed.resolve(kid) === undefined,
+      ) ||
+      primed.stats().refreshes !== 1 ||
+      primed.stats().refreshFailures !== 0
+    )
+      throw new Error(
+        `benchmark self-check failed: priming loopback refresh gave stats ${JSON.stringify(primed.stats())} (expected refreshes 1, refreshFailures 0, all three kids resolving)`,
+      );
+    return await measureAsync(async () => {
+      const store = new JwksKeyStore(url);
+      await store.refresh();
+      if (
+        JWKS_REFRESH_LOOPBACK_KIDS.some(
+          (kid) => store.resolve(kid) === undefined,
+        )
+      )
+        throw new Error(
+          "benchmark self-check failed: loopback refresh does not resolve all three pinned kids",
+        );
+      if (store.stats().refreshes !== 1 || store.stats().refreshFailures !== 0)
+        throw new Error(
+          `benchmark self-check failed: loopback refresh counted stats ${JSON.stringify(store.stats())} (expected refreshes 1, refreshFailures 0)`,
+        );
+    }, ITERATIONS);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/**
+ * `JwksKeyStore.refreshIfStale` on a fresh snapshot: the no-op
+ * direction the stale row never pays — a gateway calls this on
+ * every request, and while the snapshot is fresh it must cost only
+ * the staleness check (zero fetch). The store is primed once
+ * outside timing (one fetch, the pinned kid resolves); every
+ * measured pass self-checks that the call reports no refresh, that
+ * the fetch count does not move, and that the pinned kid still
+ * resolves. After the measured run the fetch count must still
+ * equal the single priming fetch.
+ */
+async function benchmarkJwksRefreshIfStaleFresh(): Promise<number> {
+  const { publicKey } = generateEd25519KeyPair();
+  const doc = {
+    keys: [{ ...exportPublicKeyJwk(publicKey), kid: JWKS_REFRESH_KID }],
+  };
+  let fetchCalls = 0;
+  const fetchImpl: JwksFetchImpl = async () => {
+    fetchCalls++;
+    return { ok: true, status: 200, json: async () => doc };
+  };
+  const t = JWKS_REFRESH_T0_SEC;
+  const store = new JwksKeyStore(
+    "https://gateway.example.com/.well-known/jwks.json",
+    { fetchImpl, ttlSec: JWKS_REFRESH_TTL_SEC, now: () => t },
+  );
+  // Prime: a never-refreshed store is stale, so this fetches once.
+  if ((await store.refreshIfStale()) !== true || fetchCalls !== 1)
+    throw new Error(
+      "benchmark self-check failed: priming refreshIfStale did not fetch exactly once",
+    );
+  if (store.resolve(JWKS_REFRESH_KID) === undefined)
+    throw new Error(
+      "benchmark self-check failed: primed store does not resolve the pinned kid",
+    );
+  const ops = await measureAsync(async () => {
+    if ((await store.refreshIfStale()) !== false)
+      throw new Error(
+        "benchmark self-check failed: fresh refreshIfStale reported a refresh",
+      );
+    if (fetchCalls !== 1)
+      throw new Error(
+        `benchmark self-check failed: fresh refreshIfStale made ${fetchCalls - 1} fetches (expected 0)`,
+      );
+    if (store.resolve(JWKS_REFRESH_KID) === undefined)
+      throw new Error(
+        "benchmark self-check failed: fresh store does not resolve the pinned kid",
+      );
+  }, ITERATIONS);
+  if (fetchCalls !== 1)
+    throw new Error(
+      `benchmark self-check failed: fresh refresh path made ${fetchCalls} fetches (expected 1)`,
+    );
+  if (store.stats().refreshes !== 1)
+    throw new Error(
+      `benchmark self-check failed: stats().refreshes ${store.stats().refreshes} (expected 1)`,
+    );
+  return ops;
+}
+
 /** Steady-state `JwksKeyStore.resolve` hit: a Map lookup by keyid. */
 function benchmarkJwksResolve(store: JwksKeyStore): number {
   return measure(() => {
@@ -15466,6 +15643,16 @@ results.push({
   alg: "JwksKeyStore.refresh (fetchRetries 2, 500/500/200)",
   op: "refresh",
   ops: await benchmarkJwksFetchRetries(),
+});
+results.push({
+  alg: "JwksKeyStore.refresh (loopback, 3 keys)",
+  op: "refresh",
+  ops: await benchmarkJwksRefreshLoopback(),
+});
+results.push({
+  alg: "JwksKeyStore.refreshIfStale (fresh)",
+  op: "refresh",
+  ops: await benchmarkJwksRefreshIfStaleFresh(),
 });
 results.push({
   alg: "jwkThumbprint (3 JWK shapes)",
