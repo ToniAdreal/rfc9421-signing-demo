@@ -23,6 +23,7 @@ import {
   exportPublicKeyJwkP384,
   exportPublicKeyJwkP521,
   exportPublicKeyJwkRsa,
+  exportSignedSnapshotsByLabel,
   exportSymmetricKeyJwk,
   fromNodeRequest,
   generateEd25519KeyPair,
@@ -503,6 +504,17 @@ import {
   DEMO_REPLAY_SNAPSHOT_NONCE,
   DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE,
   DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_CODE,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_FRESH_NONCE,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_ENTRIES,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_LABEL,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_ENTRIES,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_LABEL,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_RESTORED_SIZE,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_SECRET,
+  DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_TAMPER_ERROR,
   DEMO_REPLAY_STATS_CHECKS,
   DEMO_REPLAY_STATS_EXPIRED_AT_SEC,
   DEMO_REPLAY_STATS_FINAL,
@@ -4375,19 +4387,23 @@ test("demo JWKS signed snapshot segment exports a signed envelope, cold-starts o
   assert.equal(directCalls, jwksSignedSnapshotFetchCallsAfterRestore);
 });
 
-test("demo lines contain the JWKS signed snapshot restart segment (envelope shape, offline cold start, rewritten-key rejection, restored verification, followed by the JWKS observability segment)", async () => {
+test("demo lines contain the JWKS signed snapshot restart segment (envelope shape, offline cold start, rewritten-key rejection, restored verification, followed by the per-label ReplayCache signed snapshot segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /JWKS signed snapshot restart: JwksKeyStore\.exportSignedSnapshot/);
   // The signed block sits after the unsigned snapshot
-  // persistence segment and before the observability
-  // segment.
+  // persistence segment and before the per-label
+  // ReplayCache signed snapshot segment (which in turn
+  // sits before the observability segment).
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("JWKS signed snapshot restart:"),
   );
   const snapshotIdx = lines.findIndex((l) =>
     l.startsWith("JWKS snapshot persistence:"),
+  );
+  const perLabelIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label ReplayCache signed snapshots:"),
   );
   const observabilityIdx = lines.findIndex((l) =>
     l.startsWith("JWKS observability:"),
@@ -4395,9 +4411,11 @@ test("demo lines contain the JWKS signed snapshot restart segment (envelope shap
   assert.ok(
     snapshotIdx !== -1 &&
       headerIdx !== -1 &&
+      perLabelIdx !== -1 &&
       observabilityIdx !== -1 &&
       snapshotIdx < headerIdx &&
-      headerIdx < observabilityIdx,
+      headerIdx < perLabelIdx &&
+      perLabelIdx < observabilityIdx,
   );
   const expectedLines = [
     "JWKS signed snapshot restart: JwksKeyStore.exportSignedSnapshot wraps the refreshed snapshot in an HMAC envelope so a restarted process verifies offline without trusting persisted bytes blindly — a rewritten key is caught at restore instead of silently trusted",
@@ -4418,6 +4436,438 @@ test("demo lines contain the JWKS signed snapshot restart segment (envelope shap
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 6),
     lines.slice(headerIdx, headerIdx + 6),
+  );
+});
+
+test("demo per-label ReplayCache signed snapshot segment exports one envelope per label, restores both, replays each, isolates labels, and rejects a rewritten envelope", async () => {
+  const {
+    replaySignedSnapshotsByLabelEnvelopes,
+    replaySignedSnapshotsByLabelRestoredMerchantSize,
+    replaySignedSnapshotsByLabelRestoredGatewaySize,
+    replaySignedSnapshotsByLabelMerchantSigned,
+    replaySignedSnapshotsByLabelGatewaySigned,
+    replaySignedSnapshotsByLabelMerchantFirstVerification,
+    replaySignedSnapshotsByLabelGatewayFirstVerification,
+    replaySignedSnapshotsByLabelMerchantVerification,
+    replaySignedSnapshotsByLabelGatewayVerification,
+    replaySignedSnapshotsByLabelCrossLabelVerification,
+    replaySignedSnapshotsByLabelFreshSigned,
+    replaySignedSnapshotsByLabelFreshVerification,
+    replaySignedSnapshotsByLabelTamperError,
+    replaySignedSnapshotsByLabelVerificationAfterTamper,
+  } = await runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_* and
+  // cross-checked against
+  // test/replaySignedSnapshotsByLabel.test.ts (its
+  // envelope case pins the per-label shape and atomic
+  // restore, its tamper case pins the MAC mismatch
+  // rejection). The test pins the literals again here so
+  // a drift in either place fails.
+  assert.equal(
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_LABEL,
+    "merchant",
+  );
+  assert.equal(
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_LABEL,
+    "gateway",
+  );
+  assert.equal(
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE,
+    "demo-nonce-replay-signed-snapshots-merchant-001",
+  );
+  assert.equal(
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE,
+    "demo-nonce-replay-signed-snapshots-gateway-001",
+  );
+  assert.equal(
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_FRESH_NONCE,
+    "demo-nonce-replay-signed-snapshots-fresh-001",
+  );
+  assert.equal(
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_SECRET,
+    "demo-replay-signed-snapshots-by-label-secret-001",
+  );
+  assert.equal(DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_CODE, "NONCE_REPLAY");
+  assert.equal(
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_TAMPER_ERROR,
+    "ReplayCache: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
+  );
+  assert.deepEqual(
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_ENTRIES,
+    [
+      [
+        DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE,
+        DEMO_CREATED + 60,
+      ],
+    ],
+  );
+  assert.deepEqual(
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_ENTRIES,
+    [
+      [
+        DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE,
+        DEMO_CREATED + 60,
+      ],
+    ],
+  );
+  assert.equal(DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_RESTORED_SIZE, 1);
+
+  // The envelopes: exactly the two labels, v1, the
+  // pinned entries, and 64-char lowercase hex MACs (their
+  // values are never printed, only their shapes are
+  // pinned here).
+  assert.deepEqual(
+    Object.keys(replaySignedSnapshotsByLabelEnvelopes).sort(),
+    ["gateway", "merchant"],
+  );
+  const merchantEnvelope =
+    replaySignedSnapshotsByLabelEnvelopes[
+      DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_LABEL
+    ]!;
+  const gatewayEnvelope =
+    replaySignedSnapshotsByLabelEnvelopes[
+      DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_LABEL
+    ]!;
+  assert.equal(merchantEnvelope.v, 1);
+  assert.equal(gatewayEnvelope.v, 1);
+  assert.deepEqual(merchantEnvelope.snapshot.entries, [
+    ...DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_ENTRIES,
+  ]);
+  assert.deepEqual(gatewayEnvelope.snapshot.entries, [
+    ...DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_ENTRIES,
+  ]);
+  assert.match(merchantEnvelope.mac, /^[0-9a-f]{64}$/);
+  assert.match(gatewayEnvelope.mac, /^[0-9a-f]{64}$/);
+
+  // Each restored cache holds exactly its exported entry.
+  assert.equal(
+    replaySignedSnapshotsByLabelRestoredMerchantSize,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_RESTORED_SIZE,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelRestoredGatewaySize,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_RESTORED_SIZE,
+  );
+
+  // The first verifications recorded the nonces; the
+  // signed requests carry the pinned identities.
+  assert.equal(
+    replaySignedSnapshotsByLabelMerchantFirstVerification.ok,
+    true,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelMerchantFirstVerification.nonce,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelGatewayFirstVerification.ok,
+    true,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelGatewayFirstVerification.nonce,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelMerchantSigned.headers["signature-input"],
+    `sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_KEY_ID}";alg="ed25519";nonce="${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE}"`,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelGatewaySigned.headers["signature-input"],
+    `sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_KEY_ID}";alg="ed25519";nonce="${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE}"`,
+  );
+
+  // Each label's own replay is rejected with the pinned
+  // code and the exact replay reason.
+  assert.equal(replaySignedSnapshotsByLabelMerchantVerification.ok, false);
+  assert.equal(
+    replaySignedSnapshotsByLabelMerchantVerification.code,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_CODE,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelMerchantVerification.reason,
+    `nonce replay detected: "${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE}" was already seen`,
+  );
+  assert.equal(replaySignedSnapshotsByLabelGatewayVerification.ok, false);
+  assert.equal(
+    replaySignedSnapshotsByLabelGatewayVerification.code,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_CODE,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelGatewayVerification.reason,
+    `nonce replay detected: "${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE}" was already seen`,
+  );
+
+  // The merchant nonce is fresh under the gateway label
+  // (label isolation), and a fresh nonce verifies against
+  // the restored merchant cache.
+  assert.equal(replaySignedSnapshotsByLabelCrossLabelVerification.ok, true);
+  assert.equal(
+    replaySignedSnapshotsByLabelCrossLabelVerification.nonce,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelFreshSigned.headers["signature-input"],
+    `sig1=("@method" "@authority" "@path" "content-digest");created=${DEMO_CREATED};keyid="${DEMO_KEY_ID}";alg="ed25519";nonce="${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_FRESH_NONCE}"`,
+  );
+  assert.equal(replaySignedSnapshotsByLabelFreshVerification.ok, true);
+  assert.equal(
+    replaySignedSnapshotsByLabelFreshVerification.nonce,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_FRESH_NONCE,
+  );
+
+  // The rewritten gateway envelope rejects the whole
+  // batch, and the good restored gateway cache still
+  // replays afterwards, so the rejection was atomic.
+  assert.equal(
+    replaySignedSnapshotsByLabelTamperError,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_TAMPER_ERROR,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelVerificationAfterTamper.ok,
+    false,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelVerificationAfterTamper.code,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_CODE,
+  );
+  assert.equal(
+    replaySignedSnapshotsByLabelVerificationAfterTamper.reason,
+    `nonce replay detected: "${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE}" was already seen`,
+  );
+
+  // Cross-check against the library called directly: fresh
+  // caches behind a fresh key pair record one nonce each,
+  // export the same envelope shapes, restore from the JSON
+  // form pinned to the two labels, replay each label,
+  // pass the cross-label check, reject the same rewritten
+  // gateway envelope with the same message, and still
+  // replay after the rejection.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const directOpts = {
+    maxEntries: DEMO_REPLAY_CACHE_MAX_ENTRIES,
+    ttlSec: DEMO_REPLAY_CACHE_TTL_SEC,
+    now: () => DEMO_CREATED + 60,
+  };
+  const directMerchant = new ReplayCache(directOpts);
+  const directGateway = new ReplayCache(directOpts);
+  const directMerchantSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE,
+    },
+  );
+  const directGatewaySigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE,
+    },
+  );
+  assert.equal(
+    verifyRequest(directMerchantSigned, {
+      key: publicKey,
+      now: DEMO_CREATED + 60,
+      replayCache: directMerchant,
+    }).ok,
+    true,
+  );
+  assert.equal(
+    verifyRequest(directGatewaySigned, {
+      key: publicKey,
+      now: DEMO_CREATED + 60,
+      replayCache: directGateway,
+    }).ok,
+    true,
+  );
+  const directEnvelopes = exportSignedSnapshotsByLabel(
+    {
+      [DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_LABEL]:
+        directMerchant,
+      [DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_LABEL]:
+        directGateway,
+    },
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_SECRET,
+  );
+  assert.equal(
+    directEnvelopes[
+      DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_LABEL
+    ]?.v,
+    merchantEnvelope.v,
+  );
+  assert.deepEqual(
+    directEnvelopes[
+      DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_LABEL
+    ]?.snapshot.entries,
+    merchantEnvelope.snapshot.entries,
+  );
+  assert.deepEqual(
+    directEnvelopes[
+      DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_LABEL
+    ]?.snapshot.entries,
+    gatewayEnvelope.snapshot.entries,
+  );
+  const directRestored = ReplayCache.restoreSignedSnapshotsByLabel(
+    JSON.parse(JSON.stringify(directEnvelopes)),
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_SECRET,
+    {
+      ...directOpts,
+      expectedLabels: [
+        DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_LABEL,
+        DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_LABEL,
+      ],
+    },
+  );
+  const directRestoredMerchant =
+    directRestored[
+      DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_LABEL
+    ]!;
+  const directRestoredGateway =
+    directRestored[
+      DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_LABEL
+    ]!;
+  assert.equal(
+    directRestoredMerchant.size,
+    replaySignedSnapshotsByLabelRestoredMerchantSize,
+  );
+  assert.equal(
+    directRestoredGateway.size,
+    replaySignedSnapshotsByLabelRestoredGatewaySize,
+  );
+  const directMerchantReplay = verifyRequest(directMerchantSigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    replayCache: directRestoredMerchant,
+  });
+  assert.equal(directMerchantReplay.ok, false);
+  assert.equal(
+    directMerchantReplay.code,
+    replaySignedSnapshotsByLabelMerchantVerification.code,
+  );
+  const directGatewayReplay = verifyRequest(directGatewaySigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    replayCache: directRestoredGateway,
+  });
+  assert.equal(directGatewayReplay.ok, false);
+  assert.equal(
+    directGatewayReplay.code,
+    replaySignedSnapshotsByLabelGatewayVerification.code,
+  );
+  const directCross = verifyRequest(directMerchantSigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    replayCache: directRestoredGateway,
+  });
+  assert.equal(directCross.ok, true);
+  const directTampered = JSON.parse(
+    JSON.stringify(directEnvelopes),
+  ) as {
+    gateway: { snapshot: { entries: Array<[string, number]> } };
+  };
+  const directOriginalNonce = String(
+    directTampered.gateway.snapshot.entries[0]?.[0] ?? "",
+  );
+  directTampered.gateway.snapshot.entries[0] = [
+    directOriginalNonce[0] === "d"
+      ? `e${directOriginalNonce.slice(1)}`
+      : `d${directOriginalNonce.slice(1)}`,
+    directTampered.gateway.snapshot.entries[0]?.[1] ?? DEMO_CREATED + 60,
+  ];
+  let directTamperError = "";
+  try {
+    ReplayCache.restoreSignedSnapshotsByLabel(
+      directTampered,
+      DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_SECRET,
+      {
+        ...directOpts,
+        expectedLabels: [
+          DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_LABEL,
+          DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_LABEL,
+        ],
+      },
+    );
+  } catch (err) {
+    directTamperError = err instanceof Error ? err.message : String(err);
+  }
+  assert.equal(directTamperError, replaySignedSnapshotsByLabelTamperError);
+  const directAfterTamper = verifyRequest(directGatewaySigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    replayCache: directRestoredGateway,
+  });
+  assert.equal(directAfterTamper.ok, false);
+  assert.equal(
+    directAfterTamper.code,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_CODE,
+  );
+});
+
+test("demo lines contain the per-label ReplayCache signed snapshot segment (export, cold start, per-label replays, cross-label isolation, fresh nonce, tampered-envelope rejection, followed by the JWKS observability segment)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Per-label ReplayCache signed snapshots: exportSignedSnapshotsByLabel/);
+  // The per-label block sits after the JWKS signed
+  // snapshot restart segment and before the JWKS
+  // observability segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label ReplayCache signed snapshots:"),
+  );
+  const jwksSignedIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS signed snapshot restart:"),
+  );
+  const observabilityIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS observability:"),
+  );
+  assert.ok(
+    jwksSignedIdx !== -1 &&
+      headerIdx !== -1 &&
+      observabilityIdx !== -1 &&
+      jwksSignedIdx < headerIdx &&
+      headerIdx < observabilityIdx,
+  );
+  const expectedLines = [
+    "Per-label ReplayCache signed snapshots: exportSignedSnapshotsByLabel wraps each label's cache in its own HMAC envelope, so a restarted multi-signature deployment restores every label's replay window together — a rewritten entry in any label is caught at restore instead of silently reopening that label's window",
+    `Per-label ReplayCache signed snapshot export (labels ${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_LABEL}, ${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_LABEL}): exportSignedSnapshotsByLabel() returned envelopes v=1 holding 1 entry each (only the envelope versions and the entry counts are printed — never the secret or the MACs)`,
+    `Per-label ReplayCache signed snapshot cold start: restoreSignedSnapshotsByLabel() rebuilt a merchant cache holding ${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_RESTORED_SIZE} entry and a gateway cache holding ${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_RESTORED_SIZE} entry (zero network — restoring never fetches) with the original first-seen instant ${DEMO_CREATED + 60} (restoring never renews freshness)`,
+    `Per-label ReplayCache signed snapshot replay (merchant): FAILED (code ${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_CODE}: nonce replay detected: "${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE}" was already seen)`,
+    `Per-label ReplayCache signed snapshot replay (gateway): FAILED (code ${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_CODE}: nonce replay detected: "${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE}" was already seen)`,
+    `Per-label ReplayCache signed snapshot cross-label check: the merchant nonce verified against the restored gateway cache: OK (each label keeps its own replay window — a nonce seen under merchant is fresh under gateway)`,
+    `Per-label ReplayCache signed snapshot, new request with nonce "${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_FRESH_NONCE}" against the restored merchant cache: OK (a fresh nonce is not a replay — recorded only in the restored cache)`,
+    `Per-label ReplayCache signed snapshot with the gateway envelope rewritten: FAILED (${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_TAMPER_ERROR})`,
+    `Per-label ReplayCache signed snapshot replay (gateway) after the rejected restore: FAILED (code ${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_CODE}: nonce replay detected: "${DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE}" was already seen)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 9), expectedLines);
+  // The printed block carries no secret or MAC bytes, so
+  // it is pinned constants, identical between runs even
+  // though the segment signs with the demo's fresh key
+  // pair each run.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Per-label ReplayCache signed snapshots:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 9),
+    lines.slice(headerIdx, headerIdx + 9),
   );
 });
 

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1675 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1677 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -176,6 +176,16 @@ recorded only there; outside the printed lines the demo
 asserts the restored rejection code and the exported
 snapshot against hand-pinned expectations and that the
 original cache still holds only the exported entry. The
+demo then shows the per-label signed form of the same
+snapshot: `exportSignedSnapshotsByLabel` wraps the
+merchant and gateway caches in one HMAC envelope each,
+the pair crosses a JSON round-trip and
+`ReplayCache.restoreSignedSnapshotsByLabel` restores both
+at once (pinned to the two labels with `expectedLabels`),
+each label's nonce still replays after the restart while
+the merchant nonce is fresh under the gateway cache, and
+a rewritten gateway envelope rejects the whole batch with
+a MAC mismatch while the good restore stays usable. The
 demo also runs a dual-signed response segment: a real
 loopback gateway signs the same settlement response with
 merchant and gateway labels, the client adapts it with
@@ -3783,7 +3793,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1675 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1677 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

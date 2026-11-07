@@ -23,6 +23,22 @@ change type; no entry describes a feature that is not in the history.
   the MAC covers a label's snapshot, not its name) or a missing
   expected label fails the restore. The unsigned per-label snapshot
   stays trusted configuration only, like the single-cache one.
+- Demo gains a per-label ReplayCache signed snapshot segment (backlog
+  #958): two requests — one per label (`merchant`, `gateway`), each
+  with its own fixed nonce — verify against their own caches, and the
+  pair is exported with `exportSignedSnapshotsByLabel`, crossed over a
+  JSON wire round-trip, and restored together with
+  `ReplayCache.restoreSignedSnapshotsByLabel` pinned to the two labels
+  with `expectedLabels`. Each label's request still replays against
+  its own restored cache, the merchant nonce is fresh under the
+  gateway cache, a fresh nonce verifies against the restored merchant
+  cache, and a rewritten gateway envelope rejects the whole batch
+  with a MAC mismatch while the good restore stays usable. Only the
+  envelope versions and the entry counts are printed, never the secret
+  or the MACs; `DemoResult` gains the segment's shape fields,
+  verifications and the pinned rejection message, and the demo
+  fail-fasts on all of them. Zero network, zero randomness: the
+  segment is byte-identical between runs.
 - Demo gains an HMAC `oct` JWK key-distribution segment (backlog
   #944): a fixed 32-byte HMAC secret is exported with
   `exportSymmetricKeyJwk` (HS256 + kid `hmac-key-1`), read back
