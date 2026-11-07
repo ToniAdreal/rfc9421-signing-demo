@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore.clear()` (backlog #964): drops the cached key snapshot
+  and the freshness timestamp at once (`size` 0, `lastRefreshedAt`
+  `null`, `isStale()` `true`) and resets the `stats()` counters to
+  zero — the `ReplayCache.clear()` semantics, applied to this store.
+  After it, every `resolve()` returns `undefined` and verification
+  fails closed with `KEY_RESOLUTION_FAILED`, until a `refresh()`
+  re-fetches or a snapshot is restored into the cleared store; a
+  refresh already in flight still installs its snapshot when it
+  settles. `npm run demo` shows the whole sequence in its JWKS clear
+  segment (verify, clear, rejected verification, re-fetch,
+  re-verification).
 - Fetch response adapter (backlog #961):
   `fromFetchResponse(res, body, opts?)` (plus the `FetchResponseLike`
   / `FromFetchResponseOptions` types) normalizes a `fetch()`

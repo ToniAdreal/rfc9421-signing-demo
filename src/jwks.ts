@@ -187,7 +187,10 @@ export interface JwksKeyStoreOptions {
  * process that carries its keys across its own restart keeps one
  * continuous count. (A store built by the static
  * `JwksKeyStore.restore()` is a new store and starts at zero, like
- * any freshly constructed store.)
+ * any freshly constructed store.) The one exception is
+ * {@link JwksKeyStore.clear}: discarding the cached snapshot also
+ * resets all four counters to zero, so a post-clear `stats()` reads
+ * as a fresh store until new activity accrues.
  */
 export interface JwksKeyStoreStats {
   refreshes: number;
@@ -640,6 +643,17 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   operator can tell whether rotation is taking effect and whether
  *   misses look like misconfiguration or retired keys. Retry
  *   attempts inside one `refresh()` do not multiply the counters.
+ * - **Cached keys can be retired immediately with `clear()`.**
+ *   Rotation works by re-fetching, and a *failed* refresh deliberately
+ *   keeps the old snapshot — so when an endpoint stops being trusted
+ *   (or a key is known compromised), the only local way to stop
+ *   serving the cached keys at once is `clear()`: it drops the
+ *   snapshot and the freshness timestamp and resets the `stats()`
+ *   counters, exactly like `ReplayCache.clear()`. `refresh()` after a
+ *   `clear()` re-fetches from the same endpoint, and a snapshot can
+ *   still be restored into the cleared store. One limit: `clear()`
+ *   does not cancel a refresh already in flight — that fetch still
+ *   installs its snapshot when it settles (see `clear()` itself).
  * - **Opt-in fetch retries.** With `fetchRetries` set, a `refresh()`
  *   re-attempts transient failures (network errors, HTTP 5xx) after
  *   a fixed `fetchBackoffMs` pause, up to the configured retry
@@ -845,6 +859,42 @@ export class JwksKeyStore {
       hits: this.hitCount,
       misses: this.missCount,
     };
+  }
+
+  /**
+   * Discard the cached key snapshot and reset the observability
+   * counters — the `ReplayCache.clear()` semantics, applied to this
+   * store. After `clear()`, `size` is 0, `lastRefreshedAt` is `null`,
+   * `isStale()` is `true`, and `resolve` returns `undefined` for
+   * every keyid (counted as a miss, like any unknown keyid) until
+   * the next successful `refresh()` or a `restoreSnapshot()` /
+   * `restoreSignedSnapshot()` installs keys again. `exportSnapshot()`
+   * after a `clear()` throws exactly like on a store that never
+   * refreshed: there is no fetched snapshot to export.
+   *
+   * The intended use is key distrust / rotation response: when an
+   * endpoint stops being trusted (or a key is known compromised),
+   * `clear()` immediately stops the store serving the cached keys
+   * instead of waiting for the TTL to expire or for a refresh to
+   * succeed — a failed refresh deliberately keeps the old snapshot,
+   * so `clear()` is the only way to retire keys locally without a
+   * successful re-fetch. The endpoint, `fetchImpl`, TTL and clock
+   * are unchanged, so `refresh()` after a `clear()` re-fetches from
+   * the same endpoint.
+   *
+   * One honest limit: `clear()` does not cancel a refresh that is
+   * already in flight — the single-flight fetch keeps its contract
+   * and installs its snapshot when it settles (see
+   * {@link JwksKeyStore.refresh}). To retire keys while a refresh is
+   * in flight, `clear()` again after that refresh settles.
+   */
+  clear(): void {
+    this.keysByKid = new Map<string, KeyObject>();
+    this.lastRefreshAtSec = null;
+    this.refreshCount = 0;
+    this.refreshFailureCount = 0;
+    this.hitCount = 0;
+    this.missCount = 0;
   }
 
   /**

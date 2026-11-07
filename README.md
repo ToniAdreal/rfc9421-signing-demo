@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1694 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1705 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -753,6 +753,20 @@ an unknown keyid, any keyid before the first successful refresh, or an invalid
 keyid), so `hits + misses` is the total number of resolutions. The counters
 run for the store's lifetime and are not part of a snapshot: exporting or
 restoring one does not reset them.
+
+Retiring cached keys: `store.clear()` drops the cached snapshot and the
+freshness timestamp at once (`size` 0, `lastRefreshedAt` `null`, `isStale()`
+`true`) and resets the `stats()` counters to zero — the `ReplayCache.clear()`
+semantics, applied to this store. Rotation works by re-fetching, and a
+*failed* refresh deliberately keeps the old snapshot, so when an endpoint
+stops being trusted (or a key is known compromised) `clear()` is the only
+local way to stop serving the cached keys without a successful re-fetch:
+after it, every `resolve()` returns `undefined` and verification fails
+closed with `KEY_RESOLUTION_FAILED`, until a `refresh()` re-fetches or a
+snapshot is restored into the cleared store. One limit: `clear()` does not
+cancel a refresh already in flight — that fetch still installs its snapshot
+when it settles, so clear again after it lands if the keys must stay
+retired. `npm run demo` shows the whole sequence in its JWKS clear segment.
 
 Fetch timeout (opt-in): `new JwksKeyStore(url, { fetchTimeoutMs: 10_000 })`
 bounds each fetch of the default fetch implementation — a hung JWKS endpoint
@@ -3841,7 +3855,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1694 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1705 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

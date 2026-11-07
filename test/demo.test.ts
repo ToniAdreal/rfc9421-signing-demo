@@ -216,6 +216,15 @@ import {
   DEMO_JWKS_OBSERVABILITY_STATS,
   DEMO_JWKS_OBSERVABILITY_TTL_SEC,
   DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID,
+  DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR,
+  DEMO_JWKS_CLEAR_FETCH_CALLS,
+  DEMO_JWKS_CLEAR_KEY_ID,
+  DEMO_JWKS_CLEAR_NONCE,
+  DEMO_JWKS_CLEAR_SIZE_AFTER_CLEAR,
+  DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR,
+  DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH,
+  DEMO_JWKS_CLEAR_STATS_BEFORE,
+  DEMO_JWKS_CLEAR_TTL_SEC,
   DEMO_JWKS_FETCH_RETRY_BACKOFF_MS,
   DEMO_JWKS_FETCH_RETRY_FETCH_CALLS,
   DEMO_JWKS_FETCH_RETRY_KEY_ID,
@@ -4937,7 +4946,7 @@ test("demo JWKS observability segment shows lastRefreshedAt, isStale() at the TT
   assert.deepEqual(directStore.stats(), jwksObservabilityStats);
 });
 
-test("demo lines contain the JWKS observability segment (before/after reads, TTL-boundary stale verification, resolves, stats, followed by the ReplayCache observability segment)", async () => {
+test("demo lines contain the JWKS observability segment (before/after reads, TTL-boundary stale verification, resolves, stats, followed by the JWKS clear segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /JWKS observability: JwksKeyStore exposes lastRefreshedAt/);
@@ -4954,14 +4963,167 @@ test("demo lines contain the JWKS observability segment (before/after reads, TTL
     `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshFailures}, hits: ${DEMO_JWKS_OBSERVABILITY_STATS.hits}, misses: ${DEMO_JWKS_OBSERVABILITY_STATS.misses} } (hits + misses equals the total resolve() calls)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 7), expectedLines);
-  // The JWKS fetch retries segment follows the JWKS observability segment.
+  // The JWKS clear segment follows the JWKS observability segment,
+  // and the JWKS fetch retries segment follows the clear segment.
+  const clearIdx = lines.findIndex((l) => l.startsWith("JWKS clear:"));
+  const fetchRetryIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS fetch retries:"),
+  );
+  assert.ok(
+    headerIdx !== -1 &&
+      clearIdx !== -1 &&
+      fetchRetryIdx !== -1 &&
+      headerIdx < clearIdx &&
+      clearIdx < fetchRetryIdx,
+  );
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS observability:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 7), lines.slice(headerIdx, headerIdx + 7));
+});
+
+test("demo JWKS clear segment verifies, clears to zero, rejects the retired key, and re-verifies after a re-fetch", async () => {
+  const {
+    jwksClearVerificationBefore,
+    jwksClearStatsBefore,
+    jwksClearSizeAfterClear,
+    jwksClearLastRefreshedAfterClear,
+    jwksClearStaleAfterClear,
+    jwksClearStatsAfterClear,
+    jwksClearVerificationAfterClear,
+    jwksClearFetchCalls,
+    jwksClearVerificationAfterRefetch,
+    jwksClearStatsAfterRefetch,
+  } = await runDemo();
+  assert.equal(DEMO_JWKS_CLEAR_KEY_ID, "demo-jwks-clear-1");
+  assert.equal(DEMO_JWKS_CLEAR_NONCE, "demo-nonce-jwks-clear-001");
+  assert.equal(DEMO_JWKS_CLEAR_TTL_SEC, 120);
+  assert.equal(DEMO_JWKS_CLEAR_FETCH_CALLS, 2);
+  assert.equal(DEMO_JWKS_CLEAR_SIZE_AFTER_CLEAR, 0);
+  assert.equal(DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR, "KEY_RESOLUTION_FAILED");
+  assert.deepEqual(DEMO_JWKS_CLEAR_STATS_BEFORE, {
+    refreshes: 1,
+    refreshFailures: 0,
+    hits: 1,
+    misses: 0,
+  });
+  assert.deepEqual(DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR, {
+    refreshes: 0,
+    refreshFailures: 0,
+    hits: 0,
+    misses: 0,
+  });
+  assert.deepEqual(DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH, {
+    refreshes: 1,
+    refreshFailures: 0,
+    hits: 1,
+    misses: 1,
+  });
+  assert.equal(jwksClearVerificationBefore.ok, true);
+  assert.deepEqual(jwksClearStatsBefore, DEMO_JWKS_CLEAR_STATS_BEFORE);
+  assert.equal(jwksClearSizeAfterClear, DEMO_JWKS_CLEAR_SIZE_AFTER_CLEAR);
+  assert.equal(jwksClearLastRefreshedAfterClear, null);
+  assert.equal(jwksClearStaleAfterClear, true);
+  assert.deepEqual(jwksClearStatsAfterClear, DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR);
+  assert.equal(jwksClearVerificationAfterClear.ok, false);
+  assert.equal(
+    jwksClearVerificationAfterClear.code,
+    DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR,
+  );
+  assert.equal(jwksClearFetchCalls, DEMO_JWKS_CLEAR_FETCH_CALLS);
+  assert.equal(jwksClearVerificationAfterRefetch.ok, true);
+  assert.deepEqual(
+    jwksClearStatsAfterRefetch,
+    DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH,
+  );
+  // Cross-check against a directly driven store (the same clear
+  // semantics test/jwksClear.test.ts pins).
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const direct = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        keys: [
+          {
+            ...exportPublicKeyJwk(publicKey),
+            kid: DEMO_JWKS_CLEAR_KEY_ID,
+          },
+        ],
+      }),
+    }),
+    ttlSec: DEMO_JWKS_CLEAR_TTL_SEC,
+    now: () => DEMO_CREATED,
+  });
+  await direct.refresh();
+  const directSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_CLEAR_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_JWKS_CLEAR_NONCE,
+    },
+  );
+  const directOpts = { keyResolver: direct.resolve, now: DEMO_CREATED + 60 };
+  assert.equal(verifyRequest(directSigned, directOpts).ok, true);
+  assert.deepEqual(direct.stats(), jwksClearStatsBefore);
+  direct.clear();
+  assert.equal(direct.size, jwksClearSizeAfterClear);
+  assert.equal(direct.lastRefreshedAt, jwksClearLastRefreshedAfterClear);
+  assert.equal(direct.isStale(), jwksClearStaleAfterClear);
+  assert.deepEqual(direct.stats(), jwksClearStatsAfterClear);
+  assert.equal(
+    verifyRequest(directSigned, directOpts).code,
+    DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR,
+  );
+  await direct.refresh();
+  assert.equal(verifyRequest(directSigned, directOpts).ok, true);
+  assert.deepEqual(direct.stats(), jwksClearStatsAfterRefetch);
+});
+
+test("demo lines contain the JWKS clear segment (verify, cleared zero state, rejected verification, re-fetch re-verification)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /JWKS clear: JwksKeyStore\.clear\(\) drops the cached keys/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("JWKS clear:"));
+  const observabilityIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS observability:"),
+  );
+  assert.ok(
+    observabilityIdx !== -1 && headerIdx !== -1 && observabilityIdx < headerIdx,
+  );
+  const fmt = (st: {
+    refreshes: number;
+    refreshFailures: number;
+    hits: number;
+    misses: number;
+  }) =>
+    `{ refreshes: ${st.refreshes}, refreshFailures: ${st.refreshFailures}, hits: ${st.hits}, misses: ${st.misses} }`;
+  const expectedLines = [
+    "JWKS clear: JwksKeyStore.clear() drops the cached keys and zeroes the stats() counters at once — the explicit reset a gateway runs when an endpoint stops being trusted or a key is known compromised, instead of waiting for the TTL to expire or for a refresh to succeed",
+    `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" verifies through the fetched snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_CLEAR_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_CLEAR_NONCE}"), stats() = ${fmt(DEMO_JWKS_CLEAR_STATS_BEFORE)}`,
+    `JWKS clear after clear(): size = ${DEMO_JWKS_CLEAR_SIZE_AFTER_CLEAR}, lastRefreshedAt=null, isStale()=true, stats() = ${fmt(DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR)} (every cached key dropped, every counter back at zero)`,
+    `JWKS clear verification after clear(): the same signed request: FAILED (code ${DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR}: keyid "${DEMO_JWKS_CLEAR_KEY_ID}" could not be resolved to a key) — the retired key no longer resolves`,
+    `JWKS clear after a fresh refresh() (fetch count ${DEMO_JWKS_CLEAR_FETCH_CALLS}): the same signed request verifies again: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_CLEAR_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_CLEAR_NONCE}"), stats() = ${fmt(DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH)} (the post-clear miss from the rejected verification stays visible in the counters)`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), expectedLines);
+  // The JWKS fetch retries segment follows the JWKS clear segment.
   const fetchRetryIdx = lines.findIndex((l) =>
     l.startsWith("JWKS fetch retries:"),
   );
   assert.ok(headerIdx !== -1 && fetchRetryIdx !== -1 && headerIdx < fetchRetryIdx);
   const again = await runDemo();
-  const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS observability:"));
-  assert.deepEqual(again.lines.slice(againIdx, againIdx + 7), lines.slice(headerIdx, headerIdx + 7));
+  const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS clear:"));
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 5),
+    lines.slice(headerIdx, headerIdx + 5),
+  );
 });
 
 test("demo JWKS fetch retries segment retries 500s to a 200 and never retries a 404", async () => {

@@ -610,6 +610,29 @@
  * a fresh ed25519 pair (generation is not printed) and
  * every clock is injected, so the segment's printed
  * lines are identical between runs.
+ * The demo then shows a JWKS clear segment: the
+ * observability segment above shows the snapshot
+ * serving stale keys, but never the explicit reset a
+ * gateway runs when an endpoint stops being trusted —
+ * `clear()`. A `JwksKeyStore` over a counting fake fetch
+ * (zero network) and an injected clock refreshes once,
+ * a request signed under the pinned keyid verifies
+ * through the fetched snapshot, and then `clear()` is
+ * called: the segment prints the emptied state — `size`
+ * 0, `lastRefreshedAt` `null`, `isStale()` `true`, and
+ * `stats()` all zero — and the same signed request is
+ * rejected with `KEY_RESOLUTION_FAILED`. A fresh
+ * `refresh()` then re-fetches the key (fetch count 2)
+ * and the same request verifies again, with the
+ * post-clear miss from the rejected verification still
+ * visible in the re-accumulated `stats()`. Outside the
+ * printed lines the demo asserts every outcome and
+ * reading equals the hand-pinned expectations below (the
+ * same clear semantics `test/jwksClear.test.ts` pins).
+ * The segment key pair is a fresh ed25519 pair
+ * (generation is not printed) and every clock is
+ * injected, so the segment's printed lines are
+ * identical between runs.
  * The demo closes with a JWKS fetch retries segment:
  * the observability segment above refreshes exactly once
  * over a healthy fake endpoint, so it cannot show what
@@ -2674,6 +2697,62 @@ export const DEMO_JWKS_OBSERVABILITY_STATS: JwksKeyStoreStats = {
   refreshes: 1,
   refreshFailures: 0,
   hits: 2,
+  misses: 1,
+};
+
+/** Key id of the JWKS clear segment's pinned key. */
+export const DEMO_JWKS_CLEAR_KEY_ID = "demo-jwks-clear-1";
+/** Nonce of the JWKS clear segment's signed request. */
+export const DEMO_JWKS_CLEAR_NONCE = "demo-nonce-jwks-clear-001";
+/** TTL of the JWKS clear segment's store (the clock never moves). */
+export const DEMO_JWKS_CLEAR_TTL_SEC = 120;
+/**
+ * Fetch count of the JWKS clear segment: exactly one
+ * refresh before `clear()` and exactly one re-fetch
+ * after it.
+ */
+export const DEMO_JWKS_CLEAR_FETCH_CALLS = 2;
+/**
+ * Hand-pinned `stats()` of the JWKS clear segment after
+ * its refresh and its first verification: one successful
+ * refresh, then the verification's single `resolve()`
+ * hit (hits 1, misses 0) — the same counting rules
+ * `test/jwksStats.test.ts` pins. Written out here,
+ * never derived from the store the demo is checking.
+ */
+export const DEMO_JWKS_CLEAR_STATS_BEFORE: JwksKeyStoreStats = {
+  refreshes: 1,
+  refreshFailures: 0,
+  hits: 1,
+  misses: 0,
+};
+/** Hand-pinned `size` of the JWKS clear segment after `clear()`: every key dropped. */
+export const DEMO_JWKS_CLEAR_SIZE_AFTER_CLEAR = 0;
+/**
+ * Hand-pinned `stats()` of the JWKS clear segment
+ * right after `clear()`: every counter back at zero.
+ */
+export const DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR: JwksKeyStoreStats = {
+  refreshes: 0,
+  refreshFailures: 0,
+  hits: 0,
+  misses: 0,
+};
+/** Rejection code of the JWKS clear segment's verification after `clear()`. */
+export const DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR = "KEY_RESOLUTION_FAILED";
+/**
+ * Hand-pinned `stats()` of the JWKS clear segment after
+ * the re-fetch and the second verification: the re-fetch
+ * counts one refresh, the verification after it one
+ * hit — and the miss from the rejected verification
+ * between `clear()` and the re-fetch is still visible,
+ * because `clear()` zeroes the counters once, it does
+ * not stop them re-accumulating.
+ */
+export const DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH: JwksKeyStoreStats = {
+  refreshes: 1,
+  refreshFailures: 0,
+  hits: 1,
   misses: 1,
 };
 
@@ -4974,6 +5053,66 @@ export interface DemoResult {
    * hand-pinned `DEMO_JWKS_OBSERVABILITY_STATS`).
    */
   jwksObservabilityStats: JwksKeyStoreStats;
+  /**
+   * Verification of the JWKS clear segment's signed
+   * request through the fetched snapshot, before
+   * `clear()` (ok).
+   */
+  jwksClearVerificationBefore: VerifyResult;
+  /**
+   * The segment's `stats()` after its refresh and its
+   * first verification (equals the hand-pinned
+   * `DEMO_JWKS_CLEAR_STATS_BEFORE`).
+   */
+  jwksClearStatsBefore: JwksKeyStoreStats;
+  /**
+   * The segment's `size` after `clear()` (equals
+   * `DEMO_JWKS_CLEAR_SIZE_AFTER_CLEAR`: 0).
+   */
+  jwksClearSizeAfterClear: number;
+  /**
+   * The segment's `lastRefreshedAt` after `clear()`:
+   * `null` — the freshness timestamp is dropped with
+   * the snapshot.
+   */
+  jwksClearLastRefreshedAfterClear: number | null;
+  /**
+   * The segment's `isStale()` after `clear()`: `true`
+   * — a cleared store is stale.
+   */
+  jwksClearStaleAfterClear: boolean;
+  /**
+   * The segment's `stats()` right after `clear()`
+   * (equals the hand-pinned
+   * `DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR` — all zero).
+   */
+  jwksClearStatsAfterClear: JwksKeyStoreStats;
+  /**
+   * Verification of the same signed request after
+   * `clear()` (rejected with
+   * `DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR`).
+   */
+  jwksClearVerificationAfterClear: VerifyResult;
+  /**
+   * Fake-fetch count after the segment's re-fetch
+   * (equals the hand-pinned
+   * `DEMO_JWKS_CLEAR_FETCH_CALLS`: one refresh before
+   * `clear()`, one after).
+   */
+  jwksClearFetchCalls: number;
+  /**
+   * Verification of the same signed request after the
+   * re-fetch (ok — the key is back).
+   */
+  jwksClearVerificationAfterRefetch: VerifyResult;
+  /**
+   * The segment's `stats()` after the re-fetch and the
+   * second verification (equals the hand-pinned
+   * `DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH` — the
+   * post-clear miss from the rejected verification is
+   * still visible).
+   */
+  jwksClearStatsAfterRefetch: JwksKeyStoreStats;
   /**
    * Fake-fetch count of the closing JWKS fetch retries
    * segment's retrying store (equals the hand-pinned
@@ -9378,6 +9517,162 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // JWKS clear segment: the observability segment above
+  // shows a stale snapshot still serving, but never the
+  // explicit reset a gateway runs when an endpoint stops
+  // being trusted — clear(). This segment drives a fresh
+  // JwksKeyStore through a counting fake fetch (zero
+  // network) and an injected clock pinned at DEMO_CREATED:
+  // refresh() once, verify a request signed under the
+  // pinned keyid through the fetched snapshot, then
+  // clear() and read the emptied state (size 0,
+  // lastRefreshedAt null, isStale() true, stats() all
+  // zero), verify the same signed request again — it must
+  // now fail with KEY_RESOLUTION_FAILED — and finally
+  // refresh() again so the same request verifies once
+  // more, with the post-clear miss from the rejected
+  // verification still visible in the re-accumulated
+  // stats(). The segment key pair is a fresh ed25519 pair
+  // (generation is not printed); outside the printed
+  // lines the demo asserts every outcome equals the
+  // hand-pinned DEMO_JWKS_CLEAR_* expectations (the same
+  // clear semantics test/jwksClear.test.ts pins).
+  const jwksClearPair = generateEd25519KeyPair();
+  let jwksClearFetchCalls = 0;
+  const jwksClearStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      jwksClearFetchCalls++;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          keys: [
+            {
+              ...exportPublicKeyJwk(jwksClearPair.publicKey),
+              kid: DEMO_JWKS_CLEAR_KEY_ID,
+            },
+          ],
+        }),
+      };
+    },
+    ttlSec: DEMO_JWKS_CLEAR_TTL_SEC,
+    now: () => DEMO_CREATED,
+  });
+  await jwksClearStore.refresh();
+  const jwksClearSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_CLEAR_KEY_ID,
+      alg: "ed25519",
+      key: jwksClearPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_JWKS_CLEAR_NONCE,
+    },
+  );
+  const jwksClearVerificationBefore = verifyRequest(jwksClearSigned, {
+    keyResolver: jwksClearStore.resolve,
+    now: DEMO_CREATED + 60,
+  });
+  const jwksClearStatsBefore = jwksClearStore.stats();
+  jwksClearStore.clear();
+  const jwksClearSizeAfterClear = jwksClearStore.size;
+  const jwksClearLastRefreshedAfterClear =
+    jwksClearStore.lastRefreshedAt;
+  const jwksClearStaleAfterClear = jwksClearStore.isStale();
+  const jwksClearStatsAfterClear = jwksClearStore.stats();
+  const jwksClearVerificationAfterClear = verifyRequest(jwksClearSigned, {
+    keyResolver: jwksClearStore.resolve,
+    now: DEMO_CREATED + 60,
+  });
+  await jwksClearStore.refresh();
+  const jwksClearFetchCallsAfterRefetch = jwksClearFetchCalls;
+  const jwksClearVerificationAfterRefetch = verifyRequest(jwksClearSigned, {
+    keyResolver: jwksClearStore.resolve,
+    now: DEMO_CREATED + 60,
+  });
+  const jwksClearStatsAfterRefetch = jwksClearStore.stats();
+  if (
+    !jwksClearVerificationBefore.ok ||
+    jwksClearVerificationBefore.label !==
+      DEMO_JWKS_OBSERVABILITY_LABEL ||
+    jwksClearVerificationBefore.keyId !== DEMO_JWKS_CLEAR_KEY_ID ||
+    jwksClearVerificationBefore.alg !==
+      DEMO_JWKS_OBSERVABILITY_ALG ||
+    jwksClearVerificationBefore.nonce !== DEMO_JWKS_CLEAR_NONCE ||
+    jwksClearStatsBefore.refreshes !==
+      DEMO_JWKS_CLEAR_STATS_BEFORE.refreshes ||
+    jwksClearStatsBefore.refreshFailures !==
+      DEMO_JWKS_CLEAR_STATS_BEFORE.refreshFailures ||
+    jwksClearStatsBefore.hits !== DEMO_JWKS_CLEAR_STATS_BEFORE.hits ||
+    jwksClearStatsBefore.misses !==
+      DEMO_JWKS_CLEAR_STATS_BEFORE.misses ||
+    jwksClearSizeAfterClear !== DEMO_JWKS_CLEAR_SIZE_AFTER_CLEAR ||
+    jwksClearLastRefreshedAfterClear !== null ||
+    jwksClearStaleAfterClear !== true ||
+    jwksClearStatsAfterClear.refreshes !==
+      DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR.refreshes ||
+    jwksClearStatsAfterClear.refreshFailures !==
+      DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR.refreshFailures ||
+    jwksClearStatsAfterClear.hits !==
+      DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR.hits ||
+    jwksClearStatsAfterClear.misses !==
+      DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR.misses ||
+    jwksClearVerificationAfterClear.ok ||
+    jwksClearVerificationAfterClear.code !==
+      DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR ||
+    jwksClearFetchCallsAfterRefetch !== DEMO_JWKS_CLEAR_FETCH_CALLS ||
+    !jwksClearVerificationAfterRefetch.ok ||
+    jwksClearVerificationAfterRefetch.label !==
+      DEMO_JWKS_OBSERVABILITY_LABEL ||
+    jwksClearVerificationAfterRefetch.keyId !==
+      DEMO_JWKS_CLEAR_KEY_ID ||
+    jwksClearVerificationAfterRefetch.alg !==
+      DEMO_JWKS_OBSERVABILITY_ALG ||
+    jwksClearVerificationAfterRefetch.nonce !==
+      DEMO_JWKS_CLEAR_NONCE ||
+    jwksClearStatsAfterRefetch.refreshes !==
+      DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH.refreshes ||
+    jwksClearStatsAfterRefetch.refreshFailures !==
+      DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH.refreshFailures ||
+    jwksClearStatsAfterRefetch.hits !==
+      DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH.hits ||
+    jwksClearStatsAfterRefetch.misses !==
+      DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH.misses
+  ) {
+    throw new Error(
+      `demo fixture broken: JWKS clear gave verification before ` +
+        `${jwksClearVerificationBefore.ok}/${jwksClearVerificationBefore.ok ? jwksClearVerificationBefore.label : jwksClearVerificationBefore.code}/` +
+        `${jwksClearVerificationBefore.ok ? jwksClearVerificationBefore.keyId : "-"}/` +
+        `${jwksClearVerificationBefore.ok ? jwksClearVerificationBefore.nonce : "-"} with stats ` +
+        `${JSON.stringify(jwksClearStatsBefore)}, after clear size ` +
+        `${jwksClearSizeAfterClear}, lastRefreshedAt ` +
+        `${jwksClearLastRefreshedAfterClear}, stale ` +
+        `${jwksClearStaleAfterClear}, stats ` +
+        `${JSON.stringify(jwksClearStatsAfterClear)}, verification after clear ` +
+        `${jwksClearVerificationAfterClear.ok ? "ok" : jwksClearVerificationAfterClear.code}, fetch count after refetch ` +
+        `${jwksClearFetchCallsAfterRefetch}, verification after refetch ` +
+        `${jwksClearVerificationAfterRefetch.ok}/${jwksClearVerificationAfterRefetch.ok ? jwksClearVerificationAfterRefetch.label : jwksClearVerificationAfterRefetch.code}/` +
+        `${jwksClearVerificationAfterRefetch.ok ? jwksClearVerificationAfterRefetch.keyId : "-"}/` +
+        `${jwksClearVerificationAfterRefetch.ok ? jwksClearVerificationAfterRefetch.nonce : "-"} with stats ` +
+        `${JSON.stringify(jwksClearStatsAfterRefetch)}, instead of the pinned verification before ` +
+        `true/${DEMO_JWKS_OBSERVABILITY_LABEL}/${DEMO_JWKS_CLEAR_KEY_ID}/` +
+        `${DEMO_JWKS_CLEAR_NONCE} with stats ` +
+        `${JSON.stringify(DEMO_JWKS_CLEAR_STATS_BEFORE)}, after clear size ` +
+        `${DEMO_JWKS_CLEAR_SIZE_AFTER_CLEAR}, lastRefreshedAt null, stale true, stats ` +
+        `${JSON.stringify(DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR)}, verification after clear ` +
+        `${DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR}, fetch count after refetch ` +
+        `${DEMO_JWKS_CLEAR_FETCH_CALLS}, verification after refetch ` +
+        `true/${DEMO_JWKS_OBSERVABILITY_LABEL}/${DEMO_JWKS_CLEAR_KEY_ID}/` +
+        `${DEMO_JWKS_CLEAR_NONCE} with stats ` +
+        `${JSON.stringify(DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH)}`,
+    );
+  }
+
   // JWKS fetch retries segment: the observability segment
   // above refreshes exactly once over a healthy fake
   // endpoint, so it cannot show what `fetchRetries` does
@@ -13278,6 +13573,18 @@ export async function runDemo(): Promise<DemoResult> {
     `JWKS observability resolves at the boundary: resolve("${DEMO_JWKS_OBSERVABILITY_KEY_ID}") returned a key (hit), resolve("${DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID}") returned undefined (miss)`,
     `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${jwksObservabilityStats.refreshes}, refreshFailures: ${jwksObservabilityStats.refreshFailures}, hits: ${jwksObservabilityStats.hits}, misses: ${jwksObservabilityStats.misses} } (hits + misses equals the total resolve() calls)`,
     "",
+    "JWKS clear: JwksKeyStore.clear() drops the cached keys and zeroes the stats() counters at once — the explicit reset a gateway runs when an endpoint stops being trusted or a key is known compromised, instead of waiting for the TTL to expire or for a refresh to succeed",
+    jwksClearVerificationBefore.ok
+      ? `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" verifies through the fetched snapshot: OK (label ${jwksClearVerificationBefore.label}, keyid="${jwksClearVerificationBefore.keyId}", alg="${jwksClearVerificationBefore.alg}", nonce="${jwksClearVerificationBefore.nonce}"), stats() = { refreshes: ${jwksClearStatsBefore.refreshes}, refreshFailures: ${jwksClearStatsBefore.refreshFailures}, hits: ${jwksClearStatsBefore.hits}, misses: ${jwksClearStatsBefore.misses} }`
+      : `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" through the fetched snapshot: FAILED (code ${jwksClearVerificationBefore.code}: ${jwksClearVerificationBefore.reason})`,
+    `JWKS clear after clear(): size = ${jwksClearSizeAfterClear}, lastRefreshedAt=${jwksClearLastRefreshedAfterClear}, isStale()=${jwksClearStaleAfterClear}, stats() = { refreshes: ${jwksClearStatsAfterClear.refreshes}, refreshFailures: ${jwksClearStatsAfterClear.refreshFailures}, hits: ${jwksClearStatsAfterClear.hits}, misses: ${jwksClearStatsAfterClear.misses} } (every cached key dropped, every counter back at zero)`,
+    jwksClearVerificationAfterClear.ok
+      ? `JWKS clear verification after clear(): the same signed request: OK (unexpected — the cleared store still resolved the retired key)`
+      : `JWKS clear verification after clear(): the same signed request: FAILED (code ${jwksClearVerificationAfterClear.code}: ${jwksClearVerificationAfterClear.reason}) — the retired key no longer resolves`,
+    jwksClearVerificationAfterRefetch.ok
+      ? `JWKS clear after a fresh refresh() (fetch count ${jwksClearFetchCallsAfterRefetch}): the same signed request verifies again: OK (label ${jwksClearVerificationAfterRefetch.label}, keyid="${jwksClearVerificationAfterRefetch.keyId}", alg="${jwksClearVerificationAfterRefetch.alg}", nonce="${jwksClearVerificationAfterRefetch.nonce}"), stats() = { refreshes: ${jwksClearStatsAfterRefetch.refreshes}, refreshFailures: ${jwksClearStatsAfterRefetch.refreshFailures}, hits: ${jwksClearStatsAfterRefetch.hits}, misses: ${jwksClearStatsAfterRefetch.misses} } (the post-clear miss from the rejected verification stays visible in the counters)`
+      : `JWKS clear after a fresh refresh() (fetch count ${jwksClearFetchCallsAfterRefetch}): the same signed request: FAILED (code ${jwksClearVerificationAfterRefetch.code}: ${jwksClearVerificationAfterRefetch.reason})`,
+    "",
     "JWKS fetch retries: JwksKeyStore fetchRetries retries only transient JWKS failures — a briefly sick endpoint heals on retry, a wrong request never does",
     `JWKS fetch retries over a 500, 500, 200 script (fetchRetries ${DEMO_JWKS_FETCH_RETRY_RETRIES}, backoff ${DEMO_JWKS_FETCH_RETRY_BACKOFF_MS}ms): refresh() succeeded on attempt ${jwksFetchRetryFetchCalls} after ${jwksFetchRetrySleeps.length} sleeps, the snapshot holds ${jwksFetchRetrySize} key and resolve("${DEMO_JWKS_FETCH_RETRY_KEY_ID}") returned a key`,
     `JWKS fetch retries over a 404 endpoint (same fetchRetries ${DEMO_JWKS_FETCH_RETRY_RETRIES}): refresh() FAILED (${jwksFetchRetryNotFoundError}) after exactly ${jwksFetchRetryNotFoundFetchCalls} fetch and ${jwksFetchRetryNotFoundSleeps.length} sleeps — a 4xx response is terminal, never retried`,
@@ -13847,6 +14154,16 @@ export async function runDemo(): Promise<DemoResult> {
     jwksObservabilityHitResolved,
     jwksObservabilityUnknownResolved,
     jwksObservabilityStats,
+    jwksClearVerificationBefore,
+    jwksClearStatsBefore,
+    jwksClearSizeAfterClear,
+    jwksClearLastRefreshedAfterClear,
+    jwksClearStaleAfterClear,
+    jwksClearStatsAfterClear,
+    jwksClearVerificationAfterClear,
+    jwksClearFetchCalls: jwksClearFetchCallsAfterRefetch,
+    jwksClearVerificationAfterRefetch,
+    jwksClearStatsAfterRefetch,
     jwksFetchRetryFetchCalls,
     jwksFetchRetrySleeps,
     jwksFetchRetryResolved,
