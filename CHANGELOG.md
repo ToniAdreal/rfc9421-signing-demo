@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Fetch response adapter (backlog #961):
+  `fromFetchResponse(res, body, opts?)` (plus the `FetchResponseLike`
+  / `FromFetchResponseOptions` types) normalizes a `fetch()`
+  `Response` into a `RequestLike`, the fetch-API twin of
+  `fromNodeResponse`: `res.status` bound via `@status` (missing or
+  non-integer statuses fail fast, same boundary rule), header names
+  lowercased and multi-value fields joined with `", "` (a real
+  `Headers` instance, or any iterable of `[name, value]` pairs),
+  `opts.request` attached as `RequestLike.request` for covered `;req`
+  binding or an explicit `opts.method` + `opts.url` pair instead.
+  The body is read by the caller and passed in as
+  `string | Buffer | Uint8Array` — the adapter never consumes
+  `res.body`, and a `Uint8Array` body is copied into a `Buffer`.
+  A fetch `Response` carries no trailers, so the resulting
+  `RequestLike` never gains a `trailers` field and `;tr` components
+  cannot verify through this adapter.
 - Per-label signed replay-cache snapshots (backlog #952):
   `exportSignedSnapshotsByLabel(caches, secret)` exports one
   HMAC-SHA256 envelope per label of a `replayCacheByLabel` map, and

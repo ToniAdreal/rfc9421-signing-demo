@@ -100,7 +100,7 @@ export {
   serializeDictionaryMemberValue,
 } from "./structuredFields.js";
 export type { StructuredFieldType } from "./structuredFields.js";
-export { fromNodeRequest, fromNodeResponse } from "./nodeHttp.js";
+export { fromFetchResponse, fromNodeRequest, fromNodeResponse } from "./nodeHttp.js";
 export { addResponseSignature, signResponse, verifyResponse } from "./response.js";
 export type {
   HttpResponseLike,
@@ -109,6 +109,8 @@ export type {
   VerifyResponseOptions,
 } from "./response.js";
 export type {
+  FetchResponseLike,
+  FromFetchResponseOptions,
   FromNodeRequestOptions,
   FromNodeResponseOptions,
   IncomingRequestLike,

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1677 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1694 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -956,6 +956,44 @@ when present, else `res.trailers`). On a real client the trailers are
 complete only after the response's `end` event — which is when the
 example above calls the adapter.
 
+Verifying signed *responses* with the global `fetch` API — the
+receive→verify chain via `fromFetchResponse`:
+
+```ts
+import { fromFetchResponse, verifyRequest } from "./dist/src/index.js";
+
+// The request the client actually sent — the response signature can be
+// bound to it (see ";req" below), so keep it around.
+const request = { method: "GET", url, headers: { host } };
+
+const res = await fetch(url);
+// A fetch body is a one-shot stream and verification needs the exact
+// raw bytes, so read it first and pass the bytes in — the adapter
+// never consumes res.body itself.
+const body = Buffer.from(await res.arrayBuffer());
+const result = verifyRequest(fromFetchResponse(res, body, { request }), {
+  key: gatewayPublicKey,
+  requiredComponents: ["@status"], // insist the signer bound the status
+});
+if (!result.ok) {
+  throw new Error(`bad gateway signature: ${result.code}`);
+}
+```
+
+What `fromFetchResponse` does: takes the response `status` (a covered
+`@status` binds it; a missing status throws a configuration `Error`
+instead of silently defaulting, and so does a non-integer one — the same
+boundary rule as `fromNodeResponse`), lowercases header names and joins
+multi-value headers with `", "` (the same convention as
+`fromNodeResponse`), passes the already-read body through untouched (a
+`Uint8Array` body is copied into a `Buffer`; a string or `Buffer` passes
+through as-is), and takes the triggering request from `opts.request`
+(attached as `RequestLike.request`, enabling covered `;req` components)
+or from an explicit `opts.method` + `opts.url` pair. A fetch `Response`
+carries no trailers, so the resulting `RequestLike` never gains a
+`trailers` field and a covered `;tr` component cannot verify through
+this adapter — use `fromNodeResponse` when trailers matter.
+
 Signing responses directly, without assembling a `RequestLike` —
 `signResponse` / `verifyResponse` (thin wrappers, zero new
 cryptography):
@@ -1349,6 +1387,16 @@ values. Without a request to bind to, keep using the request-side API
   verifying gateway-signed responses — pass `opts.request` (the request
   you sent) to enable covered `;req` request-binding components. See
   the Quickstart response receive→verify example.
+- **Fetch client adapter**: `fromFetchResponse(res, body, opts?)`
+  normalizes a `fetch()` `Response` into a `RequestLike` (response
+  `status` bound via `@status`, same header conventions as
+  `fromNodeResponse`, body read by the caller and passed in as
+  `string | Buffer | Uint8Array`), so `verifyRequest` plugs straight
+  into verifying gateway-signed responses fetched with the global
+  `fetch` — pass `opts.request` (the request you sent) to enable
+  covered `;req` request-binding components. A fetch `Response` carries
+  no trailers, so `;tr` components cannot verify through this adapter.
+  See the Quickstart fetch receive→verify example.
 - **Response signing entry points**: `signResponse(res, opts)` /
   `verifyResponse(res, opts)` wrap the request-side API for the
   response shape (`{ status, headers, body? }`), covering `@status`
@@ -3793,7 +3841,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1677 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1694 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

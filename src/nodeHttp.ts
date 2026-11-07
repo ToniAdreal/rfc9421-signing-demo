@@ -6,7 +6,9 @@
  * `verifyRequest` can check signatures on messages received by a real
  * server (`fromNodeRequest`) or on responses received by a real client
  * (`fromNodeResponse`, e.g. verifying a gateway-signed settlement
- * callback). Zero runtime dependencies.
+ * callback). `fromFetchResponse` is the same client-direction adapter
+ * for the global `fetch` API: a `Response` from `fetch()` instead of an
+ * `http.IncomingMessage`. Zero runtime dependencies.
  *
  * The request body is NOT read here: `IncomingMessage` is a stream, so
  * the caller must buffer it first and pass the complete bytes (string or
@@ -104,6 +106,54 @@ export interface FromNodeResponseOptions {
 }
 
 /**
+ * The `Response` fields the fetch adapter actually reads. The global
+ * `fetch` (Node ≥ 20) returns objects satisfying this shape; plain test
+ * doubles do too — any iterable of `[name, value]` header pairs works
+ * (a real `Headers` instance, or a literal array of pairs), with no
+ * dependency on the DOM `Headers` type.
+ *
+ * `status` is optional only so a missing status fails fast with a
+ * descriptive error instead of silently defaulting: a real `Response`
+ * always carries one.
+ */
+export interface FetchResponseLike {
+  /** The response status code — the field a covered `@status` binds. */
+  status?: number;
+  /**
+   * Header fields, as `[name, value]` pairs in iteration order. A real
+   * `Headers` instance already combines repeated fields (other than
+   * `set-cookie`, which it yields as separate entries) with `", "`; the
+   * adapter groups entries by lowercased name and joins each group with
+   * `joinHeaderValues`, the same convention `fromNodeResponse` applies
+   * to Node's array-valued headers.
+   */
+  headers: Iterable<[string, string]>;
+}
+
+export interface FromFetchResponseOptions {
+  /**
+   * The request that triggered this response. Supplies the
+   * `RequestLike.method`/`url` fields (which a pure `@status` flow never
+   * covers, but the type requires) and is attached as
+   * `RequestLike.request`, so a covered `;req` component
+   * (e.g. `"@method";req`) resolves against it and binds the response
+   * signature to that request. Takes precedence over the explicit
+   * `method`/`url` pair.
+   */
+  request?: RequestLike;
+  /**
+   * Explicit request method, used only when `request` is absent. Must be
+   * paired with `url`.
+   */
+  method?: string;
+  /**
+   * Explicit request URL, used only when `request` is absent. Must be
+   * paired with `method`.
+   */
+  url?: string;
+}
+
+/**
  * Build a `RequestLike` from a Node HTTP response plus its
  * already-buffered body.
  *
@@ -172,6 +222,109 @@ export function fromNodeResponse(
   // event, which is when the caller has the buffered body anyway.
   const trailers = normalizeTrailers(res);
   return trailers === undefined ? requestLike : { ...requestLike, trailers };
+}
+
+/**
+ * Build a `RequestLike` from a `fetch()` `Response` plus its
+ * already-read body.
+ *
+ * This is the fetch-API twin of `fromNodeResponse`: same `status` /
+ * `method` / `url` / `;req` semantics, same fail-fast errors, only the
+ * input shape differs (`Response.status` / `Response.headers` instead
+ * of `IncomingMessage.statusCode` / a record of headers).
+ *
+ * The body is NOT read here and `res.body` is never consumed: a fetch
+ * body is a one-shot stream, and verification needs the exact raw
+ * bytes (the `Content-Digest` check recomputes over them), so the
+ * caller reads it first — typically
+ * `Buffer.from(await res.arrayBuffer())` — and passes the bytes in.
+ * A `Uint8Array` body is copied into a `Buffer` (the `RequestLike`
+ * body type is `string | Buffer`); a `Buffer` or string passes through
+ * untouched.
+ *
+ * A fetch `Response` carries no trailers, so the resulting
+ * `RequestLike` never gains a `trailers` field: a covered `;tr`
+ * component cannot verify through this adapter (it resolves against
+ * `RequestLike.trailers`, which is absent), exactly as if the peer
+ * sent no trailers. Use `fromNodeResponse` when trailers matter.
+ *
+ * Throws a descriptive `Error` on a missing `res.status` or a
+ * non-integer status — the same boundary rule as `fromNodeResponse` —
+ * and when neither `opts.request` nor the `opts.method` + `opts.url`
+ * pair supplies the triggering request.
+ */
+export function fromFetchResponse(
+  res: FetchResponseLike,
+  body?: string | Buffer | Uint8Array,
+  opts?: FromFetchResponseOptions,
+): RequestLike {
+  const status = res.status;
+  if (status === undefined)
+    throw new Error(
+      "fromFetchResponse: res.status is missing — @status verification needs the response status",
+    );
+  if (typeof status !== "number" || !Number.isInteger(status))
+    throw new Error(
+      `fromFetchResponse: res.status must be an integer HTTP status code, got ${String(status)}`,
+    );
+
+  let method: string | undefined;
+  let url: string | undefined;
+  let boundRequest: RequestLike | undefined;
+  if (opts?.request !== undefined) {
+    boundRequest = opts.request;
+    method = boundRequest.method;
+    url = boundRequest.url;
+  } else {
+    method = opts?.method;
+    url = opts?.url;
+  }
+  if (method === undefined || method === "" || url === undefined || url === "")
+    throw new Error(
+      "fromFetchResponse: cannot determine the request this response answers — " +
+        "pass opts.request, or the opts.method + opts.url pair",
+    );
+
+  const headers = normalizeFetchHeaders(res.headers);
+  const requestLike: RequestLike = {
+    method,
+    url,
+    headers,
+    body:
+      body === undefined
+        ? undefined
+        : typeof body === "string" || Buffer.isBuffer(body)
+          ? body
+          : Buffer.from(body),
+    status,
+    ...(boundRequest !== undefined ? { request: boundRequest } : {}),
+  };
+  return requestLike;
+}
+
+/**
+ * Normalize a fetch `Headers` iteration into the `RequestLike.headers`
+ * shape: names lowercased, entries grouped by name, each group combined
+ * via `joinHeaderValues` — the exact convention `fromNodeResponse`
+ * applies to Node's array-valued headers, so a signer that built its
+ * `RequestLike` by hand and a verifier that received the message
+ * through this adapter can never diverge on multi-value fields.
+ */
+function normalizeFetchHeaders(
+  headers: Iterable<[string, string]>,
+): Record<string, string> {
+  const grouped = new Map<string, string[]>();
+  for (const [name, value] of headers) {
+    const lower = name.toLowerCase();
+    const list = grouped.get(lower);
+    if (list) list.push(value);
+    else grouped.set(lower, [value]);
+  }
+  const out: Record<string, string> = {};
+  for (const [name, values] of grouped) {
+    out[name] = joinHeaderValues(values);
+  }
+  return out;
 }
 
 export interface FromNodeRequestOptions {
