@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo gains an HMAC `oct` JWK key-distribution segment (backlog
+  #944): a fixed 32-byte HMAC secret is exported with
+  `exportSymmetricKeyJwk` (HS256 + kid `hmac-key-1`), read back
+  through a JSON wire round-trip with `importSymmetricKeyJwk`, and
+  the imported key completes an hmac-sha256 sign -> verify
+  round-trip under the exported kid — the symmetric half of JWK key
+  distribution, for gateway key rotation over JWKS. A 31-byte secret
+  is shown rejected at export and a 16-byte `k` JWK at import, both
+  by the per-alg secret floor the sign/verify paths enforce. Only
+  the JWK's shape (kty/kid/alg and the 43-character `k` length) is
+  printed, never the secret bytes; `DemoResult` gains the segment's
+  shape fields, verification and both pinned rejection messages,
+  and the demo fail-fasts on all of them. Zero network, zero
+  randomness: the segment is byte-identical between runs.
 - Demo gains a required co-signatures segment (backlog #942): the
   dual-signed request (merchant `sig1` + gateway) is verified with
   `verifyAllLabels` under `requiredLabels: ["sig1", "gateway"]`

@@ -1132,6 +1132,18 @@
  * still carries its keyid, so keyids are asserted for both labels).
  * Every clock is injected and the segment's key pairs are fresh per
  * run, so the segment is byte-identical between runs.
+ * The demo closes with an HMAC `oct` JWK key distribution segment:
+ * the JWK segments above cover only asymmetric keys, but a gateway
+ * HMAC secret rotates as an `oct` JWK (a JWKS `oct` entry). A fixed
+ * 32-byte demo secret is exported with `exportSymmetricKeyJwk`
+ * (HS256 + kid), read back through a JSON wire round-trip with
+ * `importSymmetricKeyJwk`, and the imported key completes an
+ * hmac-sha256 sign -> verify round-trip under the exported kid.
+ * A 31-byte secret is printed rejected at export and a 16-byte
+ * `k` JWK at import, both by the per-alg floor the sign/verify
+ * paths enforce. Only the JWK's shape (kty/kid/alg and the
+ * 43-character `k` length) is printed, never the secret bytes, so
+ * the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -1187,6 +1199,7 @@ import {
   exportPublicKeyJwkP521,
   exportPublicKeyJwkRsa,
   exportPublicKeyPem,
+  exportSymmetricKeyJwk,
   fromNodeRequest,
   fromNodeResponse,
   generateEd25519KeyPair,
@@ -1205,6 +1218,7 @@ import {
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
+  importSymmetricKeyJwk,
   isVerifyError,
   jwkThumbprint,
   JwksKeyStore,
@@ -1293,6 +1307,40 @@ export const DEMO_SIGNATURE_LABELS: ReadonlyArray<string> = [
  */
 export const DEMO_GATEWAY_SECRET =
   "demo-gateway-secret-do-not-use-in-prod-0123456789";
+/**
+ * Key id the HMAC `oct` JWK segment exports the demo secret under.
+ */
+export const DEMO_OCT_JWK_KEY_ID = "hmac-key-1";
+/**
+ * Nonce the HMAC `oct` JWK segment's round-trip request carries.
+ */
+export const DEMO_OCT_JWK_NONCE = "demo-nonce-oct-jwk-001";
+/**
+ * Demo-only HMAC secret for the `oct` JWK segment: fixed 32 bytes
+ * (the hmac-sha256 floor), so the exported JWK and the round-trip
+ * signature are deterministic — labelled as a demo value, never use
+ * it anywhere else. Only the JWK's shape (kty/kid/alg and the
+ * 43-character `k` length) is printed, never the secret bytes.
+ */
+export const DEMO_OCT_JWK_SECRET = secretKey(Buffer.alloc(32, 7));
+/**
+ * Demo-only too-short HMAC secret for the `oct` JWK segment: 31
+ * bytes, one below the hmac-sha256 floor, so its export is rejected
+ * with the pinned guard error (`DEMO_HMAC_GUARD_ERRORS[0]`). Built
+ * with node:crypto's raw `createSecretKey` — the library's
+ * `secretKey()` helper would refuse it at construction, so the raw
+ * constructor is what lets the exporter's own floor check fire.
+ */
+export const DEMO_OCT_JWK_SHORT_SECRET = createSecretKey(
+  Buffer.alloc(31, 7),
+);
+/**
+ * Pinned rejection for importing a 16-byte `oct` JWK: the per-alg
+ * floor the sign/verify paths enforce, wrapped in the importer's
+ * `invalid JWK:` style.
+ */
+export const DEMO_OCT_JWK_IMPORT_ERROR =
+  "importSymmetricKeyJwk: invalid JWK: hmac-sha256 secret must be at least 32 bytes (RFC 2104: the key SHOULD be at least as long as the hash output; sha-256 → 32 bytes), got 16 bytes";
 /**
  * Components the gateway signature covers. Unlike the merchant's
  * `sig1` signature (the default set, including `content-digest`), the
@@ -5496,6 +5544,30 @@ export interface DemoResult {
    * with `DEMO_RESPONSE_SIGNING_TAMPER_CODE`).
    */
   responseSigningTamperedVerification: VerifyResult;
+  /**
+   * The HMAC `oct` JWK exported in the oct-JWK segment: only its
+   * shape is recorded here (kty/kid/alg and the `k` length) — the
+   * secret bytes themselves never leave this file's locals.
+   */
+  octJwkKty: string;
+  octJwkKid: string;
+  octJwkAlg: string;
+  octJwkKeyLength: number;
+  /**
+   * Verification of the request signed with the imported `oct` key
+   * (ok — the imported key is the same secret).
+   */
+  octJwkVerification: VerifyResult;
+  /**
+   * Pinned rejection from exporting the 31-byte demo secret (one
+   * below the hmac-sha256 floor): `DEMO_HMAC_GUARD_ERRORS[0]`.
+   */
+  octJwkExportError: string;
+  /**
+   * Pinned rejection from importing a 16-byte `oct` JWK (below the
+   * hmac-sha256 floor): `DEMO_OCT_JWK_IMPORT_ERROR`.
+   */
+  octJwkImportError: string;
   lines: string[];
 }
 
@@ -12260,6 +12332,83 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // HMAC `oct` JWK key-distribution segment (backlog #944): the JWK
+  // segments above cover only asymmetric keys, but a gateway HMAC
+  // secret rotates as an `oct` JWK (a JWKS `oct` entry). A fixed
+  // 32-byte demo secret is exported with `exportSymmetricKeyJwk`
+  // (HS256 + kid), read back through a JSON wire round-trip with
+  // `importSymmetricKeyJwk`, and the imported key completes an
+  // hmac-sha256 sign -> verify round-trip — the imported key is the
+  // same secret, so the verification passes under the exported kid.
+  // A 31-byte secret is rejected at export and a 16-byte `k` JWK at
+  // import, both by the per-alg floor the sign/verify paths enforce.
+  // Only the JWK's shape is printed, never the secret bytes, so the
+  // segment is byte-identical between runs.
+  const octJwk = exportSymmetricKeyJwk(DEMO_OCT_JWK_SECRET, {
+    alg: "HS256",
+    kid: DEMO_OCT_JWK_KEY_ID,
+  });
+  const octJwkWire = JSON.parse(JSON.stringify(octJwk)) as unknown;
+  const octJwkImported = importSymmetricKeyJwk(octJwkWire);
+  const octJwkImportedK = (
+    octJwkImported.export({ format: "jwk" }) as unknown as { k: string }
+  ).k;
+  let octJwkExportError = "";
+  try {
+    exportSymmetricKeyJwk(DEMO_OCT_JWK_SHORT_SECRET);
+  } catch (e) {
+    octJwkExportError = (e as Error).message;
+  }
+  let octJwkImportError = "";
+  try {
+    importSymmetricKeyJwk({
+      kty: "oct",
+      k: Buffer.alloc(16, 7).toString("base64url"),
+    });
+  } catch (e) {
+    octJwkImportError = (e as Error).message;
+  }
+  const octJwkSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_OCT_JWK_KEY_ID,
+      alg: "hmac-sha256",
+      key: octJwkImported,
+      created: DEMO_CREATED,
+      nonce: DEMO_OCT_JWK_NONCE,
+    },
+  );
+  const octJwkVerification = verifyRequest(octJwkSigned, {
+    key: octJwkImported,
+    now: DEMO_CREATED + 60,
+  });
+  if (
+    octJwk.kty !== "oct" ||
+    octJwk.kid !== DEMO_OCT_JWK_KEY_ID ||
+    octJwk.alg !== "HS256" ||
+    octJwk.k.length !== 43 ||
+    octJwkImportedK !== octJwk.k ||
+    octJwkExportError !== DEMO_HMAC_GUARD_ERRORS[0] ||
+    octJwkImportError !== DEMO_OCT_JWK_IMPORT_ERROR ||
+    !octJwkVerification.ok ||
+    octJwkVerification.label !== "sig1" ||
+    octJwkVerification.keyId !== DEMO_OCT_JWK_KEY_ID ||
+    octJwkVerification.alg !== "hmac-sha256" ||
+    octJwkVerification.nonce !== DEMO_OCT_JWK_NONCE
+  ) {
+    throw new Error(
+      `demo fixture broken: oct JWK segment gave kty=${octJwk.kty}/kid=${octJwk.kid}/alg=${octJwk.alg}/k-length=${octJwk.k.length}, ` +
+        `imported-k-match=${octJwkImportedK === octJwk.k}, export-error=${JSON.stringify(octJwkExportError)}, ` +
+        `import-error=${JSON.stringify(octJwkImportError)} and verification ${octJwkVerification.ok}/${octJwkVerification.label}/` +
+        `${octJwkVerification.keyId}/${octJwkVerification.alg}, instead of oct/HS256/kid hmac-key-1, the two pinned floor rejections and an ok hmac-sha256 verification`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -12976,6 +13125,14 @@ export async function runDemo(): Promise<DemoResult> {
     responseSigningTamperedVerification.ok
       ? "Response signing verification after status tampering (200 -> 500): OK (unexpected — the tampered status was not detected)"
       : `Response signing verification after status tampering (200 -> 500): FAILED (code ${responseSigningTamperedVerification.code}: ${responseSigningTamperedVerification.reason})`,
+    "",
+    `HMAC oct JWK key distribution: a fixed 32-byte HMAC secret is exported as an oct JWK (HS256, kid "${DEMO_OCT_JWK_KEY_ID}") and read back through a JSON wire round-trip — the symmetric half of JWK key distribution, for gateway key rotation over JWKS`,
+    `oct JWK: kty="oct" kid="${octJwk.kid}" alg="${octJwk.alg}" k length ${octJwk.k.length} chars (32 bytes base64url, no padding; the secret itself is never printed)`,
+    octJwkVerification.ok
+      ? `oct JWK round-trip verification: OK (label ${octJwkVerification.label}, keyid="${octJwkVerification.keyId}", alg="hmac-sha256", nonce="${octJwkVerification.nonce}")`
+      : `oct JWK round-trip verification: FAILED (code ${octJwkVerification.code}: ${octJwkVerification.reason})`,
+    `Short secret rejected at export: ${octJwkExportError}`,
+    `Short oct JWK rejected at import: ${octJwkImportError}`,
   ];
 
   return {
@@ -13284,6 +13441,13 @@ export async function runDemo(): Promise<DemoResult> {
     responseSigningSigned,
     responseSigningVerification,
     responseSigningTamperedVerification,
+    octJwkKty: octJwk.kty,
+    octJwkKid: octJwk.kid ?? "",
+    octJwkAlg: octJwk.alg ?? "",
+    octJwkKeyLength: octJwk.k.length,
+    octJwkVerification,
+    octJwkExportError,
+    octJwkImportError,
     lines,
   };
 }

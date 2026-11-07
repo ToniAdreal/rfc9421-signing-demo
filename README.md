@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1643 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1645 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -189,7 +189,18 @@ the merchant signs with `signResponse` (ed25519) and the
 gateway appends its hmac-sha256 label with
 `addResponseSignature` — so the response-side twin of the
 request-side `signRequest` / `addSignature` pair is shown
-end to end, again with per-label tamper isolation:
+end to end, again with per-label tamper isolation. The demo
+closes with an HMAC `oct` JWK key distribution segment: a
+fixed 32-byte HMAC secret is exported as an `oct` JWK
+(`exportSymmetricKeyJwk`, HS256 + kid), read back through a
+JSON wire round-trip with `importSymmetricKeyJwk`, and the
+imported key completes an hmac-sha256 sign -> verify
+round-trip under the exported kid — the symmetric half of JWK
+key distribution, for gateway key rotation over JWKS. A
+31-byte secret is shown rejected at export and a 16-byte `k`
+JWK at import, both by the per-alg floor the sign/verify
+paths enforce; only the JWK's shape is printed, never the
+secret bytes.
 
 ```bash
 npm run demo
@@ -3736,7 +3747,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1643 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1645 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

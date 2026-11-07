@@ -23,6 +23,7 @@ import {
   exportPublicKeyJwkP384,
   exportPublicKeyJwkP521,
   exportPublicKeyJwkRsa,
+  exportSymmetricKeyJwk,
   fromNodeRequest,
   generateEd25519KeyPair,
   generateP256KeyPair,
@@ -36,6 +37,7 @@ import {
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
+  importSymmetricKeyJwk,
   joinHeaderValues,
   JwksKeyStore,
   parseSignatureField,
@@ -155,6 +157,10 @@ import {
   DEMO_HMAC_GUARD_ACCEPTED,
   DEMO_HMAC_GUARD_ERRORS,
   DEMO_HMAC_GUARD_REJECTED,
+  DEMO_OCT_JWK_IMPORT_ERROR,
+  DEMO_OCT_JWK_KEY_ID,
+  DEMO_OCT_JWK_NONCE,
+  DEMO_OCT_JWK_SECRET,
   DEMO_RSA_GUARD_ACCEPTED,
   DEMO_RSA_GUARD_CONTEXT,
   DEMO_RSA_GUARD_ERRORS,
@@ -6013,19 +6019,158 @@ test("demo response-signing segment signs a response with @status and rejects a 
     `Response signing verification: OK (label ${DEMO_RESPONSE_SIGNING_LABEL}, keyid="${DEMO_RESPONSE_SIGNING_KEY_ID}", alg="ed25519", nonce="${DEMO_RESPONSE_SIGNING_NONCE}", status ${DEMO_RESPONSE_SIGNING_STATUS}, covered "@status" "content-digest")`,
     `Response signing verification after status tampering (200 -> 500): FAILED (code ${DEMO_RESPONSE_SIGNING_TAMPER_CODE}: ${responseSigningTamperedVerification.reason})`,
   ]);
-  // The segment closes the demo: nothing follows it.
-  assert.equal(lines[headerIdx + 4], undefined);
+  // The segment is followed by the HMAC oct JWK segment (blank
+  // separator, then its header), which now closes the demo.
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(
+    lines[headerIdx + 5]!.startsWith("HMAC oct JWK key distribution:"),
+  );
 });
 
 test("demo response-signing segment prints byte-identical lines across runs", async () => {
   const first = await runDemo();
   const second = await runDemo();
-  const start = (ls: string[]) => ls.findIndex((l) => l.startsWith("Response signing:"));
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Response signing:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("HMAC oct JWK key distribution:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // Only the key pair is fresh per run and signature bytes are
+  // never printed, so the response-signing segment's lines are
+  // identical.
+  assert.deepEqual(
+    first.lines.slice(a, aEnd),
+    second.lines.slice(b, bEnd),
+  );
+});
+
+test("demo oct JWK segment exports, imports and verifies an HMAC secret, and rejects short secrets", async () => {
+  const {
+    lines,
+    octJwkKty,
+    octJwkKid,
+    octJwkAlg,
+    octJwkKeyLength,
+    octJwkVerification,
+    octJwkExportError,
+    octJwkImportError,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // The exported JWK's shape: oct, the exported kid and alg, and
+  // the 43-char `k` of a 32-byte secret — the secret itself is never
+  // in the result.
+  assert.equal(octJwkKty, "oct");
+  assert.equal(octJwkKid, DEMO_OCT_JWK_KEY_ID);
+  assert.equal(octJwkAlg, "HS256");
+  assert.equal(octJwkKeyLength, 43);
+
+  // The imported key is the same secret, so the round-trip request
+  // verifies under the exported kid.
+  assert.equal(octJwkVerification.ok, true);
+  assert.equal(octJwkVerification.label, "sig1");
+  assert.equal(octJwkVerification.keyId, DEMO_OCT_JWK_KEY_ID);
+  assert.equal(octJwkVerification.alg, "hmac-sha256");
+  assert.equal(octJwkVerification.nonce, DEMO_OCT_JWK_NONCE);
+
+  // Both floor rejections carry the pinned messages.
+  assert.equal(octJwkExportError, DEMO_HMAC_GUARD_ERRORS[0]);
+  assert.equal(octJwkImportError, DEMO_OCT_JWK_IMPORT_ERROR);
+
+  // Independent re-derivation: exporting the same fixed secret again
+  // yields the same oct shape, and a request signed with the
+  // original secret verifies against a key imported from that fresh
+  // export — the round-trip is the library's behavior, not a
+  // fixture echo.
+  const fresh = exportSymmetricKeyJwk(DEMO_OCT_JWK_SECRET, {
+    alg: "HS256",
+    kid: DEMO_OCT_JWK_KEY_ID,
+  });
+  assert.equal(fresh.kty, "oct");
+  assert.equal(fresh.kid, DEMO_OCT_JWK_KEY_ID);
+  assert.equal(fresh.alg, "HS256");
+  assert.equal(fresh.k.length, 43);
+  const reimported = importSymmetricKeyJwk(
+    JSON.parse(JSON.stringify(fresh)) as unknown,
+  );
+  const crossSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_OCT_JWK_KEY_ID,
+      alg: "hmac-sha256",
+      key: DEMO_OCT_JWK_SECRET,
+      created: DEMO_CREATED,
+      nonce: DEMO_OCT_JWK_NONCE,
+    },
+  );
+  assert.equal(
+    verifyRequest(crossSigned, { key: reimported, now: DEMO_CREATED + 60 })
+      .ok,
+    true,
+  );
+
+  // Printed lines: header, shape, verification, both rejections.
+  assert.match(
+    out,
+    /HMAC oct JWK key distribution: a fixed 32-byte HMAC secret is exported as an oct JWK \(HS256, kid "hmac-key-1"\)/,
+  );
+  assert.match(
+    out,
+    /oct JWK: kty="oct" kid="hmac-key-1" alg="HS256" k length 43 chars/,
+  );
+  assert.match(
+    out,
+    /oct JWK round-trip verification: OK \(label sig1, keyid="hmac-key-1", alg="hmac-sha256", nonce="demo-nonce-oct-jwk-001"\)/,
+  );
+  assert.match(
+    out,
+    /Short secret rejected at export: assertHmacSecretLength: hmac-sha256 secret must be at least 32 bytes/,
+  );
+  assert.match(
+    out,
+    /Short oct JWK rejected at import: importSymmetricKeyJwk: invalid JWK: hmac-sha256 secret must be at least 32 bytes/,
+  );
+
+  // Ordering: the segment follows the response-signing segment and
+  // closes the demo — byte-exact lines, nothing after them.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("HMAC oct JWK key distribution:"),
+  );
+  assert.ok(headerIdx !== -1);
+  const tamperIdx = lines.findIndex((l) =>
+    l.startsWith("Response signing verification after status tampering"),
+  );
+  assert.ok(tamperIdx !== -1 && tamperIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), [
+    `HMAC oct JWK key distribution: a fixed 32-byte HMAC secret is exported as an oct JWK (HS256, kid "${DEMO_OCT_JWK_KEY_ID}") and read back through a JSON wire round-trip — the symmetric half of JWK key distribution, for gateway key rotation over JWKS`,
+    `oct JWK: kty="oct" kid="${DEMO_OCT_JWK_KEY_ID}" alg="HS256" k length 43 chars (32 bytes base64url, no padding; the secret itself is never printed)`,
+    `oct JWK round-trip verification: OK (label sig1, keyid="${DEMO_OCT_JWK_KEY_ID}", alg="hmac-sha256", nonce="${DEMO_OCT_JWK_NONCE}")`,
+    `Short secret rejected at export: ${DEMO_HMAC_GUARD_ERRORS[0]}`,
+    `Short oct JWK rejected at import: ${DEMO_OCT_JWK_IMPORT_ERROR}`,
+  ]);
+  assert.equal(lines[headerIdx + 5], undefined);
+});
+
+test("demo oct JWK segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("HMAC oct JWK key distribution:"));
   const a = start(first.lines);
   const b = start(second.lines);
   assert.ok(a !== -1 && b !== -1);
-  // Only the key pair is fresh per run and signature bytes are
-  // never printed, so the closing segment's lines are identical.
+  // Only fixed strings, the JWK shape and the pinned floor
+  // rejections are printed — the secret and the signature bytes
+  // never appear — so the closing segment is identical.
   assert.deepEqual(second.lines.slice(b), first.lines.slice(a));
 });
 
@@ -8511,8 +8656,8 @@ test("demo lines contain the request-target segment (four forms plus tampered ov
     `Override tampered after signing (${DEMO_RT_ASTERISK_FORM} -> ${DEMO_RT_TAMPERED_FORM}): FAILED (code ${DEMO_RT_REJECT_CODE}: signature mismatch) — the override is part of the signed bytes, so presenting a different target breaks the signature`,
   ]);
   // The request-target segment is followed by the response-signing
-  // segment (blank separator, then its header), which now closes
-  // the demo.
+  // segment (blank separator, then its header), and then the HMAC
+  // oct JWK segment that closes the demo.
   assert.equal(lines[headerIdx + 6], "");
   assert.ok(lines[headerIdx + 7]!.startsWith("Response signing:"));
   const again = await runDemo();
