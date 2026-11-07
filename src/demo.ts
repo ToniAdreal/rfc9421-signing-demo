@@ -3860,6 +3860,19 @@ export interface DemoResult {
    * `sig1` label still verifies, the `gateway` label fails.
    */
   contentTypeTamperedVerification: VerifyResult[];
+  /**
+   * Per-label results for the dual-signed request under
+   * `requiredLabels: ["sig1", "gateway"]` (both ok — the merchant's
+   * `sig1` label and the gateway label are both on the wire).
+   */
+  requiredLabelsVerification: VerifyResult[];
+  /**
+   * Per-label results after the gateway label was stripped from the
+   * dual-signed request: the merchant `sig1` label still verifies,
+   * the gateway label is a synthetic `MISSING_REQUIRED_LABEL`
+   * failure appended after the wire-order results.
+   */
+  requiredLabelsStrippedVerification: VerifyResult[];
   /** First verification of `signed` against the demo replay cache (ok). */
   replayFirstVerification: VerifyResult;
   /**
@@ -5591,6 +5604,79 @@ function formatLabelResult(prefix: string, result: VerifyResult): string {
 }
 
 /**
+ * Split a structured-field list header value (`signature-input` or
+ * `signature`) into its top-level `label=...` members. Commas inside
+ * parentheses (covered-component lists) or double-quoted strings
+ * (parameter values) do not split — only the `, ` between members
+ * does. Used by `stripSignatureLabel` below; the demo's wire form
+ * is pinned, but the split does not assume which label is last.
+ */
+function splitTopLevelMembers(value: string): string[] {
+  const members: string[] = [];
+  let depth = 0;
+  let inQuotes = false;
+  let start = 0;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (inQuotes) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inQuotes = false;
+      continue;
+    }
+    if (ch === '"') inQuotes = true;
+    else if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (ch === "," && depth === 0) {
+      members.push(value.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  members.push(value.slice(start).trim());
+  return members.filter((m) => m.length > 0);
+}
+
+/**
+ * Return a copy of a signed request with one label's member removed
+ * from both the `signature-input` and the `signature` headers — the
+ * whole co-signature, params and bytes, as a downgrade attack that
+ * strips a co-signature would remove it. A missing header or a label
+ * that is not on the wire is a broken demo fixture, not a silent
+ * no-op: the caller asserts on the stripped result, so a bad strip
+ * must throw here instead of printing a misleading segment.
+ */
+function stripSignatureLabel(
+  signed: SignedHttpRequest,
+  label: string,
+): SignedHttpRequest {
+  const stripFromHeader = (header: string): string => {
+    const value = getHeader(signed.headers, header);
+    if (value === undefined) {
+      throw new Error(
+        `demo fixture broken: stripSignatureLabel found no ${header} ` +
+          `header on the dual-signed request`,
+      );
+    }
+    const members = splitTopLevelMembers(value);
+    const kept = members.filter((m) => !m.startsWith(`${label}=`));
+    if (kept.length === members.length) {
+      throw new Error(
+        `demo fixture broken: stripSignatureLabel found no ${label} ` +
+          `member in the ${header} header`,
+      );
+    }
+    return kept.join(", ");
+  };
+  return {
+    ...signed,
+    headers: {
+      ...signed.headers,
+      "signature-input": stripFromHeader("signature-input"),
+      signature: stripFromHeader("signature"),
+    },
+  };
+}
+
+/**
  * Run the demo without printing anything, and return the signed request,
  * both verification results, and the exact lines `main()` prints — so
  * tests can assert on the demo itself, not just on the library.
@@ -6255,6 +6341,62 @@ export async function runDemo(): Promise<DemoResult> {
     },
     dualVerifyOptions,
   );
+
+  // Required co-signatures segment: a settlement receiver that only
+  // settles when both the merchant and the gateway signed must not
+  // accept a request just because every label present passed —
+  // `verifyAllLabels` without `requiredLabels` returns `[]` for an
+  // unsigned request, and a stripped co-signature is invisible to a
+  // naive `results.every((r) => r.ok)` check. With `requiredLabels`
+  // set to the demo's two labels (`DEMO_SIGNATURE_LABELS`: the
+  // merchant's `sig1`, then `gateway`), the dual-signed request
+  // verifies label by label. Strip the gateway label's members from
+  // the dual-signed request and the same call still reports the
+  // merchant label ok, while the gateway label comes back as a
+  // synthetic `MISSING_REQUIRED_LABEL` failure appended after the
+  // wire-order results — a downgrade that drops a co-signature is a
+  // fail-closed policy failure, not a silent absence.
+  const requiredLabelsVerification = verifyAllLabels(dualSigned, {
+    ...dualVerifyOptions,
+    requiredLabels: [...DEMO_SIGNATURE_LABELS],
+  });
+  if (
+    requiredLabelsVerification.length !== DEMO_SIGNATURE_LABELS.length ||
+    requiredLabelsVerification.some(
+      (r, i) => r.label !== DEMO_SIGNATURE_LABELS[i] || !r.ok,
+    )
+  ) {
+    throw new Error(
+      `demo fixture broken: required-labels verification of the ` +
+        `dual-signed request returned ${JSON.stringify(requiredLabelsVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
+        `instead of both labels ok`,
+    );
+  }
+  const gatewayStripped = stripSignatureLabel(dualSigned, DEMO_GATEWAY_LABEL);
+  const requiredLabelsStrippedVerification = verifyAllLabels(
+    gatewayStripped,
+    {
+      ...dualVerifyOptions,
+      requiredLabels: [...DEMO_SIGNATURE_LABELS],
+    },
+  );
+  if (
+    requiredLabelsStrippedVerification.length !==
+      DEMO_SIGNATURE_LABELS.length ||
+    requiredLabelsStrippedVerification[0].label !==
+      DEMO_SIGNATURE_LABELS[0] ||
+    !requiredLabelsStrippedVerification[0].ok ||
+    requiredLabelsStrippedVerification[1].label !== DEMO_GATEWAY_LABEL ||
+    requiredLabelsStrippedVerification[1].ok ||
+    requiredLabelsStrippedVerification[1].code !==
+      "MISSING_REQUIRED_LABEL"
+  ) {
+    throw new Error(
+      `demo fixture broken: gateway-stripped required-labels ` +
+        `verification returned ${JSON.stringify(requiredLabelsStrippedVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
+        `instead of merchant ok plus a synthetic MISSING_REQUIRED_LABEL gateway failure`,
+    );
+  }
 
   // Replay segment: a nonce alone does not stop replays — the verifier
   // needs a cache of seen nonces. With an opt-in ReplayCache (fixed
@@ -12151,6 +12293,15 @@ export async function runDemo(): Promise<DemoResult> {
       formatLabelResult("After content-type tampering", r),
     ),
     "",
+    `Required co-signatures: verifyAllLabels with requiredLabels [${DEMO_SIGNATURE_LABELS.map((l) => `"${l}"`).join(", ")}] demands both labels be on the wire — a request whose present labels merely all pass is not enough`,
+    ...requiredLabelsVerification.map((r) =>
+      formatLabelResult("Required-label verification", r),
+    ),
+    `Gateway label stripped from the dual-signed request (a downgrade that drops a co-signature)`,
+    ...requiredLabelsStrippedVerification.map((r) =>
+      formatLabelResult("After gateway label stripped", r),
+    ),
+    "",
     `Replay protection: same request verified twice against a ReplayCache (capacity ${DEMO_REPLAY_CACHE_MAX_ENTRIES}, TTL ${DEMO_REPLAY_CACHE_TTL_SEC}s)`,
     replayFirstVerification.ok
       ? `Replay check, first presentation of nonce "${DEMO_NONCE}": OK`
@@ -12837,6 +12988,8 @@ export async function runDemo(): Promise<DemoResult> {
     dualVerification,
     signatureLabels,
     contentTypeTamperedVerification,
+    requiredLabelsVerification,
+    requiredLabelsStrippedVerification,
     replayFirstVerification,
     replaySecondVerification,
     replayOtherNonceVerification,

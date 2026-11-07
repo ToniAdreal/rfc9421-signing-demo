@@ -725,6 +725,97 @@ test("demo lines contain the dual headers, dual verification, and tamper isolati
   );
 });
 
+test("demo required-labels segment verifies both labels, then reports the stripped gateway as MISSING_REQUIRED_LABEL", async () => {
+  const {
+    lines,
+    requiredLabelsVerification,
+    requiredLabelsStrippedVerification,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // Both labels are on the wire, so the required-labels check
+  // passes label by label in wire order.
+  assert.equal(requiredLabelsVerification.length, 2);
+  assert.equal(requiredLabelsVerification[0].label, "sig1");
+  assert.equal(requiredLabelsVerification[0].ok, true);
+  assert.equal(requiredLabelsVerification[1].label, DEMO_GATEWAY_LABEL);
+  assert.equal(requiredLabelsVerification[1].ok, true);
+
+  // Stripping the gateway label leaves the merchant label ok and
+  // appends a synthetic failure for the missing required label —
+  // the downgrade is fail-closed, not a silent absence.
+  assert.equal(requiredLabelsStrippedVerification.length, 2);
+  assert.equal(requiredLabelsStrippedVerification[0].label, "sig1");
+  assert.equal(requiredLabelsStrippedVerification[0].ok, true);
+  assert.equal(
+    requiredLabelsStrippedVerification[1].label,
+    DEMO_GATEWAY_LABEL,
+  );
+  assert.equal(requiredLabelsStrippedVerification[1].ok, false);
+  assert.equal(
+    requiredLabelsStrippedVerification[1].code,
+    "MISSING_REQUIRED_LABEL",
+  );
+  assert.match(
+    requiredLabelsStrippedVerification[1].reason ?? "",
+    /gateway/,
+  );
+
+  // Printed lines: header naming both required labels, both
+  // verifications, the strip line, and the synthetic failure.
+  assert.match(
+    out,
+    /Required co-signatures: verifyAllLabels with requiredLabels \["sig1", "gateway"\]/,
+  );
+  assert.match(out, /Required-label verification sig1: OK /);
+  assert.match(out, /Required-label verification gateway: OK /);
+  assert.match(
+    out,
+    /Gateway label stripped from the dual-signed request \(a downgrade that drops a co-signature\)/,
+  );
+  assert.match(out, /After gateway label stripped sig1: OK /);
+  assert.match(
+    out,
+    /After gateway label stripped gateway: FAILED \(code MISSING_REQUIRED_LABEL:/,
+  );
+
+  // Ordering: the segment sits between the content-type tampering
+  // lines and the replay segment.
+  const tamperIdx = lines.findIndex((l) =>
+    l.startsWith("After content-type tampering gateway:"),
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Required co-signatures:"),
+  );
+  const replayIdx = lines.findIndex((l) =>
+    l.startsWith("Replay protection:"),
+  );
+  assert.ok(tamperIdx !== -1 && headerIdx !== -1 && replayIdx !== -1);
+  assert.ok(tamperIdx < headerIdx && headerIdx < replayIdx);
+});
+
+test("demo required-labels segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Required co-signatures:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Replay protection:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // No fresh key material is printed in this segment — the merchant
+  // key pair is fresh per run but only label/keyid/alg/code/reason
+  // appear — so the header, both verifications, the strip line and
+  // the synthetic failure are byte-identical between runs.
+  assert.deepEqual(
+    first.lines.slice(a, aEnd),
+    second.lines.slice(b, bEnd),
+  );
+});
+
 test("demo replay segment rejects the same request twice via ReplayCache", async () => {
   const {
     replayFirstVerification,

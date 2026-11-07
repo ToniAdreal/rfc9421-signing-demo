@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo gains a required co-signatures segment (backlog #942): the
+  dual-signed request (merchant `sig1` + gateway) is verified with
+  `verifyAllLabels` under `requiredLabels: ["sig1", "gateway"]`
+  (both labels ok), then the gateway label's members are stripped
+  from the `signature-input` and `signature` headers and the same
+  call reports the merchant label still ok while the gateway label
+  comes back as a synthetic `MISSING_REQUIRED_LABEL` failure — a
+  downgrade that drops a co-signature is a fail-closed policy
+  failure, not a silent absence. `DemoResult` gains
+  `requiredLabelsVerification` /
+  `requiredLabelsStrippedVerification`; the demo fail-fasts on both
+  results and the new tests pin the printed lines and the
+  byte-identical slice. Zero network, zero randomness: the section
+  reuses the in-process dual-signed request.
 - `JwksKeyStore.refresh()` skips entries that declare a non-signing
   purpose (backlog #940): a JWKS entry whose `use` is present and is
   not `"sig"` (RFC 7517 §4.2 — e.g. `use: "enc"`), or whose
