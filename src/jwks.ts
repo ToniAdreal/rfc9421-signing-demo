@@ -43,12 +43,14 @@ export interface JwksFetchResponse {
   text?: () => Promise<string>;
   /**
    * Response headers, for the `Content-Length` precheck of the
-   * `maxBodyBytes` body limit (see
-   * {@link JwksKeyStoreOptions.maxBodyBytes}). The native `Headers`
+   * `maxBodyBytes` body limit and the `Cache-Control: max-age`
+   * freshness read (see {@link JwksKeyStoreOptions.maxBodyBytes}
+   * and {@link JwksKeyStore.effectiveTtlSec}). The native `Headers`
    * satisfies this shape; a custom `fetchImpl` may provide any
-   * object with a `get(name)` accessor. When absent (or when the
+   * object with a `get(name)` accessor. When absent (or when a
    * header itself is absent or unparseable) the precheck is skipped
-   * and only the post-read byte check applies.
+   * and only the post-read byte check applies, and a missing or
+   * malformed `max-age` leaves `ttlSec` in force.
    */
   headers?: { get(name: string): string | null };
   /**
@@ -95,6 +97,16 @@ export interface JwksKeyStoreOptions {
    * number > 0. `isStale()` is advisory only: `resolve` keeps serving
    * the last good snapshot past the TTL until a `refresh()` succeeds,
    * so a JWKS outage never turns into a verification outage.
+   *
+   * A fetched response's `Cache-Control: max-age` can only shorten
+   * this TTL, never lengthen it: after a successful `refresh()` the
+   * effective TTL is `min(ttlSec, max-age)` (see
+   * {@link JwksKeyStore.effectiveTtlSec}), so a publisher that
+   * declares `max-age=60` retires its keys from this store after 60
+   * seconds, while a publisher declaring `max-age=3600` is still
+   * re-fetched every 300 seconds. A missing or malformed `max-age`
+   * leaves this value in force. `Expires` is not consulted — only
+   * `max-age` (see the README's JWKS section for the honest limit).
    */
   ttlSec?: number;
   /**
@@ -390,6 +402,36 @@ function isNonSigningJwkEntry(entry: Record<string, unknown>): boolean {
   const keyOps = entry["key_ops"];
   if (keyOps === undefined) return false;
   return !(Array.isArray(keyOps) && keyOps.includes("verify"));
+}
+
+/**
+ * Parse a `Cache-Control` header value for a `max-age` directive
+ * (RFC 9111 §5.2.2.1), used only by the `refresh()` path (see
+ * `fetchAndSwap`). Returns the delta-seconds as a non-negative
+ * integer, or `null` when the header is absent, not a string, or
+ * carries no parseable `max-age` directive.
+ *
+ * Parsing is deliberately tolerant of the shapes real endpoints
+ * send — comma-separated directive lists (`public, max-age=60`),
+ * case-insensitive directive names (`MAX-AGE=60`), and optional
+ * whitespace around the `=` (`max-age = 60`) — and deliberately
+ * strict about the value: it must be digits only, so `max-age=abc`
+ * or `max-age=60abc` is malformed and yields `null` (the caller
+ * keeps `ttlSec`) rather than a guessed number. A quoted value
+ * (`max-age="60"`) is likewise malformed: `max-age` is a
+ * delta-seconds token, not a quoted-string, in RFC 9111. When
+ * several `max-age` directives appear, the first parseable one
+ * wins; a malformed one earlier in the list is skipped, not fatal.
+ */
+function parseCacheControlMaxAge(header: unknown): number | null {
+  if (typeof header !== "string") return null;
+  for (const directive of header.split(",")) {
+    const match = /^\s*max-age\s*=\s*(\d+)\s*$/i.exec(directive);
+    if (match === null) continue;
+    const value = Number.parseInt(match[1] as string, 10);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  return null;
 }
 
 /**
@@ -694,6 +736,19 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   verifiers hitting a stale window together cannot thundering-herd
  *   the JWKS endpoint. A settled refresh is never reused: the next
  *   call fetches again, and a failure is never cached.
+ * - **A fetched `Cache-Control: max-age` can only shorten the
+ *   snapshot TTL, never lengthen it.** After a successful
+ *   `refresh()`, the effective TTL is `min(ttlSec, max-age)` (see
+ *   {@link JwksKeyStore.effectiveTtlSec}): a publisher declaring
+ *   `max-age=60` retires its keys after 60 seconds instead of the
+ *   configured 300, while a publisher declaring `max-age=3600` is
+ *   still re-fetched every 300 seconds. A missing or malformed
+ *   `max-age` leaves `ttlSec` in force, and a failed refresh never
+ *   moves the effective TTL — the previous snapshot keeps its own.
+ *   Restored snapshots carry no cache headers (the snapshot format
+ *   is this store's own), so they always use `ttlSec`. `Expires`
+ *   is not consulted — only `max-age` — and the README says so
+ *   plainly.
  * - **Observable via `stats()`.** Successful/failed refreshes and
  *   `resolve()` hits/misses are counted for the store's lifetime (see
  *   {@link JwksKeyStoreStats} for the exact counting rules, including
@@ -775,6 +830,17 @@ export class JwksKeyStore {
   private keysByKid = new Map<string, KeyObject>();
   /** Unix seconds of the last successful refresh, or null if none. */
   private lastRefreshAtSec: number | null = null;
+  /**
+   * Effective TTL in seconds of the current snapshot — `min(ttlSec,
+   * max-age)` from the last successful `refresh()` (see
+   * {@link JwksKeyStore.effectiveTtlSec}), or `null` when no
+   * snapshot is held (before the first refresh, after `clear()`)
+   * or when the snapshot came from a restore (the snapshot format
+   * carries no cache headers, so `ttlSec` applies). Only ever set
+   * at the same atomic swap point as `lastRefreshAtSec`, so a
+   * failed refresh can never move it.
+   */
+  private snapshotTtlSec: number | null = null;
   /**
    * The single in-flight refresh, if any (single-flight). Concurrent
    * `refresh()` / stale `refreshIfStale()` calls all await this same
@@ -906,14 +972,32 @@ export class JwksKeyStore {
   }
 
   /**
+   * The TTL in seconds the current snapshot is actually fresh for:
+   * `min(ttlSec, max-age)` from the last successful `refresh()`
+   * when the fetched response carried a parseable `Cache-Control:
+   * max-age`, otherwise the configured `ttlSec`. Before any
+   * refresh, after `clear()`, and for a snapshot installed by
+   * `restoreSnapshot()` / `restoreSignedSnapshot()` / `JwksKeyStore.
+   * restore()` (the snapshot format carries no cache headers) this
+   * is exactly `ttlSec`. A failed refresh never moves it, and a
+   * later successful refresh re-derives it from that response's own
+   * header, so the effective TTL always describes the snapshot
+   * currently held — never a stale or a failed fetch.
+   */
+  get effectiveTtlSec(): number {
+    return this.snapshotTtlSec ?? this.ttlSec;
+  }
+
+  /**
    * Whether the snapshot should be re-fetched: `true` when no refresh
    * has succeeded yet, or when the last successful refresh is at least
-   * `ttlSec` old by the store's clock. Advisory only — see the class
+   * the effective TTL (see {@link JwksKeyStore.effectiveTtlSec}) old
+   * by the store's clock. Advisory only — see the class
    * documentation for why `resolve` keeps serving a stale snapshot.
    */
   isStale(): boolean {
     if (this.lastRefreshAtSec === null) return true;
-    return this.clock() - this.lastRefreshAtSec >= this.ttlSec;
+    return this.clock() - this.lastRefreshAtSec >= this.effectiveTtlSec;
   }
 
   /**
@@ -961,6 +1045,7 @@ export class JwksKeyStore {
   clear(): void {
     this.keysByKid = new Map<string, KeyObject>();
     this.lastRefreshAtSec = null;
+    this.snapshotTtlSec = null;
     this.refreshCount = 0;
     this.refreshFailureCount = 0;
     this.hitCount = 0;
@@ -1258,8 +1343,24 @@ export class JwksKeyStore {
       }
       next.set(kid, key);
     }
+    // Effective TTL for the snapshot being installed: the fetched
+    // response's Cache-Control max-age can only shorten the
+    // configured ttlSec, never lengthen it (fail-closed direction —
+    // a publisher may retire its keys early, but may not make this
+    // store trust them longer than the operator configured). A
+    // missing header, a missing max-age, or a malformed value
+    // leaves ttlSec in force. Computed here, at the swap point, so
+    // a refresh that fails anywhere above never moves it.
+    let effectiveTtlSec = this.ttlSec;
+    if (typeof res.headers?.get === "function") {
+      const maxAge = parseCacheControlMaxAge(
+        res.headers.get("cache-control"),
+      );
+      if (maxAge !== null) effectiveTtlSec = Math.min(this.ttlSec, maxAge);
+    }
     this.keysByKid = next;
     this.lastRefreshAtSec = this.clock();
+    this.snapshotTtlSec = effectiveTtlSec;
   }
 
   /**
@@ -1394,6 +1495,11 @@ export class JwksKeyStore {
     const { fetchedAtSec, keysByKid } = parseJwksSnapshot(snapshot);
     this.keysByKid = keysByKid;
     this.lastRefreshAtSec = fetchedAtSec;
+    // A restored snapshot carries no Cache-Control header (it is
+    // this store's own export format), so its effective TTL falls
+    // back to the configured ttlSec — restoring never inherits a
+    // max-age from an earlier fetch.
+    this.snapshotTtlSec = null;
   }
 
   /**
@@ -1500,6 +1606,10 @@ export class JwksKeyStore {
     const { fetchedAtSec, keysByKid } = parseJwksSnapshot(snapshot);
     this.keysByKid = keysByKid;
     this.lastRefreshAtSec = fetchedAtSec;
+    // Like restoreSnapshot(): a signed envelope's snapshot carries
+    // no Cache-Control header, so the effective TTL falls back to
+    // the configured ttlSec.
+    this.snapshotTtlSec = null;
   }
 
   /**

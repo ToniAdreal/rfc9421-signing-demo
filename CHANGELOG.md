@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore` follows `Cache-Control: max-age` (backlog #983):
+  after a successful `refresh()` the snapshot's effective TTL is
+  `min(ttlSec, max-age)` — a publisher declaring `max-age=60` retires
+  its keys after 60 seconds instead of the configured 300, while a
+  publisher declaring `max-age=3600` is still re-fetched every 300
+  seconds (a publisher may shorten the TTL, never lengthen it).
+  `store.effectiveTtlSec` exposes the TTL the current snapshot is
+  actually fresh for, and `isStale()` / `refreshIfStale()` judge
+  staleness against it. A missing or malformed `max-age` leaves
+  `ttlSec` in force, a failed refresh never moves the effective TTL,
+  a later refresh re-derives it from its own header, and restored
+  snapshots (no cache headers in the snapshot format) always use
+  `ttlSec`. `Expires` is not consulted — only `max-age`. 11 new tests
+  in `test/jwksCacheControl.test.ts`, including a mutation check
+  (parser forced to return `null` makes the max-age tests fail).
 - CLI demo JWKS body-limit segment (backlog #980): the demo now covers
   the `JwksKeyStore` `maxBodyBytes` cap end to end — a store capped at
   128 bytes with a clock pinned to the demo's fixed instant refreshes a

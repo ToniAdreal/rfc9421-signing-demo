@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1740 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1751 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -816,6 +816,25 @@ response offers `text()` and `headers` (the default fetch's native
 them); a custom `fetchImpl` whose response offers only `json()` cannot
 have its body measured, so the limit is not enforced there and the
 document is parsed via `json()` exactly as before.
+
+Cache-Control max-age: after a successful `refresh()`, the snapshot's
+effective TTL is `min(ttlSec, max-age)` when the fetched response
+carries a parseable `Cache-Control: max-age` — a publisher declaring
+`max-age=60` retires its keys from this store after 60 seconds instead
+of the configured 300, so a key rotation the publisher announces is
+honored promptly, while a publisher declaring `max-age=3600` is still
+re-fetched every 300 seconds: a publisher may shorten the TTL, never
+lengthen it. `store.effectiveTtlSec` exposes the TTL the current
+snapshot is actually fresh for, and `isStale()` / `refreshIfStale()`
+judge staleness against it. A missing header, a missing `max-age`, or
+a malformed value (`max-age=abc`, `max-age=60abc`, a quoted value)
+leaves `ttlSec` in force; multi-directive values (`public, max-age=60`)
+and case/spacing variants (`MAX-AGE = 60`) parse. A failed refresh
+never moves the effective TTL, and a later successful refresh
+re-derives it from that response's own header. Restored snapshots
+carry no cache headers (the snapshot format is this store's own), so
+they always use `ttlSec`. One honest limit: `Expires` is not
+consulted — only `max-age`.
 
 Fetch retries (opt-in): `new JwksKeyStore(url, { fetchRetries: 2,
 fetchBackoffMs: 1000 })` re-attempts a failed `refresh()` up to the
@@ -3933,7 +3952,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1740 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1751 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
