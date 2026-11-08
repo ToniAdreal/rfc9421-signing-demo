@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1763 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1783 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -666,8 +666,8 @@ cannot pollute replay state.
 JWK public-key distribution (webhook / gateway deployments, where PEM is
 awkward to ship): export the ed25519 public key as a plain RFC 8037 object,
 send it as JSON, and import it on the verifier side. Private JWKs (`"d"`
-present) are refused — this helper is public-key distribution only, so
-private keys stay in PEM on the signer side.
+present) are refused by this helper — it is public-key distribution only;
+the private side is `importPrivateKeyJwk` (below).
 
 ```ts
 import { exportPublicKeyJwk, importPublicKeyJwk } from "./dist/src/index.js";
@@ -721,6 +721,28 @@ stored like a secret. `jwkThumbprint` deliberately does not cover
 `oct`: a thumbprint is an identifier derived from public material,
 and hashing a secret into one would encourage shipping secrets
 around.
+
+Private keys arrive as JWKs too — a KMS export, a rotation payload — and
+`importPrivateKeyJwk` is the private counterpart of the importers above:
+one function dispatching on `kty` (`OKP` / `Ed25519`, `EC` / `P-256` /
+`P-384` / `P-521`, `RSA` with the full CRT set, `oct`), so a signer
+holding a private JWK never has to convert it to PEM first. The same
+fail-closed rules apply: a public JWK (no `"d"`) is refused, `use` must
+be `"sig"` when present, `key_ops` must include `"sign"` when present, an
+`oct` key must clear the same per-`alg` secret floor as
+`importSymmetricKeyJwk`, and an RSA key below the 2048-bit floor is
+refused at import. One honest difference from the public importers: this
+helper imports secret material by design, so the input JWK must only
+ever travel over a channel already trusted for the private key itself,
+and must never be logged.
+
+```ts
+import { importPrivateKeyJwk, signRequest } from "./dist/src/index.js";
+const privateKey = importPrivateKeyJwk(JSON.parse(kmsExportedJson)); // { kty: "OKP", crv: "Ed25519", x: "...", d: "..." }
+const signed = signRequest(req, { keyId: "kms-key-1", alg: "ed25519", key: privateKey });
+// An RSA private JWK must carry the full CRT set (n/e/d/p/q/dp/dq/qi);
+// a KMS export with only n/e/d is refused with a named error.
+```
 
 Stable `keyid` derivation for those JWKs: `jwkThumbprint(jwk)` computes
 the RFC 7638 thumbprint (required members only, lexicographic canonical
@@ -3963,7 +3985,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1763 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1783 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

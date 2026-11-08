@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `importPrivateKeyJwk` private JWK import (backlog #989): one
+  function dispatching on `kty` imports a private key from a JWK
+  object — `OKP` / `Ed25519` (`d` + `x`), `EC` / `P-256` / `P-384` /
+  `P-521` (`d` + `x` + `y`), `RSA` with the full CRT set
+  (`n` / `e` / `d` / `p` / `q` / `dp` / `dq` / `qi`), and `oct`
+  (`k`, same canonical-`k` check and per-`alg` secret floor as
+  `importSymmetricKeyJwk`) — so a KMS-exported private JWK no
+  longer has to be converted to PEM first. Fail-closed throughout:
+  a public JWK (no `"d"`) is refused, `use` must be `"sig"` when
+  present, `key_ops` must include `"sign"` when present, and an RSA
+  key below the 2048-bit floor is refused at import. 20 new tests
+  in `test/importPrivateKeyJwk.test.ts`, including a mutation check
+  (flipping the `use` gate makes the key-use test fail).
 - `;key` consults the `structuredFieldTypes` registry (backlog
   #985): `resolveComponent`'s `;key` branch now looks the field up
   in the same per-field registry `;sf` uses before parsing it as a

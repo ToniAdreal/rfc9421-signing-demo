@@ -1050,6 +1050,230 @@ export function importSymmetricKeyJwk(jwk: unknown): KeyObject {
 }
 
 /**
+ * Import a private key from a JWK object (RFC 7517 / RFC 7518 /
+ * RFC 8037) — the private counterpart of the `importPublicKeyJwk*`
+ * helpers, for the case the key arrives as JSON instead of PEM: a
+ * KMS export, a key-rotation payload, or a snapshot envelope a
+ * signer hands to a fresh process. Four families are supported,
+ * dispatching on `kty` (and `crv` for the curve families):
+ *
+ * - `OKP` / `Ed25519` — `d` + `x` (RFC 8037 §2), for `ed25519`;
+ * - `EC` / `P-256` / `P-384` / `P-521` — `d` + `x` + `y`
+ *   (RFC 7518 §6.2), for the three `ecdsa-p*-*` algorithms;
+ * - `RSA` — `n` / `e` / `d` plus the full CRT set `p` / `q` /
+ *   `dp` / `dq` / `qi` (RFC 7518 §6.3), for `rsa-pss-sha512` and
+ *   `rsa-v1_5-sha256` (one RSA key serves both — the JWK carries
+ *   no `alg`, as with {@link exportPublicKeyJwkRsa});
+ * - `oct` — `k` (RFC 7518 §6.4), for `hmac-sha256` / `hmac-sha512`,
+ *   built the same way {@link importSymmetricKeyJwk} builds it.
+ *
+ * Strictly validates before touching node:crypto, in the same
+ * fail-fast style as the public importers: the input must be a
+ * plain object carrying private material (`"d"` for the asymmetric
+ * families, `"k"` for `oct`) — a public JWK passed here by mistake
+ * is refused with a clear error instead of silently importing the
+ * wrong half of the key. Anything malformed throws a descriptive
+ * `Error` — never a verification failure, since this is key setup,
+ * not signature checking.
+ *
+ * Key-use members are enforced, not ignored: `use`, when present,
+ * must be `"sig"` (an `"enc"` key is refused — this library only
+ * signs with private keys), and `key_ops`, when present, must be
+ * an array containing `"sign"`. node:crypto itself ignores both
+ * members, so without this check an encryption-only JWK would be
+ * imported and only fail later, at first use.
+ *
+ * Two honest limits, documented where they bite. First, the RSA
+ * shape must carry the complete CRT parameter set: node:crypto
+ * refuses an RSA private JWK with only `n` / `e` / `d`, so this
+ * helper refuses it too, with a named error, instead of node's
+ * generic "Invalid JWK RSA key". KMS exports that omit the CRT
+ * parameters must be completed (or converted to PEM) upstream.
+ * Second, what import still does not check is modulus primality
+ * for RSA (same caveat as {@link importPublicKeyJwkRsa}) — a
+ * 2048-bit composite modulus is imported, and the 2048-bit floor
+ * ({@link MIN_RSA_MODULUS_BITS}, via {@link assertRsaModulusLength})
+ * is enforced, but primality is only proven when the key signs or
+ * verifies a real signature.
+ *
+ * This helper imports secret material by design — unlike the
+ * public-key importers — so callers must treat the input JWK like
+ * the private key itself: only accept it over a channel already
+ * trusted for the key (never a public directory), and never log
+ * it. The returned `KeyObject` is a private (or, for `oct`, secret)
+ * key; `exportPublicKeyJwk*` / `jwkThumbprint` stay the way to
+ * derive the distributable public half.
+ */
+export function importPrivateKeyJwk(jwk: unknown): KeyObject {
+  const fail = (why: string): never => {
+    throw new Error(`importPrivateKeyJwk: invalid JWK: ${why}`);
+  };
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk))
+    fail(
+      `expected a JWK object, got ${
+        Array.isArray(jwk) ? "an array" : jwk === null ? "null" : typeof jwk
+      }`,
+    );
+  const o = jwk as Record<string, unknown>;
+  // Key-use policy, checked before the family dispatch so every
+  // family gets the same refusal: this library signs with private
+  // keys, so an encryption-only JWK is a configuration error here,
+  // not a key this helper should ever hand back.
+  if ("use" in o) {
+    if (o["use"] !== "sig")
+      fail(
+        `unsupported "use" ${JSON.stringify(o["use"])} for a private signing key ` +
+          `(only "sig" is accepted; an "enc" key cannot sign)`,
+      );
+  }
+  if ("key_ops" in o) {
+    const ops = o["key_ops"];
+    if (!Array.isArray(ops) || ops.some((op) => typeof op !== "string"))
+      fail(`"key_ops" must be an array of strings when present`);
+    // `fail` above returns `never`, but TypeScript does not narrow
+    // `ops` through a never-returning call, so the cast pins the
+    // array-of-strings shape the guard just established.
+    if (!(ops as string[]).includes("sign"))
+      fail(
+        `"key_ops" must include "sign" for a private signing key, got ${JSON.stringify(ops)}`,
+      );
+  }
+  if (!("kty" in o)) fail(`missing "kty" parameter`);
+  const kty = o["kty"];
+  // The `oct` family is a secret, not an asymmetric private key, so
+  // it goes through `createSecretKey` exactly the way
+  // `importSymmetricKeyJwk` builds it (same canonical-`k` check,
+  // same per-`alg` floor) — `createPrivateKey` rejects `oct` outright.
+  if (kty === "oct") {
+    if ("d" in o)
+      fail(
+        'unexpected "d" member: oct JWKs carry the secret in "k" only ' +
+          "(a JWK with \"d\" is an asymmetric private key, not an HMAC secret)",
+      );
+    const k = o["k"];
+    if (typeof k !== "string" || k.length === 0)
+      throw new Error(
+        `importPrivateKeyJwk: invalid JWK: missing or empty "k" (the base64url shared secret)`,
+      );
+    if (!/^[A-Za-z0-9_-]+$/.test(k))
+      fail(
+        `"k" must be unpadded base64url (characters A-Z a-z 0-9 - _ only, no "=" padding)`,
+      );
+    const bytes = Buffer.from(k, "base64url");
+    if (bytes.toString("base64url") !== k)
+      fail(`"k" is not canonical base64url (decodes to ${bytes.length} bytes but does not re-encode identically)`);
+    const alg = o["alg"];
+    let signAlg: "hmac-sha256" | "hmac-sha512" = "hmac-sha256";
+    if (alg !== undefined) {
+      if (alg === "HS256") signAlg = "hmac-sha256";
+      else if (alg === "HS512") signAlg = "hmac-sha512";
+      else
+        fail(
+          `unsupported "alg" ${JSON.stringify(alg)} for an oct key (supported: "HS256", "HS512")`,
+        );
+    }
+    const key = createSecretKey(bytes);
+    try {
+      assertHmacSecretLength(key, signAlg);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `importPrivateKeyJwk: invalid JWK: ${detail.replace(/^assertHmacSecretLength: /, "")}`,
+      );
+    }
+    return key;
+  }
+  // Required member for this family: a non-empty string, else a
+  // named refusal (a public JWK passed by mistake fails here, on
+  // the missing "d", with the member named).
+  const member = (name: string): string => {
+    const value = o[name];
+    if (typeof value !== "string" || value.length === 0)
+      throw new Error(
+        `importPrivateKeyJwk: invalid JWK: missing or empty "${name}" (a required member for this private JWK)`,
+      );
+    return value;
+  };
+  // Only the members node:crypto needs are passed through — `kid`,
+  // `alg`, `use` and `key_ops` are validated above where they matter
+  // and otherwise ignored, so a KMS export carrying metadata still
+  // imports.
+  let nodeJwk: Record<string, string>;
+  if (kty === "OKP") {
+    if (!("crv" in o)) fail(`missing "crv" parameter`);
+    if (o["crv"] !== "Ed25519")
+      fail(`expected crv "Ed25519", got ${JSON.stringify(o["crv"])}`);
+    nodeJwk = { kty: "OKP", crv: "Ed25519", x: member("x"), d: member("d") };
+  } else if (kty === "EC") {
+    if (!("crv" in o)) fail(`missing "crv" parameter`);
+    const crv = o["crv"];
+    if (crv !== "P-256" && crv !== "P-384" && crv !== "P-521")
+      fail(
+        `unsupported crv ${JSON.stringify(crv)} (supported: "P-256", "P-384", "P-521")`,
+      );
+    nodeJwk = {
+      kty: "EC",
+      crv: crv as string,
+      x: member("x"),
+      y: member("y"),
+      d: member("d"),
+    };
+  } else if (kty === "RSA") {
+    // The full CRT set is required: node:crypto refuses an RSA
+    // private JWK with only n/e/d, so each CRT member is demanded
+    // by name here instead of letting node fail generically.
+    nodeJwk = {
+      kty: "RSA",
+      n: member("n"),
+      e: member("e"),
+      d: member("d"),
+      p: member("p"),
+      q: member("q"),
+      dp: member("dp"),
+      dq: member("dq"),
+      qi: member("qi"),
+    };
+  } else {
+    // A direct `throw` (rather than the `fail` helper) so the
+    // compiler sees this branch as terminating and `nodeJwk` as
+    // definitely assigned below.
+    throw new Error(
+      `importPrivateKeyJwk: invalid JWK: unsupported kty ${JSON.stringify(kty)} (supported: "OKP", "EC", "RSA", "oct")`,
+    );
+  }
+  let key: KeyObject;
+  try {
+    key = createPrivateKey({ key: nodeJwk, format: "jwk" });
+  } catch (err) {
+    throw new Error(
+      `importPrivateKeyJwk: node:crypto rejected the JWK: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  if (key.type !== "private")
+    throw new Error(
+      `importPrivateKeyJwk: node:crypto returned a non-private key for a private JWK`,
+    );
+  if (kty === "RSA") {
+    // Same floor as the public RSA importer, enforced at import so
+    // a sub-floor private key fails loudly at setup, never at first
+    // sign. The guard's message already carries this function's
+    // name, so strip that prefix before wrapping it (same pattern
+    // as the RSA public importer).
+    try {
+      assertRsaModulusLength(key, "importPrivateKeyJwk");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `importPrivateKeyJwk: invalid JWK: ${detail.replace(/^importPrivateKeyJwk: /, "")}`,
+      );
+    }
+  }
+  return key;
+}
+
+/**
  * Required JWK members per `kty` for the RFC 7638 thumbprint
  * computation (RFC 7638 §3.2, with the member sets defined by
  * RFC 7517/7518 and RFC 8037/8038). Only these members — plus `kty`

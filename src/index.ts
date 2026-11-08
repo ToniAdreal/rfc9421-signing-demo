@@ -53,6 +53,7 @@ export {
   generateRsaPssKeyPair,
   generateRsaV15KeyPair,
   importPrivateKey,
+  importPrivateKeyJwk,
   importPublicKey,
   importPublicKeyJwk,
   importPublicKeyJwkP256,
