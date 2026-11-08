@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Verify-side signature header length limits (backlog #976):
+  `VerifyOptions` gains `maxSignatureInputLength` /
+  `maxSignatureLength` (each default 65,536 bytes; must be a positive
+  integer), enforced fail-closed before any parsing — an oversized
+  `signature-input` header returns `SIGNATURE_INPUT_TOO_LARGE` and an
+  oversized `signature` header `SIGNATURE_TOO_LARGE`, without the
+  parser ever running over them. Length is measured in UTF-8 bytes on
+  the joined header value the parser would see (multi-value fields
+  after joining, non-ASCII in bytes not characters). `VerifyAllOptions`
+  gains the per-label maps `maxSignatureInputLengthByLabel` /
+  `maxSignatureLengthByLabel` (the global/default bound gates
+  pre-parse before the header is split into labels, a tighter
+  per-label bound then applies inside `verifyRequest`); `verifyResponse`
+  gates before its own guard parse too. The defaults are calibrated on
+  measured headers (2026-11-08): a single-label ed25519 signature over
+  four components is 97 bytes, seven components 138 bytes, a two-label
+  ed25519 header 197 bytes, and an RSA-PSS signature value 351 bytes —
+  the 64 KiB default is more than 180x the largest. 17 new tests in
+  `test/verifyHeaderLimits.test.ts`, covering request, response, and
+  multi-label paths.
 - `JwksKeyStore` response body limit (backlog #973): the new
   `maxBodyBytes` option (default `1_048_576`, 1 MiB; must be a positive
   integer) caps how much a JWKS endpoint may make `refresh()` swallow

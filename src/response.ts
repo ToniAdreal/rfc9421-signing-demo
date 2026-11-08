@@ -50,7 +50,7 @@ import {
 } from "./components.js";
 import { contentDigestAlgOf } from "./digest.js";
 import { signRequest, assertNoDuplicateCoveredComponents, type SignOptions } from "./sign.js";
-import { verifyRequest, type VerifyOptions, type VerifyResult } from "./verify.js";
+import { checkSignatureHeaderLengths, verifyRequest, type VerifyOptions, type VerifyResult } from "./verify.js";
 
 /**
  * The response shape both wrappers accept. `headers` keeps the
@@ -302,6 +302,20 @@ export function verifyResponse(
   opts: VerifyResponseOptions,
 ): VerifyResult {
   assertStatus("verifyResponse", res.status);
+  // Header length limits (fail-closed, before the guard below parses
+  // `signature-input`): the guard's own parse must never run over an
+  // oversized header. `verifyRequest` re-checks the same limits after
+  // the delegation, so this gate only protects the parse here.
+  const sigField = getHeader(res.headers, "signature");
+  const sigInputEarly = getHeader(res.headers, "signature-input");
+  const tooLarge = checkSignatureHeaderLengths(
+    sigInputEarly,
+    sigField,
+    opts,
+    opts.label ?? "sig1",
+    "verifyResponse",
+  );
+  if (tooLarge !== undefined) return tooLarge;
   const sigInput = getHeader(res.headers, "signature-input");
   if (sigInput !== undefined) {
     try {

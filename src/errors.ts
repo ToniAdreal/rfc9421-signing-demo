@@ -16,6 +16,23 @@ export type VerifyFailureCode =
   | "SIGNATURE_BASE_BUILD_FAILED"
   /** `signature` header present but unparseable. */
   | "MALFORMED_SIGNATURE"
+  /**
+   * The `signature-input` header is longer than the configured
+   * `VerifyOptions.maxSignatureInputLength` byte limit (default
+   * 65,536 bytes). Checked *before* any parsing: an oversized header
+   * is rejected without the parser ever running over it, so a hostile
+   * peer cannot make the verifier chew through megabytes of header
+   * before failing. Length is measured in UTF-8 bytes on the joined
+   * header value (the value the parser would see), not in characters.
+   */
+  | "SIGNATURE_INPUT_TOO_LARGE"
+  /**
+   * The `signature` header is longer than the configured
+   * `VerifyOptions.maxSignatureLength` byte limit (default 65,536
+   * bytes). Checked *before* any parsing, in the same position as
+   * `SIGNATURE_INPUT_TOO_LARGE`.
+   */
+  | "SIGNATURE_TOO_LARGE"
   /** `alg` parameter names an unsupported algorithm. */
   | "UNSUPPORTED_ALG"
   /**

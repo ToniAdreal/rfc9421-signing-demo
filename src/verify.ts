@@ -25,6 +25,29 @@ import {
   type StructuredFieldType,
 } from "./structuredFields.js";
 
+/**
+ * Default cap on the `signature-input` header, in UTF-8 bytes
+ * (see `VerifyOptions.maxSignatureInputLength`). Calibrated on
+ * measured headers (2026-11-08, fixture: POST
+ * `https://api.example.com/v1/payments`, body `{"amount":100}`,
+ * keyId `"k"`, created `1700000000`): a single-label ed25519
+ * signature over four components is 97 bytes, seven components 138
+ * bytes, a two-label ed25519 header 197 bytes, and an RSA-PSS
+ * signature value 351 bytes — a 64 KiB default leaves more than
+ * 180x headroom over the largest realistic single header while
+ * bounding parser work at a fixed size.
+ */
+export const DEFAULT_MAX_SIGNATURE_INPUT_LENGTH = 65_536;
+
+/**
+ * Default cap on the `signature` header, in UTF-8 bytes (see
+ * `VerifyOptions.maxSignatureLength`). Same calibration as
+ * `DEFAULT_MAX_SIGNATURE_INPUT_LENGTH`: the largest realistic
+ * signature value this library emits (RSA-PSS, 351 bytes) is more
+ * than 180x below the default.
+ */
+export const DEFAULT_MAX_SIGNATURE_LENGTH = 65_536;
+
 export interface VerifyOptions {
   /**
    * ed25519: the signer's public KeyObject.
@@ -198,6 +221,40 @@ export interface VerifyOptions {
    * `VerifyAllOptions.maxSignatureAgeSecByLabel`.
    */
   maxSignatureAgeSec?: number;
+  /**
+   * Maximum accepted `signature-input` header length, in UTF-8 bytes
+   * (default 65,536, see `DEFAULT_MAX_SIGNATURE_INPUT_LENGTH`). A
+   * header longer than this is rejected with
+   * `SIGNATURE_INPUT_TOO_LARGE` *before* any parsing runs — a hostile
+   * peer cannot make the verifier chew through megabytes of header
+   * before failing. The length is measured on the joined header value
+   * (multi-value fields joined the way `getHeader` joins them), which
+   * is the value the parser would see; a non-ASCII header is measured
+   * in bytes, not characters. Must be a positive integer — anything
+   * else throws a caller configuration `Error`. Unlike
+   * `maxSignatureAgeSec` this limit is always on: there is no opt-out,
+   * only a larger (or smaller) explicit value. In `verifyAllLabels`
+   * the same limit applies to every label, unless overridden per
+   * label via `VerifyAllOptions.maxSignatureInputLengthByLabel` —
+   * with one layering note: the pre-parse gate in `verifyAllLabels`
+   * enforces the global/default bound before the header is split
+   * into labels, and a tighter per-label limit is then enforced per
+   * label inside `verifyRequest`, so parser work is always bounded
+   * by the global value even when a label demands less.
+   */
+  maxSignatureInputLength?: number;
+  /**
+   * Maximum accepted `signature` header length, in UTF-8 bytes
+   * (default 65,536, see `DEFAULT_MAX_SIGNATURE_LENGTH`). A header
+   * longer than this is rejected with `SIGNATURE_TOO_LARGE` *before*
+   * any parsing runs, in the same position as
+   * `maxSignatureInputLength`. Must be a positive integer — anything
+   * else throws a caller configuration `Error`. In `verifyAllLabels`
+   * the same limit applies to every label, unless overridden per
+   * label via `VerifyAllOptions.maxSignatureLengthByLabel`, with the
+   * same pre-parse layering as `maxSignatureInputLength`.
+   */
+  maxSignatureLength?: number;
   /**
    * Optional `keyid` pinning (key-confusion protection): after the
    * cryptographic check passes, the `keyid` claimed in the
@@ -471,6 +528,81 @@ function assertMaxSignatureAgeSec(value: number | undefined): void {
     );
 }
 
+/**
+ * Validate one signature-header length limit
+ * (`maxSignatureInputLength` / `maxSignatureLength`). A bogus limit is
+ * a caller configuration error (throw), not a verification failure —
+ * the same fail-fast rule as `maxBodyBytes` on the JWKS side: a
+ * zero or negative limit would reject every signature, and a
+ * fractional one has no meaning in bytes, so both are caller bugs,
+ * never policy. `caller` names the entry point for the message
+ * (`verifyRequest` / `verifyAllLabels`).
+ */
+function assertHeaderLengthLimit(
+  value: number | undefined,
+  name: "maxSignatureInputLength" | "maxSignatureLength",
+  caller: "verifyRequest" | "verifyAllLabels" | "verifyResponse",
+): void {
+  if (value === undefined) return;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0)
+    throw new Error(
+      `${caller}: \`${name}\` must be a positive integer (bytes), got ${typeof value === "number" ? String(value) : typeof value}`,
+    );
+}
+
+/**
+ * Enforce the signature-header length limits on the raw header values,
+ * before any parsing runs. Returns the fail-closed `VerifyResult`
+ * when either header exceeds its limit, or `undefined` when both are
+ * within bounds. Length is measured in UTF-8 bytes
+ * (`Buffer.byteLength`), on the joined header value the parser would
+ * see — so a multi-value field is measured after joining, and a
+ * non-ASCII header is measured in bytes, not characters. The
+ * `signature-input` limit is checked first: the input header is the
+ * one the parser touches first. Missing headers (`undefined`) are
+ * skipped here — their absence is reported by the caller's own
+ * `MISSING_*` checks, not by this gate.
+ */
+export function checkSignatureHeaderLengths(
+  sigInput: string | undefined,
+  sigField: string | undefined,
+  opts: Pick<VerifyOptions, "maxSignatureInputLength" | "maxSignatureLength">,
+  label: string,
+  caller: "verifyRequest" | "verifyResponse" | "verifyAllLabels" = "verifyRequest",
+): VerifyResult | undefined {
+  // A bogus limit is a caller configuration error, not a verification
+  // failure — validated here as well as in `verifyRequest`, because
+  // the response-side and multi-label entry points gate on this
+  // helper before `verifyRequest`'s own asserts run.
+  assertHeaderLengthLimit(opts.maxSignatureInputLength, "maxSignatureInputLength", caller);
+  assertHeaderLengthLimit(opts.maxSignatureLength, "maxSignatureLength", caller);
+  const inputLimit =
+    opts.maxSignatureInputLength ?? DEFAULT_MAX_SIGNATURE_INPUT_LENGTH;
+  if (sigInput !== undefined) {
+    const bytes = Buffer.byteLength(sigInput, "utf8");
+    if (bytes > inputLimit)
+      return {
+        ok: false,
+        code: "SIGNATURE_INPUT_TOO_LARGE",
+        reason: `signature-input header is ${bytes} bytes, over the maxSignatureInputLength=${inputLimit} byte limit`,
+        label,
+      };
+  }
+  const sigLimit =
+    opts.maxSignatureLength ?? DEFAULT_MAX_SIGNATURE_LENGTH;
+  if (sigField !== undefined) {
+    const bytes = Buffer.byteLength(sigField, "utf8");
+    if (bytes > sigLimit)
+      return {
+        ok: false,
+        code: "SIGNATURE_TOO_LARGE",
+        reason: `signature header is ${bytes} bytes, over the maxSignatureLength=${sigLimit} byte limit`,
+        label,
+      };
+  }
+  return undefined;
+}
+
 /** The RFC 9421 signature algorithms this library implements. */
 type SupportedAlg =
   | "ed25519"
@@ -606,6 +738,8 @@ export function verifyRequest(
   assertKeyConfig(opts);
   assertCandidateKeys(opts.candidateKeys);
   assertMaxSignatureAgeSec(opts.maxSignatureAgeSec);
+  assertHeaderLengthLimit(opts.maxSignatureInputLength, "maxSignatureInputLength", "verifyRequest");
+  assertHeaderLengthLimit(opts.maxSignatureLength, "maxSignatureLength", "verifyRequest");
   assertRequiredComponents(opts.requiredComponents);
   assertAllowedAlgs(opts.allowedAlgs);
   assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyRequest");
@@ -630,6 +764,13 @@ export function verifyRequest(
       reason: "missing signature header",
       label,
     };
+
+  // Header length limits (fail-closed, before any parsing): an
+  // oversized header is rejected without the parser ever running
+  // over it. Checked after the presence checks above, so a missing
+  // header still reports its own MISSING_* code.
+  const tooLarge = checkSignatureHeaderLengths(sigInput, sigField, opts, label);
+  if (tooLarge !== undefined) return tooLarge;
 
   let parsed;
   try {
@@ -1461,6 +1602,31 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    */
   maxSignatureAgeSecByLabel?: Record<string, number>;
   /**
+   * Per-label `signature-input` header length limits for multi-party
+   * signatures (e.g. a merchant signature that must stay under a
+   * tight bound plus a payment-gateway signature allowed the default,
+   * on the same request): maps a signature label to that label's own
+   * `maxSignatureInputLength`. A label absent from the map falls back
+   * to the global `maxSignatureInputLength` (default 65,536). Each
+   * value follows the global limit's rules (a positive integer,
+   * otherwise a configuration error). Layering note: the pre-parse
+   * gate in `verifyAllLabels` enforces the global/default bound
+   * before the header is split into labels, and a tighter per-label
+   * limit is then enforced per label inside `verifyRequest` — so
+   * parser work is always bounded by the global value even when a
+   * label demands less. A length limit is not key selection, so it
+   * never joins the `keys`/`keyResolver`/`candidateKeys`
+   * mutual-exclusion rules.
+   */
+  maxSignatureInputLengthByLabel?: Record<string, number>;
+  /**
+   * Per-label `signature` header length limits for multi-party
+   * signatures: maps a signature label to that label's own
+   * `maxSignatureLength`. Same fallback, validation, and pre-parse
+   * layering as `maxSignatureInputLengthByLabel`.
+   */
+  maxSignatureLengthByLabel?: Record<string, number>;
+  /**
    * Per-label clock-skew tolerances for multi-party signatures (e.g. a
    * merchant signer whose clock runs tight plus a payment-gateway
    * signer whose clock drifts more, on the same request): maps a
@@ -1826,6 +1992,36 @@ function assertMaxSignatureAgeSecByLabel(
 }
 
 /**
+ * Validate a per-label signature-header length-limit map. Each value
+ * is validated with the same rules as the global limit (reusing
+ * `assertHeaderLengthLimit`); a malformed map or value is a caller
+ * configuration error, so it throws rather than returning
+ * `{ ok: false }`.
+ */
+function assertHeaderLengthLimitByLabel(
+  field: "maxSignatureInputLengthByLabel" | "maxSignatureLengthByLabel",
+  map: Record<string, number> | undefined,
+): void {
+  if (map === undefined) return;
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    throw new Error(
+      `verifyAllLabels: \`${field}\` must be a label→limit object`,
+    );
+  const name =
+    field === "maxSignatureInputLengthByLabel"
+      ? "maxSignatureInputLength"
+      : "maxSignatureLength";
+  for (const [label, limit] of Object.entries(map)) {
+    try {
+      assertHeaderLengthLimit(limit, name, "verifyAllLabels");
+    } catch (e) {
+      throw new Error(
+        `verifyAllLabels: \`${field}["${label}"]\` is invalid: ${(e as Error).message}`,
+      );
+    }
+  }
+}
+/**
  * Validate the per-label clock-skew-tolerance map. Each value must be
  * a positive finite number of seconds (a zero or negative tolerance
  * would reject every future-dated signature, including one created in
@@ -2086,6 +2282,8 @@ export function verifyAllLabels(
   assertKeyResolvers(opts.keyResolvers);
   assertCandidateKeysByLabel(opts.candidateKeysByLabel);
   assertMaxSignatureAgeSecByLabel(opts.maxSignatureAgeSecByLabel);
+  assertHeaderLengthLimitByLabel("maxSignatureInputLengthByLabel", opts.maxSignatureInputLengthByLabel);
+  assertHeaderLengthLimitByLabel("maxSignatureLengthByLabel", opts.maxSignatureLengthByLabel);
   assertClockSkewToleranceSecByLabel(opts.clockSkewToleranceSecByLabel);
   assertExpiredToleranceSecByLabel(opts.expiredToleranceSecByLabel);
   assertRequiredComponentsByLabel(opts.requiredComponentsByLabel);
@@ -2098,6 +2296,14 @@ export function verifyAllLabels(
   assertReplayCacheByLabel(opts.replayCacheByLabel);
   assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyAllLabels");
   assertStructuredFieldTypesByLabel(opts.structuredFieldTypesByLabel);
+  // Header length limits (fail-closed, before the header is split into
+  // labels): the global/default bound caps parser work here; a tighter
+  // per-label limit is then enforced per label inside `verifyRequest`.
+  // A missing `signature` header is not a gate failure — each label
+  // reports it as MISSING_SIGNATURE from its own `verifyRequest`.
+  const sigField = getHeader(req.headers, "signature");
+  const tooLarge = checkSignatureHeaderLengths(sigInput, sigField, opts, "", "verifyAllLabels");
+  if (tooLarge !== undefined) return [tooLarge];
   let labels: string[];
   try {
     labels = listSignatureLabels(sigInput);
@@ -2148,6 +2354,18 @@ export function verifyAllLabels(
     // so it never joins the mutual-exclusion checks above.
     const maxSignatureAgeSec =
       opts.maxSignatureAgeSecByLabel?.[label] ?? opts.maxSignatureAgeSec;
+    // Per-label header length limits: a label in the map is checked
+    // against its own limit; every other label falls back to the
+    // global limit (default 65,536). The pre-parse gate above already
+    // bounded parser work by the global value, so a tighter limit
+    // here only ever rejects a label that parsed cleanly — it never
+    // lets a header past the parser that the global bound would
+    // have stopped.
+    const maxSignatureInputLength =
+      opts.maxSignatureInputLengthByLabel?.[label] ??
+      opts.maxSignatureInputLength;
+    const maxSignatureLength =
+      opts.maxSignatureLengthByLabel?.[label] ?? opts.maxSignatureLength;
     // Per-label clock-skew tolerance: a label pinned in
     // `clockSkewToleranceSecByLabel` is checked against its own
     // tolerance; every other label falls back to the global
@@ -2233,7 +2451,7 @@ export function verifyAllLabels(
     // `opts` alone would carry the global registry for every label.
     const structuredFieldTypes =
       opts.structuredFieldTypesByLabel?.[label] ?? opts.structuredFieldTypes;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, allowedAlgs, requireCreated, requireExpires, requireNonce, requireTag, replayCache, structuredFieldTypes });
+    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, maxSignatureInputLength, maxSignatureLength, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, allowedAlgs, requireCreated, requireExpires, requireNonce, requireTag, replayCache, structuredFieldTypes });
   });
   // Required-label fail-closed: every required label that never
   // appeared on the wire is appended as a synthetic failure, in
