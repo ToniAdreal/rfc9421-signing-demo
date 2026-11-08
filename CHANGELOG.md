@@ -4496,6 +4496,16 @@ change type; no entry describes a feature that is not in the history.
   all-zero-modulus entry refresh failure) pin the behavior; the
   `RsaPublicJwk` caveat and the README JWK section now state the
   floor is enforced at import (modulus primality remains unchecked).
+- The README Limitations section no longer says `;sf` covers "the
+  RFC 8941 core types only" (backlog #988): the parser has supported
+  the RFC 9651 Date and Display String types since backlog #926, and
+  the `;sf` section and the FAQ already said so — only Limitations
+  lagged behind. It now reads "covers the RFC 9651 types (including
+  Date and Display String)". The `;sf` + Date / Display String
+  sign→verify round-trips were verified to already exist in
+  `test/structuredFieldDateDisplayString.test.ts`; the one gap was a
+  tamper case for Display String, so one new test pins a tampered
+  Display String value failing with `SIGNATURE_MISMATCH`.
 
 ## [0.1.0]
 

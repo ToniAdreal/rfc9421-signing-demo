@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1762 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1763 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1713,7 +1713,7 @@ const dual = addResponseSignature(merchantSigned, {
   keystores over HTTP. The `bs`, `sf`, `key`, and `tr` component parameters
   *are* implemented for header fields, and `;name` *is* implemented for
   the `@query-param` derived component (see "What it implements"; `;sf`
-  covers the RFC 8941 core types only, with an opt-in per-field type
+  covers the RFC 9651 types (including Date and Display String), with an opt-in per-field type
   registry (`structuredFieldTypes`, plus a per-label override
   `structuredFieldTypesByLabel` in `verifyAllLabels`) and the
   Dictionary → List → Item trial order otherwise, and `;key` selects
@@ -3963,7 +3963,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1762 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1763 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

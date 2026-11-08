@@ -290,6 +290,21 @@ test("tampering a ;sf Date value fails with SIGNATURE_MISMATCH", () => {
   assert.equal(res.code, "SIGNATURE_MISMATCH");
 });
 
+test("tampering a ;sf Display String value fails with SIGNATURE_MISMATCH", () => {
+  const { publicKey, signed } = signSf(
+    { "signature-agent": '%"M%c3%bcnchen"' },
+    ["@method", "signature-agent;sf"],
+  );
+  // Same percent-encoded form, different decoded content (n -> o).
+  const tampered = {
+    ...signed,
+    headers: { ...signed.headers, "signature-agent": '%"M%c3%bcochen"' },
+  };
+  const res = verifyRequest(tampered, { key: publicKey, now: CREATED + 60 });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "SIGNATURE_MISMATCH");
+});
+
 test("sign→verify round-trip: Dictionary with a Date member via ;key", () => {
   const { publicKey, signed } = signSf(
     { "agent-timestamps": "created=@1659578233, expires=@1659581833" },
