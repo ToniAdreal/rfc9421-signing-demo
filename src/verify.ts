@@ -383,8 +383,8 @@ export interface VerifyOptions {
    */
   requiredComponents?: string[];
   /**
-   * Per-field Structured Field type registry for `;sf` covered
-   * components (RFC 9421 §2.1.1) — the verify-side twin of
+   * Per-field Structured Field type registry for `;sf` and `;key`
+   * covered components (RFC 9421 §2.1.1) — the verify-side twin of
    * `SignOptions.structuredFieldTypes`: maps a header field name to
    * `"dictionary"`, `"list"`, or `"item"`, and a registered field is
    * parsed only as its registered type. A value that only parses as
@@ -392,8 +392,10 @@ export interface VerifyOptions {
    * cannot be rebuilt under the registered type), never by falling
    * back to the trial order — so a signer and a verifier that agree
    * on the registry agree on the base, and a signer that serialized
-   * under the wrong type is rejected rather than rescued. Field
-   * names match case-insensitively; an empty field name, a
+   * under the wrong type is rejected rather than rescued. Under
+   * `;key`, a field registered as a List or an Item fails the same
+   * way (a field registered as a Dictionary behaves as before).
+   * Field names match case-insensitively; an empty field name, a
    * case-duplicate key, or an unknown type name is a caller
    * configuration error (throw, before any crypto runs). Fields
    * absent from the map keep the default Dictionary → List → Item
@@ -401,8 +403,8 @@ export interface VerifyOptions {
    * every label unless that label is mapped in
    * `VerifyAllOptions.structuredFieldTypesByLabel`, whose registry
    * replaces this global one for that label (it is not merged with
-   * it). It affects only `;sf` components, exactly as on the sign
-   * side.
+   * it). It does not affect `;bs` components, exactly as on the
+   * sign side.
    */
   structuredFieldTypes?: Record<string, StructuredFieldType>;
 }

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1751 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1762 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1240,7 +1240,16 @@ values. Without a request to bind to, keep using the request-side API
   `SIGNATURE_BASE_BUILD_FAILED` on the verify side — never an
   empty-string component value. The parameter value must be a quoted
   string naming a valid Dictionary key (missing, unquoted, or
-  non-key values fail closed). `;key` combines with `;req`
+  non-key values fail closed). A field the caller registered as a
+  List or an Item (`SignOptions.structuredFieldTypes` /
+  `VerifyOptions.structuredFieldTypes`, the same registry `;sf`
+  uses) fails fast on the sign side and with
+  `SIGNATURE_BASE_BUILD_FAILED` on the verify side under `;key` —
+  the registry and `;key` agree on the field's type, so a
+  List-registered field is never silently parsed as a Dictionary; a
+  Dictionary-registered or unregistered field behaves as before (in
+  `verifyAllLabels`, `structuredFieldTypesByLabel` applies per
+  label). `;key` combines with `;req`
   (canonical wire form `;req;key="…"`), is rejected on derived
   components, and is incompatible with both `;bs` and `;sf` (raw
   bytes / whole-field serialization vs. one strictly serialized
@@ -1708,8 +1717,10 @@ const dual = addResponseSignature(merchantSigned, {
   registry (`structuredFieldTypes`, plus a per-label override
   `structuredFieldTypesByLabel` in `verifyAllLabels`) and the
   Dictionary → List → Item trial order otherwise, and `;key` selects
-  Dictionary members of those same RFC 9651
-  types; `;tr` reads the field value from caller-supplied
+  Dictionary members of those same RFC 9651 types — consulting the
+  same registry, so a field registered as a List or an Item fails
+  closed under `;key` instead of being silently parsed as a
+  Dictionary; `;tr` reads the field value from caller-supplied
   `RequestLike.trailers` — this library does not parse raw HTTP
   trailer sections off the wire). `@request-target` *is* implemented
   (§2.2.5), reconstructed from the absolute `RequestLike.url` in
@@ -3952,7 +3963,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1751 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1762 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

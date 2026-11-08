@@ -37,7 +37,12 @@
  * Field and only the named member enters the signature base, as its
  * strict member serialization (Item or Inner List, without the key
  * itself) — other members are deliberately NOT bound, so they may
- * change without breaking the signature. `;key` combines with `;req`
+ * change without breaking the signature. A field the caller
+ * registered as a List or an Item (see `ResolveComponentOptions.
+ * structuredFieldTypes`) fails closed under `;key` — the registry
+ * and `;key` agree on the field's type, so a List-registered field
+ * is never silently parsed as a Dictionary; a Dictionary-registered
+ * or unregistered field behaves as before. `;key` combines with `;req`
  * (canonical wire form `;req;key="…"`) but not with `;bs` or `;sf`:
  * `;bs` binds the raw field bytes and `;sf` re-serializes the whole
  * field, while `;key` already applies the strict serialization to
@@ -111,13 +116,15 @@ export type { StructuredFieldType } from "./structuredFields.js";
 /**
  * Options for component resolution that are not part of the wire
  * signature parameters. `structuredFieldTypes` is the per-field
- * `;sf` type registry (see `SignOptions.structuredFieldTypes`):
- * a registered field is parsed only as its registered type, while
+ * type registry (see `SignOptions.structuredFieldTypes`): a
+ * registered field is parsed only as its registered type, while
  * unregistered fields keep the Dictionary → List → Item trial order.
- * It affects only `;sf` components: `;bs` binds raw bytes and
- * `;key` selects one Dictionary member by its own rule, so a
- * registry entry for a field covered with `;bs` or `;key` changes
- * neither of those paths, and `;sf` combined with `;bs`/`;key`
+ * It affects `;sf` and `;key` components: `;sf` parses the field as
+ * its registered type, and `;key` selects one Dictionary member —
+ * a field registered as a List or an Item fails closed under `;key`
+ * (a field registered as a Dictionary behaves as before). `;bs`
+ * binds raw bytes, so a registry entry for a field covered with
+ * `;bs` changes nothing, and `;sf` combined with `;bs`/`;key`
  * still fails closed before any serialization runs.
  */
 export interface ResolveComponentOptions {
@@ -622,6 +629,23 @@ export function resolveComponent(
     if (v === undefined)
       throw new Error(`covered ${fieldKind} field "${cid}" is missing from the request`);
     try {
+      // A field the caller registered as a List or an Item is not a
+      // Dictionary, so `;key` — which selects one Dictionary member —
+      // fails closed and names the registered type, instead of
+      // silently parsing the value as a Dictionary. A field
+      // registered as a Dictionary behaves exactly as before, and an
+      // unregistered field keeps the Dictionary parse. The registry
+      // is the same one `;sf` consults, so the two parameters agree
+      // on what type a field is.
+      const registered = lookupStructuredFieldType(
+        options?.structuredFieldTypes,
+        cid,
+      );
+      if (registered !== undefined && registered !== "dictionary") {
+        throw new Error(
+          `field "${cid}" is registered as a "${registered}" Structured Field, and ";key" only selects a member of a Dictionary`,
+        );
+      }
       return serializeDictionaryMemberValue(normalizeFieldValue(v), dictKey);
     } catch (err) {
       throw new Error(

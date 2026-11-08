@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `;key` consults the `structuredFieldTypes` registry (backlog
+  #985): `resolveComponent`'s `;key` branch now looks the field up
+  in the same per-field registry `;sf` uses before parsing it as a
+  Dictionary. A field registered as `"dictionary"` behaves exactly
+  as before and an unregistered field keeps the Dictionary parse,
+  but a field registered as `"list"` or `"item"` fails closed and
+  names the registered type — fail-fast on the sign side and with
+  `SIGNATURE_BASE_BUILD_FAILED` on the verify side (including
+  `verifyRequestOrThrow` and per-label registries in
+  `verifyAllLabels`) — instead of silently parsing the value as a
+  Dictionary. The `;sf` and `;key` parameters now agree on what
+  type a field is. 11 new tests in `test/keyRegistry.test.ts`,
+  including a mutation check (disabling the registry gate makes 8
+  of the 11 tests fail).
 - `JwksKeyStore` follows `Cache-Control: max-age` (backlog #983):
   after a successful `refresh()` the snapshot's effective TTL is
   `min(ttlSec, max-age)` — a publisher declaring `max-age=60` retires
