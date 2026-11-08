@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo fetch-adapter segment (backlog #977): the demo now covers
+  the fetch-side receive path — the same loopback settlement response
+  the gateway segments serve, signed with `signResponse` and fetched
+  with the global `fetch()`, read with `arrayBuffer()`, adapted with
+  `fromFetchResponse` and verified with `verifyResponse`, so the
+  webhook-receiver shape (a callback arriving as a fetch `Response`)
+  is shown end to end. Tampering one body byte (the settlement amount
+  `10000` -> `10001`) through the same adapted path is rejected with
+  `BODY_DIGEST_MISMATCH`. New `DemoResult` fields
+  (`fetchResponseRequest` / `fetchResponseVerification` /
+  `fetchResponseTamperedVerification`) and 1 new test in
+  `test/demo.test.ts`, asserting the adapted structure, the pinned
+  keyid/alg/nonce, the `@status content-digest` coverage, and the
+  byte-exact printed lines.
 - Verify-side signature header length limits (backlog #976):
   `VerifyOptions` gains `maxSignatureInputLength` /
   `maxSignatureLength` (each default 65,536 bytes; must be a positive

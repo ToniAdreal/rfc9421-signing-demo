@@ -52,6 +52,7 @@ import {
   signatureInputValue,
   verifyRequest,
   verifyAllLabels,
+  verifyResponse,
   type VerifyResult,
 } from "../src/index.js";
 import {
@@ -106,6 +107,10 @@ import {
   DEMO_GATEWAY_RESPONSE_STATUS,
   DEMO_GATEWAY_RESPONSE_TAMPER_CODE,
   DEMO_GATEWAY_RESPONSE_TAMPERED_STATUS,
+  DEMO_FETCH_RESPONSE_KEY_ID,
+  DEMO_FETCH_RESPONSE_NONCE,
+  DEMO_FETCH_RESPONSE_TAMPER_CODE,
+  DEMO_FETCH_RESPONSE_TAMPERED_BODY,
   DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID,
   DEMO_DUAL_RESPONSE_GATEWAY_LABEL,
   DEMO_DUAL_RESPONSE_GATEWAY_NONCE,
@@ -6254,6 +6259,103 @@ test("demo signed-response segment verifies a gateway-signed @status response ov
   );
 });
 
+test("demo fetch-adapter segment verifies a gateway-signed settlement response fetched with fetch() and rejects a one-byte body tamper", async () => {
+  const {
+    lines,
+    fetchResponseRequest,
+    fetchResponseVerification,
+    fetchResponseTamperedVerification,
+  } = await runDemo();
+
+  // Structure: the adapted response carries the pinned status/body, the
+  // bound request, and the lowercased wire headers — the fetch `Response`
+  // shape, not the Node `IncomingMessage` shape.
+  assert.equal(fetchResponseRequest.status, DEMO_GATEWAY_RESPONSE_STATUS);
+  assert.equal(fetchResponseRequest.method, "GET");
+  assert.match(
+    fetchResponseRequest.url,
+    new RegExp(
+      `^http://127\\.0\\.0\\.1:\\d+${DEMO_GATEWAY_RESPONSE_PATH}$`,
+    ),
+  );
+  assert.equal(
+    fetchResponseRequest.body?.toString(),
+    DEMO_GATEWAY_RESPONSE_BODY,
+  );
+  assert.equal(
+    fetchResponseRequest.headers["content-type"],
+    "application/json",
+  );
+  assert.ok(fetchResponseRequest.headers["content-digest"] !== undefined);
+  assert.equal(fetchResponseRequest.trailers, undefined);
+  assert.equal(fetchResponseRequest.request?.method, "GET");
+  assert.equal(fetchResponseRequest.request?.url, fetchResponseRequest.url);
+
+  // Verification identity is the pinned fetch-segment keyid/alg/nonce,
+  // covering @status plus content-digest by default.
+  assert.equal(fetchResponseVerification.ok, true);
+  assert.equal(fetchResponseVerification.label, "sig1");
+  assert.equal(fetchResponseVerification.keyId, DEMO_FETCH_RESPONSE_KEY_ID);
+  assert.equal(fetchResponseVerification.alg, "ed25519");
+  assert.equal(fetchResponseVerification.nonce, DEMO_FETCH_RESPONSE_NONCE);
+  assert.deepEqual(fetchResponseVerification.coveredComponents, [
+    "@status",
+    "content-digest",
+  ]);
+  // The one-byte body tamper (amount 10000 -> 10001) is rejected
+  // with the pinned code, and the tampered body is exactly one byte
+  // off the served body.
+  assert.equal(fetchResponseTamperedVerification.ok, false);
+  assert.equal(
+    fetchResponseTamperedVerification.code,
+    DEMO_FETCH_RESPONSE_TAMPER_CODE,
+  );
+  assert.equal(
+    DEMO_FETCH_RESPONSE_TAMPERED_BODY.length,
+    DEMO_GATEWAY_RESPONSE_BODY.length,
+  );
+  assert.notEqual(
+    DEMO_FETCH_RESPONSE_TAMPERED_BODY,
+    DEMO_GATEWAY_RESPONSE_BODY,
+  );
+
+  // Cross-check with direct library calls: the same adapted message
+  // verified under an unrelated key is rejected (the struct is a real
+  // verifiable message, not a demo stub).
+  const { publicKey: otherKey } = generateEd25519KeyPair();
+  const crossCheck = verifyRequest(fetchResponseRequest, {
+    key: otherKey,
+    now: DEMO_CREATED + 60,
+    requiredComponents: ["@status", "content-digest"],
+  });
+  assert.equal(crossCheck.ok, false);
+  assert.equal(crossCheck.code, "SIGNATURE_MISMATCH");
+
+  // Printed lines: header + four pinned lines (status / ok / body /
+  // tamper rejection) — byte-exact, followed by the allowed-algs
+  // segment.
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Fetch-adapter response verification: the fetch-API twin of the gateway segment/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Fetch-adapter response verification:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 5), [
+    `Fetch response status: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
+    `Fetch response verification: OK (label sig1, keyid="${DEMO_FETCH_RESPONSE_KEY_ID}", alg="ed25519", nonce="${DEMO_FETCH_RESPONSE_NONCE}")`,
+    `Fetch response body: ${DEMO_GATEWAY_RESPONSE_BODY}`,
+    `Fetch response verification after body tampering (amount 10000 -> 10001): FAILED (code ${DEMO_FETCH_RESPONSE_TAMPER_CODE}: ${fetchResponseTamperedVerification.reason})`,
+  ]);
+  // The allowed-algs segment follows the fetch-adapter segment.
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(
+    lines[headerIdx + 6]!.startsWith("Allowed-algs whitelist:"),
+  );
+});
+
 test("demo dual-signed response segment verifies both labels over loopback and fails only the tampered gateway label", async () => {
   const {
     lines,
@@ -6437,7 +6539,7 @@ test("demo addResponseSignature segment signs the response with signResponse and
 
   // Printed lines: header + status + dual ok + tamper isolation —
   // byte-exact, between the dual-signed segment and the
-  // allowed-algs whitelist segment.
+  // fetch-adapter segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("addResponseSignature multi-party response:"),
   );
@@ -6447,9 +6549,11 @@ test("demo addResponseSignature segment signs the response with signResponse and
     `addResponseSignature verification: merchant OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
     `addResponseSignature after gateway signature tampering: gateway FAILED (code ${DEMO_ADD_RESPONSE_SIG_TAMPER_CODE}: ${addResponseSignatureResponseTamperedVerification[1].reason}), merchant still OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519")`,
   ]);
-  // The allowed-algs whitelist segment follows the addResponseSignature segment.
+  // The fetch-adapter segment follows the addResponseSignature segment.
   assert.equal(lines[headerIdx + 4], "");
-  assert.ok(lines[headerIdx + 5]!.startsWith("Allowed-algs whitelist:"));
+  assert.ok(
+    lines[headerIdx + 5]!.startsWith("Fetch-adapter response verification:"),
+  );
 });
 
 test("demo addResponseSignature segment prints byte-identical lines across runs", async () => {

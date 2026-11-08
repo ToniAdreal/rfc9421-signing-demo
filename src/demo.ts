@@ -1258,6 +1258,7 @@ import {
   exportPublicKeyPem,
   exportSignedSnapshotsByLabel,
   exportSymmetricKeyJwk,
+  fromFetchResponse,
   fromNodeRequest,
   fromNodeResponse,
   generateEd25519KeyPair,
@@ -3991,6 +3992,25 @@ export const DEMO_GATEWAY_RESPONSE_TAMPERED_STATUS = 500;
  */
 export const DEMO_GATEWAY_RESPONSE_TAMPER_CODE: VerifyFailureCode =
   "SIGNATURE_MISMATCH";
+/** Key id the fetch-adapter segment's gateway signature carries. */
+export const DEMO_FETCH_RESPONSE_KEY_ID = "demo-fetch-response-1";
+/** Nonce the fetch-adapter segment's gateway signature carries. */
+export const DEMO_FETCH_RESPONSE_NONCE = "demo-fetch-response-nonce-1";
+/**
+ * Tampered form of `DEMO_GATEWAY_RESPONSE_BODY` for the
+ * fetch-adapter segment: the settlement amount's last digit
+ * `10000` -> `10001`, exactly one byte — verification of the
+ * same adapted path must reject it with
+ * `DEMO_FETCH_RESPONSE_TAMPER_CODE`.
+ */
+export const DEMO_FETCH_RESPONSE_TAMPERED_BODY =
+  '{"settled":true,"amount":10001,"currency":"USD"}';
+/**
+ * Hand-pinned failure code for the fetch-adapter segment's
+ * one-byte body tamper (`BODY_DIGEST_MISMATCH`).
+ */
+export const DEMO_FETCH_RESPONSE_TAMPER_CODE: VerifyFailureCode =
+  "BODY_DIGEST_MISMATCH";
 /** Label of the merchant signature in the dual-signed response segment. */
 export const DEMO_DUAL_RESPONSE_MERCHANT_LABEL = "merchant";
 /** Label of the gateway signature in the dual-signed response segment. */
@@ -5876,6 +5896,22 @@ export interface DemoResult {
    */
   addResponseSignatureResponseTamperedVerification: VerifyResult[];
   /**
+   * The client's adapted `RequestLike` for the fetch-adapter
+   * segment's settlement response: the same
+   * `DEMO_GATEWAY_RESPONSE_*` settlement response, fetched with
+   * the global `fetch()`, read with `arrayBuffer()` and adapted
+   * with `fromFetchResponse`.
+   */
+  fetchResponseRequest: RequestLike;
+  /** Verification of the fetch-adapted signed response (ok). */
+  fetchResponseVerification: VerifyResult;
+  /**
+   * Verification after one body byte was tampered (the settlement
+   * amount `10000` -> `10001`): rejected with
+   * `DEMO_FETCH_RESPONSE_TAMPER_CODE`.
+   */
+  fetchResponseTamperedVerification: VerifyResult;
+  /**
    * Verification of the whitelisted ed25519 signature in the
    * allowed-algs segment (ok under `allowedAlgs: ["ed25519"]`).
    */
@@ -6653,6 +6689,146 @@ async function fetchAddResponseSignatureResponse(): Promise<AddResponseSignature
         `demo fixture broken: addResponseSignature segment gateway-signature ` +
           `tamper gave ${JSON.stringify(tamperedVerification)} instead of ` +
           `merchant ok and gateway ${DEMO_ADD_RESPONSE_SIG_TAMPER_CODE}`,
+      );
+    }
+    return { requestLike, verification, tamperedVerification };
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * The fetch-adapter segment's loopback fixture (backlog #977): the
+ * fetch-API twin of `fetchGatewaySignedResponse` above — the same
+ * loopback settlement response (`DEMO_GATEWAY_RESPONSE_*`), but the
+ * gateway signs it with the response entry point `signResponse`
+ * (`@status` + `content-digest` by default) and the client fetches
+ * it with the global `fetch()`, reads the one-shot body with
+ * `arrayBuffer()`, adapts the response with
+ * `fromFetchResponse(res, body, { request })` and verifies with
+ * `verifyResponse` — the shape a webhook receiver sees when the
+ * callback arrives as a fetch `Response`, the most common form on
+ * the receiving side. The fetch adapter never consumes `res.body`
+ * itself, so the caller reads the exact raw bytes first and passes
+ * them in (the `content-digest` check recomputes over them).
+ *
+ * A second verification tampers one body byte
+ * (`DEMO_FETCH_RESPONSE_TAMPERED_BODY`, the settlement amount
+ * `10000` -> `10001`) through the same adapted path and must be
+ * rejected with `DEMO_FETCH_RESPONSE_TAMPER_CODE`: the digest is
+ * part of the signed bytes, so a tampered webhook payload cannot
+ * pass as the signed one. Nothing about the wire form is printed
+ * except through fixed literals, so the printed segment is
+ * byte-identical between runs even though the port and the key
+ * pair are fresh per run.
+ */
+interface FetchSignedResponseFixture {
+  /** The client's adapted `RequestLike` for the fetch-signed response. */
+  requestLike: RequestLike;
+  /** Verification of the fetch-adapted signed response (ok). */
+  verification: VerifyResult;
+  /**
+   * Verification after one body byte was tampered (rejected with
+   * `DEMO_FETCH_RESPONSE_TAMPER_CODE`).
+   */
+  tamperedVerification: VerifyResult;
+}
+
+async function fetchFetchSignedResponse(): Promise<FetchSignedResponseFixture> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const server = createServer((req, res) => {
+    const signed = signResponse(
+      {
+        status: DEMO_GATEWAY_RESPONSE_STATUS,
+        headers: { "content-type": "application/json" },
+        body: DEMO_GATEWAY_RESPONSE_BODY,
+      },
+      {
+        keyId: DEMO_FETCH_RESPONSE_KEY_ID,
+        alg: "ed25519",
+        key: privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_FETCH_RESPONSE_NONCE,
+      },
+    );
+    res.writeHead(DEMO_GATEWAY_RESPONSE_STATUS, {
+      "content-type": "application/json",
+      "content-digest": signed.headers["content-digest"] as string,
+      "signature-input": signed.headers["signature-input"] as string,
+      signature: signed.headers["signature"] as string,
+    });
+    res.end(DEMO_GATEWAY_RESPONSE_BODY);
+  });
+  try {
+    const { port } = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    });
+    const url = `http://127.0.0.1:${port}${DEMO_GATEWAY_RESPONSE_PATH}`;
+    const request: RequestLike = {
+      method: "GET",
+      url,
+      headers: { host: `127.0.0.1:${port}` },
+    };
+    const res = await fetch(url);
+    const body = Buffer.from(await res.arrayBuffer());
+    const requestLike = fromFetchResponse(res, body, { request });
+    const adaptedStatus = requestLike.status;
+    if (
+      adaptedStatus !== DEMO_GATEWAY_RESPONSE_STATUS ||
+      body.toString() !== DEMO_GATEWAY_RESPONSE_BODY
+    ) {
+      throw new Error(
+        `demo fixture broken: fetch-adapter segment adapted status ` +
+          `${adaptedStatus} / body ${JSON.stringify(body.toString())} ` +
+          `instead of ${DEMO_GATEWAY_RESPONSE_STATUS} / the pinned settlement body`,
+      );
+    }
+    const verifyOptions = {
+      key: publicKey,
+      now: DEMO_CREATED + 60,
+    };
+    // `verifyResponse` needs a definite status; `adaptedStatus` is
+    // the asserted adapted value (200), so the call still verifies
+    // the adapted headers/body, not a rebuilt message.
+    const verification = verifyResponse(
+      { ...requestLike, status: adaptedStatus },
+      verifyOptions,
+    );
+    // The wire said amount 10000; the tampered view claims 10001 —
+    // one byte the gateway never signed.
+    const tamperedVerification = verifyResponse(
+      {
+        ...requestLike,
+        status: adaptedStatus,
+        body: DEMO_FETCH_RESPONSE_TAMPERED_BODY,
+      },
+      verifyOptions,
+    );
+    if (
+      !verification.ok ||
+      verification.label !== "sig1" ||
+      verification.keyId !== DEMO_FETCH_RESPONSE_KEY_ID ||
+      verification.alg !== "ed25519" ||
+      verification.nonce !== DEMO_FETCH_RESPONSE_NONCE ||
+      verification.coveredComponents?.join(" ") !== "@status content-digest"
+    ) {
+      throw new Error(
+        `demo fixture broken: fetch-adapter segment verification gave ` +
+          `${JSON.stringify(verification)} instead of ok with the pinned ` +
+          `label/keyid/alg/nonce and "@status content-digest" covered`,
+      );
+    }
+    if (
+      tamperedVerification.ok !== false ||
+      tamperedVerification.code !== DEMO_FETCH_RESPONSE_TAMPER_CODE
+    ) {
+      throw new Error(
+        `demo fixture broken: fetch-adapter segment body tamper gave ` +
+          `${JSON.stringify(tamperedVerification)} instead of ` +
+          `${DEMO_FETCH_RESPONSE_TAMPER_CODE}`,
       );
     }
     return { requestLike, verification, tamperedVerification };
@@ -11193,6 +11369,20 @@ export async function runDemo(): Promise<DemoResult> {
   const addResponseSignatureResponse =
     await fetchAddResponseSignatureResponse();
 
+  // Fetch-adapter segment (client direction): the fetch-API twin
+  // of the gateway segment above — the same loopback settlement
+  // response, now signed with `signResponse` and fetched with the
+  // global `fetch()`, read with `arrayBuffer()`, adapted with
+  // `fromFetchResponse` and verified with `verifyResponse`. A
+  // second pass tampers one body byte (the settlement amount
+  // 10000 -> 10001) through the same adapted path and is rejected
+  // with `BODY_DIGEST_MISMATCH`. The helper's fail-fast asserts
+  // already pinned every outcome outside the printed lines; only
+  // the port (never printed) and the key pair are fresh per run,
+  // so the segment's printed lines are byte-identical between
+  // runs.
+  const fetchResponse = await fetchFetchSignedResponse();
+
   // Allowed-algs whitelist segment: a gateway that only accepts
   // ed25519 should not have to hand-roll a pre-check before
   // verifying — `allowedAlgs: ["ed25519"]` (backlog #851) is
@@ -13780,6 +13970,16 @@ export async function runDemo(): Promise<DemoResult> {
       ? "addResponseSignature after gateway signature tampering: gateway OK (unexpected — the tampered gateway signature was not rejected), merchant OK"
       : `addResponseSignature after gateway signature tampering: gateway FAILED (code ${addResponseSignatureResponse.tamperedVerification[1].code}: ${addResponseSignatureResponse.tamperedVerification[1].reason}), merchant still OK (label ${addResponseSignatureResponse.tamperedVerification[0].label}, keyid="${addResponseSignatureResponse.tamperedVerification[0].keyId}", alg="${addResponseSignatureResponse.tamperedVerification[0].alg}")`,
     "",
+    "Fetch-adapter response verification: the fetch-API twin of the gateway segment — the same loopback settlement response, now fetched with the global fetch(), read with arrayBuffer(), adapted with fromFetchResponse and verified with verifyResponse — the shape a webhook receiver sees when the callback arrives as a fetch Response",
+    `Fetch response status: ${fetchResponse.requestLike.status}`,
+    fetchResponse.verification.ok
+      ? `Fetch response verification: OK (label ${fetchResponse.verification.label}, keyid="${fetchResponse.verification.keyId}", alg="${fetchResponse.verification.alg}", nonce="${fetchResponse.verification.nonce}")`
+      : `Fetch response verification: FAILED (code ${fetchResponse.verification.code}: ${fetchResponse.verification.reason})`,
+    `Fetch response body: ${fetchResponse.requestLike.body?.toString()}`,
+    fetchResponse.tamperedVerification.ok
+      ? "Fetch response verification after body tampering (amount 10000 -> 10001): OK (unexpected — the tampered body was not detected)"
+      : `Fetch response verification after body tampering (amount 10000 -> 10001): FAILED (code ${fetchResponse.tamperedVerification.code}: ${fetchResponse.tamperedVerification.reason})`,
+    "",
     "Allowed-algs whitelist: a gateway that only accepts ed25519 verifies both signatures under allowedAlgs [\"ed25519\"] — the ed25519 signature verifies, the RSA-PSS signature is rejected with ALG_NOT_ALLOWED before any cryptographic verification, so a foreign algorithm never reaches the crypto path",
     allowedAlgsEdVerification.ok
       ? `Whitelisted algorithm verifies: the same request signed with ed25519 verified under allowedAlgs ["ed25519"]: OK (label ${allowedAlgsEdVerification.label}, keyid="${allowedAlgsEdVerification.keyId}", alg="${allowedAlgsEdVerification.alg}", nonce="${allowedAlgsEdVerification.nonce}")`
@@ -14261,6 +14461,9 @@ export async function runDemo(): Promise<DemoResult> {
       addResponseSignatureResponse.verification,
     addResponseSignatureResponseTamperedVerification:
       addResponseSignatureResponse.tamperedVerification,
+    fetchResponseRequest: fetchResponse.requestLike,
+    fetchResponseVerification: fetchResponse.verification,
+    fetchResponseTamperedVerification: fetchResponse.tamperedVerification,
     allowedAlgsEdVerification,
     allowedAlgsRsaVerification,
     jwksRequireHttpsError,
