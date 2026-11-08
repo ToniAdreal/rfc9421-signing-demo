@@ -31,6 +31,27 @@ export interface JwksFetchResponse {
   status: number;
   json(): Promise<unknown>;
   /**
+   * Raw body text. The default fetch's native `Response` always
+   * provides it; a custom `fetchImpl` may provide it so that the
+   * `maxBodyBytes` body limit (see
+   * {@link JwksKeyStoreOptions.maxBodyBytes}) can be enforced by
+   * measuring the body before parsing. When absent, `fetchAndSwap`
+   * falls back to `json()` and the limit cannot be measured on that
+   * path — the response is parsed exactly as before, and the
+   * limitation is documented on the option, not papered over.
+   */
+  text?: () => Promise<string>;
+  /**
+   * Response headers, for the `Content-Length` precheck of the
+   * `maxBodyBytes` body limit (see
+   * {@link JwksKeyStoreOptions.maxBodyBytes}). The native `Headers`
+   * satisfies this shape; a custom `fetchImpl` may provide any
+   * object with a `get(name)` accessor. When absent (or when the
+   * header itself is absent or unparseable) the precheck is skipped
+   * and only the post-read byte check applies.
+   */
+  headers?: { get(name: string): string | null };
+  /**
    * Final URL the response was fetched from, after any redirects.
    * The default fetch populates this from the native `Response.url`;
    * a custom `fetchImpl` may omit it, in which case the
@@ -102,6 +123,43 @@ export interface JwksKeyStoreOptions {
    * need one. Unset by default (zero behavior change).
    */
   fetchTimeoutMs?: number;
+  /**
+   * Maximum JWKS response body size in bytes. Defaults to `1_048_576`
+   * (1 MiB). Must be a positive integer.
+   *
+   * Calibration (measured 2026-11-08 on this repo's own key
+   * material): a three-key JWKS document (ed25519 + P-256 + RSA-2048)
+   * is 645 bytes, 100 ed25519 keys are 9,800 bytes, and 20 RSA-2048
+   * keys are 7,860 bytes — so 1 MiB is roughly 100x headroom over a
+   * 100-key rotation set, and a legitimate JWKS document never comes
+   * near it; the cap only bites on a compromised or hostile endpoint
+   * serving an absurd body.
+   *
+   * Enforcement happens in `fetchAndSwap`, before any parse, in two
+   * layers: (1) a `Content-Length` precheck — when the response
+   * reports one (see {@link JwksFetchResponse.headers}) and it
+   * exceeds the cap, the body is rejected without being read at all;
+   * (2) a post-read byte check — the body is read as text and its
+   * UTF-8 byte length is checked before `JSON.parse`. An over-limit
+   * response throws
+   * `JwksKeyStore: JWKS response from <url> exceeds the <max> byte
+   * body limit (...)`, leaves the previous snapshot and freshness
+   * timestamp untouched (fail-closed, counted as a refresh failure),
+   * and is terminal for retries — a too-large body will not heal by
+   * re-fetching.
+   *
+   * Guarantee strength differs by path: the default fetch (a native
+   * `Response`, which always carries `text()` and `headers`) gets
+   * both layers, as does a custom `fetchImpl` that provides them. A
+   * custom `fetchImpl` whose response offers only `json()` cannot
+   * have its body measured, so the limit is NOT enforced there — the
+   * document is parsed via `json()` exactly as before, and callers
+   * on that path must enforce their own limit or provide `text()`.
+   * The `Content-Length` precheck is best-effort (an absent or
+   * unparseable header is skipped); the post-read byte check is
+   * authoritative wherever `text()` is available.
+   */
+  maxBodyBytes?: number;
   /**
    * Opt-in transport-layer enforcement: when `true`, the JWKS
    * endpoint URL must use `https:` — a plaintext `http:` endpoint is
@@ -703,6 +761,8 @@ export class JwksKeyStore {
   private readonly usingDefaultFetch: boolean;
   /** Opt-in fetch timeout in milliseconds, or undefined when unset. */
   private readonly fetchTimeoutMs?: number;
+  /** Response body cap in bytes (default 1 MiB, see `maxBodyBytes`). */
+  private readonly maxBodyBytes: number;
   /** Opt-in https-only enforcement, including the redirect check. */
   private readonly requireHttps: boolean;
   /** Opt-in fetch retry count (0 = single attempt, the default). */
@@ -754,6 +814,7 @@ export class JwksKeyStore {
       ttlSec = 300,
       now,
       fetchTimeoutMs,
+      maxBodyBytes = 1_048_576,
       requireHttps,
       fetchRetries = 0,
       fetchBackoffMs = 1000,
@@ -787,6 +848,14 @@ export class JwksKeyStore {
         `JwksKeyStore: \`fetchTimeoutMs\` must be a positive integer (milliseconds), got ${String(fetchTimeoutMs)}`,
       );
     if (
+      typeof maxBodyBytes !== "number" ||
+      !Number.isInteger(maxBodyBytes) ||
+      maxBodyBytes <= 0
+    )
+      throw new Error(
+        `JwksKeyStore: \`maxBodyBytes\` must be a positive integer (bytes), got ${String(maxBodyBytes)}`,
+      );
+    if (
       typeof fetchRetries !== "number" ||
       !Number.isInteger(fetchRetries) ||
       fetchRetries < 0
@@ -809,6 +878,7 @@ export class JwksKeyStore {
     this.usingDefaultFetch = fetchImpl === undefined;
     this.fetchImpl = fetchImpl ?? ((u: string) => globalThis.fetch(u));
     this.fetchTimeoutMs = fetchTimeoutMs;
+    this.maxBodyBytes = maxBodyBytes;
     this.fetchRetries = fetchRetries;
     this.fetchBackoffMs = fetchBackoffMs;
     this.sleepImpl =
@@ -1091,15 +1161,68 @@ export class JwksKeyStore {
           `JwksKeyStore: JWKS fetch redirected to insecure http: ${res.url}`,
         );
     }
-    let doc: unknown;
-    try {
-      doc = await res.json();
-    } catch (err) {
+    // Body-size limit (maxBodyBytes), enforced before any parse so a
+    // hostile endpoint cannot make `refresh()` swallow an unbounded
+    // body into memory: (1) a Content-Length precheck rejects an
+    // over-limit body without reading it at all — best-effort, an
+    // absent or unparseable header is skipped; (2) when the response
+    // offers `text()`, the body is read as text and its UTF-8 byte
+    // length is checked before `JSON.parse` — authoritative on that
+    // path. A response with only `json()` (a custom fetchImpl that
+    // does not expose `text()`) cannot be measured, so the limit is
+    // not enforced there and the document is parsed via `json()`
+    // exactly as before — see the maxBodyBytes option documentation.
+    // Either rejection is terminal for retries (a too-large body
+    // will not heal by re-fetching) and leaves the old snapshot
+    // untouched, like every other failure below.
+    let contentLength: number | null = null;
+    if (typeof res.headers?.get === "function") {
+      const raw = res.headers.get("content-length");
+      if (typeof raw === "string") {
+        const parsed = Number.parseInt(raw.trim(), 10);
+        if (Number.isFinite(parsed) && parsed >= 0) contentLength = parsed;
+      }
+    }
+    if (contentLength !== null && contentLength > this.maxBodyBytes)
       throw new Error(
-        `JwksKeyStore: JWKS response from ${this.url} is not valid JSON: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `JwksKeyStore: JWKS response from ${this.url} exceeds the ${this.maxBodyBytes} byte body limit (Content-Length: ${contentLength} bytes)`,
       );
+    let doc: unknown;
+    if (typeof res.text === "function") {
+      let text: string;
+      try {
+        text = await res.text();
+      } catch (err) {
+        throw new Error(
+          `JwksKeyStore: failed to read JWKS response body from ${this.url}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      const receivedBytes = Buffer.byteLength(text, "utf8");
+      if (receivedBytes > this.maxBodyBytes)
+        throw new Error(
+          `JwksKeyStore: JWKS response from ${this.url} exceeds the ${this.maxBodyBytes} byte body limit (received ${receivedBytes} bytes)`,
+        );
+      try {
+        doc = JSON.parse(text);
+      } catch (err) {
+        throw new Error(
+          `JwksKeyStore: JWKS response from ${this.url} is not valid JSON: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    } else {
+      try {
+        doc = await res.json();
+      } catch (err) {
+        throw new Error(
+          `JwksKeyStore: JWKS response from ${this.url} is not valid JSON: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
     // Build the next snapshot fully before swapping it in: any failure
     // below must leave the previous snapshot untouched.

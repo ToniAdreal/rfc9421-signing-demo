@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1705 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1719 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -778,6 +778,29 @@ The option takes a positive integer (milliseconds) and is unset by default, so
 no configuration change is zero behavior change; it applies to the default
 fetch only — a custom `fetchImpl` never receives an abort signal and must
 implement its own timeout if it needs one.
+
+Response body limit: `new JwksKeyStore(url, { maxBodyBytes: 1_048_576 })`
+caps the JWKS response body at 1 MiB by default (a positive integer in
+bytes; the option takes any positive integer). A compromised or hostile
+endpoint can otherwise return an unbounded JSON body that `refresh()`
+would swallow whole into memory before shape validation fails. The
+limit is enforced before any parse, in two layers: a `Content-Length`
+precheck rejects an over-limit body without reading it, and the body
+is then read as text and its UTF-8 byte length checked before
+`JSON.parse`. An over-limit response throws
+`JwksKeyStore: JWKS response from <url> exceeds the <max> byte body
+limit (...)`, leaves the previous snapshot and `lastRefreshedAt`
+untouched (fail-closed, counted as a refresh failure), and is terminal
+for retries. The 1 MiB default is calibrated, not guessed: a three-key
+JWKS document (ed25519 + P-256 + RSA-2048) is 645 bytes, 100 ed25519
+keys are 9,800 bytes, and 20 RSA-2048 keys are 7,860 bytes (measured
+2026-11-08), so the default is roughly 100x headroom over a 100-key
+rotation set. One honest limit: the guarantee holds where the
+response offers `text()` and `headers` (the default fetch's native
+`Response` always does, as does a custom `fetchImpl` that provides
+them); a custom `fetchImpl` whose response offers only `json()` cannot
+have its body measured, so the limit is not enforced there and the
+document is parsed via `json()` exactly as before.
 
 Fetch retries (opt-in): `new JwksKeyStore(url, { fetchRetries: 2,
 fetchBackoffMs: 1000 })` re-attempts a failed `refresh()` up to the
@@ -3893,7 +3916,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1705 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1719 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

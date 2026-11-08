@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore` response body limit (backlog #973): the new
+  `maxBodyBytes` option (default `1_048_576`, 1 MiB; must be a positive
+  integer) caps how much a JWKS endpoint may make `refresh()` swallow
+  into memory before shape validation — previously `fetchAndSwap`
+  called `res.json()` with no size bound anywhere in the fetch path.
+  Enforcement is two-layer, before any parse: a `Content-Length`
+  precheck rejects an over-limit body without reading it, and the body
+  is then read as text and its UTF-8 byte length checked before
+  `JSON.parse`. An over-limit response throws
+  `JwksKeyStore: JWKS response from <url> exceeds the <max> byte body
+  limit (...)`, leaves the previous snapshot and freshness timestamp
+  untouched, and is terminal for retries. `JwksFetchResponse` gains
+  optional `text()` and `headers` members (the native `Response`
+  always provides both, so the default fetch gets both layers); a
+  custom `fetchImpl` whose response offers only `json()` cannot be
+  measured, so the limit is documented as unenforced there and the
+  document is parsed via `json()` exactly as before. The 1 MiB
+  default is calibrated on measured bodies: a three-key JWKS document
+  is 645 bytes, 100 ed25519 keys 9,800 bytes, 20 RSA-2048 keys 7,860
+  bytes (2026-11-08) — roughly 100x headroom over a 100-key rotation
+  set. 14 new tests in `test/jwksMaxBody.test.ts`, including loopback
+  coverage of both layers on the default fetch and a mutation check
+  (weakening the post-read check turns 7 of them red).
 - Two new JWKS refresh benchmark rows (backlog #969): a serial
   `JwksKeyStore.refresh` row over a real loopback `http` server
   serving a fixed three-shape JWKS document (ed25519 / P-256 / RSA)
