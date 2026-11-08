@@ -980,6 +980,28 @@
  * construction-time rule `test/jwks.test.ts` pins). Only the
  * loopback port (never printed) and the key pair are fresh per
  * run, so the segment is byte-identical between runs.
+ * The demo then runs a JWKS maxBodyBytes segment: a
+ * `JwksKeyStore` capped at 128 bytes and pinned to the demo's
+ * fixed clock through an injected `now` is driven through a
+ * counting fake fetch scripted in three calls — first a healthy
+ * one-key document (119 bytes, under the cap) that refreshes and
+ * resolves, then an oversized two-key document (228 bytes) with
+ * no `Content-Length`, rejected by the post-read byte check with
+ * the pinned received-bytes message, then a response whose
+ * `Content-Length` claims 999999 bytes, rejected by the precheck
+ * before its body is read at all (the fake counts `text()` calls
+ * to prove it). After both failures the snapshot still holds the
+ * one scripted key, `resolve()` still returns it,
+ * `lastRefreshedAt` still reads the healthy refresh instant, and
+ * a request signed with the scripted key still verifies through
+ * the store's resolver — the old snapshot keeps serving keys.
+ * Outside the printed lines the demo asserts every count, size,
+ * error message and verification equals the hand-pinned
+ * expectations below (the same two-layer rules
+ * `test/jwksMaxBody.test.ts` pins). The key pairs are fresh per
+ * run (generation is not printed) and every byte count is fixed
+ * by the key and kid shapes, so the segment is byte-identical
+ * between runs.
  * The demo then runs a per-label nonce requirement segment: a
  * dual-label request carries a merchant signature that must carry
  * a nonce and a gateway signature that historically carries none,
@@ -2814,6 +2836,66 @@ export const DEMO_JWKS_REQUIRE_HTTPS_SIZE = 1;
  * exactly one fetch serves the scripted key.
  */
 export const DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS = 1;
+
+/** Key id of the closing JWKS maxBodyBytes segment's scripted key. */
+export const DEMO_JWKS_MAX_BODY_KEY_ID = "demo-jwks-max-body-1";
+/** Key id of the second key in the oversized JWKS document. */
+export const DEMO_JWKS_MAX_BODY_SECOND_KEY_ID = "demo-jwks-max-body-2";
+/**
+ * Body cap of the closing JWKS maxBodyBytes segment's store, in bytes:
+ * the healthy one-key document is 119 bytes (under the cap) and the
+ * oversized two-key document is 228 bytes (over it).
+ */
+export const DEMO_JWKS_MAX_BODY_BYTES = 128;
+/**
+ * Byte length of the healthy one-key JWKS document the segment serves
+ * first (one ed25519 JWK plus its kid; measured, not guessed).
+ */
+export const DEMO_JWKS_MAX_BODY_HEALTHY_BYTES = 119;
+/**
+ * Byte length of the oversized two-key JWKS document the segment serves
+ * second (the same key shape twice, with the two pinned kids).
+ */
+export const DEMO_JWKS_MAX_BODY_RECEIVED_BYTES = 228;
+/**
+ * Hand-pinned refresh failure of the oversized body: the same message
+ * `test/jwksMaxBody.test.ts` pins for the post-read byte check.
+ */
+export const DEMO_JWKS_MAX_BODY_ERROR =
+  `JwksKeyStore: JWKS response from ${DEMO_JWKS_URL} exceeds the 128 byte body limit (received 228 bytes)`;
+/**
+ * Content-Length the third fetch claims: far over the cap, so the
+ * precheck rejects it before the body is read at all.
+ */
+export const DEMO_JWKS_MAX_BODY_CONTENT_LENGTH = 999999;
+/**
+ * Hand-pinned refresh failure of the Content-Length precheck: the same
+ * message `test/jwksMaxBody.test.ts` pins for the precheck path.
+ */
+export const DEMO_JWKS_MAX_BODY_CONTENT_LENGTH_ERROR =
+  `JwksKeyStore: JWKS response from ${DEMO_JWKS_URL} exceeds the 128 byte body limit (Content-Length: 999999 bytes)`;
+/**
+ * Snapshot size of the store after its healthy refresh: exactly the
+ * one scripted key, and the two failed refreshes must leave it there.
+ */
+export const DEMO_JWKS_MAX_BODY_SIZE = 1;
+/**
+ * Fetch count of the segment's store: healthy, oversized, precheck —
+ * one fetch per refresh, no retries on a terminal body-limit failure.
+ */
+export const DEMO_JWKS_MAX_BODY_FETCH_CALLS = 3;
+/**
+ * `text()` call count of the segment's fake fetch: the healthy body and
+ * the oversized body are both read; the Content-Length precheck
+ * rejects before any read, so it adds no call.
+ */
+export const DEMO_JWKS_MAX_BODY_TEXT_CALLS = 2;
+/**
+ * `lastRefreshedAt` of the store after the two failed refreshes: the
+ * injected clock never moves, so the healthy refresh pins it at
+ * `DEMO_CREATED` and both failures leave it there.
+ */
+export const DEMO_JWKS_MAX_BODY_LAST_REFRESHED_AT = DEMO_CREATED;
 
 /**
  * Fixed nonces of the closing ReplayCache observability
@@ -5213,6 +5295,51 @@ export interface DemoResult {
    * `DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS`).
    */
   jwksRequireHttpsDefaultFetchCalls: number;
+  /**
+   * Refresh failure message of the oversized JWKS body (equals the
+   * hand-pinned `DEMO_JWKS_MAX_BODY_ERROR`).
+   */
+  jwksMaxBodyError: string;
+  /**
+   * Refresh failure message of the Content-Length precheck (equals
+   * the hand-pinned `DEMO_JWKS_MAX_BODY_CONTENT_LENGTH_ERROR`).
+   */
+  jwksMaxBodyContentLengthError: string;
+  /**
+   * Fetch count of the maxBodyBytes store (equals the hand-pinned
+   * `DEMO_JWKS_MAX_BODY_FETCH_CALLS`).
+   */
+  jwksMaxBodyFetchCalls: number;
+  /**
+   * `text()` call count of the segment's fake fetch (equals the
+   * hand-pinned `DEMO_JWKS_MAX_BODY_TEXT_CALLS`: the precheck never
+   * reads the body).
+   */
+  jwksMaxBodyTextCalls: number;
+  /**
+   * Snapshot size of the store after the two failed refreshes
+   * (equals the hand-pinned `DEMO_JWKS_MAX_BODY_SIZE`: the healthy
+   * snapshot survives both failures).
+   */
+  jwksMaxBodySize: number;
+  /**
+   * Whether the store still resolves the scripted keyid after the
+   * two failed refreshes (`true`).
+   */
+  jwksMaxBodyResolved: boolean;
+  /**
+   * `lastRefreshedAt` of the store after the two failed refreshes
+   * (equals the hand-pinned
+   * `DEMO_JWKS_MAX_BODY_LAST_REFRESHED_AT`: a failed refresh never
+   * moves it).
+   */
+  jwksMaxBodyLastRefreshedAt: number | null;
+  /**
+   * Verification of a request signed with the segment key through
+   * the store's resolver after the two failed refreshes (ok — the
+   * old snapshot keeps verifying).
+   */
+  jwksMaxBodyVerification: VerifyResult;
   /**
    * The dual-label request of the closing per-label nonce
    * requirement segment, merchant signature without a nonce
@@ -11553,6 +11680,172 @@ export async function runDemo(): Promise<DemoResult> {
     jwksRequireHttpsServer.close();
   }
 
+  // JWKS maxBodyBytes segment: the JWKS sections above fetch
+  // healthy documents only, so none shows what the body cap
+  // does when the endpoint turns hostile: a compromised or
+  // misconfigured endpoint serving an absurd JWKS body must be
+  // rejected before the document is parsed, and the previous
+  // snapshot must keep serving keys. This segment drives a
+  // JwksKeyStore with `maxBodyBytes: 128` and an injected clock
+  // pinned at DEMO_CREATED through a counting fake fetch
+  // scripted in three calls: first a healthy one-key document
+  // (119 bytes, under the cap) that refreshes and resolves; then
+  // an oversized two-key document (228 bytes) with no
+  // Content-Length, rejected by the post-read byte check with
+  // the pinned received-bytes message; then a response whose
+  // Content-Length claims 999999 bytes, rejected by the precheck
+  // before its body is read at all (the fake counts `text()`
+  // calls to prove it). After both failures the snapshot still
+  // holds the one scripted key, `resolve()` still returns it,
+  // `lastRefreshedAt` still reads the healthy refresh instant,
+  // and a request signed with the scripted key still verifies
+  // through the store's resolver. Outside the printed lines the
+  // demo asserts every count, size, error message and
+  // verification equals the hand-pinned DEMO_JWKS_MAX_BODY_*
+  // expectations (the same two-layer rules
+  // `test/jwksMaxBody.test.ts` pins). The key pairs are fresh
+  // per run (generation is not printed) and every byte count is
+  // fixed by the key and kid shapes, so the segment's printed
+  // lines are identical between runs.
+  const jwksMaxBodyPair = generateEd25519KeyPair();
+  const jwksMaxBodySecondPair = generateEd25519KeyPair();
+  const jwksMaxBodyHealthyBody = JSON.stringify({
+    keys: [
+      {
+        ...exportPublicKeyJwk(jwksMaxBodyPair.publicKey),
+        kid: DEMO_JWKS_MAX_BODY_KEY_ID,
+      },
+    ],
+  });
+  const jwksMaxBodyOversizedBody = JSON.stringify({
+    keys: [
+      {
+        ...exportPublicKeyJwk(jwksMaxBodyPair.publicKey),
+        kid: DEMO_JWKS_MAX_BODY_KEY_ID,
+      },
+      {
+        ...exportPublicKeyJwk(jwksMaxBodySecondPair.publicKey),
+        kid: DEMO_JWKS_MAX_BODY_SECOND_KEY_ID,
+      },
+    ],
+  });
+  let jwksMaxBodyFetchCalls = 0;
+  let jwksMaxBodyTextCalls = 0;
+  const jwksMaxBodyStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      jwksMaxBodyFetchCalls++;
+      if (jwksMaxBodyFetchCalls === 1) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new Error("json() must not be called on the text() path");
+          },
+          text: async () => {
+            jwksMaxBodyTextCalls++;
+            return jwksMaxBodyHealthyBody;
+          },
+          headers: {
+            get: (name: string) =>
+              name.toLowerCase() === "content-length"
+                ? String(DEMO_JWKS_MAX_BODY_HEALTHY_BYTES)
+                : null,
+          },
+        };
+      }
+      if (jwksMaxBodyFetchCalls === 2) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new Error("json() must not be called on the text() path");
+          },
+          text: async () => {
+            jwksMaxBodyTextCalls++;
+            return jwksMaxBodyOversizedBody;
+          },
+          headers: { get: () => null },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error("json() must not be called on the text() path");
+        },
+        text: async () => {
+          jwksMaxBodyTextCalls++;
+          return jwksMaxBodyHealthyBody;
+        },
+        headers: {
+          get: (name: string) =>
+            name.toLowerCase() === "content-length"
+              ? String(DEMO_JWKS_MAX_BODY_CONTENT_LENGTH)
+              : null,
+        },
+      };
+    },
+    maxBodyBytes: DEMO_JWKS_MAX_BODY_BYTES,
+    now: () => DEMO_CREATED,
+  });
+  await jwksMaxBodyStore.refresh();
+  let jwksMaxBodyError = "";
+  try {
+    await jwksMaxBodyStore.refresh();
+  } catch (err) {
+    jwksMaxBodyError = err instanceof Error ? err.message : String(err);
+  }
+  let jwksMaxBodyContentLengthError = "";
+  try {
+    await jwksMaxBodyStore.refresh();
+  } catch (err) {
+    jwksMaxBodyContentLengthError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const jwksMaxBodySize = jwksMaxBodyStore.size;
+  const jwksMaxBodyResolved =
+    jwksMaxBodyStore.resolve(DEMO_JWKS_MAX_BODY_KEY_ID) !== undefined;
+  const jwksMaxBodyLastRefreshedAt = jwksMaxBodyStore.lastRefreshedAt;
+  const jwksMaxBodySigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_MAX_BODY_KEY_ID,
+      alg: "ed25519",
+      key: jwksMaxBodyPair.privateKey,
+      created: DEMO_CREATED,
+    },
+  );
+  const jwksMaxBodyVerification = verifyRequest(jwksMaxBodySigned, {
+    keyResolver: jwksMaxBodyStore.resolve,
+    now: DEMO_CREATED,
+  });
+  if (
+    Buffer.byteLength(jwksMaxBodyHealthyBody, "utf8") !==
+      DEMO_JWKS_MAX_BODY_HEALTHY_BYTES ||
+    Buffer.byteLength(jwksMaxBodyOversizedBody, "utf8") !==
+      DEMO_JWKS_MAX_BODY_RECEIVED_BYTES ||
+    jwksMaxBodyError !== DEMO_JWKS_MAX_BODY_ERROR ||
+    jwksMaxBodyContentLengthError !==
+      DEMO_JWKS_MAX_BODY_CONTENT_LENGTH_ERROR ||
+    jwksMaxBodyFetchCalls !== DEMO_JWKS_MAX_BODY_FETCH_CALLS ||
+    jwksMaxBodyTextCalls !== DEMO_JWKS_MAX_BODY_TEXT_CALLS ||
+    jwksMaxBodySize !== DEMO_JWKS_MAX_BODY_SIZE ||
+    jwksMaxBodyResolved !== true ||
+    jwksMaxBodyLastRefreshedAt !== DEMO_JWKS_MAX_BODY_LAST_REFRESHED_AT ||
+    jwksMaxBodyVerification.ok !== true ||
+    jwksMaxBodyVerification.keyId !== DEMO_JWKS_MAX_BODY_KEY_ID ||
+    jwksMaxBodyVerification.alg !== "ed25519"
+  ) {
+    throw new Error(
+      `demo fixture broken: JWKS maxBodyBytes gave healthy ${Buffer.byteLength(jwksMaxBodyHealthyBody, "utf8")} bytes / oversized ${Buffer.byteLength(jwksMaxBodyOversizedBody, "utf8")} bytes, errors ${jwksMaxBodyError} / ${jwksMaxBodyContentLengthError}, fetches ${jwksMaxBodyFetchCalls} with ${jwksMaxBodyTextCalls} body reads, size ${jwksMaxBodySize}, resolved ${jwksMaxBodyResolved}, lastRefreshedAt ${jwksMaxBodyLastRefreshedAt}, verification ok=${jwksMaxBodyVerification.ok} keyId=${jwksMaxBodyVerification.keyId} alg=${jwksMaxBodyVerification.alg}, instead of the pinned ${DEMO_JWKS_MAX_BODY_HEALTHY_BYTES} / ${DEMO_JWKS_MAX_BODY_RECEIVED_BYTES} bytes, errors ${DEMO_JWKS_MAX_BODY_ERROR} / ${DEMO_JWKS_MAX_BODY_CONTENT_LENGTH_ERROR}, ${DEMO_JWKS_MAX_BODY_FETCH_CALLS} fetches with ${DEMO_JWKS_MAX_BODY_TEXT_CALLS} body reads, size ${DEMO_JWKS_MAX_BODY_SIZE}, resolved true, lastRefreshedAt ${DEMO_JWKS_MAX_BODY_LAST_REFRESHED_AT}, verification ok with keyId ${DEMO_JWKS_MAX_BODY_KEY_ID} alg ed25519`,
+    );
+  }
+
   // Per-label nonce requirement segment: `requireNonceByLabel`
   // is the per-label form of the required-nonce segment's
   // global `requireNonce` — where the global check demands a
@@ -13993,6 +14286,14 @@ export async function runDemo(): Promise<DemoResult> {
     "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule also intercepts a later https-to-http redirect when the response reports its final URL",
     `JWKS requireHttps over the same loopback http: endpoint (default off): refresh() succeeded after ${jwksRequireHttpsDefaultFetchCalls} fetch, the snapshot holds ${jwksRequireHttpsSize} key and resolve("${DEMO_JWKS_REQUIRE_HTTPS_KEY_ID}") returned a key — plaintext is allowed only for loopback development and tests`,
     "",
+    "JWKS maxBodyBytes: JwksKeyStore maxBodyBytes is a fail-closed body cap — an oversized JWKS document is rejected before it is parsed, so a hostile endpoint cannot flood the key set or the process memory",
+    `JWKS maxBodyBytes over a counting fake endpoint (cap ${DEMO_JWKS_MAX_BODY_BYTES} bytes): the healthy one-key document (${DEMO_JWKS_MAX_BODY_HEALTHY_BYTES} bytes) refreshed and resolve("${DEMO_JWKS_MAX_BODY_KEY_ID}") returned a key`,
+    `JWKS maxBodyBytes oversized body (${DEMO_JWKS_MAX_BODY_RECEIVED_BYTES} bytes, no Content-Length): refresh() FAILED (${jwksMaxBodyError}) — the post-read byte check rejects before parsing`,
+    `JWKS maxBodyBytes Content-Length precheck (claims ${DEMO_JWKS_MAX_BODY_CONTENT_LENGTH} bytes): refresh() FAILED (${jwksMaxBodyContentLengthError}) after ${jwksMaxBodyTextCalls} body reads — the precheck rejects without reading the body at all`,
+    jwksMaxBodyVerification.ok
+      ? `JWKS maxBodyBytes after both failures: the snapshot still holds ${jwksMaxBodySize} key, lastRefreshedAt is still ${jwksMaxBodyLastRefreshedAt}, and a request signed with the scripted key still verifies through the store's resolver: OK (label ${jwksMaxBodyVerification.label}, keyid="${jwksMaxBodyVerification.keyId}", alg="${jwksMaxBodyVerification.alg}") — the old snapshot keeps serving keys`
+      : `JWKS maxBodyBytes after both failures: the snapshot still holds ${jwksMaxBodySize} key, but verification through the store's resolver FAILED (code ${jwksMaxBodyVerification.code}: ${jwksMaxBodyVerification.reason})`,
+    "",
     "Per-label nonce requirement: verifyAllLabels' requireNonceByLabel map demands a nonce only from the merchant signature — the gateway signature historically carries none, so it falls back to the unset global requireNonce — the per-label form of the required-nonce segment's global check, checked after the cryptographic check like the global one, so a forged nonce-less merchant signature still reports a signature failure rather than a policy violation",
     requireNonceByLabelMissingByLabel[
       DEMO_REQUIRE_NONCE_BY_LABEL_MERCHANT_LABEL
@@ -14472,6 +14773,14 @@ export async function runDemo(): Promise<DemoResult> {
     jwksRequireHttpsResolved,
     jwksRequireHttpsSize,
     jwksRequireHttpsDefaultFetchCalls,
+    jwksMaxBodyError,
+    jwksMaxBodyContentLengthError,
+    jwksMaxBodyFetchCalls,
+    jwksMaxBodyTextCalls,
+    jwksMaxBodySize,
+    jwksMaxBodyResolved,
+    jwksMaxBodyLastRefreshedAt,
+    jwksMaxBodyVerification,
     requireNonceByLabelSigned,
     requireNonceByLabelMissingVerification,
     requireNonceByLabelWithNonceSigned,

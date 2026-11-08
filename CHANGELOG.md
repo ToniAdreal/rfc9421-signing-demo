@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo JWKS body-limit segment (backlog #980): the demo now covers
+  the `JwksKeyStore` `maxBodyBytes` cap end to end — a store capped at
+  128 bytes with a clock pinned to the demo's fixed instant refreshes a
+  healthy one-key document (119 bytes), rejects an oversized two-key
+  document (228 bytes, no `Content-Length`) with the pinned
+  received-bytes error before parsing, and rejects a response whose
+  `Content-Length` claims 999999 bytes before reading the body at all
+  (the fake fetch counts `text()` calls to prove it). After both
+  failures the snapshot still holds the one scripted key, `resolve()`
+  still returns it, `lastRefreshedAt` still reads the healthy refresh
+  instant, and a request signed with the scripted key still verifies
+  through the store's resolver. New `DemoResult` fields
+  (`jwksMaxBodyError` / `jwksMaxBodyContentLengthError` /
+  `jwksMaxBodyFetchCalls` / `jwksMaxBodyTextCalls` / `jwksMaxBodySize` /
+  `jwksMaxBodyResolved` / `jwksMaxBodyLastRefreshedAt` /
+  `jwksMaxBodyVerification`) and 3 new tests in `test/demo.test.ts`,
+  asserting the pinned constants, an independent reproduction of the
+  same three refreshes outside `runDemo()`, and the byte-exact printed
+  lines.
 - CLI demo fetch-adapter segment (backlog #977): the demo now covers
   the fetch-side receive path — the same loopback settlement response
   the gateway segments serve, signed with `signResponse` and fetched

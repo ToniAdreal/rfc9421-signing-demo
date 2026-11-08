@@ -239,6 +239,18 @@ import {
   DEMO_JWKS_FETCH_RETRY_RETRIES,
   DEMO_JWKS_FETCH_RETRY_SIZE,
   DEMO_JWKS_FETCH_RETRY_SLEEP_CALLS,
+  DEMO_JWKS_MAX_BODY_BYTES,
+  DEMO_JWKS_MAX_BODY_CONTENT_LENGTH,
+  DEMO_JWKS_MAX_BODY_CONTENT_LENGTH_ERROR,
+  DEMO_JWKS_MAX_BODY_ERROR,
+  DEMO_JWKS_MAX_BODY_FETCH_CALLS,
+  DEMO_JWKS_MAX_BODY_HEALTHY_BYTES,
+  DEMO_JWKS_MAX_BODY_KEY_ID,
+  DEMO_JWKS_MAX_BODY_LAST_REFRESHED_AT,
+  DEMO_JWKS_MAX_BODY_RECEIVED_BYTES,
+  DEMO_JWKS_MAX_BODY_SECOND_KEY_ID,
+  DEMO_JWKS_MAX_BODY_SIZE,
+  DEMO_JWKS_MAX_BODY_TEXT_CALLS,
   DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS,
   DEMO_JWKS_REQUIRE_HTTPS_ERROR,
   DEMO_JWKS_REQUIRE_HTTPS_KEY_ID,
@@ -6991,9 +7003,9 @@ test("demo lines contain the JWKS requireHttps segment (rejection, https constru
     "JWKS requireHttps over an https: endpoint (requireHttps true): construction passed with no fetch attempted — the rule also intercepts a later https-to-http redirect when the response reports its final URL",
     `JWKS requireHttps over the same loopback http: endpoint (default off): refresh() succeeded after ${DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS} fetch, the snapshot holds ${DEMO_JWKS_REQUIRE_HTTPS_SIZE} key and resolve("${DEMO_JWKS_REQUIRE_HTTPS_KEY_ID}") returned a key — plaintext is allowed only for loopback development and tests`,
   ]);
-  // The per-label nonce requirement segment now closes the demo.
+  // The JWKS maxBodyBytes segment follows the requireHttps segment.
   assert.equal(lines[headerIdx + 4], "");
-  assert.ok(lines[headerIdx + 5]!.startsWith("Per-label nonce requirement:"));
+  assert.ok(lines[headerIdx + 5]!.startsWith("JWKS maxBodyBytes:"));
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
     l.startsWith("JWKS requireHttps:"),
@@ -7001,6 +7013,240 @@ test("demo lines contain the JWKS requireHttps segment (rejection, https constru
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 4),
     lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo JWKS maxBodyBytes segment rejects an oversized body and a lying Content-Length while the old snapshot keeps verifying", async () => {
+  const {
+    jwksMaxBodyError,
+    jwksMaxBodyContentLengthError,
+    jwksMaxBodyFetchCalls,
+    jwksMaxBodyTextCalls,
+    jwksMaxBodySize,
+    jwksMaxBodyResolved,
+    jwksMaxBodyLastRefreshedAt,
+    jwksMaxBodyVerification,
+  } = await runDemo();
+  assert.equal(DEMO_JWKS_MAX_BODY_KEY_ID, "demo-jwks-max-body-1");
+  assert.equal(DEMO_JWKS_MAX_BODY_SECOND_KEY_ID, "demo-jwks-max-body-2");
+  assert.equal(DEMO_JWKS_MAX_BODY_BYTES, 128);
+  assert.equal(DEMO_JWKS_MAX_BODY_HEALTHY_BYTES, 119);
+  assert.equal(DEMO_JWKS_MAX_BODY_RECEIVED_BYTES, 228);
+  assert.equal(
+    DEMO_JWKS_MAX_BODY_ERROR,
+    `JwksKeyStore: JWKS response from ${DEMO_JWKS_URL} exceeds the 128 byte body limit (received 228 bytes)`,
+  );
+  assert.equal(DEMO_JWKS_MAX_BODY_CONTENT_LENGTH, 999999);
+  assert.equal(
+    DEMO_JWKS_MAX_BODY_CONTENT_LENGTH_ERROR,
+    `JwksKeyStore: JWKS response from ${DEMO_JWKS_URL} exceeds the 128 byte body limit (Content-Length: 999999 bytes)`,
+  );
+  assert.equal(DEMO_JWKS_MAX_BODY_FETCH_CALLS, 3);
+  assert.equal(DEMO_JWKS_MAX_BODY_TEXT_CALLS, 2);
+  assert.equal(DEMO_JWKS_MAX_BODY_SIZE, 1);
+  assert.equal(DEMO_JWKS_MAX_BODY_LAST_REFRESHED_AT, DEMO_CREATED);
+  assert.equal(jwksMaxBodyError, DEMO_JWKS_MAX_BODY_ERROR);
+  assert.equal(
+    jwksMaxBodyContentLengthError,
+    DEMO_JWKS_MAX_BODY_CONTENT_LENGTH_ERROR,
+  );
+  assert.equal(jwksMaxBodyFetchCalls, DEMO_JWKS_MAX_BODY_FETCH_CALLS);
+  assert.equal(jwksMaxBodyTextCalls, DEMO_JWKS_MAX_BODY_TEXT_CALLS);
+  assert.equal(jwksMaxBodySize, DEMO_JWKS_MAX_BODY_SIZE);
+  assert.equal(jwksMaxBodyResolved, true);
+  assert.equal(
+    jwksMaxBodyLastRefreshedAt,
+    DEMO_JWKS_MAX_BODY_LAST_REFRESHED_AT,
+  );
+  assert.equal(jwksMaxBodyVerification.ok, true);
+  assert.equal(jwksMaxBodyVerification.keyId, DEMO_JWKS_MAX_BODY_KEY_ID);
+  assert.equal(jwksMaxBodyVerification.alg, "ed25519");
+  // Independent reproduction of the same three refreshes, outside
+  // runDemo(), over an injected fetch (zero network; the same
+  // two-layer rules test/jwksMaxBody.test.ts pins).
+  const pair = generateEd25519KeyPair();
+  const secondPair = generateEd25519KeyPair();
+  const healthyBody = JSON.stringify({
+    keys: [
+      {
+        ...exportPublicKeyJwk(pair.publicKey),
+        kid: DEMO_JWKS_MAX_BODY_KEY_ID,
+      },
+    ],
+  });
+  const oversizedBody = JSON.stringify({
+    keys: [
+      {
+        ...exportPublicKeyJwk(pair.publicKey),
+        kid: DEMO_JWKS_MAX_BODY_KEY_ID,
+      },
+      {
+        ...exportPublicKeyJwk(secondPair.publicKey),
+        kid: DEMO_JWKS_MAX_BODY_SECOND_KEY_ID,
+      },
+    ],
+  });
+  assert.equal(
+    Buffer.byteLength(healthyBody, "utf8"),
+    DEMO_JWKS_MAX_BODY_HEALTHY_BYTES,
+  );
+  assert.equal(
+    Buffer.byteLength(oversizedBody, "utf8"),
+    DEMO_JWKS_MAX_BODY_RECEIVED_BYTES,
+  );
+  let directFetches = 0;
+  let directTextCalls = 0;
+  const directStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      directFetches++;
+      if (directFetches === 1) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new Error("json() must not be called on the text() path");
+          },
+          text: async () => {
+            directTextCalls++;
+            return healthyBody;
+          },
+          headers: {
+            get: (name: string) =>
+              name.toLowerCase() === "content-length"
+                ? String(DEMO_JWKS_MAX_BODY_HEALTHY_BYTES)
+                : null,
+          },
+        };
+      }
+      if (directFetches === 2) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new Error("json() must not be called on the text() path");
+          },
+          text: async () => {
+            directTextCalls++;
+            return oversizedBody;
+          },
+          headers: { get: () => null },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error("json() must not be called on the text() path");
+        },
+        text: async () => {
+          directTextCalls++;
+          return healthyBody;
+        },
+        headers: {
+          get: (name: string) =>
+            name.toLowerCase() === "content-length"
+              ? String(DEMO_JWKS_MAX_BODY_CONTENT_LENGTH)
+              : null,
+        },
+      };
+    },
+    maxBodyBytes: DEMO_JWKS_MAX_BODY_BYTES,
+    now: () => DEMO_CREATED,
+  });
+  await directStore.refresh();
+  assert.equal(directStore.size, DEMO_JWKS_MAX_BODY_SIZE);
+  assert.equal(directStore.lastRefreshedAt, DEMO_CREATED);
+  await assert.rejects(
+    () => directStore.refresh(),
+    (err: unknown) =>
+      err instanceof Error && err.message === DEMO_JWKS_MAX_BODY_ERROR,
+  );
+  await assert.rejects(
+    () => directStore.refresh(),
+    (err: unknown) =>
+      err instanceof Error &&
+      err.message === DEMO_JWKS_MAX_BODY_CONTENT_LENGTH_ERROR,
+  );
+  assert.equal(directFetches, DEMO_JWKS_MAX_BODY_FETCH_CALLS);
+  assert.equal(directTextCalls, DEMO_JWKS_MAX_BODY_TEXT_CALLS);
+  assert.equal(directStore.size, jwksMaxBodySize);
+  assert.equal(
+    directStore.resolve(DEMO_JWKS_MAX_BODY_KEY_ID) !== undefined,
+    jwksMaxBodyResolved,
+  );
+  assert.equal(directStore.lastRefreshedAt, jwksMaxBodyLastRefreshedAt);
+  const directSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_JWKS_MAX_BODY_KEY_ID,
+      alg: "ed25519",
+      key: pair.privateKey,
+      created: DEMO_CREATED,
+    },
+  );
+  const directVerification = verifyRequest(directSigned, {
+    keyResolver: directStore.resolve,
+    now: DEMO_CREATED,
+  });
+  assert.equal(directVerification.ok, jwksMaxBodyVerification.ok);
+  assert.equal(directVerification.keyId, jwksMaxBodyVerification.keyId);
+  assert.equal(directVerification.alg, jwksMaxBodyVerification.alg);
+});
+
+test("demo lines contain the JWKS maxBodyBytes segment (healthy refresh, oversized rejection, precheck rejection, old snapshot keeps verifying, followed by the per-label nonce requirement segment)", async () => {
+  const { lines, jwksMaxBodyVerification } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /JWKS maxBodyBytes: JwksKeyStore maxBodyBytes is a fail-closed body cap/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS maxBodyBytes:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), [
+    "JWKS maxBodyBytes: JwksKeyStore maxBodyBytes is a fail-closed body cap — an oversized JWKS document is rejected before it is parsed, so a hostile endpoint cannot flood the key set or the process memory",
+    `JWKS maxBodyBytes over a counting fake endpoint (cap ${DEMO_JWKS_MAX_BODY_BYTES} bytes): the healthy one-key document (${DEMO_JWKS_MAX_BODY_HEALTHY_BYTES} bytes) refreshed and resolve("${DEMO_JWKS_MAX_BODY_KEY_ID}") returned a key`,
+    `JWKS maxBodyBytes oversized body (${DEMO_JWKS_MAX_BODY_RECEIVED_BYTES} bytes, no Content-Length): refresh() FAILED (${DEMO_JWKS_MAX_BODY_ERROR}) — the post-read byte check rejects before parsing`,
+    `JWKS maxBodyBytes Content-Length precheck (claims ${DEMO_JWKS_MAX_BODY_CONTENT_LENGTH} bytes): refresh() FAILED (${DEMO_JWKS_MAX_BODY_CONTENT_LENGTH_ERROR}) after ${DEMO_JWKS_MAX_BODY_TEXT_CALLS} body reads — the precheck rejects without reading the body at all`,
+    `JWKS maxBodyBytes after both failures: the snapshot still holds ${DEMO_JWKS_MAX_BODY_SIZE} key, lastRefreshedAt is still ${DEMO_JWKS_MAX_BODY_LAST_REFRESHED_AT}, and a request signed with the scripted key still verifies through the store's resolver: OK (label ${jwksMaxBodyVerification.label}, keyid="${jwksMaxBodyVerification.keyId}", alg="${jwksMaxBodyVerification.alg}") — the old snapshot keeps serving keys`,
+  ]);
+  // The per-label nonce requirement segment follows the maxBodyBytes segment.
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(lines[headerIdx + 6]!.startsWith("Per-label nonce requirement:"));
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("JWKS maxBodyBytes:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 5),
+    lines.slice(headerIdx, headerIdx + 5),
+  );
+});
+
+test("demo JWKS maxBodyBytes segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("JWKS maxBodyBytes:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Per-label nonce requirement:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // Only the key pairs are fresh per run and no key bytes are printed,
+  // so the segment's printed lines — including the blank separator
+  // before the per-label nonce requirement segment — are identical.
+  assert.deepEqual(
+    second.lines.slice(b, bEnd),
+    first.lines.slice(a, aEnd),
   );
 });
 
