@@ -126,7 +126,9 @@ Read this before using it anywhere that matters.
   mutually exclusive with the static `key`; an unknown or missing
   `keyid` fails with `KEY_RESOLUTION_FAILED`, and a resolver that
   throws is contained to `VERIFICATION_ERROR` — never a silent
-  fallback to another key). `verifyAllLabels` accepts per-label
+  fallback to another key, except the opt-in `singleKeyFallback`,
+  which tries the store's only key for a keyid-less signature and
+  never falls back with zero or two-plus keys). `verifyAllLabels` accepts per-label
   resolvers via `VerifyAllOptions.keyResolvers` (one per label, with
   the same per-label containment semantics); the same `VERIFICATION_ERROR`
   containment applies per label. JWKS network key discovery *is*

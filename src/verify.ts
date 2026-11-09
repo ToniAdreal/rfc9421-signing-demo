@@ -18,6 +18,7 @@ import {
 } from "./components.js";
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
 import { assertHmacSecretLength, assertRsaModulusLength, algMatchesKeyShape, describeKey } from "./keys.js";
+import type { JwksKeyStore } from "./jwks.js";
 import type { SignAlg } from "./sign.js";
 import type { NonceStore } from "./replay.js";
 import {
@@ -76,13 +77,45 @@ export interface VerifyOptions {
    * header parses and *before* the cryptographic check; the returned
    * KeyObject is the key the signature is checked against. A signature
    * with no `keyid`, or a `keyid` the resolver cannot map, fails with
-   * `KEY_RESOLUTION_FAILED` (never a silent fallback to another key).
+   * `KEY_RESOLUTION_FAILED` (never a silent fallback to another key —
+   * unless `singleKeyFallback` below opts in, for exactly one key).
    * Mutually exclusive with `key` and `candidateKeys`: passing more
    * than one of the three throws a configuration `Error`. Composes with
    * `expectedKeyId` (checked after the crypto
    * step) and with `verifyAllLabels` (resolved independently per label).
    */
   keyResolver?: (keyId: string) => KeyObject | undefined;
+  /**
+   * Opt-in single-key fallback for keyid-less signatures, via a
+   * `JwksKeyStore`. RFC 9421 leaves `keyid` optional, and this
+   * library's own `signRequest` omits it when no `keyId` is given —
+   * so a single-key deployment (a JWKS document holding exactly one
+   * key) cannot otherwise verify signatures that carry no `keyid`:
+   * the resolver has nothing to resolve. When this is set, a
+   * signature with no `keyid` is tried against the store's only key
+   * (`JwksKeyStore.resolveOnlyKey()`); when the snapshot holds zero
+   * keys, or two or more, there is no fallback and the signature
+   * still fails with `KEY_RESOLUTION_FAILED`. A signature that
+   * *does* carry a `keyid` is never affected — it resolves (or
+   * fails) through `keyResolver` exactly as before.
+   *
+   * Configuration rule, enforced fail-fast: `keyResolver` must be
+   * exactly that store's `resolve` — pass `store.resolve` itself,
+   * not a wrapper such as `memoizeKeyResolver(store.resolve)`
+   * (the identity check cannot see through wrappers). Any other
+   * resolver, a static `key`, or `candidateKeys` alongside this
+   * option throws a configuration `Error`. In `verifyAllLabels`
+   * the same rule applies per label: a label whose effective
+   * resolver is not this store's `resolve` throws.
+   *
+   * Only enable this when the caller knows the deployment holds
+   * exactly one key: the fallback trusts the store's snapshot as
+   * the deployment's whole key set, so a store that later grows a
+   * second key silently stops falling back (fail-closed, never
+   * ambiguous). Defaults to unset (backwards compatible): no
+   * fallback is attempted unless the caller opts in.
+   */
+  singleKeyFallback?: JwksKeyStore;
   /**
    * Ordered candidate keys for key-rotation verification (a key ring).
    * When set, the signature is tried against each key in order and the
@@ -488,6 +521,58 @@ function assertKeyConfig(
 }
 
 /**
+ * Validate the shape of the opt-in single-key fallback store: it must
+ * look like a `JwksKeyStore` (a `resolve` and a `resolveOnlyKey`
+ * function). A duck-type check, not `instanceof` — the store may come
+ * from a second copy of the module. This is a caller configuration
+ * error, not a verification failure, so it throws rather than
+ * returning `{ ok: false }`. `caller` names the entry point for the
+ * message (`verifyRequest` / `verifyAllLabels`).
+ */
+function assertSingleKeyFallbackStore(
+  store: JwksKeyStore | undefined,
+  caller: "verifyRequest" | "verifyAllLabels",
+): void {
+  if (store === undefined) return;
+  const shape = store as unknown as {
+    resolve?: unknown;
+    resolveOnlyKey?: unknown;
+  };
+  if (
+    typeof store !== "object" ||
+    store === null ||
+    typeof shape.resolve !== "function" ||
+    typeof shape.resolveOnlyKey !== "function"
+  )
+    throw new Error(
+      `${caller}: \`singleKeyFallback\` must be a JwksKeyStore`,
+    );
+}
+
+/**
+ * Validate the opt-in single-key fallback pairing: the store must be
+ * store-shaped (see `assertSingleKeyFallbackStore`), and the
+ * `keyResolver` in play must be exactly that store's `resolve`. A
+ * non-JWKS resolver — or a static `key` / `candidateKeys` with no
+ * resolver at all — cannot fall back to the store's only key, so
+ * pairing the opt-in with anything else is a caller configuration
+ * error (throw), not a verification failure. `caller` names the entry
+ * point for the message.
+ */
+function assertSingleKeyFallback(
+  opts: Pick<VerifyOptions, "keyResolver" | "singleKeyFallback">,
+  caller: "verifyRequest" | "verifyAllLabels",
+): void {
+  assertSingleKeyFallbackStore(opts.singleKeyFallback, caller);
+  const store = opts.singleKeyFallback;
+  if (store === undefined) return;
+  if (opts.keyResolver !== store.resolve)
+    throw new Error(
+      `${caller}: \`singleKeyFallback\` requires \`keyResolver\` to be that store's \`resolve\` — a non-JWKS resolver cannot fall back to the store's only key`,
+    );
+}
+
+/**
  * Validate the `candidateKeys` rotation list. An empty list, a
  * non-array, or an entry that is not a KeyObject is a caller
  * configuration error (throw), not a verification failure.
@@ -738,6 +823,7 @@ export function verifyRequest(
   opts: VerifyOptions,
 ): VerifyResult {
   assertKeyConfig(opts);
+  assertSingleKeyFallback(opts, "verifyRequest");
   assertCandidateKeys(opts.candidateKeys);
   assertMaxSignatureAgeSec(opts.maxSignatureAgeSec);
   assertHeaderLengthLimit(opts.maxSignatureInputLength, "maxSignatureInputLength", "verifyRequest");
@@ -885,52 +971,63 @@ export function verifyRequest(
   let key: KeyObject | undefined = opts.key;
   if (opts.keyResolver !== undefined) {
     const claimedKeyId = parsed.params.keyid;
-    if (claimedKeyId === undefined || claimedKeyId === "")
-      return {
-        ok: false,
-        code: "KEY_RESOLUTION_FAILED",
-        reason: "signature carries no keyid to resolve",
-        label,
-        alg: parsed.params.alg,
-        nonce: parsed.params.nonce,
-      tag: parsed.params.tag,
-      created: parsed.params.created,
-      expires: parsed.params.expires,
-      coveredComponents: [...parsed.componentIds],
-      };
-    let resolved: KeyObject | undefined;
-    try {
-      resolved = opts.keyResolver(claimedKeyId);
-    } catch (e) {
-      return {
-        ok: false,
-        code: "VERIFICATION_ERROR",
-        reason: `key resolver threw: ${(e as Error).message}`,
-        label,
-        keyId: claimedKeyId,
-        alg: parsed.params.alg,
-        nonce: parsed.params.nonce,
-      tag: parsed.params.tag,
-      created: parsed.params.created,
-      expires: parsed.params.expires,
-      coveredComponents: [...parsed.componentIds],
-      };
+    if (claimedKeyId === undefined || claimedKeyId === "") {
+      // Opt-in single-key fallback (see `VerifyOptions.singleKeyFallback`):
+      // a keyid-less signature has nothing to resolve, so without the
+      // opt-in it fails closed exactly as before. With the opt-in, the
+      // store's only key is tried — and only when the snapshot holds
+      // exactly one key, so a rotation set can never silently collapse
+      // to one of its members.
+      const onlyKey = opts.singleKeyFallback?.resolveOnlyKey();
+      if (onlyKey === undefined)
+        return {
+          ok: false,
+          code: "KEY_RESOLUTION_FAILED",
+          reason: "signature carries no keyid to resolve",
+          label,
+          alg: parsed.params.alg,
+          nonce: parsed.params.nonce,
+          tag: parsed.params.tag,
+          created: parsed.params.created,
+          expires: parsed.params.expires,
+          coveredComponents: [...parsed.componentIds],
+        };
+      key = onlyKey;
+    } else {
+      let resolved: KeyObject | undefined;
+      try {
+        resolved = opts.keyResolver(claimedKeyId);
+      } catch (e) {
+        return {
+          ok: false,
+          code: "VERIFICATION_ERROR",
+          reason: `key resolver threw: ${(e as Error).message}`,
+          label,
+          keyId: claimedKeyId,
+          alg: parsed.params.alg,
+          nonce: parsed.params.nonce,
+          tag: parsed.params.tag,
+          created: parsed.params.created,
+          expires: parsed.params.expires,
+          coveredComponents: [...parsed.componentIds],
+        };
+      }
+      if (resolved === undefined)
+        return {
+          ok: false,
+          code: "KEY_RESOLUTION_FAILED",
+          reason: `keyid "${claimedKeyId}" could not be resolved to a key`,
+          label,
+          keyId: claimedKeyId,
+          alg: parsed.params.alg,
+          nonce: parsed.params.nonce,
+          tag: parsed.params.tag,
+          created: parsed.params.created,
+          expires: parsed.params.expires,
+          coveredComponents: [...parsed.componentIds],
+        };
+      key = resolved;
     }
-    if (resolved === undefined)
-      return {
-        ok: false,
-        code: "KEY_RESOLUTION_FAILED",
-        reason: `keyid "${claimedKeyId}" could not be resolved to a key`,
-        label,
-        keyId: claimedKeyId,
-        alg: parsed.params.alg,
-        nonce: parsed.params.nonce,
-      tag: parsed.params.tag,
-      created: parsed.params.created,
-      expires: parsed.params.expires,
-      coveredComponents: [...parsed.componentIds],
-      };
-    key = resolved;
   }
 
   // Key rotation (ordered candidate list, e.g. the old and new
@@ -2282,6 +2379,12 @@ export function verifyAllLabels(
   assertExpectedKeyIds(opts.expectedKeyIds);
   assertExpectedTags(opts.expectedTags);
   assertKeyResolvers(opts.keyResolvers);
+  // Shape-only here: the resolver-identity half of the fallback rule
+  // is per label (a label's own resolver may differ from the global
+  // one), so it is enforced inside each per-label `verifyRequest`
+  // call below — a misconfigured label throws there, like the other
+  // per-label key-source conflicts.
+  assertSingleKeyFallbackStore(opts.singleKeyFallback, "verifyAllLabels");
   assertCandidateKeysByLabel(opts.candidateKeysByLabel);
   assertMaxSignatureAgeSecByLabel(opts.maxSignatureAgeSecByLabel);
   assertHeaderLengthLimitByLabel("maxSignatureInputLengthByLabel", opts.maxSignatureInputLengthByLabel);

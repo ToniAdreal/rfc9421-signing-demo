@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1783 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1799 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -779,6 +779,25 @@ waiter receives the same error), so a burst of verifiers hitting a stale
 window together cannot thundering-herd the endpoint. Only overlapping calls
 merge: once a refresh settles, the next call fetches again, and a failure is
 never cached.
+
+Single-key fallback for keyid-less signatures (opt-in): `keyid` is
+optional in RFC 9421, and this library's own `signRequest` omits it
+when no `keyId` is given — so a single-key deployment (a JWKS document
+holding exactly one key) cannot otherwise verify signatures that carry
+no `keyid`. Passing the store as `verifyRequest(signed, {
+keyResolver: store.resolve, singleKeyFallback: store })` lets a
+keyid-less signature be tried against the store's only key
+(`store.resolveOnlyKey()` returns it only when the snapshot holds
+exactly one key; zero keys, or two or more, mean no fallback and the
+signature still fails with `KEY_RESOLUTION_FAILED`). A signature that
+does carry a `keyid` is never affected. The pairing is enforced
+fail-fast: `keyResolver` must be exactly that store's `resolve` (pass
+`store.resolve` itself, not a wrapper such as
+`memoizeKeyResolver(store.resolve)`), and a static `key` or
+`candidateKeys` alongside the opt-in throws a configuration error.
+Only enable this when the deployment is known to hold exactly one key:
+a store that later grows a second key silently stops falling back.
+`verifyAllLabels` applies the same rule per label.
 
 Observability: `store.stats()` returns a detached `{ refreshes,
 refreshFailures, hits, misses }` snapshot (mirroring `ReplayCache.stats()`).
@@ -3985,7 +4004,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1783 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1799 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

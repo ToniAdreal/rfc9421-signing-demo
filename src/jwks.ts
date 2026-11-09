@@ -1668,4 +1668,25 @@ export class JwksKeyStore {
     else this.hitCount++;
     return key;
   };
+
+  /**
+   * Return the single cached key when the snapshot holds exactly one
+   * key, otherwise `undefined` (zero keys, or two or more). Never
+   * throws and never performs I/O. This is the read half of the
+   * opt-in single-key fallback in `verifyRequest` (see
+   * `VerifyOptions.singleKeyFallback`): a keyid-less signature can
+   * only be verified against a deployment the caller knows holds
+   * exactly one key, so a rotation set can never silently collapse
+   * to one of its members.
+   *
+   * Serves whatever snapshot is cached — including a stale one, the
+   * same as `resolve` — and, unlike `resolve`, touches neither the
+   * hit nor the miss counter: it is not a `keyid` resolution, so it
+   * must not inflate the `stats()` resolution counts.
+   */
+  resolveOnlyKey(): KeyObject | undefined {
+    if (this.keysByKid.size !== 1) return undefined;
+    for (const key of this.keysByKid.values()) return key;
+    return undefined;
+  }
 }

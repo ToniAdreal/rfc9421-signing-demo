@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Single-key JWKS fallback for keyid-less signatures (backlog #996):
+  `JwksKeyStore.resolveOnlyKey()` returns the cached key only when
+  the snapshot holds exactly one key, and `VerifyOptions.singleKeyFallback`
+  (the store instance, opt-in) lets `verifyRequest` try that key for a
+  signature carrying no `keyid` — multi-key and empty snapshots never
+  fall back, and keyid-carrying signatures resolve exactly as before.
+  Fail-fast pairing: `keyResolver` must be that store's `resolve`
+  (a non-JWKS resolver, a static `key`, or `candidateKeys` alongside
+  the opt-in throws a configuration error); `verifyAllLabels` applies
+  the same rule per label. 16 new tests in
+  `test/singleKeyFallback.test.ts`, including a mutation check
+  (breaking `resolveOnlyKey` fails 6 of them).
 - `importPrivateKeyJwk` private JWK import (backlog #989): one
   function dispatching on `kty` imports a private key from a JWK
   object — `OKP` / `Ed25519` (`d` + `x`), `EC` / `P-256` / `P-384` /
