@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1799 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1807 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -808,7 +808,11 @@ call counts as exactly one hit (returned a key) or miss (returned `undefined`:
 an unknown keyid, any keyid before the first successful refresh, or an invalid
 keyid), so `hits + misses` is the total number of resolutions. The counters
 run for the store's lifetime and are not part of a snapshot: exporting or
-restoring one does not reset them.
+restoring one does not reset them. `store.keyIds()` returns the cached kids in
+snapshot order as a fresh array (empty before the first refresh and after
+`clear()`), so a rotation audit can check whether a retired kid has actually
+left the cache — or a new kid has been fetched — without probing `resolve()`
+kid by kid.
 
 Retiring cached keys: `store.clear()` drops the cached snapshot and the
 freshness timestamp at once (`size` 0, `lastRefreshedAt` `null`, `isStale()`
@@ -4004,7 +4008,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1799 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1807 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

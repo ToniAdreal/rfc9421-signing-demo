@@ -1016,6 +1016,27 @@ export class JwksKeyStore {
   }
 
   /**
+   * The key ids (`kid`) of the keys in the current snapshot, in
+   * snapshot order (the order the JWKS document listed them, or the
+   * order a restored snapshot carried them). An empty array before
+   * the first successful refresh and after `clear()`. The returned
+   * array is a fresh copy — mutating it does not affect the store —
+   * and it is deduplicated by construction: the snapshot holds one
+   * key per kid (a JWKS document listing the same kid twice keeps
+   * the last entry, at its first position).
+   *
+   * The intended use is key-rotation audit: a caller can check
+   * whether a retired kid has actually left the cache, or whether
+   * a newly published kid has been fetched yet, without probing
+   * `resolve()` kid by kid. It pairs with `size` (which only
+   * counts) and `stats()` (which only counts resolutions): neither
+   * can name the keys the store is currently serving.
+   */
+  keyIds(): string[] {
+    return [...this.keysByKid.keys()];
+  }
+
+  /**
    * Discard the cached key snapshot and reset the observability
    * counters — the `ReplayCache.clear()` semantics, applied to this
    * store. After `clear()`, `size` is 0, `lastRefreshedAt` is `null`,

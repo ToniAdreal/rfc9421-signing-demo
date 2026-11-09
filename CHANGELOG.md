@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Cached kid listing for key-rotation audit (backlog #1000):
+  `JwksKeyStore.keyIds()` returns the kids of the current snapshot in
+  snapshot order as a fresh array (empty before the first refresh and
+  after `clear()`; a JWKS document listing the same kid twice lists
+  it once, last entry wins) — so a caller can check whether a retired
+  kid has left the cache, or a new kid has been fetched, without
+  probing `resolve()` kid by kid. 8 new tests in
+  `test/jwksKeyIds.test.ts`.
 - Single-key JWKS fallback for keyid-less signatures (backlog #996):
   `JwksKeyStore.resolveOnlyKey()` returns the cached key only when
   the snapshot holds exactly one key, and `VerifyOptions.singleKeyFallback`
