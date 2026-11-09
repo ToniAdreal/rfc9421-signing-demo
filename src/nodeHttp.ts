@@ -26,9 +26,18 @@
  * adapter after `end` (as the README example does) is both necessary
  * and sufficient. Before `end`, `trailers` is empty even for a message
  * that will carry trailers.
+ *
+ * `createVerifiedHandler` is the server-side counterpart that closes
+ * the loop: it buffers the body, adapts it with `fromNodeRequest`,
+ * verifies it, and only then calls the business handler — so a
+ * webhook receiver cannot forget a step and let an unverified request
+ * into its logic. The `node:http` import below is type-only (erased at
+ * compile time): the runtime dependency count stays zero.
  */
 
+import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { joinHeaderValues, type RequestLike } from "./components.js";
+import { verifyRequest, type VerifyOptions, type VerifyResult } from "./verify.js";
 
 /**
  * The trailer fields an adapter actually reads, shared by the request
@@ -450,4 +459,206 @@ export function fromNodeRequest(
   return trailers === undefined
     ? { method, url, headers, body }
     : { method, url, headers, body, trailers };
+}
+
+/**
+ * Default cap on the request body `createVerifiedHandler` buffers, in
+ * bytes: 1 MiB. A webhook body is a signed JSON payload (a settlement
+ * callback, a gateway notification), not a file upload — 1 MiB is more
+ * than 100x a typical signed callback, and anything larger is rejected
+ * with 413 before any verification runs. Raise it via
+ * `CreateVerifiedHandlerOptions.maxBodyBytes` for a deployment that
+ * legitimately signs larger payloads.
+ */
+export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+
+/**
+ * The business handler a verified request is handed to: the raw Node
+ * request/response pair plus the `VerifyResult` of the signature that
+ * was just checked. `result.ok` is always `true` here — a failed
+ * verification never reaches this handler, it is answered 401 by the
+ * wrapper. `result.keyId` / `result.alg` / `result.nonce` /
+ * `result.created` are available for logging and audit; the handler
+ * owns the response (status, headers, body) from here on.
+ */
+export type VerifiedRequestHandler = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  result: VerifyResult,
+) => void;
+
+export interface CreateVerifiedHandlerOptions {
+  /**
+   * Maximum request body size in bytes. A body larger than this is
+   * rejected with 413 before any verification runs — the key resolver
+   * is never called and the buffered prefix is discarded. Defaults to
+   * `DEFAULT_MAX_BODY_BYTES` (1 MiB). Must be a positive integer;
+   * anything else throws a configuration `Error` at handler-creation
+   * time, never per request. A body exactly at the cap still verifies.
+   */
+  maxBodyBytes?: number;
+}
+
+/**
+ * Build a standard `http.RequestListener` that verifies RFC 9421
+ * signatures before any business logic runs — the four steps a webhook
+ * receiver otherwise hand-rolls (buffer the body, adapt it with
+ * `fromNodeRequest`, verify it, answer 401 on failure) in one place,
+ * so a missed step cannot let an unverified request into the handler.
+ *
+ * Flow per request:
+ * 1. Stream the body into memory, up to `opts.maxBodyBytes`
+ *    (default 1 MiB). Past the cap the handler stops reading, answers
+ *    413 with `{ error: "request body too large", code:
+ *    "BODY_TOO_LARGE" }`, and never calls the key resolver — the
+ *    buffered prefix is discarded and the socket is closed once the
+ *    413 is flushed, so a peer cannot keep uploading into a dead
+ *    verification.
+ * 2. `fromNodeRequest` + `verifyRequest` with the `verifyOpts` given
+ *    at creation. A request that cannot even be adapted (missing
+ *    method/url/host) is answered 400 `{ error: "malformed request",
+ *    code: "MALFORMED_REQUEST" }`; a misconfigured `verifyOpts`
+ *    (`verifyRequest` throws only on caller configuration errors) is
+ *    answered 500 `{ error: "internal error", code: "INTERNAL_ERROR"
+ *    }` — a server bug, never a client verdict, so no detail leaks.
+ *    A stream that errors mid-body is answered 500 `{ error: "failed
+ *    to read request body", code: "BODY_READ_FAILED" }` without
+ *    verifying.
+ * 3. Verification failure is answered 401 with exactly `{ error:
+ *    "signature verification failed", code }`, where `code` is the
+ *    `VerifyResult.code` (e.g. `SIGNATURE_MISMATCH`, `EXPIRED`,
+ *    `MISSING_SIGNATURE_INPUT`) — no `reason`, no stack, no key
+ *    material. The business handler is never called.
+ * 4. Verification success calls `handler(req, res, result)` with the
+ *    raw Node pair and the `VerifyResult`; the handler owns the
+ *    response from there.
+ *
+ * Honest limits (see also SECURITY.md): TLS is the caller's job —
+ * this handler sees whatever the socket gives it, and `@scheme`
+ * follows the `fromNodeRequest` default (https on a TLS socket, http
+ * otherwise) — this wrapper takes no scheme option, so behind a
+ * TLS-terminating proxy sign over the plain-http URL the server
+ * rebuilds, or terminate TLS in Node. The body is held in memory up
+ * to the cap. The handler is single-process and stateless: replay
+ * protection still needs an opt-in `VerifyOptions.replayCache` (see
+ * SECURITY.md).
+ */
+export function createVerifiedHandler(
+  verifyOpts: VerifyOptions,
+  handler: VerifiedRequestHandler,
+  opts?: CreateVerifiedHandlerOptions,
+): RequestListener {
+  const maxBodyBytes = opts?.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0)
+    throw new Error(
+      `createVerifiedHandler: maxBodyBytes must be a positive integer number of bytes, got ${String(opts?.maxBodyBytes)}`,
+    );
+
+  return (req, res) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+
+    function cleanup(): void {
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("error", onError);
+    }
+
+    function reject(
+      status: number,
+      error: string,
+      code: string,
+      destroyAfterFlush: boolean,
+    ): void {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      res.writeHead(status, { "content-type": "application/json" });
+      const body = JSON.stringify({ error, code });
+      if (destroyAfterFlush) {
+        // The 413 path: the peer may still be uploading, so close the
+        // socket once the rejection is flushed — nothing more is read.
+        res.end(body, () => {
+          req.destroy();
+        });
+      } else {
+        res.end(body);
+      }
+    }
+
+    function onData(chunk: Buffer): void {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buf.length;
+      if (size > maxBodyBytes) {
+        // Fail-closed: stop accumulating, never verify, 413. The
+        // buffered prefix is discarded.
+        reject(413, "request body too large", "BODY_TOO_LARGE", true);
+        return;
+      }
+      chunks.push(buf);
+    }
+
+    function onEnd(): void {
+      if (settled) return;
+      const body = Buffer.concat(chunks);
+      let requestLike: RequestLike;
+      try {
+        // Feed the adapter exactly the fields it reads: a real
+        // IncomingMessage satisfies IncomingRequestLike at runtime,
+        // but its `socket` is typed net.Socket, which has no
+        // `encrypted` property for TS's weak-type check — narrow it
+        // to the one flag the adapter reads (a TLSSocket carries it),
+        // the same cast `fromNodeRequest` itself applies.
+        requestLike = fromNodeRequest(
+          {
+            method: req.method,
+            url: req.url,
+            headers: req.headers,
+            socket: req.socket as { encrypted?: boolean } | null | undefined,
+            trailers: req.trailers,
+            rawTrailers: req.rawTrailers,
+          },
+          body,
+        );
+      } catch {
+        // A real IncomingMessage always carries method/url; a missing
+        // host header (e.g. an HTTP/1.0 peer) is the realistic miss —
+        // the request cannot even be adapted, so it is malformed,
+        // not a signature verdict.
+        reject(400, "malformed request", "MALFORMED_REQUEST", false);
+        return;
+      }
+      let result: VerifyResult;
+      try {
+        result = verifyRequest(requestLike, verifyOpts);
+      } catch {
+        // verifyRequest throws only on caller configuration errors
+        // (bad key setup) — a server bug, never a client verdict.
+        reject(500, "internal error", "INTERNAL_ERROR", false);
+        return;
+      }
+      if (!result.ok) {
+        reject(
+          401,
+          "signature verification failed",
+          result.code ?? "SIGNATURE_MISMATCH",
+          false,
+        );
+        return;
+      }
+      settled = true;
+      cleanup();
+      handler(req, res, result);
+    }
+
+    function onError(): void {
+      // Stream read error mid-body: fail closed without verifying.
+      reject(500, "failed to read request body", "BODY_READ_FAILED", false);
+    }
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+  };
 }

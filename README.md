@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1870 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1880 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1082,6 +1082,45 @@ chunked messages and are complete only after the request's `end`
 event, which is when the example above calls the adapter. A message
 with no trailers produces no `trailers` field at all.
 
+The same receive→verify chain as a ready-made handler — use
+`createVerifiedHandler` instead of hand-rolling the buffer→adapt→verify→401
+steps, so a missed step cannot let an unverified request into the business
+logic:
+
+```ts
+import { createServer } from "node:http";
+import { createVerifiedHandler } from "./dist/src/index.js";
+
+// The business handler only ever runs for a verified request: it gets
+// the raw Node pair plus the VerifyResult (result.keyId / result.alg /
+// result.nonce / result.created are available for logging and audit).
+const server = createServer(
+  createVerifiedHandler(
+    { key: gatewayPublicKey }, // any VerifyOptions: key, keyResolver, …
+    (req, res, result) => {
+      res.writeHead(200).end("ok");
+    },
+    { maxBodyBytes: 1_048_576 }, // default cap; a larger body gets 413
+  ),
+);
+```
+
+What the wrapper does per request: it streams the body into memory up to
+`maxBodyBytes` (default 1 MiB, `DEFAULT_MAX_BODY_BYTES`); past the cap it
+stops reading, answers 413 `{ error: "request body too large", code:
+"BODY_TOO_LARGE" }`, and never calls the key resolver. It then runs
+`fromNodeRequest` + `verifyRequest`; a verification failure is answered 401
+with exactly `{ error: "signature verification failed", code }` — the
+`VerifyResult.code` (`SIGNATURE_MISMATCH`, `EXPIRED`,
+`MISSING_SIGNATURE_INPUT`, …), no `reason`, no stack, no key material —
+and the business handler is never called. A request that cannot even be
+adapted (missing method/url/host) gets 400 `MALFORMED_REQUEST`; a
+misconfigured `verifyOpts` (which `verifyRequest` only throws for on caller
+configuration errors) gets 500 `INTERNAL_ERROR`. Honest limits: TLS is the
+caller's job, the body is held in memory up to the cap, and replay
+protection still needs an opt-in `VerifyOptions.replayCache` (see
+SECURITY.md).
+
 Verifying signed *responses* with a Node `http` client — the
 receive→verify chain via `fromNodeResponse`:
 
@@ -1587,6 +1626,13 @@ values. Without a request to bind to, keep using the request-side API
   rebuilt from the `host` header, lowercased header names, multi-value
   headers joined with `", "`), so `verifyRequest` plugs straight into a
   webhook receiver — see the Quickstart receive→verify example.
+- **Node http verified handler**: `createVerifiedHandler(verifyOpts,
+  handler, opts?)` returns a standard `http.RequestListener` that
+  buffers the body (default cap 1 MiB, `DEFAULT_MAX_BODY_BYTES`),
+  verifies it, and only then calls `handler(req, res, result)` — a
+  verification failure is answered 401 with exactly `{ error, code }`
+  and the handler is never called, an oversized body is answered 413
+  before any verification runs. See the Quickstart handler example.
 - **Node http client adapter**: `fromNodeResponse(res, body, opts?)`
   normalizes a client's received `http.IncomingMessage` into a
   `RequestLike` (response `statusCode` bound via `@status`, same header
@@ -4122,7 +4168,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1870 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1880 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

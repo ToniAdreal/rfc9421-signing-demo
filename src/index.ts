@@ -112,7 +112,13 @@ export {
   serializeDictionaryMemberValue,
 } from "./structuredFields.js";
 export type { StructuredFieldType } from "./structuredFields.js";
-export { fromFetchResponse, fromNodeRequest, fromNodeResponse } from "./nodeHttp.js";
+export {
+  createVerifiedHandler,
+  DEFAULT_MAX_BODY_BYTES,
+  fromFetchResponse,
+  fromNodeRequest,
+  fromNodeResponse,
+} from "./nodeHttp.js";
 export { addResponseSignature, signResponse, verifyAllResponseLabels, verifyResponse } from "./response.js";
 export type {
   HttpResponseLike,
@@ -122,6 +128,7 @@ export type {
   VerifyResponseOptions,
 } from "./response.js";
 export type {
+  CreateVerifiedHandlerOptions,
   FetchResponseLike,
   FromFetchResponseOptions,
   FromNodeRequestOptions,
@@ -129,4 +136,5 @@ export type {
   IncomingRequestLike,
   IncomingResponseLike,
   IncomingTrailersLike,
+  VerifiedRequestHandler,
 } from "./nodeHttp.js";

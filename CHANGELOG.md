@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Node `http` signature-verifying handler `createVerifiedHandler`
+  (backlog #1016): a standard `http.RequestListener` that closes the
+  loop the adapters left open — it streams the request body into
+  memory (default cap 1 MiB, `DEFAULT_MAX_BODY_BYTES`, configurable
+  via `CreateVerifiedHandlerOptions.maxBodyBytes`), adapts it with
+  `fromNodeRequest`, verifies it with the `VerifyOptions` given at
+  creation, and only then calls `handler(req, res, result)` with the
+  raw Node pair and the `VerifyResult` (`result.ok` is always true
+  there). A verification failure is answered 401 with exactly
+  `{ error: "signature verification failed", code }` — the
+  `VerifyResult.code`, no `reason`, no stack, no key material — and
+  the business handler is never called; a body past the cap is
+  answered 413 `{ error: "request body too large", code:
+  "BODY_TOO_LARGE" }` before any verification runs (the key resolver
+  is never called) and the socket is closed once the 413 is flushed.
+  A request that cannot be adapted gets 400 `MALFORMED_REQUEST`, a
+  misconfigured `verifyOpts` gets 500 `INTERNAL_ERROR`, and a stream
+  error mid-body gets 500 `BODY_READ_FAILED` — all without verifying.
+  A non-positive or non-integer `maxBodyBytes` throws a configuration
+  `Error` at creation time; a body exactly at the cap still verifies.
+  New types `VerifiedRequestHandler` and
+  `CreateVerifiedHandlerOptions` are exported. 10 new tests in
+  `test/nodeHttpVerifiedHandler.test.ts` (loopback `http.createServer`
+  end-to-end).
 - JWKS publishing via `buildJwksDocument` (backlog #1015): the
   publishing half of `JwksKeyStore`'s consuming half — it assembles
   a `{ keys: [...] }` JWKS document from public keys plus their

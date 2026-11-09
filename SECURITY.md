@@ -194,6 +194,22 @@ Read this before using it anywhere that matters.
 - **Timing.** HMAC comparison uses `timingSafeEqual` after a length check,
   and Ed25519 verification goes through `node:crypto`. No additional
   side-channel analysis has been done.
+- **The verified handler does not add transport security.** `createVerifiedHandler`
+  verifies the signature, nothing else: TLS is still the caller's job —
+  without it anyone on the path can read (and, by re-signing nothing, only
+  replay) the webhook — and `@scheme` follows the `fromNodeRequest`
+  default (https on a TLS socket, http otherwise), with no scheme option
+  on the wrapper, so behind a TLS-terminating proxy the signer must sign
+  over the plain-http URL the server rebuilds, or TLS must terminate in
+  Node. The body is held in memory up to `maxBodyBytes` (default 1 MiB):
+  a body past the cap is rejected with 413 before verification, but a
+  flood of bodies just under the cap still allocates that much per
+  in-flight request, so put the handler behind a reverse proxy with its
+  own connection and rate limits in any exposed deployment. Replay
+  protection is unchanged by the wrapper: it still needs an opt-in
+  `VerifyOptions.replayCache`, and a 401 answer still costs a full
+  signature verification — a flood of forged requests is a compute cost
+  the caller must absorb or rate-limit upstream.
 
 ## What verification does *not* guarantee
 
