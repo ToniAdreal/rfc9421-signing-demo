@@ -4502,6 +4502,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- The verifier now rejects a repeated covered component (backlog
+  #1001): `parseComponentIds` in `src/components.ts` previously only
+  pushed identifiers, so `("@method" "@method" "@path")` was accepted
+  and the signature base carried the same line twice — the signer
+  already refused to mint that shape (`signRequest`'s
+  `assertNoDuplicateCoveredComponents`), but a foreign or hand-built
+  signature could still verify. The parse layer now throws on the
+  duplicate and on a list longer than the new exported cap
+  `MAX_COVERED_COMPONENTS` (64), and `verifyRequest` converges both
+  to `MALFORMED_SIGNATURE_INPUT` before any crypto runs (per label in
+  `verifyAllLabels`, and through `verifyResponse`'s delegation). The
+  duplicate rule mirrors the sign side's `coveredComponentKey`
+  (base lowercased, parameter names lowercased in listed order,
+  values verbatim), so `"@method"` + `"@method";req` is still not a
+  duplicate (`;req` reroutes the binding) and parameter order
+  variants are distinct entries on both sides. The README's
+  sign-side guards sentence (which claimed the verifier would
+  rebuild and accept the duplicated base), Limitations, the
+  interop-hazards list, and the `MALFORMED_SIGNATURE_INPUT` error
+  table row now state the rejection. 14 new tests in
+  `test/duplicateCoveredComponents.test.ts`.
 - `fromNodeResponse` now rejects a non-integer `res.statusCode` at the
   adapter boundary (backlog #931): it previously checked only for a
   missing status, so a string `"200"` slipped through and verified as

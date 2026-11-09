@@ -221,8 +221,10 @@ function defaultCoveredComponents(hasBody: boolean): string[] {
  * `"@method"` + `"@method"`, or case/quoting variants of it
  * (`"@METHOD"`, `"@method";req` + `"@METHOD";REQ`), which would
  * mint a signature base with the identical line twice — a silent
- * non-standard signature the verifier would rebuild identically
- * and accept. Entries this helper cannot split (malformed) fall
+ * non-standard signature the verifier rejects as
+ * `MALFORMED_SIGNATURE_INPUT` (backlog #1001: the verify side
+ * applies this same identity at parse time). Entries this helper
+ * cannot split (malformed) fall
  * through to `buildSignatureBase`, which reports them properly;
  * the key is only used for equality, never for parsing.
  */
@@ -249,8 +251,10 @@ export function coveredComponentKey(entry: string): string {
  * Fail fast on a repeated covered component, before the signature
  * base is built and before any crypto runs. Without this,
  * `["@method", "@method"]` mints a base with the `@method` line
- * twice — the verifier rebuilds the identical base, so the
- * malformed signature verifies silently. `signResponse` calls this
+ * twice; the verifier applies the same identity at parse time and
+ * rejects it as `MALFORMED_SIGNATURE_INPUT` (backlog #1001), so
+ * this guard keeps the signer from minting signatures its own
+ * verifier refuses. `signResponse` calls this
  * with its own name (it delegates the actual signing to
  * `signRequest`, so the message names the entry point the caller
  * used); `addSignature` / `addResponseSignature` inherit the
@@ -318,8 +322,9 @@ function assertLabelShape(label: string): void {
  *   lowercasing the base and parameter names, parameters included —
  *   `"@method"` + `"@method"`, or `"@method";req` + `"@METHOD";REQ`)
  *   is rejected: it would mint a base with the identical line twice,
- *   a silent non-standard signature the verifier would rebuild
- *   identically and accept. `"@method"` + `"@method";req` is NOT a
+ *   a silent non-standard signature the verifier also rejects as
+ *   `MALFORMED_SIGNATURE_INPUT` (backlog #1001). `"@method"` +
+ *   `"@method";req` is NOT a
  *   duplicate — `;req` reroutes the component to the associated
  *   request, so the two bind different values;
  * - `created` / `expires` must be finite integers (Unix seconds) — the

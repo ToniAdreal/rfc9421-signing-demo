@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1807 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1821 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1324,7 +1324,8 @@ values. Without a request to bind to, keep using the request-side API
   `coveredComponents` list (would sign nothing), a covered component listed
   twice (`"@method"` + `"@method"`, or case/quoting variants of the same
   identifier — it would mint a base with the identical line twice, which
-  the verifier would rebuild identically and accept; the comparison counts
+  the verifier also rejects as `MALFORMED_SIGNATURE_INPUT` (see
+  Limitations); the comparison counts
   the parameter suffix, so `"@method"` + `"@method";req` is not a
   duplicate — `;req` reroutes the component to the associated request and
   the two bind different values), and non-integer
@@ -1784,6 +1785,20 @@ const dual = addResponseSignature(merchantSigned, {
   runs in-process. The verifier
   checks one signature label per call; `verifyAllLabels` verifies every
   label in the request (one `VerifyResult` per label).
+- **Covered-component hygiene.** The verifier rejects a `signature-input`
+  whose covered-components list repeats an identifier, or holds more
+  than `MAX_COVERED_COMPONENTS` (64, exported from the package entry
+  point): both fail as `MALFORMED_SIGNATURE_INPUT` at parse time,
+  before any crypto runs, per label in `verifyAllLabels`. The
+  duplicate rule is the sign side's rule (`coveredComponentKey`):
+  base lowercased, parameter names lowercased in listed order,
+  parameter values verbatim — so `"@method"` + `"@method";req` is not
+  a duplicate (`;req` reroutes the binding to the associated
+  request), while `"@method"` + `"@METHOD"` is. A peer that repeats a
+  covered component, or sends a very long component list, is rejected
+  rather than silently verified; 64 leaves roughly an order of
+  magnitude of headroom over any realistic signature (this library's
+  own fixtures cover at most seven components).
 - **Authority normalization** uses WHATWG `URL` semantics (lowercased, default
   ports elided). Both sides of this library agree with each other, but a
   foreign implementation with different normalization would disagree.
@@ -1882,6 +1897,10 @@ most also appear in [Limitations](#limitations)):
 - **Covered component selection.** Signer and verifier must agree on the
   exact covered components, in the exact order. Defaults here are
   `@method @authority @path`, plus `content-digest` when a body exists.
+  A peer that repeats a covered component, or sends more than 64 of
+  them, is rejected as `MALFORMED_SIGNATURE_INPUT` before any crypto
+  runs (see Limitations) — the duplicated line is never silently
+  verified.
 - **Digest algorithm.** Body binding understands `sha-512` (preferred) and
   `sha-256` (fallback when no `sha-512` entry is present). Signing defaults
   to `sha-512`; set `SignOptions.contentDigestAlg: "sha-256"` for a peer
@@ -3965,7 +3984,7 @@ Codes are stable across versions; the human-readable `reason` strings are not.
 |--------|---------|
 | `MISSING_SIGNATURE_INPUT` | `signature-input` header absent |
 | `MISSING_SIGNATURE` | `signature` header absent |
-| `MALFORMED_SIGNATURE_INPUT` | `signature-input` present but unparseable |
+| `MALFORMED_SIGNATURE_INPUT` | `signature-input` present but unparseable — including a repeated covered component or more than 64 covered components (see `MAX_COVERED_COMPONENTS`) |
 | `SIGNATURE_BASE_BUILD_FAILED` | covered components could not be rebuilt from the request |
 | `MALFORMED_SIGNATURE` | `signature` present but unparseable |
 | `SIGNATURE_INPUT_TOO_LARGE` | `signature-input` header exceeds the `VerifyOptions.maxSignatureInputLength` byte limit (default 65,536), rejected before any parsing |
@@ -4008,7 +4027,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1807 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1821 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

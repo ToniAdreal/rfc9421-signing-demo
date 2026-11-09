@@ -84,6 +84,7 @@ export {
   getHeaderRaw,
   joinHeaderValues,
   listSignatureLabels,
+  MAX_COVERED_COMPONENTS,
   parseSignatureField,
   parseSignatureInput,
   resolveComponent,

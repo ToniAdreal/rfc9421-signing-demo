@@ -180,15 +180,19 @@ test("signResponse rejects a duplicate with its own caller name", () => {
 });
 
 /**
- * The guard is sign-side only: a foreign signer that already
- * minted a signature over a duplicated component list still
- * verifies, because the verifier rebuilds the base from the wire
- * list as written. Tightening the verifier would reject
- * pre-existing wire traffic; the fix keeps the verify side
- * byte-identical and only stops this library from minting new
- * duplicates.
+ * Backlog #1001 reversed the sign-side-only guard: a foreign signer
+ * that minted a signature over a duplicated component list is now
+ * rejected at parse time with MALFORMED_SIGNATURE_INPUT, before any
+ * crypto runs — the duplicated line made the signature base
+ * ambiguous about what was signed. The signature below is
+ * cryptographically valid over the duplicated base (the base
+ * assertion proves it), so the rejection is a parser policy
+ * decision, not a crypto failure. The sign side still refuses to
+ * mint such signatures; the two sides now agree, and pre-existing
+ * wire traffic carrying duplicates is rejected rather than silently
+ * verified.
  */
-test("verify side unchanged: a foreign signature over duplicate components still verifies", () => {
+test("verify side rejects a foreign signature over duplicate components", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
   const req = makeRequest();
   const covered = ["@method", "@method"];
@@ -205,6 +209,7 @@ test("verify side unchanged: a foreign signature over duplicate components still
     },
   };
   const res = verifyRequest(wire, { key: publicKey, now: NOW });
-  assert.equal(res.ok, true, `expected ok, got ${JSON.stringify(res)}`);
-  assert.deepEqual(res.coveredComponents, covered);
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "MALFORMED_SIGNATURE_INPUT");
+  assert.match(res.reason ?? "", /duplicate covered component "@method"/);
 });

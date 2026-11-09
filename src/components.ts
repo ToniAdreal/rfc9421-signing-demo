@@ -783,6 +783,19 @@ export interface ParsedSignatureInput {
 }
 
 /**
+ * Hard cap on covered components per signature (see
+ * `parseComponentIds`): a list longer than this is rejected as
+ * `MALFORMED_SIGNATURE_INPUT`. RFC 9421 sets no limit, so this is a
+ * local fail-closed bound on parser and base-builder work per label
+ * (the 64 KiB header cap alone would still admit thousands of tiny
+ * entries). Calibrated generously: this library's own fixtures cover
+ * at most seven components, and a realistic multi-party signature
+ * covers a handful — 64 leaves roughly an order of magnitude of
+ * headroom while keeping the per-label component loop bounded.
+ */
+export const MAX_COVERED_COMPONENTS = 64;
+
+/**
  * Parse the inside of a covered-components inner list, preserving any
  * component parameters that follow a quoted identifier (the old
  * quoted-strings-only scan silently swallowed a `;req` suffix, which
@@ -796,9 +809,31 @@ export interface ParsedSignatureInput {
  * `;tr`, `;name="…"`, and
  * `;key="…"` the same way: a supported suffix is canonicalized on
  * rebuild, with the `;key`/`;name` string value preserved as-is.)
+ *
+ * Two entries are duplicates when they are the same identifier after
+ * the normalization above (base lowercased, parameter names
+ * lowercased, parameters in listed order, values verbatim) — the
+ * exact twin of the sign side's `coveredComponentKey` (see
+ * `src/sign.ts`), so the verifier never rejects a signature the
+ * signer could mint, and never accepts one the signer refuses. A
+ * parameter reroutes what the component binds, so `"@method"` and
+ * `"@method";req` are different components (the second binds the
+ * associated request's method); parameter order variants
+ * (`";req;bs"` vs `";bs;req"`) are distinct entries here, exactly as
+ * on the sign side — `serializeComponentId` still canonicalizes
+ * their order when the base is rebuilt. A duplicate, or a list
+ * longer than `MAX_COVERED_COMPONENTS`, is a hard parse error;
+ * `verifyRequest` converges it to `MALFORMED_SIGNATURE_INPUT`
+ * before any crypto runs, so a duplicated line can never make the
+ * signature base ambiguous about what was signed.
  */
 function parseComponentIds(inner: string): string[] {
   const ids: string[] = [];
+  // Same identity as the sign side's `coveredComponentKey`: the
+  // stored id already is base-lowercased with parameter names
+  // lowercased in listed order, so the stored string itself is the
+  // duplicate key — no second normalization pass to drift.
+  const seen = new Set<string>();
   let i = 0;
   while (i < inner.length) {
     while (i < inner.length && /\s/.test(inner[i])) i++;
@@ -840,7 +875,15 @@ function parseComponentIds(inner: string): string[] {
       suffix += `;${pm[1].toLowerCase()}${pm[2] !== undefined ? `=${pm[2]}` : ""}`;
       j += pm[0].length;
     }
-    ids.push(raw.toLowerCase() + suffix);
+    const id = raw.toLowerCase() + suffix;
+    if (seen.has(id))
+      throw new Error(`duplicate covered component "${id}"`);
+    seen.add(id);
+    ids.push(id);
+    if (ids.length > MAX_COVERED_COMPONENTS)
+      throw new Error(
+        `too many covered components: ${ids.length} (max ${MAX_COVERED_COMPONENTS})`,
+      );
     i = j;
   }
   return ids;
