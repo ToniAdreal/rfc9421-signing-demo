@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Multi-label response verification (backlog #1002):
+  `verifyAllResponseLabels(res, opts)` verifies every label on a
+  signed response and returns one `VerifyResult` per label in wire
+  order — the response-side twin of `verifyAllLabels`, for the
+  multi-party settlement flow `addResponseSignature` documents
+  (merchant ed25519 signs, gateway hmac appends). `requiredLabels`
+  missing from the wire are reported as synthetic
+  `MISSING_REQUIRED_LABEL` failures; `@status` still binds the
+  status code and `;req` components still resolve against the
+  attached triggering request (`request` option); the per-label
+  option maps (`keys`, `keyResolvers`, `expectedKeyIds`, …) behave
+  exactly as in `verifyAllLabels`, since the implementation
+  delegates to it through the `RequestLike` synthesis
+  `verifyResponse` uses (now shared as `responseToRequestLike`).
+  A request-derived component without `;req`, or a `;req`
+  component with no request attached, throws a configuration
+  error — checked for every label. 12 new tests in
+  `test/verifyAllResponseLabels.test.ts`.
 - Cached kid listing for key-rotation audit (backlog #1000):
   `JwksKeyStore.keyIds()` returns the kids of the current snapshot in
   snapshot order as a fresh array (empty before the first refresh and

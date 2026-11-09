@@ -104,11 +104,12 @@ export {
 } from "./structuredFields.js";
 export type { StructuredFieldType } from "./structuredFields.js";
 export { fromFetchResponse, fromNodeRequest, fromNodeResponse } from "./nodeHttp.js";
-export { addResponseSignature, signResponse, verifyResponse } from "./response.js";
+export { addResponseSignature, signResponse, verifyAllResponseLabels, verifyResponse } from "./response.js";
 export type {
   HttpResponseLike,
   SignedHttpResponse,
   SignResponseOptions,
+  VerifyAllResponseOptions,
   VerifyResponseOptions,
 } from "./response.js";
 export type {

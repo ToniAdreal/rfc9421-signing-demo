@@ -628,7 +628,11 @@ function assertMaxSignatureAgeSec(value: number | undefined): void {
 function assertHeaderLengthLimit(
   value: number | undefined,
   name: "maxSignatureInputLength" | "maxSignatureLength",
-  caller: "verifyRequest" | "verifyAllLabels" | "verifyResponse",
+  caller:
+    | "verifyRequest"
+    | "verifyAllLabels"
+    | "verifyResponse"
+    | "verifyAllResponseLabels",
 ): void {
   if (value === undefined) return;
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0)
@@ -655,7 +659,11 @@ export function checkSignatureHeaderLengths(
   sigField: string | undefined,
   opts: Pick<VerifyOptions, "maxSignatureInputLength" | "maxSignatureLength">,
   label: string,
-  caller: "verifyRequest" | "verifyResponse" | "verifyAllLabels" = "verifyRequest",
+  caller:
+    | "verifyRequest"
+    | "verifyResponse"
+    | "verifyAllLabels"
+    | "verifyAllResponseLabels" = "verifyRequest",
 ): VerifyResult | undefined {
   // A bogus limit is a caller configuration error, not a verification
   // failure — validated here as well as in `verifyRequest`, because

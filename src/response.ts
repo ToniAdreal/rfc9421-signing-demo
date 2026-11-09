@@ -50,7 +50,14 @@ import {
 } from "./components.js";
 import { contentDigestAlgOf } from "./digest.js";
 import { signRequest, assertNoDuplicateCoveredComponents, type SignOptions } from "./sign.js";
-import { checkSignatureHeaderLengths, verifyRequest, type VerifyOptions, type VerifyResult } from "./verify.js";
+import {
+  checkSignatureHeaderLengths,
+  verifyAllLabels,
+  verifyRequest,
+  type VerifyAllOptions,
+  type VerifyOptions,
+  type VerifyResult,
+} from "./verify.js";
 
 /**
  * The response shape both wrappers accept. `headers` keeps the
@@ -104,6 +111,19 @@ export type SignResponseOptions = SignOptions & {
  * request passed here, and fails the guard without one.
  */
 export type VerifyResponseOptions = VerifyOptions & {
+  /** The request that triggered this response, for `;req` coverage. */
+  request?: RequestLike;
+};
+
+/**
+ * Verification options for `verifyAllResponseLabels`: identical to
+ * `VerifyAllOptions` (per-label keys, resolvers, freshness windows,
+ * `requiredLabels`, …), plus the same optional `request` as the
+ * single-label side: a wire signature covering `;req` components
+ * verifies against the request passed here, and fails the guard
+ * without one.
+ */
+export type VerifyAllResponseOptions = VerifyAllOptions & {
   /** The request that triggered this response, for `;req` coverage. */
   request?: RequestLike;
 };
@@ -181,13 +201,17 @@ function findRequestComponent(
  * to the request-side API.
  */
 function requestComponentError(
-  caller: "signResponse" | "verifyResponse",
+  caller: "signResponse" | "verifyResponse" | "verifyAllResponseLabels",
   entry: string,
   hasRequest: boolean,
 ): string {
   const { base, params } = splitComponent(entry);
   const otherSide =
-    caller === "signResponse" ? "signRequest" : "verifyRequest";
+    caller === "signResponse"
+      ? "signRequest"
+      : caller === "verifyAllResponseLabels"
+        ? "verifyAllLabels"
+        : "verifyRequest";
   if (REQUEST_DERIVED_COMPONENTS.has(base) && hasRequest)
     return (
       `${caller}: covered component "${entry}" derives from the request, not the response — ` +
@@ -206,13 +230,44 @@ function requestComponentError(
 }
 
 function assertStatus(
-  caller: "signResponse" | "verifyResponse",
+  caller: "signResponse" | "verifyResponse" | "verifyAllResponseLabels",
   status: unknown,
 ): asserts status is number {
   if (typeof status !== "number" || !Number.isInteger(status))
     throw new Error(
       `${caller}: "status" must be an integer HTTP status code, got ${String(status)}`,
     );
+}
+
+/**
+ * Synthesize the `RequestLike` the request-side API verifies a
+ * response through — the single synthesis path both `verifyResponse`
+ * and `verifyAllResponseLabels` share, so the fabricated shape can
+ * never drift between the two entry points.
+ *
+ * `method`/`url` are required by the `RequestLike` type but are never
+ * consulted here: the guard in each caller rejects every component
+ * that could read them, so no fabricated value can leak into a
+ * signature base. The URL still has to parse — `resolveComponent`
+ * runs `new URL` before its switch — so it is a reserved `.invalid`
+ * host (RFC 2606) that can never be a real request target, never a
+ * plausible one. `request` is the attached triggering request, what
+ * `;req` components resolve against; without one the guard already
+ * rejected them.
+ */
+function responseToRequestLike(
+  res: HttpResponseLike,
+  request?: RequestLike,
+): RequestLike {
+  return {
+    method: "",
+    url: "https://response.invalid/",
+    headers: res.headers,
+    body: res.body,
+    status: res.status,
+    trailers: res.trailers,
+    ...(request !== undefined ? { request } : {}),
+  };
 }
 
 /**
@@ -344,16 +399,112 @@ export function verifyResponse(
   }
   // `request` is consumed here, not forwarded into VerifyOptions.
   const { request, ...verifyOpts } = opts;
-  const req: RequestLike = {
-    method: "",
-    url: "https://response.invalid/",
-    headers: res.headers,
-    body: res.body,
-    status: res.status,
-    trailers: res.trailers,
-    ...(request !== undefined ? { request } : {}),
-  };
-  return verifyRequest(req, verifyOpts);
+  return verifyRequest(responseToRequestLike(res, request), verifyOpts);
+}
+
+/**
+ * Verify every signature carried by the response — the response-side
+ * twin of `verifyAllLabels`, for the multi-party settlement flow
+ * `addResponseSignature` documents (merchant ed25519 signs, gateway
+ * hmac appends). Parses all labels from the `Signature-Input` header
+ * and verifies each one through the response synthesis path (the same
+ * `RequestLike` `verifyResponse` builds: `@status` binds the status
+ * code, `;req` components resolve against the attached triggering
+ * request), returning one `VerifyResult` per label in wire order. A
+ * failing label never blocks the remaining labels.
+ *
+ * With `opts.requiredLabels`, every required label that never appears
+ * on the wire is appended as a synthetic failure (`{ ok: false, code:
+ * "MISSING_REQUIRED_LABEL", label }`) after the wire-order results, in
+ * `requiredLabels` order — the same empty-array trap closure as
+ * `verifyAllLabels`. Returns an empty array when the response has no
+ * `Signature-Input` header and no labels are required. When the header
+ * is present but cannot even be split into labels, returns a
+ * single-element array with `ok: false` and code
+ * `MALFORMED_SIGNATURE_INPUT`. Like `verifyAllLabels`, this function
+ * never throws on malformed input.
+ *
+ * Two caller configuration errors still throw, matching
+ * `verifyResponse`: a missing or non-integer `status`, and a wire
+ * signature whose covered components derive from the request without
+ * `;req`, or carry `;req` with no `request` attached — checked for
+ * every label, not just the first. Per-label option maps (`keys`,
+ * `keyResolvers`, `expectedKeyIds`, …) behave exactly as in
+ * `verifyAllLabels`: the delegation below is the same function, so a
+ * label's own key, resolver, freshness window, or replay store is
+ * honoured and never leaks onto another label.
+ */
+export function verifyAllResponseLabels(
+  res: HttpResponseLike,
+  opts: VerifyAllResponseOptions,
+): VerifyResult[] {
+  assertStatus("verifyAllResponseLabels", res.status);
+  // Header length limits (fail-closed, before the guard below parses
+  // `signature-input`): the guard's own parse must never run over an
+  // oversized header. `verifyAllLabels` re-checks the same limits
+  // after the delegation, so this gate only protects the parse here.
+  const sigField = getHeader(res.headers, "signature");
+  const sigInput = getHeader(res.headers, "signature-input");
+  const tooLarge = checkSignatureHeaderLengths(
+    sigInput,
+    sigField,
+    opts,
+    "",
+    "verifyAllResponseLabels",
+  );
+  if (tooLarge !== undefined) return [tooLarge];
+  // Response-side guard over every label: a request-derived component
+  // without `;req`, or a `;req` component with no request attached, is
+  // a caller configuration error — checked per label, so a second
+  // party's label cannot smuggle in a component the first label's
+  // guard already passed on. A parse failure means the header is
+  // malformed, which `verifyAllLabels` reports properly below.
+  if (sigInput !== undefined) {
+    try {
+      const labels = listSignatureLabels(sigInput);
+      for (const label of labels) {
+        try {
+          const parsed = parseSignatureInput(sigInput, label);
+          const offending = findRequestComponent(
+            parsed.componentIds,
+            opts.request !== undefined,
+          );
+          if (offending !== undefined)
+            throw new Error(
+              requestComponentError(
+                "verifyAllResponseLabels",
+                offending,
+                opts.request !== undefined,
+              ),
+            );
+        } catch (e) {
+          if (
+            e instanceof Error &&
+            e.message.startsWith("verifyAllResponseLabels: covered component")
+          )
+            throw e;
+          // This label's entry is unparsable — the delegation below
+          // reports it as MALFORMED_SIGNATURE_INPUT; the remaining
+          // labels still get their guard check.
+        }
+      }
+    } catch (e) {
+      if (
+        e instanceof Error &&
+        e.message.startsWith("verifyAllResponseLabels: covered component")
+      )
+        throw e;
+      // The header cannot even be split into labels — `verifyAllLabels`
+      // reports it as MALFORMED_SIGNATURE_INPUT below.
+    }
+  }
+  // `request` is consumed here, not forwarded into VerifyAllOptions.
+  // The synthesis path is the one `verifyResponse` uses, shared
+  // through `responseToRequestLike` — `@status` still binds the
+  // status code and `;req` still resolves against the attached
+  // request, per label.
+  const { request, ...verifyAllOpts } = opts;
+  return verifyAllLabels(responseToRequestLike(res, request), verifyAllOpts);
 }
 
 /**

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1821 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1833 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1134,6 +1134,34 @@ if (!result.ok) {
 }
 ```
 
+A dual-signed settlement response — merchant ed25519, gateway hmac
+appended with `addResponseSignature` — verifies both labels at once
+with `verifyAllResponseLabels`, the response-side twin of
+`verifyAllLabels` (one result per label in wire order,
+`requiredLabels` fail-closed, per-label `keys`):
+
+```ts
+import { signResponse, addResponseSignature, verifyAllResponseLabels } from "./dist/src/index.js";
+
+const signed = signResponse(
+  { status: 200, headers: { "content-type": "application/json" }, body },
+  { key: merchantPrivateKey, alg: "ed25519", created, label: "merchant" },
+);
+const dual = addResponseSignature(signed, {
+  key: gatewaySecret, alg: "hmac-sha256", created, label: "gateway",
+});
+
+// A bad gateway label never blocks the merchant result. Require both
+// co-signatures or fail closed on the missing one.
+const results = verifyAllResponseLabels(dual, {
+  keys: { merchant: merchantPublicKey, gateway: gatewaySecret },
+  requiredLabels: ["merchant", "gateway"],
+});
+if (!results.every((r) => r.ok)) {
+  throw new Error(`bad settlement signature: ${results.find((r) => !r.ok)?.code}`);
+}
+```
+
 Honest limit, with one opt-in exception: response signing covers
 response components only, unless the caller attaches the triggering
 request as the `request` option on both sides
@@ -1530,8 +1558,11 @@ values. Without a request to bind to, keep using the request-side API
   components only, except `;req` components when the triggering
   request is attached via the `request` option on both sides —
   request-derived components without `;req` are always rejected
-  with a pointer to the request-side API. See the
-  Quickstart response-signing example.
+  with a pointer to the request-side API. `verifyAllResponseLabels(res, opts)`
+  is the multi-label twin: one `VerifyResult` per label in wire
+  order, `requiredLabels` fail-closed, per-label `keys` — the
+  multi-party settlement shape (`signResponse` + `addResponseSignature`).
+  See the Quickstart response-signing example.
 - **Multi-signature verification**: `verifyAllLabels(req, { key, keys })`
   parses every label from the `Signature-Input` header and verifies each
   one with `verifyRequest`, returning one `VerifyResult` per label in wire
@@ -1572,7 +1603,15 @@ values. Without a request to bind to, keep using the request-side API
   A repeated signature-input parameter (e.g. two `created=` values, case
   variants included) is ambiguous authenticated input and is rejected as
   `MALFORMED_SIGNATURE_INPUT` before any crypto runs — the parser never
-  silently lets the later value win.
+  silently lets the later value win. The response side has the same
+  entry point: `verifyAllResponseLabels(res, opts)` verifies every
+  label on a signed response with the same per-label semantics
+  (`keys`, `keyResolvers`, `expectedKeyIds`, `requiredLabels`, …)
+  while keeping the response binding — `@status` still binds the
+  status code, `;req` components still resolve against the attached
+  triggering request — so a dual-signed settlement response
+  (`signResponse` + `addResponseSignature`) needs no hand-assembled
+  `RequestLike` to audit both parties.
 
 ```ts
 import { verifyAllLabels } from "./dist/src/index.js";
@@ -4027,7 +4066,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1821 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1833 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
