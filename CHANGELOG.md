@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Private-key JWK import demo segment (backlog #1005): the CLI
+  demo closes with an `importPrivateKeyJwk` segment — a fixed
+  ed25519 private JWK (demo-only) is carried through a JSON wire
+  round-trip, read back with `importPrivateKeyJwk`, and the
+  imported key completes an ed25519 sign -> verify round-trip
+  against the public half derived from it, the asymmetric half of
+  JWK key distribution for KMS-exported signing keys. A copy with
+  its `d` member stripped is shown rejected at import with the
+  pinned missing-member error. Only the JWK's shape is printed,
+  never the `d` or `x` bytes. 2 new tests in
+  `test/demo.test.ts`.
 - Multi-label response verification (backlog #1002):
   `verifyAllResponseLabels(res, opts)` verifies every label on a
   signed response and returns one `VerifyResult` per label in wire

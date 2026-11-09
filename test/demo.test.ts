@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import {
   createHmac,
+  createPublicKey,
   createSecretKey,
   createSign,
   generateKeyPairSync,
@@ -34,6 +35,7 @@ import {
   generateRsaV15KeyPair,
   getHeader,
   getHeaderRaw,
+  importPrivateKeyJwk,
   importPublicKeyJwkP256,
   importPublicKeyJwkP384,
   importPublicKeyJwkP521,
@@ -298,6 +300,10 @@ import {
   DEMO_PARSE_RAW_PREVIEW,
   DEMO_PARSE_TAMPERED_ERROR,
   DEMO_PEM_NONCE,
+  DEMO_PRIVATE_JWK,
+  DEMO_PRIVATE_JWK_IMPORT_ERROR,
+  DEMO_PRIVATE_JWK_KEY_ID,
+  DEMO_PRIVATE_JWK_NONCE,
   DEMO_RESOLVE_COMPONENTS,
   DEMO_RESOLVE_ILLEGAL_COMPONENT,
   DEMO_RESOLVE_ILLEGAL_ERROR,
@@ -6748,7 +6754,8 @@ test("demo response-signing segment signs a response with @status and rejects a 
     `Response signing verification after status tampering (200 -> 500): FAILED (code ${DEMO_RESPONSE_SIGNING_TAMPER_CODE}: ${responseSigningTamperedVerification.reason})`,
   ]);
   // The segment is followed by the HMAC oct JWK segment (blank
-  // separator, then its header), which now closes the demo.
+  // separator, then its header), which is followed by the
+  // private-key JWK segment that closes the demo.
   assert.equal(lines[headerIdx + 4], "");
   assert.ok(
     lines[headerIdx + 5]!.startsWith("HMAC oct JWK key distribution:"),
@@ -6869,7 +6876,8 @@ test("demo oct JWK segment exports, imports and verifies an HMAC secret, and rej
   );
 
   // Ordering: the segment follows the response-signing segment and
-  // closes the demo — byte-exact lines, nothing after them.
+  // is followed by the private-key JWK segment that closes the
+  // demo — byte-exact lines.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("HMAC oct JWK key distribution:"),
   );
@@ -6885,7 +6893,10 @@ test("demo oct JWK segment exports, imports and verifies an HMAC secret, and rej
     `Short secret rejected at export: ${DEMO_HMAC_GUARD_ERRORS[0]}`,
     `Short oct JWK rejected at import: ${DEMO_OCT_JWK_IMPORT_ERROR}`,
   ]);
-  assert.equal(lines[headerIdx + 5], undefined);
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(
+    lines[headerIdx + 6]!.startsWith("Private-key JWK import:"),
+  );
 });
 
 test("demo oct JWK segment prints byte-identical lines across runs", async () => {
@@ -6893,12 +6904,135 @@ test("demo oct JWK segment prints byte-identical lines across runs", async () =>
   const second = await runDemo();
   const start = (ls: string[]) =>
     ls.findIndex((l) => l.startsWith("HMAC oct JWK key distribution:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Private-key JWK import:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // Only fixed strings, the JWK shape and the pinned floor
+  // rejections are printed — the secret and the signature bytes
+  // never appear — so the segment is identical.
+  assert.deepEqual(
+    first.lines.slice(a, aEnd),
+    second.lines.slice(b, bEnd),
+  );
+});
+
+test("demo private-key JWK segment imports a fixed ed25519 private JWK, signs with it, and rejects a JWK without \"d\"", async () => {
+  const {
+    lines,
+    privateJwkKty,
+    privateJwkCrv,
+    privateJwkKid,
+    privateJwkVerification,
+    privateJwkImportError,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // The imported JWK's shape: OKP / Ed25519 under the pinned kid —
+  // the `d` and `x` bytes themselves never appear in the result.
+  assert.equal(privateJwkKty, "OKP");
+  assert.equal(privateJwkCrv, "Ed25519");
+  assert.equal(privateJwkKid, DEMO_PRIVATE_JWK_KEY_ID);
+
+  // The imported key is the KMS-exported signing key, so the
+  // round-trip request verifies under the exported kid.
+  assert.equal(privateJwkVerification.ok, true);
+  assert.equal(privateJwkVerification.label, "sig1");
+  assert.equal(privateJwkVerification.keyId, DEMO_PRIVATE_JWK_KEY_ID);
+  assert.equal(privateJwkVerification.alg, "ed25519");
+  assert.equal(privateJwkVerification.nonce, DEMO_PRIVATE_JWK_NONCE);
+
+  // The stripped JWK is rejected with the pinned missing-member
+  // message.
+  assert.equal(privateJwkImportError, DEMO_PRIVATE_JWK_IMPORT_ERROR);
+
+  // Independent re-derivation: importing the same fixed JWK again
+  // yields a private ed25519 key whose public half matches the
+  // fixture's `x`, and a request signed with it verifies against
+  // that public half — the round-trip is the library's behavior,
+  // not a fixture echo.
+  const reimported = importPrivateKeyJwk(
+    JSON.parse(JSON.stringify(DEMO_PRIVATE_JWK)) as unknown,
+  );
+  assert.equal(reimported.type, "private");
+  assert.equal(reimported.asymmetricKeyType, "ed25519");
+  const reimportedPublic = createPublicKey(reimported);
+  const reimportedPublicJwk = reimportedPublic.export({
+    format: "jwk",
+  }) as unknown as { x: string };
+  assert.equal(reimportedPublicJwk.x, DEMO_PRIVATE_JWK.x);
+  const crossSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_PRIVATE_JWK_KEY_ID,
+      alg: "ed25519",
+      key: reimported,
+      created: DEMO_CREATED,
+      nonce: DEMO_PRIVATE_JWK_NONCE,
+    },
+  );
+  assert.equal(
+    verifyRequest(crossSigned, { key: reimportedPublic, now: DEMO_CREATED + 60 })
+      .ok,
+    true,
+  );
+
+  // Printed lines: header, shape, verification, the rejection.
+  assert.match(
+    out,
+    /Private-key JWK import: a fixed ed25519 private JWK is read back through a JSON wire round-trip with importPrivateKeyJwk/,
+  );
+  assert.match(
+    out,
+    /Private JWK: kty="OKP" crv="Ed25519" kid="private-jwk-key-1"/,
+  );
+  assert.match(
+    out,
+    /Private JWK round-trip verification: OK \(label sig1, keyid="private-jwk-key-1", alg="ed25519", nonce="demo-nonce-private-jwk-001"\)/,
+  );
+  assert.match(
+    out,
+    /Private JWK without "d" rejected at import: importPrivateKeyJwk: invalid JWK: missing or empty "d"/,
+  );
+
+  // Ordering: the segment follows the HMAC oct JWK segment and
+  // closes the demo — byte-exact lines, nothing after them.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Private-key JWK import:"),
+  );
+  assert.ok(headerIdx !== -1);
+  const octIdx = lines.findIndex((l) =>
+    l.startsWith("HMAC oct JWK key distribution:"),
+  );
+  assert.ok(octIdx !== -1 && octIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    `Private-key JWK import: a fixed ed25519 private JWK is read back through a JSON wire round-trip with importPrivateKeyJwk — the asymmetric half of JWK key distribution, for KMS-exported signing keys; the private key material itself is never printed`,
+    `Private JWK: kty="OKP" crv="Ed25519" kid="${DEMO_PRIVATE_JWK_KEY_ID}" (d and x are never printed)`,
+    `Private JWK round-trip verification: OK (label sig1, keyid="${DEMO_PRIVATE_JWK_KEY_ID}", alg="ed25519", nonce="${DEMO_PRIVATE_JWK_NONCE}")`,
+    `Private JWK without "d" rejected at import: ${DEMO_PRIVATE_JWK_IMPORT_ERROR}`,
+  ]);
+  assert.equal(lines[headerIdx + 4], undefined);
+});
+
+test("demo private-key JWK segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Private-key JWK import:"));
   const a = start(first.lines);
   const b = start(second.lines);
   assert.ok(a !== -1 && b !== -1);
-  // Only fixed strings, the JWK shape and the pinned floor
-  // rejections are printed — the secret and the signature bytes
-  // never appear — so the closing segment is identical.
+  // Only fixed strings, the JWK shape and the pinned rejection are
+  // printed — the key bytes and the signature bytes never appear —
+  // so the closing segment is identical.
   assert.deepEqual(second.lines.slice(b), first.lines.slice(a));
 });
 

@@ -1223,6 +1223,20 @@
  * paths enforce. Only the JWK's shape (kty/kid/alg and the
  * 43-character `k` length) is printed, never the secret bytes, so
  * the segment is byte-identical between runs.
+ * The demo closes with a private-key JWK import segment: the
+ * JWK segments above cover a public key (`importPublicKeyJwk`)
+ * and a symmetric secret (`importSymmetricKeyJwk`), but a signing
+ * key arrives from a KMS as a *private* JWK. A fixed ed25519
+ * private JWK (demo-only, never use it anywhere else) is carried
+ * through a JSON wire round-trip and read back with
+ * `importPrivateKeyJwk`, and the imported key completes an
+ * ed25519 sign -> verify round-trip — the asymmetric half of JWK
+ * key distribution, for KMS-exported signing keys. A copy of the
+ * JWK with its `d` member stripped is printed rejected at import:
+ * a public JWK passed to the private importer by mistake fails
+ * on the same missing member. Only the JWK's shape (kty/crv/kid)
+ * is printed, never the `d` or `x` bytes, so the segment is
+ * byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -1255,6 +1269,7 @@ import { createServer, get, type IncomingMessage } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import {
   createHmac,
+  createPublicKey,
   createSecretKey,
   createSign,
   generateKeyPairSync,
@@ -1293,6 +1308,7 @@ import {
   getHeader,
   getHeaderRaw,
   importPrivateKey,
+  importPrivateKeyJwk,
   importPublicKey,
   importPublicKeyJwk,
   importPublicKeyJwkP256,
@@ -1423,6 +1439,42 @@ export const DEMO_OCT_JWK_SHORT_SECRET = createSecretKey(
  */
 export const DEMO_OCT_JWK_IMPORT_ERROR =
   "importSymmetricKeyJwk: invalid JWK: hmac-sha256 secret must be at least 32 bytes (RFC 2104: the key SHOULD be at least as long as the hash output; sha-256 → 32 bytes), got 16 bytes";
+/**
+ * Key id the private-key JWK segment signs under.
+ */
+export const DEMO_PRIVATE_JWK_KEY_ID = "private-jwk-key-1";
+/**
+ * Nonce the private-key JWK segment's round-trip request carries.
+ */
+export const DEMO_PRIVATE_JWK_NONCE = "demo-nonce-private-jwk-001";
+/**
+ * Demo-only fixed ed25519 private JWK for the private-key JWK
+ * segment: the `d` member is the 32-byte seed, `x` its public
+ * half, both base64url without padding. Labelled as a demo value
+ * — never use it anywhere else. Only the JWK's shape
+ * (kty/crv/kid) is printed, never the `d` or `x` bytes.
+ */
+export const DEMO_PRIVATE_JWK: {
+  kty: "OKP";
+  crv: "Ed25519";
+  kid: string;
+  x: string;
+  d: string;
+} = {
+  kty: "OKP",
+  crv: "Ed25519",
+  kid: DEMO_PRIVATE_JWK_KEY_ID,
+  x: "AXmEXfH3rSPd3k1GQHVDmVJaf-tFLI_jvDHHuBxPlk4",
+  d: "beb_wAAN24Uf94P6nwhBzYA9G4oXthqDR6K2OMqvf0Q",
+};
+/**
+ * Pinned rejection for importing the private JWK with its `d`
+ * member stripped — the same refusal a public JWK passed to the
+ * private importer by mistake hits (`src/keys.ts` names the
+ * missing required member).
+ */
+export const DEMO_PRIVATE_JWK_IMPORT_ERROR =
+  'importPrivateKeyJwk: invalid JWK: missing or empty "d" (a required member for this private JWK)';
 /**
  * Components the gateway signature covers. Unlike the merchant's
  * `sig1` signature (the default set, including `content-digest`), the
@@ -6088,6 +6140,24 @@ export interface DemoResult {
    * hmac-sha256 floor): `DEMO_OCT_JWK_IMPORT_ERROR`.
    */
   octJwkImportError: string;
+  /**
+   * The fixed ed25519 private JWK imported in the private-JWK
+   * segment: only its shape is recorded here (kty/crv/kid) — the
+   * `d` and `x` bytes themselves never leave this file's locals.
+   */
+  privateJwkKty: string;
+  privateJwkCrv: string;
+  privateJwkKid: string;
+  /**
+   * Verification of the request signed with the imported private
+   * key (ok — the imported key is the KMS-exported signing key).
+   */
+  privateJwkVerification: VerifyResult;
+  /**
+   * Pinned rejection from importing the private JWK with its `d`
+   * member stripped: `DEMO_PRIVATE_JWK_IMPORT_ERROR`.
+   */
+  privateJwkImportError: string;
   lines: string[];
 }
 
@@ -13716,6 +13786,76 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Private-key JWK import segment (backlog #1005): the JWK
+  // segments above cover a public key (`importPublicKeyJwk`) and a
+  // symmetric secret (`importSymmetricKeyJwk`), but a signing key
+  // arrives from a KMS as a *private* JWK. The fixed demo private
+  // JWK is carried through a JSON wire round-trip and read back
+  // with `importPrivateKeyJwk`, and the imported key completes an
+  // ed25519 sign -> verify round-trip against the public half
+  // derived from it — the asymmetric half of JWK key distribution.
+  // A copy with its `d` member stripped is rejected at import with
+  // the pinned missing-member error (the same refusal a public JWK
+  // passed to this importer by mistake hits). Only the JWK's shape
+  // is printed, never the `d` or `x` bytes, so the segment is
+  // byte-identical between runs.
+  const privateJwkWire = JSON.parse(
+    JSON.stringify(DEMO_PRIVATE_JWK),
+  ) as unknown;
+  const privateJwkImported = importPrivateKeyJwk(privateJwkWire);
+  const privateJwkPublic = createPublicKey(privateJwkImported);
+  const privateJwkPublicJwk = privateJwkPublic.export({
+    format: "jwk",
+  }) as unknown as { x: string };
+  const privateJwkSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_PRIVATE_JWK_KEY_ID,
+      alg: "ed25519",
+      key: privateJwkImported,
+      created: DEMO_CREATED,
+      nonce: DEMO_PRIVATE_JWK_NONCE,
+    },
+  );
+  const privateJwkVerification = verifyRequest(privateJwkSigned, {
+    key: privateJwkPublic,
+    now: DEMO_CREATED + 60,
+  });
+  let privateJwkImportError = "";
+  try {
+    const stripped = JSON.parse(JSON.stringify(DEMO_PRIVATE_JWK)) as Record<
+      string,
+      unknown
+    >;
+    delete stripped["d"];
+    importPrivateKeyJwk(stripped);
+  } catch (e) {
+    privateJwkImportError = (e as Error).message;
+  }
+  if (
+    privateJwkImported.type !== "private" ||
+    privateJwkImported.asymmetricKeyType !== "ed25519" ||
+    privateJwkPublicJwk.x !== DEMO_PRIVATE_JWK.x ||
+    !privateJwkVerification.ok ||
+    privateJwkVerification.label !== "sig1" ||
+    privateJwkVerification.keyId !== DEMO_PRIVATE_JWK_KEY_ID ||
+    privateJwkVerification.alg !== "ed25519" ||
+    privateJwkVerification.nonce !== DEMO_PRIVATE_JWK_NONCE ||
+    privateJwkImportError !== DEMO_PRIVATE_JWK_IMPORT_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: private JWK segment gave imported-type=${privateJwkImported.type}/${privateJwkImported.asymmetricKeyType}, ` +
+        `public-x-match=${privateJwkPublicJwk.x === DEMO_PRIVATE_JWK.x}, verification ${privateJwkVerification.ok}/${privateJwkVerification.label}/` +
+        `${privateJwkVerification.keyId}/${privateJwkVerification.alg} and import-error=${JSON.stringify(privateJwkImportError)}, ` +
+        `instead of a private ed25519 key whose public half matches the fixture, an ok ed25519 verification and the pinned missing-"d" rejection`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -14490,6 +14630,13 @@ export async function runDemo(): Promise<DemoResult> {
       : `oct JWK round-trip verification: FAILED (code ${octJwkVerification.code}: ${octJwkVerification.reason})`,
     `Short secret rejected at export: ${octJwkExportError}`,
     `Short oct JWK rejected at import: ${octJwkImportError}`,
+    "",
+    `Private-key JWK import: a fixed ed25519 private JWK is read back through a JSON wire round-trip with importPrivateKeyJwk — the asymmetric half of JWK key distribution, for KMS-exported signing keys; the private key material itself is never printed`,
+    `Private JWK: kty="OKP" crv="Ed25519" kid="${DEMO_PRIVATE_JWK_KEY_ID}" (d and x are never printed)`,
+    privateJwkVerification.ok
+      ? `Private JWK round-trip verification: OK (label ${privateJwkVerification.label}, keyid="${privateJwkVerification.keyId}", alg="ed25519", nonce="${privateJwkVerification.nonce}")`
+      : `Private JWK round-trip verification: FAILED (code ${privateJwkVerification.code}: ${privateJwkVerification.reason})`,
+    `Private JWK without "d" rejected at import: ${privateJwkImportError}`,
   ];
 
   return {
@@ -14840,6 +14987,11 @@ export async function runDemo(): Promise<DemoResult> {
     octJwkVerification,
     octJwkExportError,
     octJwkImportError,
+    privateJwkKty: DEMO_PRIVATE_JWK.kty,
+    privateJwkCrv: DEMO_PRIVATE_JWK.crv,
+    privateJwkKid: DEMO_PRIVATE_JWK.kid,
+    privateJwkVerification,
+    privateJwkImportError,
     lines,
   };
 }
