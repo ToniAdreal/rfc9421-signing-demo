@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1856 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1870 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -786,6 +786,30 @@ await store.refresh(); // the async fetch stays in your layer; verifyRequest sta
 const result = verifyRequest(signed, { keyResolver: store.resolve }); // unknown kid -> KEY_RESOLUTION_FAILED
 await store.refreshIfStale(); // rotation = re-fetch when stale; returns false (and fetches nothing) while fresh
 ```
+
+Publishing a JWKS document: the other half of the same flow is
+`buildJwksDocument`, for the signer that wants its own
+`/.well-known/jwks.json` instead of hand-assembling `{ keys: [...]
+}` (a mistyped `kty`/`crv` or a forgotten `kid` only surfaces
+later, on the verifier, as `KEY_RESOLUTION_FAILED`). Each entry is
+a public key plus its `kid`; the `kid` must be non-empty and unique
+across the document, a symmetric secret is refused outright (a JWKS
+publishes public keys only), and so is a private key — pass the
+public half. The document it returns is exactly what
+`JwksKeyStore` consumes, so a verifier fetching it resolves every
+`kid` and verifies signatures made with the matching private keys:
+
+```ts
+import { buildJwksDocument, generateEd25519KeyPair } from "./dist/src/index.js";
+const { publicKey } = generateEd25519KeyPair();
+const doc = buildJwksDocument([{ key: publicKey, kid: "ed-key-1" }]);
+// GET /.well-known/jwks.json -> JSON.stringify(doc)
+```
+
+Key order in the document is irrelevant (verifiers resolve by
+`kid`), and a JSON round-trip still verifies. Serve it over HTTPS
+from a trusted origin — the document is public by design, and
+whatever it serves becomes a verification key (see SECURITY.md).
 
 `refreshIfStale()` is the one-call form of the `if (store.isStale()) await store.refresh()`
 check: a fresh snapshot returns `false` without touching the network, a stale
@@ -4098,7 +4122,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1856 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1870 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

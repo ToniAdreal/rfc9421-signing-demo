@@ -1050,6 +1050,152 @@ export function importSymmetricKeyJwk(jwk: unknown): KeyObject {
 }
 
 /**
+ * One entry of a JWKS document to publish: a public key and the `kid`
+ * verifiers will resolve it under. The `kid` is the same identifier
+ * the signer puts in `signRequest`'s `keyId` and the verifier's
+ * `JwksKeyStore` resolves by — publish and consume must agree on it.
+ */
+export interface JwksDocumentEntry {
+  /** A public `KeyObject` (the `.publicKey` half of a generated pair). */
+  key: KeyObject;
+  /** Non-empty, document-unique key id, e.g. `"ed-key-1"`. */
+  kid: string;
+}
+
+/**
+ * One key inside a published JWKS document: one of the five public
+ * JWK shapes this library exports, tagged with its `kid`. Exactly the
+ * shape {@link JwksKeyStore} consumes on the verify side, so a
+ * document built here round-trips through a store unchanged.
+ */
+export type JwksDocumentKey =
+  | (Ed25519PublicJwk & { kid: string })
+  | (P256PublicJwk & { kid: string })
+  | (P384PublicJwk & { kid: string })
+  | (P521PublicJwk & { kid: string })
+  | (RsaPublicJwk & { kid: string });
+
+/**
+ * A JWKS document (RFC 7517 §5) as served from
+ * `/.well-known/jwks.json`: the `{ keys: [...] }` object a signer
+ * publishes so verifiers can fetch its public keys by `kid`.
+ */
+export interface JwksDocument {
+  keys: JwksDocumentKey[];
+}
+
+/**
+ * Build the JWKS document a signer publishes at
+ * `/.well-known/jwks.json` — the publishing half of
+ * {@link JwksKeyStore}'s consuming half. Each entry's public key is
+ * exported with the matching `exportPublicKeyJwk*` helper (ed25519 →
+ * OKP/Ed25519, P-256/P-384/P-521 → EC/`crv`, RSA → `n`/`e`) and
+ * tagged with its `kid`, so callers never hand-assemble `{ keys:
+ * [...] }` and mistype a `kty`/`crv` or forget a `kid` — mistakes
+ * that otherwise surface only later, on the verifier, as
+ * `KEY_RESOLUTION_FAILED`.
+ *
+ * Fail-fast, at build time: `kid` must be a non-empty string and
+ * unique across the document (a duplicate would make the published
+ * document ambiguous — `JwksKeyStore` lets the later entry win, so
+ * the publisher must not ship one); a symmetric secret key is
+ * refused outright — a JWKS publishes public keys only, and an
+ * `oct` entry would hand the shared secret to every verifier; a
+ * private key is refused too (pass the public half). Any key shape
+ * outside the five exported families throws a configuration error.
+ * The returned document never carries private material: the
+ * exporters emit public JWKs only, so no entry has a `"d"` member.
+ * Key order is preserved as given, but verifiers resolve by `kid`,
+ * so order is irrelevant to verification — a JSON round-trip (or a
+ * reordered document) still verifies.
+ *
+ * Serve the result with `JSON.stringify(doc)` from your
+ * `/.well-known/jwks.json` route, over HTTPS (see SECURITY.md);
+ * rotation is a new document with the new `kid` added (and the
+ * retired `kid` removed once verifiers have re-fetched).
+ *
+ * @example
+ * ```ts
+ * import { buildJwksDocument, generateEd25519KeyPair } from "./dist/src/index.js";
+ * const { publicKey } = generateEd25519KeyPair();
+ * const doc = buildJwksDocument([{ key: publicKey, kid: "ed-key-1" }]);
+ * // GET /.well-known/jwks.json -> JSON.stringify(doc)
+ * ```
+ */
+export function buildJwksDocument(
+  entries: readonly JwksDocumentEntry[],
+): JwksDocument {
+  if (!Array.isArray(entries))
+    throw new Error(
+      `buildJwksDocument: \`entries\` must be an array, got ${
+        entries === null ? "null" : typeof entries
+      }`,
+    );
+  const seenKids = new Set<string>();
+  const keys: JwksDocumentKey[] = entries.map((entry, i) => {
+    const where = `entries[${i}]`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry))
+      throw new Error(
+        `buildJwksDocument: ${where} must be an object with \`key\` and \`kid\`, got ${
+          Array.isArray(entry)
+            ? "an array"
+            : entry === null
+              ? "null"
+              : typeof entry
+        }`,
+      );
+    const { key, kid } = entry as JwksDocumentEntry;
+    if (typeof kid !== "string" || kid.length === 0)
+      throw new Error(
+        `buildJwksDocument: ${where}.kid must be a non-empty string, got ${JSON.stringify(kid)}`,
+      );
+    if (seenKids.has(kid))
+      throw new Error(
+        `buildJwksDocument: duplicate kid ${JSON.stringify(kid)} at ${where} ` +
+          `(kids must be unique across the document — a verifier resolves by kid alone)`,
+      );
+    seenKids.add(kid);
+    if (typeof key !== "object" || key === null)
+      throw new Error(
+        `buildJwksDocument: ${where}.key must be a public KeyObject, got ${
+          key === null ? "null" : typeof key
+        }`,
+      );
+    const k = key as KeyObject;
+    if (k.type === "secret")
+      throw new Error(
+        `buildJwksDocument: ${where} (kid ${JSON.stringify(kid)}) is a symmetric secret key — ` +
+          `a JWKS publishes public keys only; publishing an "oct" entry would hand the shared secret to every verifier`,
+      );
+    if (k.type === "private")
+      throw new Error(
+        `buildJwksDocument: ${where} (kid ${JSON.stringify(kid)}) is a private key — ` +
+          `pass the public KeyObject (e.g. keyPair.publicKey); a JWKS never carries private material`,
+      );
+    if (k.type !== "public")
+      throw new Error(
+        `buildJwksDocument: ${where} (kid ${JSON.stringify(kid)}) has unsupported key type ${JSON.stringify(k.type)}`,
+      );
+    const curve = k.asymmetricKeyDetails?.namedCurve;
+    if (k.asymmetricKeyType === "ed25519")
+      return { ...exportPublicKeyJwk(k), kid };
+    if (k.asymmetricKeyType === "ec" && curve === "prime256v1")
+      return { ...exportPublicKeyJwkP256(k), kid };
+    if (k.asymmetricKeyType === "ec" && curve === "secp384r1")
+      return { ...exportPublicKeyJwkP384(k), kid };
+    if (k.asymmetricKeyType === "ec" && curve === "secp521r1")
+      return { ...exportPublicKeyJwkP521(k), kid };
+    if (k.asymmetricKeyType === "rsa")
+      return { ...exportPublicKeyJwkRsa(k), kid };
+    throw new Error(
+      `buildJwksDocument: ${where} (kid ${JSON.stringify(kid)}) is an unsupported key shape: ` +
+        `${describeKey(k)} — only ed25519, P-256, P-384, P-521 and RSA public keys can be published`,
+    );
+  });
+  return { keys };
+}
+
+/**
  * Import a private key from a JWK object (RFC 7517 / RFC 7518 /
  * RFC 8037) — the private counterpart of the `importPublicKeyJwk*`
  * helpers, for the case the key arrives as JSON instead of PEM: a

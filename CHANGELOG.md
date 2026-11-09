@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- JWKS publishing via `buildJwksDocument` (backlog #1015): the
+  publishing half of `JwksKeyStore`'s consuming half — it assembles
+  a `{ keys: [...] }` JWKS document from public keys plus their
+  `kid`s (ed25519 / P-256 / P-384 / P-521 / RSA, reusing the
+  `exportPublicKeyJwk*` helpers), so a signer serving
+  `/.well-known/jwks.json` never hand-assembles the document and
+  mistypes a `kty`/`crv` or forgets a `kid`. Fail-fast at build
+  time: `kid` must be a non-empty string and unique across the
+  document, a symmetric secret key is refused (a JWKS publishes
+  public keys only), and so is a private key (pass the public
+  half); unsupported key shapes throw a configuration error. The
+  document never carries private material (no `"d"` member). New
+  types `JwksDocument`, `JwksDocumentEntry` and `JwksDocumentKey`
+  are exported. 14 new tests in `test/buildJwksDocument.test.ts`.
 - `memoizeKeyResolver` cache observability (backlog #1014): the
   returned resolver is now a callable object (still directly usable
   as a `VerifyOptions.keyResolver`) carrying `.stats()` — a detached

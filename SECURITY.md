@@ -135,7 +135,12 @@ Read this before using it anywhere that matters.
   implemented via the opt-in `JwksKeyStore`: `refresh()` fetches a JWKS
   document and imports its keys by `kid` (ed25519 / P-256 / RSA only;
   entries carrying private `"d"` material make the refresh throw), and
-  its synchronous `resolve` plugs into `keyResolver`. A fetched snapshot
+  its synchronous `resolve` plugs into `keyResolver`. The publishing
+  side is the mirror image: `buildJwksDocument` only ever emits
+  public keys — a symmetric secret or a private key is refused at
+  build time, so a published document cannot accidentally carry `"d"`
+  or `"k"` material; the document itself is public by design, so
+  serve it over HTTPS from a trusted origin. A fetched snapshot
   can be exported (`exportSnapshot()`) and restored
   (`JwksKeyStore.restore()`) across the same process's restart, but the
   exported snapshot is unsigned — anyone who can rewrite it can
