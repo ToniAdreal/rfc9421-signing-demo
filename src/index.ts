@@ -21,11 +21,14 @@ export type {
 } from "./replay.js";
 export { JwksKeyStore } from "./jwks.js";
 export type {
+  JwksAutoRefreshOptions,
+  JwksAutoRefreshTimer,
   JwksFetchImpl,
   JwksFetchResponse,
   JwksKeyStoreOptions,
   JwksKeyStoreSnapshot,
   JwksKeyStoreStats,
+  JwksSetIntervalImpl,
   JwksSignedSnapshotEnvelope,
   JwksSleepImpl,
   JwksSnapshotKey,

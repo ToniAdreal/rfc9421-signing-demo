@@ -81,6 +81,63 @@ export type JwksFetchImpl = (url: string) => Promise<JwksFetchResponse>;
 export type JwksSleepImpl = (ms: number) => Promise<void>;
 
 /**
+ * The minimal timer handle a {@link JwksSetIntervalImpl} returns.
+ * `clear` cancels the timer (the `clearInterval` half); `unref`
+ * detaches it from the event loop when the environment supports it
+ * (the `NodeJS.Timeout.unref` half) so the timer never holds a
+ * process open on its own. Both are called by
+ * {@link JwksKeyStore.startAutoRefresh} — `unref` once at start,
+ * `clear` when the returned `stop()` runs or `clear()` is called —
+ * so a stub only needs to record those two calls to pin the
+ * contract. The default implementation (see
+ * {@link JwksKeyStore.startAutoRefresh}) wraps the global
+ * `setInterval` / `clearInterval`.
+ */
+export interface JwksAutoRefreshTimer {
+  /** Detach the timer from the event loop, when supported. */
+  unref?: () => void;
+  /** Cancel the timer. Must be safe to call more than once. */
+  clear: () => void;
+}
+
+/**
+ * Interval implementation used by
+ * {@link JwksKeyStore.startAutoRefresh}. Receives the tick callback
+ * and the interval in milliseconds and returns a
+ * {@link JwksAutoRefreshTimer}. Defaults to the global `setInterval`
+ * (wrapped so the store can `clearInterval` it and `unref()` it).
+ * Inject a stub in tests to fire ticks deterministically without
+ * waiting for real time.
+ */
+export type JwksSetIntervalImpl = (
+  callback: () => void,
+  ms: number,
+) => JwksAutoRefreshTimer;
+
+/**
+ * Options for {@link JwksKeyStore.startAutoRefresh}.
+ */
+export interface JwksAutoRefreshOptions {
+  /**
+   * Called with the refresh error when a scheduled `refreshIfStale()`
+   * fails (network error, HTTP error, malformed JWKS document —
+   * exactly the errors `refresh()` throws). A failed tick never
+   * throws an uncaught exception: without `onError` the failure is
+   * silently swallowed and the next tick retries as usual, so a
+   * JWKS outage can never crash a long-lived verifier process
+   * through its refresh timer. If `onError` itself throws, that
+   * throw is likewise swallowed — the timer's contract is that it
+   * never raises.
+   */
+  onError?: (err: Error) => void;
+  /**
+   * Interval implementation (see {@link JwksSetIntervalImpl}).
+   * Defaults to the global `setInterval`.
+   */
+  setIntervalImpl?: JwksSetIntervalImpl;
+}
+
+/**
  * Options for {@link JwksKeyStore}.
  */
 export interface JwksKeyStoreOptions {
@@ -589,6 +646,28 @@ function computeSnapshotMac(
 }
 
 /**
+ * The default {@link JwksSetIntervalImpl}: the global `setInterval`,
+ * wrapped so the store can cancel it (`clearInterval`) and detach it
+ * from the event loop (`unref`) through the
+ * {@link JwksAutoRefreshTimer} shape instead of holding the raw
+ * `NodeJS.Timeout`.
+ */
+function defaultSetInterval(
+  callback: () => void,
+  ms: number,
+): JwksAutoRefreshTimer {
+  const timer = setInterval(callback, ms);
+  return {
+    unref: () => {
+      timer.unref();
+    },
+    clear: () => {
+      clearInterval(timer);
+    },
+  };
+}
+
+/**
  * Strictly validate untrusted snapshot data and import every key it
  * carries, returning the parsed freshness timestamp and key map.
  * Shared by the static and instance restore paths so both fail
@@ -685,7 +764,10 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   `keyResolver` synchronously, so the network fetch cannot live
  *   inside `resolve`. `refresh()` is the async half, called by the
  *   caller at startup and whenever `isStale()` says the snapshot is
- *   old (or on a timer); `resolve` is the sync half, deliberately an
+ *   old — either by the caller's own loop (`refreshIfStale()` is the
+ *   one-call form) or by the opt-in `startAutoRefresh()` timer,
+ *   which `unref()`s its timer and never lets a failed tick throw.
+ *   `resolve` is the sync half, deliberately an
  *   arrow-function property so `store.resolve` can be passed to
  *   `verifyRequest` / `memoizeKeyResolver` without `.bind(store)`.
  * - **A failed refresh never touches the old snapshot.** HTTP errors,
@@ -849,6 +931,14 @@ export class JwksKeyStore {
    * fresh fetch (a failure is never cached).
    */
   private inFlightRefresh: Promise<void> | null = null;
+  /**
+   * The auto-refresh timer started by `startAutoRefresh()`, if any.
+   * `null` when no auto-refresh is running (never started, stopped
+   * via the returned `stop()`, or stopped by `clear()`). The store
+   * owns exactly one at a time: starting a second one while one is
+   * running throws instead of silently stacking timers.
+   */
+  private autoRefreshTimer: JwksAutoRefreshTimer | null = null;
   /** Successful actual fetches (single-flight merges count once). */
   private refreshCount = 0;
   /** Failed actual fetches (single-flight merges count once). */
@@ -1062,8 +1152,13 @@ export class JwksKeyStore {
    * and installs its snapshot when it settles (see
    * {@link JwksKeyStore.refresh}). To retire keys while a refresh is
    * in flight, `clear()` again after that refresh settles.
+   *
+   * `clear()` also stops an auto-refresh started by
+   * {@link JwksKeyStore.startAutoRefresh}: a cleared store stops
+   * re-fetching as well as stops serving keys.
    */
   clear(): void {
+    this.stopAutoRefreshTimer();
     this.keysByKid = new Map<string, KeyObject>();
     this.lastRefreshAtSec = null;
     this.snapshotTtlSec = null;
@@ -1071,6 +1166,115 @@ export class JwksKeyStore {
     this.refreshFailureCount = 0;
     this.hitCount = 0;
     this.missCount = 0;
+  }
+
+  /**
+   * Stop the auto-refresh timer started by
+   * {@link JwksKeyStore.startAutoRefresh}, if one is running. Safe
+   * to call when none is running, and safe to call more than once:
+   * the second call is a no-op. Called by `clear()` as well, so a
+   * cleared store never keeps re-fetching. An in-flight refresh
+   * started by an earlier tick is not cancelled — it keeps its
+   * single-flight contract and installs its snapshot when it
+   * settles (see the same limit on `clear()`); only future ticks
+   * stop.
+   */
+  private stopAutoRefreshTimer(): void {
+    const timer = this.autoRefreshTimer;
+    if (timer === null) return;
+    this.autoRefreshTimer = null;
+    timer.clear();
+  }
+
+  /**
+   * Start opt-in automatic refresh: every `intervalMs` milliseconds
+   * the store calls `refreshIfStale()`, so a long-lived gateway
+   * verifier picks up key rotation without the caller writing its
+   * own polling loop — the two mistakes that loop invites (a timer
+   * left referenced so the process never exits, and an unhandled
+   * refresh rejection crashing the process) are handled here
+   * instead: the timer is `unref()`d when the environment supports
+   * it, and a failed tick never throws.
+   *
+   * `intervalMs` must be a finite number > 0 (an illegal value is a
+   * fail-fast configuration error, before any timer is created).
+   * Each tick is a `refreshIfStale()` call, so a fresh snapshot
+   * costs no fetch and no `stats()` change; a stale snapshot
+   * re-fetches with all of `refresh()`'s atomic semantics, and an
+   * auto-refresh fetch counts in `stats()` exactly like a manual
+   * one (see {@link JwksKeyStoreStats}).
+   *
+   * On a tick failure the error is passed to `opts.onError` when
+   * one is given, and silently swallowed otherwise — the timer
+   * keeps running and the next tick retries as usual, so a JWKS
+   * outage degrades to staleness instead of crashing the process.
+   * If `onError` itself throws, that throw is swallowed too: the
+   * timer's contract is that it never raises an uncaught exception.
+   * For testability, `opts.setIntervalImpl` replaces the global
+   * `setInterval` (see {@link JwksSetIntervalImpl}).
+   *
+   * Returns `stop()`: call it to stop the timer. `stop()` is
+   * idempotent — calling it twice (or after `clear()`, which also
+   * stops the timer) is safe, and it never clears a timer started
+   * by a later `startAutoRefresh()` call. Starting a second
+   * auto-refresh while one is already running throws a
+   * configuration error: stop the first one (or `clear()` the
+   * store) before starting another.
+   *
+   * The returned `stop()` only cancels future ticks. A refresh
+   * already in flight when `stop()` runs keeps its contract and
+   * installs its snapshot when it settles.
+   */
+  startAutoRefresh(
+    intervalMs: number,
+    opts: JwksAutoRefreshOptions = {},
+  ): () => void {
+    if (
+      typeof intervalMs !== "number" ||
+      !Number.isFinite(intervalMs) ||
+      intervalMs <= 0
+    )
+      throw new Error(
+        `JwksKeyStore: \`intervalMs\` must be a finite number > 0, got ${String(intervalMs)}`,
+      );
+    const { onError, setIntervalImpl } = opts;
+    if (onError !== undefined && typeof onError !== "function")
+      throw new Error("JwksKeyStore: `onError` must be a function");
+    if (setIntervalImpl !== undefined && typeof setIntervalImpl !== "function")
+      throw new Error(
+        "JwksKeyStore: `setIntervalImpl` must be a function",
+      );
+    if (this.autoRefreshTimer !== null)
+      throw new Error(
+        "JwksKeyStore: auto-refresh is already running " +
+          "(call the stop() returned by startAutoRefresh() or clear() first)",
+      );
+    const tick = (): void => {
+      this.refreshIfStale().catch((err: unknown) => {
+        const error =
+          err instanceof Error ? err : new Error(String(err));
+        if (onError === undefined) return;
+        try {
+          onError(error);
+        } catch {
+          // A throwing onError must not become an uncaught
+          // exception in the timer callback: swallow it, like a
+          // refresh failure without onError.
+        }
+      });
+    };
+    const createTimer = setIntervalImpl ?? defaultSetInterval;
+    const timer = createTimer(tick, intervalMs);
+    if (typeof timer.unref === "function") timer.unref();
+    this.autoRefreshTimer = timer;
+    return () => {
+      // Only this timer may be cleared here: if clear() already
+      // stopped it (or it was never started), this is a no-op, and
+      // a timer from a later startAutoRefresh() is never touched.
+      if (this.autoRefreshTimer !== timer) return;
+      this.autoRefreshTimer = null;
+      timer.clear();
+    };
   }
 
   /**

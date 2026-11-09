@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1835 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1848 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -786,6 +786,17 @@ waiter receives the same error), so a burst of verifiers hitting a stale
 window together cannot thundering-herd the endpoint. Only overlapping calls
 merge: once a refresh settles, the next call fetches again, and a failure is
 never cached.
+
+Automatic refresh (opt-in): `store.startAutoRefresh(60_000, { onError })`
+calls `refreshIfStale()` on a timer, so a long-lived gateway verifier picks
+up rotation without a hand-written polling loop. The timer is `unref()`d, so
+it never holds the process open on its own, and a failed tick never throws:
+it goes to `onError` when one is given and is silently swallowed otherwise
+(an `onError` that itself throws is swallowed too), so a JWKS outage
+degrades to staleness instead of crashing the process. The call returns
+`stop()` (idempotent; `clear()` stops the timer as well), and auto-refresh
+fetches count in `stats()` exactly like manual ones. The interval
+implementation is injectable (`setIntervalImpl`) for deterministic tests.
 
 Single-key fallback for keyid-less signatures (opt-in): `keyid` is
 optional in RFC 9421, and this library's own `signRequest` omits it
@@ -1792,9 +1803,10 @@ const dual = addResponseSignature(merchantSigned, {
   signed envelope, `exportSignedSnapshot` /
   `restoreSignedSnapshot`, catches a rewritten snapshot at restore
   time), and deciding
-  *when* to re-fetch is your loop — `refreshIfStale()` performs the
-  staleness check and the re-fetch in one call, but nothing calls
-  it for you. Until a successful `refresh()` replaces the snapshot,
+  *when* to re-fetch is your loop by default — `refreshIfStale()` performs the
+  staleness check and the re-fetch in one call, and the opt-in
+  `startAutoRefresh()` timer is the built-in form of that loop
+  (unref'd, never throwing on a failed tick). Until a successful `refresh()` replaces the snapshot,
   a revoked key keeps verifying; a failed refresh never replaces
   the last good snapshot.
 
@@ -1868,14 +1880,16 @@ const dual = addResponseSignature(merchantSigned, {
 - **Demo-grade key management.** Keys are passed in directly, resolved via a
   caller-provided `keyResolver`, or fetched from a JWKS endpoint via
   `JwksKeyStore`; there is still no built-in persistent keystore and no
-  automatic rotation schedule — a `JwksKeyStore` snapshot can be exported
+  automatic rotation schedule by default — a `JwksKeyStore` snapshot can be exported
   and restored across a single process's restart, but the library never
   writes it anywhere itself, its unsigned persisted form is unsigned
   (trusted configuration only; the opt-in signed envelope,
   `exportSignedSnapshot` / `restoreSignedSnapshot`, catches a
-  rewritten snapshot at restore time), and deciding *when* to re-fetch remains the
-  caller's loop (`refreshIfStale()` performs the `isStale()` check and
-  the re-fetch in one call, but nothing calls it for you). Trusting
+  rewritten snapshot at restore time), and deciding *when* to re-fetch is the
+  caller's loop by default (`refreshIfStale()` performs the `isStale()` check and
+  the re-fetch in one call; the opt-in `startAutoRefresh()` timer is the
+  built-in form of that loop, unref'd and never throwing on a failed tick).
+  Trusting
   the JWKS endpoint is the caller's responsibility (see SECURITY.md).
 
 ## Interoperability
@@ -4073,7 +4087,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1835 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1848 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

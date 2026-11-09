@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Opt-in `JwksKeyStore` auto-refresh (backlog #1008):
+  `startAutoRefresh(intervalMs, { onError, setIntervalImpl })`
+  calls `refreshIfStale()` on a timer, so a long-lived gateway
+  verifier picks up key rotation without a hand-written polling
+  loop. The timer is `unref()`d (it never holds the process open),
+  a failed tick never throws — it goes to `onError` when one is
+  given and is silently swallowed otherwise (a throwing `onError`
+  is swallowed too) — and the call returns an idempotent `stop()`
+  (`clear()` stops the timer as well). Starting a second
+  auto-refresh while one runs is a fail-fast configuration error.
+  Auto-refresh fetches count in `stats()` exactly like manual
+  ones. 13 new tests in `test/jwksAutoRefresh.test.ts`.
 - Private-key JWK import demo segment (backlog #1005): the CLI
   demo closes with an `importPrivateKeyJwk` segment — a fixed
   ed25519 private JWK (demo-only) is carried through a JSON wire
