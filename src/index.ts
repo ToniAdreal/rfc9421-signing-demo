@@ -76,6 +76,8 @@ export type {
   ExportSymmetricKeyJwkOptions,
   HmacJwk,
   MemoizeKeyResolverOptions,
+  MemoizeKeyResolverStats,
+  MemoizedKeyResolver,
   P256PublicJwk,
   P384PublicJwk,
   P521PublicJwk,

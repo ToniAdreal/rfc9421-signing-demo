@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `memoizeKeyResolver` cache observability (backlog #1014): the
+  returned resolver is now a callable object (still directly usable
+  as a `VerifyOptions.keyResolver`) carrying `.stats()` — a detached
+  `{ size, hits, misses, evictions }` snapshot in the same shape as
+  `ReplayCacheStats` — and `.clear()` (empties the cache and resets
+  every counter). `evictions` counts both routes out of the cache:
+  expired entries reclaimed on read or while making room, and
+  least-recently-used entries evicted from a full cache, so a caller
+  can tell whether the cache is absorbing lookups and whether a
+  stream of one-off `keyid`s is driving evictions. New types
+  `MemoizedKeyResolver` and `MemoizeKeyResolverStats` are exported.
+  8 new tests in `test/memoizeKeyResolverStats.test.ts`.
 - Opt-in `JwksKeyStore` auto-refresh (backlog #1008):
   `startAutoRefresh(intervalMs, { onError, setIntervalImpl })`
   calls `refreshIfStale()` on a timer, so a long-lived gateway

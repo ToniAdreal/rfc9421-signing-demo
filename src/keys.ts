@@ -1438,6 +1438,44 @@ export interface MemoizeKeyResolverOptions {
 }
 
 /**
+ * Detached snapshot of a {@link MemoizedKeyResolver}'s cache counters,
+ * produced by `stats()` — the same shape as `ReplayCacheStats`, so the
+ * two cache primitives report identically.
+ *
+ * - `size`: entries currently cached.
+ * - `hits`: lookups served from the cache (a hit refreshes recency but
+ *   never extends the entry's TTL).
+ * - `misses`: lookups that found no live entry — no entry, an expired
+ *   entry, or an unknown `keyid` the resolver returned `undefined` for.
+ * - `evictions`: entries removed by expiry reclamation or LRU pressure
+ *   — an expired entry found on read, expired entries reclaimed while
+ *   making room, and least-recently-used entries evicted from a full
+ *   cache. `clear()` resets all four fields to zero.
+ */
+export interface MemoizeKeyResolverStats {
+  size: number;
+  hits: number;
+  misses: number;
+  evictions: number;
+}
+
+/**
+ * A `keyid`→key resolver returned by {@link memoizeKeyResolver}: still
+ * directly callable as a `VerifyOptions.keyResolver`, with cache
+ * observability attached.
+ *
+ * - `stats()` returns a detached snapshot — mutating it never affects
+ *   the cache.
+ * - `clear()` empties the cache and resets every counter to zero, so a
+ *   key rotation (or a test) can start from a known-empty state.
+ */
+export interface MemoizedKeyResolver {
+  (keyId: string): KeyObject | undefined;
+  stats(): MemoizeKeyResolverStats;
+  clear(): void;
+}
+
+/**
  * Wrap a `keyid`→key resolver (see `VerifyOptions.keyResolver`) with an
  * in-memory TTL cache keyed by `keyid`.
  *
@@ -1467,6 +1505,13 @@ export interface MemoizeKeyResolverOptions {
  * rotated-out key alive past its original expiry, mirroring
  * `ReplayCache`'s "hit does not renew" semantics.
  *
+ * Observability: the returned resolver carries `.stats()` (a detached
+ * `{ size, hits, misses, evictions }` snapshot, same shape as
+ * `ReplayCacheStats`) and `.clear()` (empties the cache and resets the
+ * counters), so a caller can tell whether the cache is actually working
+ * and whether a stream of one-off `keyid`s is driving LRU evictions —
+ * the same counters `ReplayCache` and `JwksKeyStore` already expose.
+ *
  * @example
  * ```ts
  * import { memoizeKeyResolver } from "./dist/src/index.js";
@@ -1475,12 +1520,13 @@ export interface MemoizeKeyResolverOptions {
  *   ttlSec: 300,
  * });
  * // pass `keyResolver` to every verifyRequest call
+ * keyResolver.stats(); // { size, hits, misses, evictions }
  * ```
  */
 export function memoizeKeyResolver(
   resolver: (keyId: string) => KeyObject | undefined,
   opts: MemoizeKeyResolverOptions = {},
-): (keyId: string) => KeyObject | undefined {
+): MemoizedKeyResolver {
   if (typeof resolver !== "function") {
     throw new Error("memoizeKeyResolver: `resolver` must be a function");
   }
@@ -1506,21 +1552,29 @@ export function memoizeKeyResolver(
   }
   // Insertion order = LRU order: hits re-insert their entry at the tail.
   const cache = new Map<string, { key: KeyObject; expiresAt: number }>();
+  let hits = 0;
+  let misses = 0;
+  let evictions = 0;
   // Make room for one new entry: reclaim expired entries first, then
   // evict least recently used (head of the Map) until there is room.
+  // Every entry removed here — expired or LRU — counts as an eviction.
   const makeRoom = (t: number): void => {
     if (cache.size < maxEntries) return;
     for (const [id, entry] of cache) {
-      if (t >= entry.expiresAt) cache.delete(id);
+      if (t >= entry.expiresAt) {
+        cache.delete(id);
+        evictions++;
+      }
       if (cache.size < maxEntries) return;
     }
     while (cache.size >= maxEntries) {
       const oldest = cache.keys().next();
       if (oldest.done) break;
       cache.delete(oldest.value);
+      evictions++;
     }
   };
-  return (keyId: string): KeyObject | undefined => {
+  const memoized = ((keyId: string): KeyObject | undefined => {
     const t = now();
     const hit = cache.get(keyId);
     if (hit !== undefined) {
@@ -1529,15 +1583,33 @@ export function memoizeKeyResolver(
         // not extend the entry's TTL.
         cache.delete(keyId);
         cache.set(keyId, hit);
+        hits++;
         return hit.key;
       }
+      // Expired on read: reclaim the stale entry (counts as an
+      // eviction) and fall through to a miss below.
       cache.delete(keyId);
+      evictions++;
     }
+    misses++;
     const resolved = resolver(keyId);
     if (resolved !== undefined) {
       makeRoom(t);
       cache.set(keyId, { key: resolved, expiresAt: t + ttlSec });
     }
     return resolved;
+  }) as MemoizedKeyResolver;
+  memoized.stats = (): MemoizeKeyResolverStats => ({
+    size: cache.size,
+    hits,
+    misses,
+    evictions,
+  });
+  memoized.clear = (): void => {
+    cache.clear();
+    hits = 0;
+    misses = 0;
+    evictions = 0;
   };
+  return memoized;
 }

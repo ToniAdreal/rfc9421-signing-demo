@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1848 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1856 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -368,6 +368,17 @@ const keyResolver = memoizeKeyResolver((keyId) => store.get(keyId), {
 });
 // pass `keyResolver` to every verifyRequest call
 ```
+
+The returned resolver is still directly callable as a `keyResolver`, and it
+carries cache observability: `keyResolver.stats()` returns a detached
+`{ size, hits, misses, evictions }` snapshot (the same shape
+`ReplayCache` reports), so a gateway can tell whether the cache is
+actually absorbing lookups and whether a stream of one-off `keyid`s is
+driving evictions. `evictions` counts both routes out of the cache —
+expired entries reclaimed (on read, or while making room for a new
+entry) and least-recently-used entries evicted from a full cache.
+`keyResolver.clear()` empties the cache and resets every counter to
+zero, e.g. after a key rotation or between tests.
 
 Key rotation without `keyid` (Stripe-style webhook secret rollover): pass
 `candidateKeys` — an ordered list of keys — and the verifier tries each in
@@ -4087,7 +4098,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1848 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1856 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
