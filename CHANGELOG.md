@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Private-key JWK exporters (backlog #1026): `exportPrivateKeyJwk`
+  (ed25519), `exportPrivateKeyJwkP256` / `P384` / `P521`, and
+  `exportPrivateKeyJwkRsa` — one exporter per key family, each returning
+  exactly the shape `importPrivateKeyJwk` accepts (`{ kty, crv, x, y, d }`
+  for EC, `{ kty, n, e, d, p, q, dp, dq, qi }` for RSA, no extra
+  members), so generate → export → wire round-trip → import → sign
+  closes without a PEM detour. Fail-closed in reverse: a public key, a
+  symmetric secret, a wrong-curve key, or an RSA key below the 2048-bit
+  floor is refused at export, and the original `KeyObject` keeps working
+  after export. `test/exportPrivateKeyJwk.test.ts` gains 13 tests (five
+  family round-trips with `x`/`d` byte-identical to node:crypto's own
+  export, RSA serving both `rsa-pss-sha512` and `rsa-v1_5-sha256`,
+  byte-identical re-export after import, deterministic double export,
+  public-key / curve-mismatch / cross-family / `oct` refusals, 1024-bit
+  RSA refused at export, original key still signs). A dropped-floor
+  mutation was verified to turn exactly the weak-RSA test red. Private
+  JWKs are secret material by design: trusted migration / backup only,
+  never logged, never published (`buildJwksDocument` still refuses
+  private keys).
+
 - Opt-in response signing for the verified handler (backlog #1025):
   `CreateVerifiedHandlerOptions.signResponse` (a
   `VerifiedHandlerSignResponseOptions` — exactly the `signResponse`

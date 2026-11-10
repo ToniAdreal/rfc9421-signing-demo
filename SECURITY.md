@@ -140,7 +140,14 @@ Read this before using it anywhere that matters.
   public keys — a symmetric secret or a private key is refused at
   build time, so a published document cannot accidentally carry `"d"`
   or `"k"` material; the document itself is public by design, so
-  serve it over HTTPS from a trusted origin. A fetched snapshot
+  serve it over HTTPS from a trusted origin. The export side is the
+  deliberate exception: `exportPrivateKeyJwk` / `exportPrivateKeyJwkP256` /
+  `exportPrivateKeyJwkP384` / `exportPrivateKeyJwkP521` /
+  `exportPrivateKeyJwkRsa` produce private JWKs by design, for trusted
+  key migration / backup only — exporting one widens the diffusion
+  surface to wherever the JWK travels, so treat the output exactly like
+  the key itself (never log it, never publish it, never send it over a
+  channel you would not trust with the private key). A fetched snapshot
   can be exported (`exportSnapshot()`) and restored
   (`JwksKeyStore.restore()`) across the same process's restart, but the
   exported snapshot is unsigned — anyone who can rewrite it can

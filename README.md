@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1897 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1910 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -765,6 +765,28 @@ const privateKey = importPrivateKeyJwk(JSON.parse(kmsExportedJson)); // { kty: "
 const signed = signRequest(req, { keyId: "kms-key-1", alg: "ed25519", key: privateKey });
 // An RSA private JWK must carry the full CRT set (n/e/d/p/q/dp/dq/qi);
 // a KMS export with only n/e/d is refused with a named error.
+```
+
+The export side of the same loop is `exportPrivateKeyJwk` (ed25519),
+`exportPrivateKeyJwkP256` / `P384` / `P521`, and
+`exportPrivateKeyJwkRsa` — one exporter per key family, each returning
+exactly the shape `importPrivateKeyJwk` accepts (`{ kty, crv, x, y, d }`
+for EC, `{ kty, n, e, d, p, q, dp, dq, qi }` for RSA, no extra members),
+so generate → export → wire round-trip → import → sign closes without a
+PEM detour. The same fail-closed rules apply in reverse: a public key,
+a symmetric secret, a wrong-curve key, or an RSA key below the 2048-bit
+floor is refused at export, and the original `KeyObject` keeps working
+after export. One honest difference from the public exporters: a private
+JWK *is* the key, so it is for trusted key migration / backup only —
+export it over a channel already trusted for the private key itself,
+never log it, and never hand it to `buildJwksDocument` (which still
+refuses private keys outright).
+
+```ts
+import { exportPrivateKeyJwk, generateEd25519KeyPair, importPrivateKeyJwk } from "./dist/src/index.js";
+const { privateKey } = generateEd25519KeyPair();
+const jwk = exportPrivateKeyJwk(privateKey); // { kty: "OKP", crv: "Ed25519", x: "...", d: "..." }
+const restored = importPrivateKeyJwk(JSON.parse(JSON.stringify(jwk))); // signs exactly like the original
 ```
 
 Stable `keyid` derivation for those JWKs: `jwkThumbprint(jwk)` computes
@@ -4237,7 +4259,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1897 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1910 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

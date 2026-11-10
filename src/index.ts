@@ -41,6 +41,11 @@ export {
   assertRsaModulusLength,
   buildJwksDocument,
   describeKey,
+  exportPrivateKeyJwk,
+  exportPrivateKeyJwkP256,
+  exportPrivateKeyJwkP384,
+  exportPrivateKeyJwkP521,
+  exportPrivateKeyJwkRsa,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -73,6 +78,7 @@ export {
   secretKey,
 } from "./keys.js";
 export type {
+  Ed25519PrivateJwk,
   Ed25519PublicJwk,
   ExportSymmetricKeyJwkOptions,
   HmacJwk,
@@ -82,9 +88,13 @@ export type {
   MemoizeKeyResolverOptions,
   MemoizeKeyResolverStats,
   MemoizedKeyResolver,
+  P256PrivateJwk,
   P256PublicJwk,
+  P384PrivateJwk,
   P384PublicJwk,
+  P521PrivateJwk,
   P521PublicJwk,
+  RsaPrivateJwk,
   RsaPublicJwk,
 } from "./keys.js";
 export {

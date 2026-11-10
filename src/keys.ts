@@ -326,6 +326,73 @@ export function exportPublicKeyJwk(key: KeyObject): Ed25519PublicJwk {
 }
 
 /**
+ * Private-key JWK view of an ed25519 key, exactly as produced by
+ * {@link exportPrivateKeyJwk} and accepted by
+ * {@link importPrivateKeyJwk}. RFC 8037: the private half adds the
+ * base64url `d` (32-byte seed) to the public shape.
+ *
+ * Unlike the public-key JWK shapes above, this one *is* secret
+ * material: whoever holds it can sign as the key's owner. It exists
+ * for trusted key migration / backup only — export it over a channel
+ * already trusted for the private key itself, never log it, and never
+ * publish it (see {@link buildJwksDocument}, which still refuses
+ * private keys outright).
+ */
+export interface Ed25519PrivateJwk {
+  kty: "OKP";
+  crv: "Ed25519";
+  /** Base64url-encoded 32-byte ed25519 public key. */
+  x: string;
+  /** Base64url-encoded 32-byte ed25519 private seed. */
+  d: string;
+}
+
+/**
+ * Export an ed25519 private key as a plain-object JWK (RFC 8037) —
+ * the private counterpart of {@link exportPublicKeyJwk}, closing the
+ * generate → export → wire round-trip → {@link importPrivateKeyJwk}
+ * → sign key-management loop without a PEM detour. Uses node:crypto's
+ * native JWK support — no third-party dependencies.
+ *
+ * The returned shape is exactly what {@link importPrivateKeyJwk}
+ * accepts (`{ kty: "OKP", crv: "Ed25519", x, d }`, no extra members),
+ * so an exported JWK survives a `JSON.stringify` / `JSON.parse`
+ * round-trip and re-imports to the same key.
+ *
+ * Throws a caller-configuration `Error` for anything that is not an
+ * ed25519 private KeyObject (a public key, a symmetric secret, another
+ * algorithm or curve). Private JWKs are secret material by design:
+ * only export over a channel already trusted for the private key
+ * itself, never log the result, and never hand it to
+ * {@link buildJwksDocument}.
+ */
+export function exportPrivateKeyJwk(key: KeyObject): Ed25519PrivateJwk {
+  if (key.type !== "private" || key.asymmetricKeyType !== "ed25519")
+    throw new Error(
+      `exportPrivateKeyJwk: expected an ed25519 private KeyObject, got ` +
+        `type=${String(key.type)} ` +
+        `asymmetricKeyType=${String(key.asymmetricKeyType)} ` +
+        `(this helper exports ed25519 private keys only — a public key or a symmetric secret is a caller error)`,
+    );
+  const raw = key.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  // Node emits exactly { kty: "OKP", crv: "Ed25519", x: "<base64url>", d: "<base64url>" }.
+  if (
+    raw["kty"] !== "OKP" ||
+    raw["crv"] !== "Ed25519" ||
+    typeof raw["x"] !== "string" ||
+    typeof raw["d"] !== "string"
+  )
+    throw new Error(
+      "exportPrivateKeyJwk: node:crypto returned an unexpected JWK shape " +
+        `for an ed25519 private key: ${JSON.stringify(Object.keys(raw))}`,
+    );
+  return { kty: "OKP", crv: "Ed25519", x: raw["x"], d: raw["d"] };
+}
+
+/**
  * Import an ed25519 public key from a JWK object (RFC 8037), as produced by
  * {@link exportPublicKeyJwk} and typically received over the wire as JSON.
  *
@@ -433,6 +500,87 @@ export function exportPublicKeyJwkP256(key: KeyObject): P256PublicJwk {
         `for a P-256 public key: ${JSON.stringify(Object.keys(raw))}`,
     );
   return { kty: "EC", crv: "P-256", x: raw["x"], y: raw["y"] };
+}
+
+/**
+ * Private-key JWK view of a NIST P-256 key, exactly as produced by
+ * {@link exportPrivateKeyJwkP256} and accepted by
+ * {@link importPrivateKeyJwk}. RFC 7518 §6.2: the private half adds
+ * the base64url `d` (32-byte scalar) to the public shape.
+ *
+ * Secret material, same policy as {@link Ed25519PrivateJwk}: trusted
+ * key migration / backup only — never log it, never publish it (see
+ * {@link buildJwksDocument}, which still refuses private keys).
+ */
+export interface P256PrivateJwk {
+  kty: "EC";
+  crv: "P-256";
+  /** Base64url-encoded 32-byte x coordinate. */
+  x: string;
+  /** Base64url-encoded 32-byte y coordinate. */
+  y: string;
+  /** Base64url-encoded 32-byte private scalar. */
+  d: string;
+}
+
+/**
+ * Export a NIST P-256 private key as a plain-object JWK (RFC 7518
+ * §6.2) — the private counterpart of {@link exportPublicKeyJwkP256},
+ * closing the generate → export → wire round-trip →
+ * {@link importPrivateKeyJwk} → sign key-management loop without a
+ * PEM detour. Uses node:crypto's native JWK support — no third-party
+ * dependencies.
+ *
+ * The returned shape is exactly what {@link importPrivateKeyJwk}
+ * accepts (`{ kty: "EC", crv: "P-256", x, y, d }`, no extra members),
+ * so an exported JWK survives a `JSON.stringify` / `JSON.parse`
+ * round-trip and re-imports to the same key.
+ *
+ * Throws a caller-configuration `Error` for anything that is not a
+ * P-256 private KeyObject (a public key, a symmetric secret, another
+ * curve or algorithm — a P-384 key is refused here, never silently
+ * re-interpreted). Private JWKs are secret material by design: only
+ * export over a channel already trusted for the private key itself,
+ * never log the result, and never hand it to
+ * {@link buildJwksDocument}.
+ */
+export function exportPrivateKeyJwkP256(key: KeyObject): P256PrivateJwk {
+  const namedCurve = key.asymmetricKeyDetails?.namedCurve;
+  if (
+    key.type !== "private" ||
+    key.asymmetricKeyType !== "ec" ||
+    namedCurve !== "prime256v1"
+  )
+    throw new Error(
+      `exportPrivateKeyJwkP256: expected a P-256 private KeyObject, got ` +
+        `type=${String(key.type)} ` +
+        `asymmetricKeyType=${String(key.asymmetricKeyType)} ` +
+        `namedCurve=${String(namedCurve)} ` +
+        `(this helper exports P-256 private keys only — a public key, a symmetric secret, or another curve is a caller error)`,
+    );
+  const raw = key.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  // Node emits exactly { kty: "EC", crv: "P-256", x: "<base64url>", y: "<base64url>", d: "<base64url>" }.
+  if (
+    raw["kty"] !== "EC" ||
+    raw["crv"] !== "P-256" ||
+    typeof raw["x"] !== "string" ||
+    typeof raw["y"] !== "string" ||
+    typeof raw["d"] !== "string"
+  )
+    throw new Error(
+      "exportPrivateKeyJwkP256: node:crypto returned an unexpected JWK shape " +
+        `for a P-256 private key: ${JSON.stringify(Object.keys(raw))}`,
+    );
+  return {
+    kty: "EC",
+    crv: "P-256",
+    x: raw["x"],
+    y: raw["y"],
+    d: raw["d"],
+  };
 }
 
 /**
@@ -552,6 +700,87 @@ export function exportPublicKeyJwkP384(key: KeyObject): P384PublicJwk {
 }
 
 /**
+ * Private-key JWK view of a NIST P-384 key, exactly as produced by
+ * {@link exportPrivateKeyJwkP384} and accepted by
+ * {@link importPrivateKeyJwk}. RFC 7518 §6.2: the private half adds
+ * the base64url `d` (48-byte scalar) to the public shape.
+ *
+ * Secret material, same policy as {@link Ed25519PrivateJwk}: trusted
+ * key migration / backup only — never log it, never publish it (see
+ * {@link buildJwksDocument}, which still refuses private keys).
+ */
+export interface P384PrivateJwk {
+  kty: "EC";
+  crv: "P-384";
+  /** Base64url-encoded 48-byte x coordinate. */
+  x: string;
+  /** Base64url-encoded 48-byte y coordinate. */
+  y: string;
+  /** Base64url-encoded 48-byte private scalar. */
+  d: string;
+}
+
+/**
+ * Export a NIST P-384 private key as a plain-object JWK (RFC 7518
+ * §6.2) — the private counterpart of {@link exportPublicKeyJwkP384},
+ * closing the generate → export → wire round-trip →
+ * {@link importPrivateKeyJwk} → sign key-management loop without a
+ * PEM detour. Uses node:crypto's native JWK support — no third-party
+ * dependencies.
+ *
+ * The returned shape is exactly what {@link importPrivateKeyJwk}
+ * accepts (`{ kty: "EC", crv: "P-384", x, y, d }`, no extra members),
+ * so an exported JWK survives a `JSON.stringify` / `JSON.parse`
+ * round-trip and re-imports to the same key.
+ *
+ * Throws a caller-configuration `Error` for anything that is not a
+ * P-384 private KeyObject (a public key, a symmetric secret, another
+ * curve or algorithm — a P-256 key is refused here, never silently
+ * re-interpreted). Private JWKs are secret material by design: only
+ * export over a channel already trusted for the private key itself,
+ * never log the result, and never hand it to
+ * {@link buildJwksDocument}.
+ */
+export function exportPrivateKeyJwkP384(key: KeyObject): P384PrivateJwk {
+  const namedCurve = key.asymmetricKeyDetails?.namedCurve;
+  if (
+    key.type !== "private" ||
+    key.asymmetricKeyType !== "ec" ||
+    namedCurve !== "secp384r1"
+  )
+    throw new Error(
+      `exportPrivateKeyJwkP384: expected a P-384 private KeyObject, got ` +
+        `type=${String(key.type)} ` +
+        `asymmetricKeyType=${String(key.asymmetricKeyType)} ` +
+        `namedCurve=${String(namedCurve)} ` +
+        `(this helper exports P-384 private keys only — a public key, a symmetric secret, or another curve is a caller error)`,
+    );
+  const raw = key.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  // Node emits exactly { kty: "EC", crv: "P-384", x: "<base64url>", y: "<base64url>", d: "<base64url>" }.
+  if (
+    raw["kty"] !== "EC" ||
+    raw["crv"] !== "P-384" ||
+    typeof raw["x"] !== "string" ||
+    typeof raw["y"] !== "string" ||
+    typeof raw["d"] !== "string"
+  )
+    throw new Error(
+      "exportPrivateKeyJwkP384: node:crypto returned an unexpected JWK shape " +
+        `for a P-384 private key: ${JSON.stringify(Object.keys(raw))}`,
+    );
+  return {
+    kty: "EC",
+    crv: "P-384",
+    x: raw["x"],
+    y: raw["y"],
+    d: raw["d"],
+  };
+}
+
+/**
  * Import a NIST P-384 public key from a JWK object (RFC 7518 §6.2), as
  * produced by {@link exportPublicKeyJwkP384} and typically received over
  * the wire as JSON.
@@ -667,6 +896,87 @@ export function exportPublicKeyJwkP521(key: KeyObject): P521PublicJwk {
         `for a P-521 public key: ${JSON.stringify(Object.keys(raw))}`,
     );
   return { kty: "EC", crv: "P-521", x: raw["x"], y: raw["y"] };
+}
+
+/**
+ * Private-key JWK view of a NIST P-521 key, exactly as produced by
+ * {@link exportPrivateKeyJwkP521} and accepted by
+ * {@link importPrivateKeyJwk}. RFC 7518 §6.2: the private half adds
+ * the base64url `d` (66-byte scalar) to the public shape.
+ *
+ * Secret material, same policy as {@link Ed25519PrivateJwk}: trusted
+ * key migration / backup only — never log it, never publish it (see
+ * {@link buildJwksDocument}, which still refuses private keys).
+ */
+export interface P521PrivateJwk {
+  kty: "EC";
+  crv: "P-521";
+  /** Base64url-encoded 66-byte x coordinate. */
+  x: string;
+  /** Base64url-encoded 66-byte y coordinate. */
+  y: string;
+  /** Base64url-encoded 66-byte private scalar. */
+  d: string;
+}
+
+/**
+ * Export a NIST P-521 private key as a plain-object JWK (RFC 7518
+ * §6.2) — the private counterpart of {@link exportPublicKeyJwkP521},
+ * closing the generate → export → wire round-trip →
+ * {@link importPrivateKeyJwk} → sign key-management loop without a
+ * PEM detour. Uses node:crypto's native JWK support — no third-party
+ * dependencies.
+ *
+ * The returned shape is exactly what {@link importPrivateKeyJwk}
+ * accepts (`{ kty: "EC", crv: "P-521", x, y, d }`, no extra members),
+ * so an exported JWK survives a `JSON.stringify` / `JSON.parse`
+ * round-trip and re-imports to the same key.
+ *
+ * Throws a caller-configuration `Error` for anything that is not a
+ * P-521 private KeyObject (a public key, a symmetric secret, another
+ * curve or algorithm — a P-384 key is refused here, never silently
+ * re-interpreted). Private JWKs are secret material by design: only
+ * export over a channel already trusted for the private key itself,
+ * never log the result, and never hand it to
+ * {@link buildJwksDocument}.
+ */
+export function exportPrivateKeyJwkP521(key: KeyObject): P521PrivateJwk {
+  const namedCurve = key.asymmetricKeyDetails?.namedCurve;
+  if (
+    key.type !== "private" ||
+    key.asymmetricKeyType !== "ec" ||
+    namedCurve !== "secp521r1"
+  )
+    throw new Error(
+      `exportPrivateKeyJwkP521: expected a P-521 private KeyObject, got ` +
+        `type=${String(key.type)} ` +
+        `asymmetricKeyType=${String(key.asymmetricKeyType)} ` +
+        `namedCurve=${String(namedCurve)} ` +
+        `(this helper exports P-521 private keys only — a public key, a symmetric secret, or another curve is a caller error)`,
+    );
+  const raw = key.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  // Node emits exactly { kty: "EC", crv: "P-521", x: "<base64url>", y: "<base64url>", d: "<base64url>" }.
+  if (
+    raw["kty"] !== "EC" ||
+    raw["crv"] !== "P-521" ||
+    typeof raw["x"] !== "string" ||
+    typeof raw["y"] !== "string" ||
+    typeof raw["d"] !== "string"
+  )
+    throw new Error(
+      "exportPrivateKeyJwkP521: node:crypto returned an unexpected JWK shape " +
+        `for a P-521 private key: ${JSON.stringify(Object.keys(raw))}`,
+    );
+  return {
+    kty: "EC",
+    crv: "P-521",
+    x: raw["x"],
+    y: raw["y"],
+    d: raw["d"],
+  };
 }
 
 /**
@@ -791,6 +1101,99 @@ export function exportPublicKeyJwkRsa(key: KeyObject): RsaPublicJwk {
         `for an RSA public key: ${JSON.stringify(Object.keys(raw))}`,
     );
   return { kty: "RSA", n: raw["n"], e: raw["e"] };
+}
+
+/**
+ * Private-key JWK view of an RSA key, exactly as produced by
+ * {@link exportPrivateKeyJwkRsa} and accepted by
+ * {@link importPrivateKeyJwk}. RFC 7518 §6.3: the private half adds
+ * `d` plus the full CRT set (`p`, `q`, `dp`, `dq`, `qi`) to the
+ * public shape — node:crypto refuses an RSA private JWK with only
+ * `n`/`e`/`d`, so all five CRT members are always present here.
+ *
+ * Secret material, same policy as {@link Ed25519PrivateJwk}: trusted
+ * key migration / backup only — never log it, never publish it (see
+ * {@link buildJwksDocument}, which still refuses private keys).
+ */
+export interface RsaPrivateJwk {
+  kty: "RSA";
+  /** Base64url-encoded modulus. */
+  n: string;
+  /** Base64url-encoded public exponent (typically "AQAB" = 65537). */
+  e: string;
+  /** Base64url-encoded private exponent. */
+  d: string;
+  /** Base64url-encoded first prime factor. */
+  p: string;
+  /** Base64url-encoded second prime factor. */
+  q: string;
+  /** Base64url-encoded first CRT exponent (`d mod (p-1)`). */
+  dp: string;
+  /** Base64url-encoded second CRT exponent (`d mod (q-1)`). */
+  dq: string;
+  /** Base64url-encoded first CRT coefficient (`q^-1 mod p`). */
+  qi: string;
+}
+
+/**
+ * Export an RSA private key as a plain-object JWK (RFC 7518 §6.3) —
+ * the private counterpart of {@link exportPublicKeyJwkRsa}, closing
+ * the generate → export → wire round-trip →
+ * {@link importPrivateKeyJwk} → sign key-management loop without a
+ * PEM detour. Uses node:crypto's native JWK support — no third-party
+ * dependencies. The same exported JWK serves both RSA algorithms
+ * (`rsa-pss-sha512` and `rsa-v1_5-sha256`): the JWK shape carries no
+ * `alg`, so the algorithm distinction lives only in each signature's
+ * `alg` parameter.
+ *
+ * The returned shape is exactly what {@link importPrivateKeyJwk}
+ * accepts (`{ kty: "RSA", n, e, d, p, q, dp, dq, qi }`, no extra
+ * members), so an exported JWK survives a `JSON.stringify` /
+ * `JSON.parse` round-trip and re-imports to the same key.
+ *
+ * Throws a caller-configuration `Error` for anything that is not an
+ * RSA private KeyObject (a public key, a symmetric secret, another
+ * algorithm), and for an RSA key below the 2048-bit modulus floor
+ * ({@link MIN_RSA_MODULUS_BITS}, via {@link assertRsaModulusLength})
+ * — a weak key fails loudly at export, never at first sign. Private
+ * JWKs are secret material by design: only export over a channel
+ * already trusted for the private key itself, never log the result,
+ * and never hand it to {@link buildJwksDocument}.
+ */
+export function exportPrivateKeyJwkRsa(key: KeyObject): RsaPrivateJwk {
+  if (key.type !== "private" || key.asymmetricKeyType !== "rsa")
+    throw new Error(
+      `exportPrivateKeyJwkRsa: expected an RSA private KeyObject, got ` +
+        `type=${String(key.type)} ` +
+        `asymmetricKeyType=${String(key.asymmetricKeyType)} ` +
+        `(this helper exports RSA private keys only — a public key or a symmetric secret is a caller error)`,
+    );
+  // Same floor as the importers and the rsa-v1_5-sha256 sign path:
+  // a sub-floor private key is refused at export, not parked in a
+  // JWK that only fails when first used to sign.
+  assertRsaModulusLength(key, "exportPrivateKeyJwkRsa");
+  const raw = key.export({ format: "jwk" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  // Node emits exactly { kty: "RSA", n, e, d, p, q, dp, dq, qi } (all base64url).
+  const members = ["n", "e", "d", "p", "q", "dp", "dq", "qi"] as const;
+  if (raw["kty"] !== "RSA" || members.some((m) => typeof raw[m] !== "string"))
+    throw new Error(
+      "exportPrivateKeyJwkRsa: node:crypto returned an unexpected JWK shape " +
+        `for an RSA private key: ${JSON.stringify(Object.keys(raw))}`,
+    );
+  return {
+    kty: "RSA",
+    n: raw["n"] as string,
+    e: raw["e"] as string,
+    d: raw["d"] as string,
+    p: raw["p"] as string,
+    q: raw["q"] as string,
+    dp: raw["dp"] as string,
+    dq: raw["dq"] as string,
+    qi: raw["qi"] as string,
+  };
 }
 
 /**
