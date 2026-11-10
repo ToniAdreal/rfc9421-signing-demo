@@ -28,7 +28,7 @@ function signedEd(
       alg: "ed25519",
       key: privateKey,
       created: opts.created ?? CREATED,
-      expires: opts.expires,
+      ...(opts.expires !== undefined ? { expires: opts.expires } : {}),
     },
   );
   return { signed, publicKey };

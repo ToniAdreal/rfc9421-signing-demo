@@ -4401,10 +4401,10 @@ export interface DemoResult {
    */
   throwVerification: {
     label: string;
-    keyId?: string;
-    alg?: string;
-    nonce?: string;
-    tag?: string;
+    keyId?: string | undefined;
+    alg?: string | undefined;
+    nonce?: string | undefined;
+    tag?: string | undefined;
   };
   /**
    * The `VerifyError` thrown by `verifyRequestOrThrow` for the

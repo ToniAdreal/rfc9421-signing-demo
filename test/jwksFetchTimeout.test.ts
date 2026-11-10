@@ -31,7 +31,7 @@ function stubGlobalFetch(
   impl: (url: string, init?: RequestInit) => Promise<unknown>,
 ) {
   const original = globalThis.fetch;
-  const seen: Array<{ url: string; init?: RequestInit }> = [];
+  const seen: Array<{ url: string; init?: RequestInit | undefined }> = [];
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     seen.push({ url, init });
     return impl(url, init);

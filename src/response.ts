@@ -69,8 +69,8 @@ export interface HttpResponseLike {
   /** HTTP response status code, bound by a covered `@status`. */
   status: number;
   headers: Record<string, string | string[] | undefined>;
-  body?: string | Buffer;
-  trailers?: Record<string, string | string[] | undefined>;
+  body?: string | Buffer | undefined;
+  trailers?: Record<string, string | string[] | undefined> | undefined;
 }
 
 /**
@@ -83,7 +83,7 @@ export interface HttpResponseLike {
 export interface SignedHttpResponse {
   status: number;
   headers: Record<string, string>;
-  body?: string | Buffer;
+  body?: string | Buffer | undefined;
   trailers?: Record<string, string | string[] | undefined>;
   coveredComponents?: string[];
 }
@@ -621,7 +621,7 @@ export function addResponseSignature(
         ? { trailers: signedRes.trailers }
         : {}),
     },
-    { ...opts, contentDigestAlg: digestAlg },
+    { ...opts, ...(digestAlg !== undefined ? { contentDigestAlg: digestAlg } : {}) },
   );
 
   const out: Record<string, string> = {};

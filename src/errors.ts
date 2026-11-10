@@ -157,12 +157,12 @@ export type VerifyFailureCode =
 
 export interface VerifyErrorOptions {
   label: string;
-  keyId?: string;
-  alg?: string;
-  nonce?: string;
-  tag?: string;
-  created?: number;
-  expires?: number;
+  keyId?: string | undefined;
+  alg?: string | undefined;
+  nonce?: string | undefined;
+  tag?: string | undefined;
+  created?: number | undefined;
+  expires?: number | undefined;
 }
 
 /**
@@ -174,12 +174,12 @@ export class VerifyError extends Error {
   readonly code: VerifyFailureCode;
   readonly reason: string;
   readonly label: string;
-  readonly keyId?: string;
-  readonly alg?: string;
-  readonly nonce?: string;
-  readonly tag?: string;
-  readonly created?: number;
-  readonly expires?: number;
+  readonly keyId?: string | undefined;
+  readonly alg?: string | undefined;
+  readonly nonce?: string | undefined;
+  readonly tag?: string | undefined;
+  readonly created?: number | undefined;
+  readonly expires?: number | undefined;
 
   constructor(
     code: VerifyFailureCode,

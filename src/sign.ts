@@ -144,7 +144,7 @@ export interface SignedHttpRequest {
   method: string;
   url: string;
   headers: Record<string, string>;
-  body?: string | Buffer;
+  body?: string | Buffer | undefined;
   /**
    * HTTP response status code, carried through from the signed
    * `RequestLike` when present. Only consulted when `"@status"` is
@@ -439,7 +439,9 @@ export function signRequest(
     requestTarget: req.requestTarget,
   };
   const base = buildSignatureBase(covered, signingInput, params, {
-    structuredFieldTypes: opts.structuredFieldTypes,
+    ...(opts.structuredFieldTypes !== undefined
+      ? { structuredFieldTypes: opts.structuredFieldTypes }
+      : {}),
   });
 
   let sig: Buffer;
@@ -658,7 +660,7 @@ export function addSignature(
         ? { requestTarget: signedReq.requestTarget }
         : {}),
     },
-    { ...opts, contentDigestAlg: digestAlg },
+    { ...opts, ...(digestAlg !== undefined ? { contentDigestAlg: digestAlg } : {}) },
   );
 
   const out: Record<string, string> = {};

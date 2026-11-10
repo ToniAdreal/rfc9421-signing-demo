@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import type { KeyObject } from "node:crypto";
 import {
   addResponseSignature,
   addSignature,
@@ -134,7 +135,7 @@ test("every correct alg/key pairing signs and verifies", () => {
       created: CREATED,
     });
     const result = verifyRequest(signed, {
-      key: publicKey as Parameters<typeof verifyRequest>[1]["key"],
+      key: publicKey as KeyObject,
       now: NOW,
     });
     assert.equal(result.ok, true, `${alg} should sign and verify with its matching key`);

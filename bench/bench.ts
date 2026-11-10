@@ -9623,9 +9623,9 @@ function assertSignedResponseShape(
 
 function assertVerifiedResponse(where: string, result: {
   ok: boolean;
-  alg?: string;
-  keyId?: string;
-  coveredComponents?: readonly string[];
+  alg?: string | undefined;
+  keyId?: string | undefined;
+  coveredComponents?: readonly string[] | undefined;
 }): void {
   if (
     !result.ok ||

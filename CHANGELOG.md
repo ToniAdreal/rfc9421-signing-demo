@@ -4535,6 +4535,25 @@ change type; no entry describes a feature that is not in the history.
   `refresh()` / stale `refreshIfStale()` calls share one in-flight
   fetch and its atomic snapshot replacement instead of each fetching;
   a settled refresh is never reused and a failure is never cached.
+- `tsconfig.json` now enables `exactOptionalPropertyTypes` (backlog
+  #1021, pilot in this repo only): optional properties no longer
+  accept an explicit `undefined` assignment, so "field omitted" and
+  "field set to `undefined`" are distinct at the type level. This is a
+  small type-level breaking change for callers that pass an explicit
+  `undefined` for a config option (`SignOptions.tag` / `nonce` /
+  `created` / `expires` / `keyId` / `label` / `coveredComponents` /
+  `contentDigestAlg` / `structuredFieldTypes`,
+  `VerifyOptions.expectedKeyId` / `replayCache` / `key` and the rest):
+  omit the field instead. Runtime behavior is unchanged — the library
+  already treated an explicit `undefined` exactly like an omitted
+  field everywhere. Message and result shapes (`RequestLike`,
+  `SignedHttpRequest`, `HttpResponseLike`, `VerifyResult`,
+  `VerifyErrorOptions`, the Node `http` adapter `Like` types) genuinely
+  carry `undefined` at runtime, so their optional fields are annotated
+  `| undefined` and still accept it. The new
+  `test/exactOptionalPropertyTypes.test.ts` pins both sides with
+  `@ts-expect-error` cases (a regressed type makes the suite go red)
+  and one runtime case.
 
 ### Tests
 

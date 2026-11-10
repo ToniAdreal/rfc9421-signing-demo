@@ -31,7 +31,9 @@ function signedEd(
       alg: "ed25519",
       key: privateKey,
       created: opts.created ?? CREATED,
-      coveredComponents: opts.coveredComponents,
+      ...(opts.coveredComponents !== undefined
+        ? { coveredComponents: opts.coveredComponents }
+        : {}),
     },
   );
   return { signed, publicKey };

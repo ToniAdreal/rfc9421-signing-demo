@@ -51,7 +51,7 @@ function signMerchant(opts: { nonce?: string } = {}): SignedHttpRequest {
     alg: "ed25519",
     key: merchant.privateKey,
     created: CREATED,
-    nonce: opts.nonce,
+    ...(opts.nonce !== undefined ? { nonce: opts.nonce } : {}),
     coveredComponents: COVERED,
   });
 }
@@ -66,13 +66,16 @@ function signGateway(
     alg: "hmac-sha256",
     key: secret,
     created: CREATED,
-    nonce: opts.nonce,
+    ...(opts.nonce !== undefined ? { nonce: opts.nonce } : {}),
     coveredComponents: COVERED,
   });
 }
 
 function dual(nonce?: string): SignedHttpRequest {
-  return mergeSignatures(signMerchant(), signGateway(GATEWAY_NEW, { nonce }));
+  return mergeSignatures(
+    signMerchant(),
+    signGateway(GATEWAY_NEW, nonce === undefined ? {} : { nonce }),
+  );
 }
 
 test("candidateKeysByLabel: merchant + gateway each verify with their own rotation list", () => {

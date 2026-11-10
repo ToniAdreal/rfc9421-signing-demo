@@ -897,7 +897,7 @@ export class JwksKeyStore {
    */
   private readonly usingDefaultFetch: boolean;
   /** Opt-in fetch timeout in milliseconds, or undefined when unset. */
-  private readonly fetchTimeoutMs?: number;
+  private readonly fetchTimeoutMs?: number | undefined;
   /** Response body cap in bytes (default 1 MiB, see `maxBodyBytes`). */
   private readonly maxBodyBytes: number;
   /** Opt-in https-only enforcement, including the redirect check. */

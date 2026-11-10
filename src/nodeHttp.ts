@@ -52,7 +52,7 @@ export interface IncomingTrailersLike {
    * or empty. A real message has this set to `{}` when the peer sent
    * no trailers; the adapter normalizes that to "no trailers".
    */
-  trailers?: Record<string, string | string[] | undefined>;
+  trailers?: Record<string, string | string[] | undefined> | undefined;
   /**
    * Raw trailer fields, as Node exposes them on
    * `IncomingMessage.rawTrailers`: a flat `[name, value, name, value,
@@ -62,7 +62,7 @@ export interface IncomingTrailersLike {
    * The normalized output lowercases names exactly like headers — the
    * original casing is NOT preserved in `RequestLike.trailers`.
    */
-  rawTrailers?: string[];
+  rawTrailers?: string[] | undefined;
 }
 
 /**
@@ -71,9 +71,9 @@ export interface IncomingTrailersLike {
  * too, without importing `node:http`.
  */
 export interface IncomingRequestLike extends IncomingTrailersLike {
-  method?: string;
+  method?: string | undefined;
   /** Origin-form path+query on real servers (e.g. "/webhook?event=push"). */
-  url?: string;
+  url?: string | undefined;
   headers: Record<string, string | string[] | undefined>;
   /** Only `encrypted` is read, to infer the URL scheme. */
   socket?: { encrypted?: boolean } | null | undefined;
@@ -87,7 +87,7 @@ export interface IncomingRequestLike extends IncomingTrailersLike {
  */
 export interface IncomingResponseLike extends IncomingTrailersLike {
   /** The response status code — the field a covered `@status` binds. */
-  statusCode?: number;
+  statusCode?: number | undefined;
   headers: Record<string, string | string[] | undefined>;
 }
 

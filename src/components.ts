@@ -142,14 +142,14 @@ export interface RequestLike {
    * resolves against `trailers`, never `headers`. Plain (non-`;tr`)
    * components never consult this field.
    */
-  trailers?: Record<string, string | string[] | undefined>;
-  body?: string | Buffer;
+  trailers?: Record<string, string | string[] | undefined> | undefined;
+  body?: string | Buffer | undefined;
   /**
    * HTTP response status code. Only consulted when `"@status"` is covered
    * (RFC 9421 §2.2.8) — signing/verifying responses, e.g. webhook
    * callbacks or signed API responses. Plain request flows leave it unset.
    */
-  status?: number;
+  status?: number | undefined;
   /**
    * The request that triggered this message, when this message is a
    * response. Only consulted when a covered component carries the
@@ -159,7 +159,7 @@ export interface RequestLike {
    * the response cannot be transplanted onto a different request.
    * Plain request flows leave it unset.
    */
-  request?: RequestLike;
+  request?: RequestLike | undefined;
   /**
    * Explicit request-target override for the RFC 9421 §2.2.5
    * `@request-target` derived component. Only consulted when
@@ -177,7 +177,7 @@ export interface RequestLike {
    * components — so an override is an addition, not a replacement
    * for the URL carrier.
    */
-  requestTarget?: string;
+  requestTarget?: string | undefined;
 }
 
 export interface SignatureParams {
@@ -281,14 +281,14 @@ interface ComponentIdParts {
    * The Dictionary member name carried by the RFC 9421 §2.1.1
    * `;key="…"` parameter, or `undefined` when the parameter is absent.
    */
-  key?: string;
+  key?: string | undefined;
   /**
    * The percent-encoded query-parameter name carried by the RFC 9421
    * §2.2.8 `;name="…"` parameter of `@query-param`, or `undefined`
    * when the parameter is absent. Only valid on `@query-param`,
    * where it is REQUIRED.
    */
-  name?: string;
+  name?: string | undefined;
 }
 
 /** A Dictionary key (RFC 8941 §3.1.3): lowercase letter or `*`, then key chars. */
@@ -297,7 +297,7 @@ const DICTIONARY_KEY_RE = /^[a-z*][a-z0-9_\-.*]*$/;
 interface RawParam {
   name: string;
   /** Unquoted value text, or `undefined` for a bare (valueless) parameter. */
-  value?: string;
+  value?: string | undefined;
   /** True when the value arrived as a quoted string (`;key="a"`). */
   quoted: boolean;
 }

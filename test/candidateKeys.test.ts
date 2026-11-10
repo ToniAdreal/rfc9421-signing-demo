@@ -42,10 +42,10 @@ function signHmac(
   return signRequest(baseRequest(), {
     alg: "hmac-sha256",
     key: secret,
-    keyId: opts.keyId,
-    nonce: opts.nonce,
+    ...(opts.keyId !== undefined ? { keyId: opts.keyId } : {}),
+    ...(opts.nonce !== undefined ? { nonce: opts.nonce } : {}),
     created: opts.created ?? CREATED,
-    expires: opts.expires,
+    ...(opts.expires !== undefined ? { expires: opts.expires } : {}),
     label: opts.label ?? "sig1",
   });
 }

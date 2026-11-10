@@ -451,20 +451,20 @@ export interface VerifyResult {
    */
   code?: VerifyFailureCode;
   label: string;
-  keyId?: string;
-  alg?: string;
+  keyId?: string | undefined;
+  alg?: string | undefined;
   /**
    * The `nonce` signature-input parameter parsed from the request, as
    * seen on the wire (i.e. *before* signature verification establishes
    * its authenticity). Absent when the signer did not send one.
    */
-  nonce?: string;
+  nonce?: string | undefined;
   /**
    * The `tag` signature-input parameter parsed from the request, as
    * seen on the wire (i.e. *before* signature verification establishes
    * its authenticity). Absent when the signer did not send one.
    */
-  tag?: string;
+  tag?: string | undefined;
   /**
    * The `created` signature-input parameter parsed from the request,
    * as seen on the wire (i.e. *before* signature verification
@@ -474,7 +474,7 @@ export interface VerifyResult {
    * here instead of re-parsing the `signature-input` header — a
    * second parse could disagree with this library's parsing.
    */
-  created?: number;
+  created?: number | undefined;
   /**
    * The `expires` signature-input parameter parsed from the request,
    * as seen on the wire (i.e. *before* signature verification
@@ -484,7 +484,7 @@ export interface VerifyResult {
    * tampered value, because the failure is about authenticity, not
    * about what was sent.
    */
-  expires?: number;
+  expires?: number | undefined;
   /**
    * The covered component identifiers parsed from the request's
    * `signature-input` header, as seen on the wire (i.e. *before*
@@ -499,7 +499,7 @@ export interface VerifyResult {
    * `signature-input`): this field is never fabricated. Always a
    * detached copy: mutating it never affects a later verification.
    */
-  coveredComponents?: string[];
+  coveredComponents?: string[] | undefined;
 }
 
 /**
@@ -940,7 +940,9 @@ export function verifyRequest(
     };
   try {
     base = buildSignatureBase(parsed.componentIds, req, parsed.params, {
-      structuredFieldTypes: opts.structuredFieldTypes,
+      ...(opts.structuredFieldTypes !== undefined
+        ? { structuredFieldTypes: opts.structuredFieldTypes }
+        : {}),
     });
   } catch (e) {
     return {
@@ -1626,7 +1628,7 @@ function verifyWithKey(
 export function verifyRequestOrThrow(
   req: RequestLike,
   opts: VerifyOptions,
-): { label: string; keyId?: string; alg?: string; nonce?: string; tag?: string; created?: number; expires?: number; coveredComponents?: string[] } {
+): { label: string; keyId?: string | undefined; alg?: string | undefined; nonce?: string | undefined; tag?: string | undefined; created?: number | undefined; expires?: number | undefined; coveredComponents?: string[] | undefined } {
   const res = verifyRequest(req, opts);
   if (res.ok)
     return { label: res.label, keyId: res.keyId, alg: res.alg, nonce: res.nonce, tag: res.tag, created: res.created, expires: res.expires, coveredComponents: res.coveredComponents };
@@ -2564,7 +2566,29 @@ export function verifyAllLabels(
     // `opts` alone would carry the global registry for every label.
     const structuredFieldTypes =
       opts.structuredFieldTypesByLabel?.[label] ?? opts.structuredFieldTypes;
-    return verifyRequest(req, { ...opts, label, key, keyResolver, expectedKeyId, expectedTag, candidateKeys, maxSignatureAgeSec, maxSignatureInputLength, maxSignatureLength, clockSkewToleranceSec, expiredToleranceSec, requiredComponents, algFallback, allowedAlgs, requireCreated, requireExpires, requireNonce, requireTag, replayCache, structuredFieldTypes });
+    return verifyRequest(req, {
+      ...opts,
+      label,
+      ...(key !== undefined ? { key } : {}),
+      ...(keyResolver !== undefined ? { keyResolver } : {}),
+      ...(expectedKeyId !== undefined ? { expectedKeyId } : {}),
+      ...(expectedTag !== undefined ? { expectedTag } : {}),
+      ...(candidateKeys !== undefined ? { candidateKeys } : {}),
+      ...(maxSignatureAgeSec !== undefined ? { maxSignatureAgeSec } : {}),
+      ...(maxSignatureInputLength !== undefined ? { maxSignatureInputLength } : {}),
+      ...(maxSignatureLength !== undefined ? { maxSignatureLength } : {}),
+      ...(clockSkewToleranceSec !== undefined ? { clockSkewToleranceSec } : {}),
+      ...(expiredToleranceSec !== undefined ? { expiredToleranceSec } : {}),
+      ...(requiredComponents !== undefined ? { requiredComponents } : {}),
+      ...(algFallback !== undefined ? { algFallback } : {}),
+      ...(allowedAlgs !== undefined ? { allowedAlgs } : {}),
+      ...(requireCreated !== undefined ? { requireCreated } : {}),
+      ...(requireExpires !== undefined ? { requireExpires } : {}),
+      ...(requireNonce !== undefined ? { requireNonce } : {}),
+      ...(requireTag !== undefined ? { requireTag } : {}),
+      ...(replayCache !== undefined ? { replayCache } : {}),
+      ...(structuredFieldTypes !== undefined ? { structuredFieldTypes } : {}),
+    });
   });
   // Required-label fail-closed: every required label that never
   // appeared on the wire is appended as a synthetic failure, in
