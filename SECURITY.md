@@ -209,7 +209,18 @@ Read this before using it anywhere that matters.
   protection is unchanged by the wrapper: it still needs an opt-in
   `VerifyOptions.replayCache`, and a 401 answer still costs a full
   signature verification — a flood of forged requests is a compute cost
-  the caller must absorb or rate-limit upstream.
+  the caller must absorb or rate-limit upstream. The opt-in
+  `signResponse` does not change any of that: a response signature is
+  not transport security (it proves the responder held the key, over
+  whatever channel the response travelled), and the response private
+  key is the caller's to keep — it lives in the server process, never
+  in this repository, and a leaked one lets anyone mint responses
+  that verify as yours. A signing failure at request time is answered
+  500 with nothing unsigned on the wire, and the wrapper's own
+  400/401/413/500 rejections are never signed. A pinned `created` or
+  `nonce` in `signResponse` repeats on every response: the former ages
+  out of the verifier's freshness window, the latter trips any replay
+  cache on the verify side — leave both unset unless you rotate them.
 
 ## What verification does *not* guarantee
 

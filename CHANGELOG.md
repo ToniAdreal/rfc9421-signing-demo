@@ -11,6 +11,34 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Opt-in response signing for the verified handler (backlog #1025):
+  `CreateVerifiedHandlerOptions.signResponse` (a
+  `VerifiedHandlerSignResponseOptions` — exactly the `signResponse`
+  options, minus `request`) makes `createVerifiedHandler` sign the
+  business handler's response before sending it, with the request it
+  just verified attached as `request`, so a covered `;req` component
+  (e.g. `@method;req`) binds the signature to that request. The
+  wrapper buffers the response in full (`writeHead` / `write` /
+  `flushHeaders` held, not sent) and flushes the signed headers and
+  body in one go on `end`; a signing failure at request time is
+  answered 500 `INTERNAL_ERROR` with nothing unsigned on the wire,
+  and the wrapper's own 400/401/413/500 rejections are never signed.
+  The options are validated at handler-creation time by a dry-run
+  sign (bad key shape, alg, or label throws when the handler is
+  built), forgiving only a covered header the handler sets per
+  response. `test/nodeHttpVerifiedHandlerSignResponse.test.ts` gains
+  14 tests (loopback `http.createServer`): signed response verifies
+  via `verifyResponse` with label/keyid/alg pinned, `;req` binding
+  fails verification against a different method or path, no
+  `signResponse` means no signature headers, 401/413 rejections
+  carry no signature, creation-time throws for a public key, a
+  non-KeyObject key, an unknown alg, a swapped RSA/ed25519 pair and
+  illegal labels, custom label and `coveredComponents` take effect,
+  hmac-sha256 round-trip, `write()`-streamed handler still signed, a
+  covered header the handler never sets answers 500, tampered body
+  and wrong key fail verification. A dropped-`request` mutation was
+  verified to turn exactly the `;req` test red.
+
 - CLI demo JWKS publishing segment (backlog #1023): `src/demo.ts`
   gains the publish half of the JWKS loop the demo previously only
   showed from the consumption side — a new `fetchJwksPublishedDocument`

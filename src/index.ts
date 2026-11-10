@@ -136,5 +136,6 @@ export type {
   IncomingRequestLike,
   IncomingResponseLike,
   IncomingTrailersLike,
+  VerifiedHandlerSignResponseOptions,
   VerifiedRequestHandler,
 } from "./nodeHttp.js";

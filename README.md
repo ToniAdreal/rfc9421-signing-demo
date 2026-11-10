@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1883 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1897 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1126,6 +1126,48 @@ caller's job, the body is held in memory up to the cap, and replay
 protection still needs an opt-in `VerifyOptions.replayCache` (see
 SECURITY.md).
 
+Opt-in response signing — the other half of mutual authentication: pass
+`signResponse` and the wrapper signs the business handler's response
+before it is sent, bound to the request it just verified:
+
+```ts
+const server = createServer(
+  createVerifiedHandler(
+    { key: gatewayPublicKey },
+    (req, res, result) => {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+    },
+    {
+      signResponse: {
+        key: merchantPrivateKey, // this side's response-signing key
+        alg: "ed25519",
+        keyId: "merchant-key",
+        coveredComponents: ["@status", "@method;req"], // bind the response to the request it answers
+      },
+    },
+  ),
+);
+```
+
+`signResponse` takes exactly the `signResponse` options, minus
+`request` — the wrapper supplies the request it just verified, so a
+covered `;req` component (e.g. `@method;req`) resolves against it and
+the response signature cannot be transplanted onto a different
+request. Without it the response is sent exactly as the handler wrote
+it. The options are validated at handler-creation time (a bad key
+shape, alg, or label throws when the handler is built, never on the
+first live request) by a dry-run sign; only a covered header the
+handler sets per response is forgiven there. The response is buffered
+in full until the handler ends it — `writeHead` / `write` /
+`flushHeaders` are held, not sent — then signed and flushed in one go;
+a signing failure at request time (e.g. a covered header the handler
+did not set) is answered 500 `INTERNAL_ERROR` with nothing unsigned
+on the wire, and the wrapper's own 400/401/413/500 rejections are never
+signed. Leave `created` / `expires` / `nonce` unset unless you rotate
+them: the same options sign every response, so a pinned `created` ages
+out of the verifier's freshness window and a pinned `nonce` repeats on
+every response. See SECURITY.md for the key-custody limit.
+
 Verifying signed *responses* with a Node `http` client — the
 receive→verify chain via `fromNodeResponse`:
 
@@ -1637,7 +1679,9 @@ values. Without a request to bind to, keep using the request-side API
   verifies it, and only then calls `handler(req, res, result)` — a
   verification failure is answered 401 with exactly `{ error, code }`
   and the handler is never called, an oversized body is answered 413
-  before any verification runs. See the Quickstart handler example.
+  before any verification runs. With opt-in `opts.signResponse` the
+  wrapper also signs the handler's response before sending it, bound
+  to the request it just verified. See the Quickstart handler example.
 - **Node http client adapter**: `fromNodeResponse(res, body, opts?)`
   normalizes a client's received `http.IncomingMessage` into a
   `RequestLike` (response `statusCode` bound via `@status`, same header
@@ -4193,7 +4237,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1883 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1897 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

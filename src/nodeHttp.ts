@@ -35,8 +35,10 @@
  * compile time): the runtime dependency count stays zero.
  */
 
+import { KeyObject } from "node:crypto";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { joinHeaderValues, type RequestLike } from "./components.js";
+import { signResponse, type SignResponseOptions } from "./response.js";
 import { verifyRequest, type VerifyOptions, type VerifyResult } from "./verify.js";
 
 /**
@@ -497,6 +499,133 @@ export interface CreateVerifiedHandlerOptions {
    * time, never per request. A body exactly at the cap still verifies.
    */
   maxBodyBytes?: number;
+  /**
+   * Opt-in response signing: when present, the wrapper signs the
+   * business handler's response with `signResponse` before it is
+   * sent, binding it to the request that was just verified — the
+   * wrapper passes that request as the `request` option, so a covered
+   * `;req` component (e.g. `"@method";req`) resolves against it and
+   * the response signature cannot be transplanted onto a different
+   * request. Absent, the response is sent exactly as the handler
+   * wrote it, as before.
+   *
+   * The response is buffered in full (status, headers, body) until
+   * the handler ends it, then signed and flushed in one go — the
+   * signature needs the complete body for `content-digest`, so a
+   * streaming response cannot be signed this way. `writeHead` /
+   * `write` / `flushHeaders` are held, not sent, until the signed
+   * flush; the handler keeps using them exactly as before.
+   *
+   * A signing failure at request time (e.g. a covered header the
+   * handler did not set) is answered 500 `{ error: "internal error",
+   * code: "INTERNAL_ERROR" }` — nothing has been sent yet, so no
+   * unsigned response ever reaches the wire. A 401/400/413/500
+   * rejection from the wrapper itself is never signed: a failed
+   * verification gets no response signature.
+   *
+   * Pass `created` / `expires` / `nonce` only if you rotate them:
+   * the same options sign every response, so a pinned `created`
+   * ages out of the verifier's freshness window and a pinned
+   * `nonce` repeats on every response (a verifier with a replay
+   * cache rejects the repeats). Leave them unset for the usual
+   * per-response `created: now` and no nonce.
+   */
+  signResponse?: VerifiedHandlerSignResponseOptions;
+}
+
+/**
+ * Signing options for a verified handler's responses: exactly the
+ * options `signResponse` takes, minus `request` — the wrapper
+ * supplies the request it just verified, so callers never pass one
+ * (and a caller-supplied request could bind the signature to a
+ * request nobody sent). Everything else (`key`, `alg`, `label`,
+ * `keyId`, `coveredComponents`, `created`, `expires`, `nonce`,
+ * `tag`, `contentDigestAlg`, `structuredFieldTypes`) is passed
+ * through unchanged, so the handler's signature follows exactly the
+ * rules `signResponse` documents — including its default covered
+ * components (`@status`, plus `content-digest` when the response has
+ * a body). To bind the response to the triggering request, cover a
+ * `;req` component, e.g. `coveredComponents: ["@status",
+ * "@method;req"]`.
+ */
+export type VerifiedHandlerSignResponseOptions = Omit<
+  SignResponseOptions,
+  "request"
+>;
+
+/**
+ * Synthetic request the creation-time dry run signs against. It is
+ * never sent anywhere: it only exists so covered `;req` components
+ * (e.g. `"@method";req`) resolve during validation the way they will
+ * against a real verified request.
+ */
+const SIGN_RESPONSE_VALIDATION_REQUEST: RequestLike = {
+  method: "POST",
+  url: "http://127.0.0.1/verified-handler-validation",
+  headers: {},
+  body: "",
+};
+
+/**
+ * Whether a dry-run signing error is about response *content* the
+ * business handler supplies per request — a covered header field (or
+ * query parameter, or Structured Field member) that is absent from
+ * the synthetic validation response. Such an absence says nothing
+ * about the live path, where the handler may set the field, so it
+ * must not fail handler creation. Every other error is a
+ * configuration error (bad label, alg/key mismatch, short HMAC
+ * secret, bad timestamps, malformed covered component, a
+ * request-derived component without `;req`, …) and fails creation.
+ */
+function isSignResponseContentError(e: Error): boolean {
+  return (
+    e.message.includes("is missing from the request") ||
+    e.message.includes(
+      "does not occur in the request target's query string",
+    ) ||
+    e.message.includes("cannot be serialized with")
+  );
+}
+
+/**
+ * Validate `CreateVerifiedHandlerOptions.signResponse` at
+ * handler-creation time, at the same level as the `maxBodyBytes`
+ * check: a misconfigured response signer must fail when the handler
+ * is built, never on the first live request. The `key` shape is
+ * checked directly (anything that is not a `KeyObject` cannot be a
+ * private key), then the exact sign path the wrapper will use per
+ * request is dry-run once — a throwaway `signResponse` over a
+ * synthetic response — so every configuration check `signResponse` /
+ * `signRequest` runs (label shape, alg/key match, HMAC/RSA floors,
+ * timestamps, tag/nonce, covered-component shape, the
+ * request-component guard) is exercised here. Only
+ * content-dependent failures are forgiven (see
+ * `isSignResponseContentError`).
+ */
+function assertSignResponseOptions(
+  sign: VerifiedHandlerSignResponseOptions,
+): void {
+  if (typeof sign !== "object" || sign === null)
+    throw new Error(
+      `createVerifiedHandler: signResponse must be an object, got ${sign === null ? "null" : typeof sign}`,
+    );
+  if (!(sign.key instanceof KeyObject))
+    throw new Error(
+      "createVerifiedHandler: signResponse.key must be a KeyObject " +
+        "(a private key from keys.generate*KeyPair / importPrivateKey / secretKey), got " +
+        (sign.key === null ? "null" : typeof sign.key),
+    );
+  try {
+    signResponse(
+      { status: 200, headers: {}, body: "" },
+      { ...sign, request: SIGN_RESPONSE_VALIDATION_REQUEST },
+    );
+  } catch (e) {
+    if (e instanceof Error && isSignResponseContentError(e)) return;
+    throw new Error(
+      `createVerifiedHandler: invalid signResponse options: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
 }
 
 /**
@@ -531,7 +660,15 @@ export interface CreateVerifiedHandlerOptions {
  *    material. The business handler is never called.
  * 4. Verification success calls `handler(req, res, result)` with the
  *    raw Node pair and the `VerifyResult`; the handler owns the
- *    response from there.
+ *    response from there. With opt-in `opts.signResponse`, the `res`
+ *    handed to the handler buffers the response instead of sending
+ *    it: on `end` the wrapper signs it with `signResponse` (the
+ *    just-verified request attached as `request`, so covered `;req`
+ *    components bind the signature to it) and flushes the signed
+ *    headers and body in one go. A signing failure at request time
+ *    is answered 500 `INTERNAL_ERROR` — nothing was sent yet, so no
+ *    unsigned response reaches the wire. Rejections from steps 1–3
+ *    (400/401/413/500) are never signed.
  *
  * Honest limits (see also SECURITY.md): TLS is the caller's job —
  * this handler sees whatever the socket gives it, and `@scheme`
@@ -553,6 +690,8 @@ export function createVerifiedHandler(
     throw new Error(
       `createVerifiedHandler: maxBodyBytes must be a positive integer number of bytes, got ${String(opts?.maxBodyBytes)}`,
     );
+  const signOpts = opts?.signResponse;
+  if (signOpts !== undefined) assertSignResponseOptions(signOpts);
 
   return (req, res) => {
     const chunks: Buffer[] = [];
@@ -649,7 +788,13 @@ export function createVerifiedHandler(
       }
       settled = true;
       cleanup();
-      handler(req, res, result);
+      handler(
+        req,
+        signOpts !== undefined
+          ? wrapResponseForSigning(res, signOpts, requestLike)
+          : res,
+        result,
+      );
     }
 
     function onError(): void {
@@ -661,4 +806,137 @@ export function createVerifiedHandler(
     req.on("end", onEnd);
     req.on("error", onError);
   };
+}
+
+/**
+ * Buffer a business handler's response so it can be signed before
+ * anything reaches the wire. `writeHead` records the status and
+ * headers (via `setHeader`, so later `setHeader` calls still land)
+ * without flushing; `write` buffers each chunk and reports success
+ * (its callback fires on the next tick, as if flushed); `end`
+ * buffers the final chunk, signs `{ status, headers, body }` with
+ * `signResponse` — the just-verified request attached as `request`,
+ * so covered `;req` components bind the signature to it — and then
+ * flushes the signed headers and the original body in one go.
+ * `flushHeaders` is held to a no-op while signing: flushing early
+ * would send the headers unsigned.
+ *
+ * The response is held in memory in full, like the request body on
+ * the verify side — a webhook acknowledgement is small, and a
+ * signature over `content-digest` needs the complete body anyway.
+ * A signing failure here (the configuration was validated at
+ * creation, so the realistic miss is a covered header the handler
+ * did not set) is answered 500 `INTERNAL_ERROR`: nothing was sent
+ * yet, so no unsigned response reaches the wire. The returned object
+ * is the same `ServerResponse`, with its send methods replaced —
+ * anything else on it (`statusCode`, `setHeader`, `getHeaders`,
+ * `socket`, event listeners) behaves exactly as before.
+ */
+function wrapResponseForSigning(
+  res: ServerResponse,
+  signOpts: VerifiedHandlerSignResponseOptions,
+  requestLike: RequestLike,
+): ServerResponse {
+  const origWriteHead = res.writeHead.bind(res);
+  const origEnd = res.end.bind(res);
+  const chunks: Buffer[] = [];
+  let ended = false;
+
+  function bufferChunk(chunk: unknown, encoding?: BufferEncoding): void {
+    if (chunk === undefined || chunk === null) return;
+    if (typeof chunk === "string")
+      chunks.push(Buffer.from(chunk, encoding ?? "utf8"));
+    else if (Buffer.isBuffer(chunk)) chunks.push(chunk);
+    else if (chunk instanceof Uint8Array) chunks.push(Buffer.from(chunk));
+    else chunks.push(Buffer.from(String(chunk)));
+  }
+
+  function applyHeaders(hdrs: unknown): void {
+    if (hdrs === undefined || hdrs === null) return;
+    if (Array.isArray(hdrs)) {
+      for (const [name, value] of hdrs as [string, unknown][]) {
+        if (value !== undefined)
+          res.setHeader(name, value as string | number | string[]);
+      }
+      return;
+    }
+    for (const [name, value] of Object.entries(
+      hdrs as Record<string, unknown>,
+    )) {
+      if (value !== undefined)
+        res.setHeader(name, value as string | number | string[]);
+    }
+  }
+
+  res.writeHead = function (
+    statusCode: number,
+    statusMessage?: string | Record<string, unknown>,
+    headers?: Record<string, unknown>,
+  ): ServerResponse {
+    res.statusCode = statusCode;
+    if (typeof statusMessage === "string") {
+      res.statusMessage = statusMessage;
+      applyHeaders(headers);
+    } else {
+      applyHeaders(statusMessage);
+    }
+    return res;
+  } as typeof res.writeHead;
+
+  res.write = function (
+    chunk: unknown,
+    encoding?: BufferEncoding | ((error?: Error | null) => void),
+    cb?: (error?: Error | null) => void,
+  ): boolean {
+    const callback = typeof encoding === "function" ? encoding : cb;
+    bufferChunk(chunk, typeof encoding === "string" ? encoding : undefined);
+    // Pretend the bytes were flushed: the real write happens at end.
+    if (callback !== undefined) process.nextTick(callback);
+    return true;
+  } as typeof res.write;
+
+  res.flushHeaders = function (): void {
+    // Held: flushing now would send the headers unsigned. They go
+    // out with the signature at end.
+  };
+
+  res.end = function (
+    chunk?: unknown,
+    encoding?: BufferEncoding | ((error?: Error | null) => void),
+    cb?: (error?: Error | null) => void,
+  ): ServerResponse {
+    if (ended) return res;
+    ended = true;
+    const callback = typeof encoding === "function" ? encoding : cb;
+    bufferChunk(chunk, typeof encoding === "string" ? encoding : undefined);
+
+    const headers: Record<string, string | string[] | undefined> = {};
+    for (const [name, value] of Object.entries(res.getHeaders())) {
+      if (value === undefined) continue;
+      headers[name] = typeof value === "number" ? String(value) : value;
+    }
+    const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+    let signed;
+    try {
+      signed = signResponse(
+        { status: res.statusCode, headers, body },
+        { ...signOpts, request: requestLike },
+      );
+    } catch {
+      origWriteHead(500, { "content-type": "application/json" });
+      origEnd(
+        JSON.stringify({ error: "internal error", code: "INTERNAL_ERROR" }),
+        "utf8",
+        callback as () => void,
+      );
+      return res;
+    }
+    origWriteHead(signed.status, signed.headers);
+    if (signed.body !== undefined)
+      origEnd(signed.body, "utf8", callback as () => void);
+    else origEnd(callback as () => void);
+    return res;
+  } as typeof res.end;
+
+  return res;
 }
