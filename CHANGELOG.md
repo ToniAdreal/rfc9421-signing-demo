@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- End-to-end `createVerifiedHandler` benchmark rows (backlog #1027):
+  `benchmarkCreateVerifiedHandler` and
+  `benchmarkCreateVerifiedHandlerUnsigned` over a loopback `http`
+  server (one ed25519 key, `maxBodyBytes` default, `now` pinned to
+  the signature's `created` + 60s, request signed once outside
+  timing). Each measured op is one full HTTP round trip: the signed
+  row sends a pre-signed POST and pins the 200 status plus exactly
+  one business-handler call per delivery (1 + 200 warmup + 3000
+  timed), the unsigned row sends the same body with no signature
+  headers and pins 401 with the handler never called. In this run
+  the signed row measured ~1,441 ops/sec (693.79 µs/op) and the
+  unsigned row ~3,350 ops/sec (298.53 µs/op) — the unsigned path is
+  about 2.3× faster because it rejects before any cryptography,
+  while the signed path pays a fresh TCP connection plus the full
+  verify. README Benchmarks table refreshed from the same run
+  (Node v24.22.1, shared host) and a prose paragraph added for the
+  new rows.
+
 - Private-key JWK exporters (backlog #1026): `exportPrivateKeyJwk`
   (ed25519), `exportPrivateKeyJwkP256` / `P384` / `P521`, and
   `exportPrivateKeyJwkRsa` — one exporter per key family, each returning

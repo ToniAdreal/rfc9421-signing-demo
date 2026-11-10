@@ -825,7 +825,16 @@
  * default pinned verifying in both rows, so neither row can be
  * measuring a path that ignores the whitelist. Zero
  * network here: the loopback `fromNodeResponse` rows already
- * cover HTTP adaptation, these rows isolate the wrapper cost.
+ * cover HTTP adaptation, these rows isolate the wrapper cost, plus
+ * the end-to-end receive path a webhook endpoint runs on every
+ * delivery: `createVerifiedHandler` over a loopback server (one
+ * ed25519 key, `maxBodyBytes` default, `now` pinned to the
+ * signature's `created` + 60s), one pre-signed POST per measured
+ * op with the 200 status and the business-handler call count
+ * self-checked (the signed row), and the unsigned 401 rejection
+ * on the same server with the handler never called (the unsigned
+ * row) — these two rows time a full HTTP round trip per op, TCP
+ * loopback included, unlike the adapter-only rows above.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -853,6 +862,7 @@ import {
   canonicalizeStructuredFieldValueAs,
   contentDigest,
   contentDigestAlgOf,
+  createVerifiedHandler,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -12816,6 +12826,214 @@ async function benchmarkFromNodeResponseVerifyAllLabelsTrailers(): Promise<numbe
 }
 
 /**
+ * Loopback end-to-end receive path for `createVerifiedHandler` — the
+ * webhook shape a receiver runs on every signed delivery: a real
+ * `http` server (loopback only, no external network) wraps the
+ * business handler in `createVerifiedHandler` (one ed25519 key,
+ * `maxBodyBytes` default, `now` pinned to the signature's `created`
+ * + 60s exactly as the `nodeHttpVerifiedHandler` test pins it), and
+ * each measured op sends one pre-signed POST and awaits the full
+ * 200 response. The request is signed once, outside timing — the
+ * rows price the receive path, not the sender's sign cost — and
+ * reusing the same signed request across passes is sound: no
+ * `replayCache` is configured, so verification succeeds every time
+ * and the handler answers from the verified result each time.
+ */
+const HANDLER_CREATED = 1_700_000_000;
+const HANDLER_NOW = HANDLER_CREATED + 60;
+const HANDLER_BODY = JSON.stringify({ settled: true, amount: 100 });
+
+/** Minimal POST client for the verified-handler rows: status + raw body. */
+async function postToVerifiedHandler(
+  port: number,
+  headers: Record<string, string | undefined>,
+  body: string,
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/webhook",
+        method: "POST",
+        headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+/**
+ * Shared harness for the two `createVerifiedHandler` rows: one
+ * loopback server, one ed25519 key pair, one pre-signed POST (the
+ * `nodeHttpVerifiedHandler` test's wire shape). Returns the port,
+ * the signed wire headers, a live count of business-handler calls,
+ * and a close that drains connections first so `server.close`
+ * cannot hang on a keep-alive socket.
+ */
+async function startCreateVerifiedHandlerServer(): Promise<{
+  port: number;
+  signedHeaders: Record<string, string | undefined>;
+  calls: () => number;
+  close: () => Promise<void>;
+}> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  let calls = 0;
+  const server = createServer(
+    createVerifiedHandler(
+      { key: publicKey, now: HANDLER_NOW },
+      (_req, res, result) => {
+        calls++;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, keyId: result.keyId ?? null }));
+      },
+    ),
+  );
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", resolve),
+  );
+  const port = (server.address() as AddressInfo).port;
+  const signed = signRequest(
+    {
+      method: "POST",
+      url: `http://127.0.0.1:${port}/webhook`,
+      headers: { "content-type": "application/json" },
+      body: HANDLER_BODY,
+    },
+    {
+      keyId: "gateway-key",
+      alg: "ed25519",
+      key: privateKey,
+      created: HANDLER_CREATED,
+    },
+  );
+  return {
+    port,
+    signedHeaders: {
+      "Content-Type": "application/json",
+      "Signature-Input": signed.headers["signature-input"] as string,
+      Signature: signed.headers["signature"] as string,
+      "Content-Digest": signed.headers["content-digest"] as string,
+    },
+    calls: () => calls,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+/**
+ * `createVerifiedHandler` signed-delivery steady state: the whole
+ * receive path — body buffering, `fromNodeRequest` adaptation,
+ * ed25519 verification, and the 200 branch into the business
+ * handler — priced as one HTTP round trip per op. Self-checks on
+ * every measured pass pin the 200 status; asserted outside timing:
+ * one probe delivery returns 200 with the pinned body and exactly
+ * one handler call, and after the timed loop the handler-call
+ * count equals 1 + WARMUP + ITERATIONS (every warmup and timed
+ * delivery reached the business handler exactly once).
+ */
+async function benchmarkCreateVerifiedHandler(): Promise<number> {
+  const h = await startCreateVerifiedHandlerServer();
+  try {
+    const probe = await postToVerifiedHandler(
+      h.port,
+      h.signedHeaders,
+      HANDLER_BODY,
+    );
+    if (
+      probe.status !== 200 ||
+      probe.body !== JSON.stringify({ ok: true, keyId: "gateway-key" })
+    )
+      throw new Error(
+        `benchmark self-check failed: probe delivery gave ${probe.status} ${JSON.stringify(probe.body)}`,
+      );
+    if (h.calls() !== 1)
+      throw new Error(
+        `benchmark self-check failed: probe called the handler ${h.calls()} times (expected 1)`,
+      );
+    const ops = await measureAsync(async () => {
+      const res = await postToVerifiedHandler(
+        h.port,
+        h.signedHeaders,
+        HANDLER_BODY,
+      );
+      if (res.status !== 200)
+        throw new Error(
+          `benchmark self-check failed: verified handler answered ${res.status} (expected 200)`,
+        );
+    }, ITERATIONS);
+    if (h.calls() !== 1 + WARMUP + ITERATIONS)
+      throw new Error(
+        `benchmark self-check failed: handler called ${h.calls()} times (expected ${1 + WARMUP + ITERATIONS})`,
+      );
+    return ops;
+  } finally {
+    await h.close();
+  }
+}
+
+/**
+ * `createVerifiedHandler` unsigned-rejection steady state: the
+ * 401 half of the receive path — the same loopback server and
+ * body, but no signature headers, so the wrapper rejects before
+ * the business handler runs. Self-checks on every measured pass
+ * pin the 401 status; asserted outside timing: one probe delivery
+ * returns 401, and the handler-call count stays 0 through the
+ * probe and the whole timed loop.
+ */
+async function benchmarkCreateVerifiedHandlerUnsigned(): Promise<number> {
+  const h = await startCreateVerifiedHandlerServer();
+  try {
+    const probe = await postToVerifiedHandler(
+      h.port,
+      { "Content-Type": "application/json" },
+      HANDLER_BODY,
+    );
+    if (probe.status !== 401)
+      throw new Error(
+        `benchmark self-check failed: unsigned probe gave ${probe.status} (expected 401)`,
+      );
+    if (h.calls() !== 0)
+      throw new Error(
+        `benchmark self-check failed: unsigned probe called the handler ${h.calls()} times (expected 0)`,
+      );
+    const ops = await measureAsync(async () => {
+      const res = await postToVerifiedHandler(
+        h.port,
+        { "Content-Type": "application/json" },
+        HANDLER_BODY,
+      );
+      if (res.status !== 401)
+        throw new Error(
+          `benchmark self-check failed: unsigned request answered ${res.status} (expected 401)`,
+        );
+    }, ITERATIONS);
+    if (h.calls() !== 0)
+      throw new Error(
+        `benchmark self-check failed: unsigned loop called the handler ${h.calls()} times (expected 0)`,
+      );
+    return ops;
+  } finally {
+    await h.close();
+  }
+}
+
+/**
  * Per-curve JWK round-trip steady state: for one key shape, a measured
  * call runs `exportPublicKeyJwk*` on a fixed public key, pushes the
  * JWK through a JSON stringify/parse round trip (the wire form a JWKS
@@ -15845,6 +16063,16 @@ results.push({
   alg: "fromNodeResponse + verifyAllLabels (;tr trailer, loopback, 2 labels)",
   op: "adapt+verify",
   ops: await benchmarkFromNodeResponseVerifyAllLabelsTrailers(),
+});
+results.push({
+  alg: "createVerifiedHandler (signed POST, loopback)",
+  op: "verify",
+  ops: await benchmarkCreateVerifiedHandler(),
+});
+results.push({
+  alg: "createVerifiedHandler (unsigned POST, loopback)",
+  op: "verify",
+  ops: await benchmarkCreateVerifiedHandlerUnsigned(),
 });
 results.push({
   alg: "JWK round-trip P-256",
