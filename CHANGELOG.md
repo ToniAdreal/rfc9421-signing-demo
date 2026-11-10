@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for the single-call `verifyAllResponseLabels`
+  dual-label response path (backlog #1022): `bench/bench.ts` gains
+  `benchmarkVerifyAllResponseLabels`, reusing the
+  `benchmarkAddResponseSignature` dual-signed fixture — the merchant
+  signs the settlement response with `signResponse` (ed25519) and
+  the gateway appends its hmac-sha256 label with
+  `addResponseSignature`, both with `created` pinned — and every
+  measured pass verifies both labels in one `verifyAllResponseLabels`
+  call, pinning each label's alg / keyid / covered components in wire
+  order; a flipped gateway-signature byte is pinned outside timing to
+  fail exactly the gateway label with `SIGNATURE_MISMATCH` while the
+  merchant label still verifies. The new row measured ~5,063 ops/sec
+  (197.51 µs/op) in this run, slightly faster than the two-call
+  `addResponseSignature + verifyResponse` row (~4,872 ops/sec), as
+  expected for a single call that parses the `signature-input` header
+  once instead of once per label. The README Benchmarks table was
+  refreshed from the same run (Node v24.22.1, shared host).
+
 - Node `http` signature-verifying handler `createVerifiedHandler`
   (backlog #1016): a standard `http.RequestListener` that closes the
   loop the adapters left open — it streams the request body into

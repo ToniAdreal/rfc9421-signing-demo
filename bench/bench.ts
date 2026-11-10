@@ -807,7 +807,15 @@
  * and a flipped gateway-signature byte is pinned to fail
  * exactly the gateway label with `SIGNATURE_MISMATCH` (merchant
  * still ok) outside timing, so the row cannot be measuring a
- * path that ignores the second signature, plus the
+ * path that ignores the second signature, plus the single-call
+ * form of the same dual-label response path: `verifyAllResponseLabels`
+ * verifies both labels in one call over the same dual-signed fixture
+ * (same keys, same pinned `created`, same `@status` + content-digest
+ * coverage), self-checked on every measured pass (both results ok, in
+ * wire order, each with its pinned alg / keyid / covered components),
+ * with the same flipped gateway-signature byte pinned outside timing
+ * to fail exactly the gateway label, so the row measures the one-call
+ * wrapper cost against the two-call row above, plus the
  * response-side whitelist pair over the same ed25519 response
  * fixture: `verifyResponse` with `allowedAlgs` hitting the wire
  * algorithm (the full ed25519 verification cost) and with a
@@ -889,6 +897,7 @@ import {
   signResponse,
   signatureInputValue,
   verifyAllLabels,
+  verifyAllResponseLabels,
   verifyRequest,
   verifyRequestOrThrow,
   verifyResponse,
@@ -1147,6 +1156,108 @@ function benchmarkAddResponseSignature(): number {
 
   return measure(() => {
     assertDualResponseLabelsOk(dual, merchantPublic, gatewaySecret, "measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * The single-call form of the dual-label response path above: the
+ * merchant signs the settlement response with its ed25519 key, then
+ * the payment gateway appends its own hmac-sha256 signature with
+ * `addResponseSignature` — the same dual-signed fixture as
+ * `benchmarkAddResponseSignature` (same keys, same pinned
+ * `created`, same `@status` + content-digest coverage). Measures the
+ * steady-state throughput of verifying both labels in one call with
+ * `verifyAllResponseLabels`, self-checked on every measured pass
+ * (both results ok, in wire order, each with its pinned alg / keyid /
+ * covered components), so the row is directly comparable with the
+ * two-call `addResponseSignature + verifyResponse` row above and
+ * shows what the one-call wrapper costs. Outside timing, the same
+ * flipped gateway-signature byte is pinned to fail exactly the
+ * gateway label with `SIGNATURE_MISMATCH` while the merchant label
+ * still verifies, so the row cannot be measuring a path that ignores
+ * the second signature.
+ */
+function benchmarkVerifyAllResponseLabels(): number {
+  const { publicKey: merchantPublic, privateKey: merchantPrivate } =
+    generateEd25519KeyPair();
+  const gatewaySecret = secretKey("gateway-shared-secret-32-bytes-0!");
+
+  const merchantSigned = signResponse(
+    { status: 200, headers: {}, body: RESPONSE_BENCH_BODY },
+    {
+      keyId: RESPONSE_BENCH_KID,
+      alg: "ed25519",
+      key: merchantPrivate,
+      created: RESPONSE_BENCH_CREATED,
+      label: "merchant",
+    },
+  );
+  const dual = addResponseSignature(merchantSigned, {
+    keyId: RESPONSE_BENCH_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    created: RESPONSE_BENCH_CREATED,
+    label: "gateway",
+  });
+  const verifyOpts = {
+    key: merchantPublic,
+    keys: { gateway: gatewaySecret },
+    now: RESPONSE_BENCH_NOW,
+  };
+  const assertAccepted = (where: string): void => {
+    const results = verifyAllResponseLabels(dual, verifyOpts);
+    if (
+      results.length !== 2 ||
+      results[0].label !== "merchant" ||
+      !results[0].ok ||
+      results[0].alg !== "ed25519" ||
+      results[0].keyId !== RESPONSE_BENCH_KID ||
+      JSON.stringify(results[0].coveredComponents) !==
+        JSON.stringify(RESPONSE_BENCH_COVERED) ||
+      results[1].label !== "gateway" ||
+      !results[1].ok ||
+      results[1].alg !== "hmac-sha256" ||
+      results[1].keyId !== RESPONSE_BENCH_GATEWAY_KID ||
+      JSON.stringify(results[1].coveredComponents) !==
+        JSON.stringify(RESPONSE_BENCH_COVERED)
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllResponseLabels (${where}) gave ${JSON.stringify(results)}`,
+      );
+  };
+
+  // Outside timing: the dual-signed fixture verifies on both labels,
+  // and flipping one base64 character of the gateway label's
+  // signature bytes fails exactly that label with
+  // SIGNATURE_MISMATCH while the merchant label still verifies.
+  assertAccepted("outside timing");
+  const tampered: SignedHttpResponse = {
+    ...dual,
+    headers: {
+      ...dual.headers,
+      signature: (dual.headers["signature"] as string).replace(
+        /((?:^|,)\s*gateway\s*=:)([A-Za-z0-9+/])/,
+        (_m, prefix: string, p1: string) =>
+          `${prefix}${p1 === "A" ? "B" : "A"}`,
+      ),
+    },
+  };
+  const tamperedResults = verifyAllResponseLabels(tampered, verifyOpts);
+  if (
+    tamperedResults.length !== 2 ||
+    tamperedResults[0].label !== "merchant" ||
+    !tamperedResults[0].ok ||
+    tamperedResults[1].label !== "gateway" ||
+    tamperedResults[1].ok ||
+    tamperedResults[1].code !== "SIGNATURE_MISMATCH"
+  )
+    throw new Error(
+      `benchmark self-check failed: tampered gateway signature gave ${JSON.stringify(tamperedResults)} ` +
+        "(expected merchant ok, gateway SIGNATURE_MISMATCH)",
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
   }, ITERATIONS);
 }
 
@@ -15618,6 +15729,11 @@ results.push({
   alg: "addResponseSignature + verifyResponse (2 labels)",
   op: "verify",
   ops: benchmarkAddResponseSignature(),
+});
+results.push({
+  alg: "verifyAllResponseLabels (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllResponseLabels(),
 });
 results.push({
   alg: "verifyResponse allowedAlgs (hit, ed25519)",
