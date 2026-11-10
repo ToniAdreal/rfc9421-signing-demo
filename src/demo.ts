@@ -34,7 +34,15 @@
  * (mixed-case headers, a multi-value header, a host with a port) is
  * normalized with `fromNodeRequest` and verifies, while rebuilding
  * it with the wrong scheme is rejected with `SIGNATURE_MISMATCH`
- * because the inbound signature covers `@scheme`. The closing
+ * because the inbound signature covers `@scheme`. The segment
+ * before the JWKS segment demonstrates JWKS publishing: the signer
+ * generates an ed25519 pair and a P-256 pair, assembles their public
+ * halves into a JWKS document with `buildJwksDocument`, serves it
+ * from a real loopback `http` server at `/.well-known/jwks.json`,
+ * and a plain `JwksKeyStore` fetches it once and resolves both kids
+ * — one request signed with each private key then verifies through
+ * the store's resolver, closing the publish -> fetch -> verify loop
+ * the consumption segment below only shows half of. The closing
  * segment demonstrates JWKS key resolution: a `JwksKeyStore` is
  * restored offline from a snapshot of the demo public key, the demo
  * request verifies through its key resolver, and a request signed
@@ -1282,6 +1290,7 @@ import {
   assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
+  buildJwksDocument,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
   contentDigest,
@@ -1343,6 +1352,7 @@ import {
   type P521PublicJwk,
   type RsaPublicJwk,
   type IncomingRequestLike,
+  type JwksDocument,
   type JwksKeyStoreSnapshot,
   type JwksSignedSnapshotEnvelope,
   type JwksKeyStoreStats,
@@ -2889,6 +2899,32 @@ export const DEMO_JWKS_REQUIRE_HTTPS_SIZE = 1;
  */
 export const DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS = 1;
 
+/** Key id of the JWKS publish segment's ed25519 key. */
+export const DEMO_JWKS_PUBLISH_ED_KEY_ID = "demo-jwks-publish-ed-1";
+/** Key id of the JWKS publish segment's P-256 key. */
+export const DEMO_JWKS_PUBLISH_P256_KEY_ID = "demo-jwks-publish-p256-1";
+/** Nonce of the JWKS publish segment's ed25519-signed request. */
+export const DEMO_JWKS_PUBLISH_ED_NONCE = "demo-nonce-jwks-publish-ed-001";
+/** Nonce of the JWKS publish segment's P-256-signed request. */
+export const DEMO_JWKS_PUBLISH_P256_NONCE =
+  "demo-nonce-jwks-publish-p256-001";
+/** Label every JWKS publish segment signature carries (the library default). */
+export const DEMO_JWKS_PUBLISH_LABEL = "sig1";
+/** Algorithm of the JWKS publish segment's ed25519 signature. */
+export const DEMO_JWKS_PUBLISH_ED_ALG = "ed25519";
+/** Algorithm of the JWKS publish segment's P-256 signature. */
+export const DEMO_JWKS_PUBLISH_P256_ALG = "ecdsa-p256-sha256";
+/**
+ * Key count of the published JWKS document: one ed25519 key plus one
+ * P-256 key, in that order.
+ */
+export const DEMO_JWKS_PUBLISH_KEY_COUNT = 2;
+/**
+ * Loopback request count after the publish segment store's refresh:
+ * exactly one fetch serves the published document.
+ */
+export const DEMO_JWKS_PUBLISH_FETCH_CALLS = 1;
+
 /** Key id of the closing JWKS maxBodyBytes segment's scripted key. */
 export const DEMO_JWKS_MAX_BODY_KEY_ID = "demo-jwks-max-body-1";
 /** Key id of the second key in the oversized JWKS document. */
@@ -4324,6 +4360,24 @@ export interface DemoResult {
    * scheme: rejected with `SIGNATURE_MISMATCH` (`@scheme` is covered).
    */
   inboundWrongSchemeVerification: VerifyResult;
+  /** The published JWKS document of the JWKS publish segment (two public keys, pinned kids, no private material). */
+  jwksPublishDocument: JwksDocument;
+  /** Loopback request count after the publish segment store's refresh (exactly one fetch). */
+  jwksPublishFetchCalls: number;
+  /** Number of keys the publish segment's refreshed store holds (the two published keys). */
+  jwksPublishStoreSize: number;
+  /**
+   * Verification of the ed25519-signed request through the publish
+   * segment store's resolver (ok — the document carries
+   * `DEMO_JWKS_PUBLISH_ED_KEY_ID`).
+   */
+  jwksPublishEdVerification: VerifyResult;
+  /**
+   * Verification of the P-256-signed request through the publish
+   * segment store's resolver (ok — the document carries
+   * `DEMO_JWKS_PUBLISH_P256_KEY_ID`).
+   */
+  jwksPublishP256Verification: VerifyResult;
   /** The v1 snapshot the JWKS segment restores its store from. */
   jwksSnapshot: JwksKeyStoreSnapshot;
   /** Number of keys in the restored JWKS store (1: the demo key). */
@@ -7034,6 +7088,135 @@ async function fetchFetchSignedResponse(): Promise<FetchSignedResponseFixture> {
   }
 }
 
+interface JwksPublishFixture {
+  /** The published JWKS document: two public keys, pinned kids, no private material. */
+  document: JwksDocument;
+  /** Loopback request count after the store's refresh (exactly one fetch). */
+  fetchCalls: number;
+  /** Number of keys the refreshed store holds (the two published keys). */
+  storeSize: number;
+  /** Verification of the ed25519-signed request through the store's resolver (ok). */
+  edVerification: VerifyResult;
+  /** Verification of the P-256-signed request through the store's resolver (ok). */
+  p256Verification: VerifyResult;
+}
+
+async function fetchJwksPublishedDocument(): Promise<JwksPublishFixture> {
+  const edPair = generateEd25519KeyPair();
+  const p256Pair = generateP256KeyPair();
+  const document = buildJwksDocument([
+    { key: edPair.publicKey, kid: DEMO_JWKS_PUBLISH_ED_KEY_ID },
+    { key: p256Pair.publicKey, kid: DEMO_JWKS_PUBLISH_P256_KEY_ID },
+  ]);
+  let fetchCalls = 0;
+  const sockets = new Set<Socket>();
+  const server = createServer((req, res) => {
+    fetchCalls++;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(document));
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => {
+      sockets.delete(socket);
+    });
+  });
+  try {
+    const { port } = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    });
+    const url = `http://127.0.0.1:${port}/.well-known/jwks.json`;
+    const store = new JwksKeyStore(url);
+    await store.refresh();
+    const edSigned = signRequest(
+      {
+        method: "POST",
+        url: "https://api.example.com/v1/payments",
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        keyId: DEMO_JWKS_PUBLISH_ED_KEY_ID,
+        alg: DEMO_JWKS_PUBLISH_ED_ALG,
+        key: edPair.privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_JWKS_PUBLISH_ED_NONCE,
+      },
+    );
+    const edVerification = verifyRequest(edSigned, {
+      keyResolver: (kid) => store.resolve(kid),
+      now: DEMO_CREATED + 60,
+    });
+    const p256Signed = signRequest(
+      {
+        method: "POST",
+        url: "https://api.example.com/v1/payments",
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        keyId: DEMO_JWKS_PUBLISH_P256_KEY_ID,
+        alg: DEMO_JWKS_PUBLISH_P256_ALG,
+        key: p256Pair.privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_JWKS_PUBLISH_P256_NONCE,
+      },
+    );
+    const p256Verification = verifyRequest(p256Signed, {
+      keyResolver: (kid) => store.resolve(kid),
+      now: DEMO_CREATED + 60,
+    });
+    if (
+      document.keys.length !== DEMO_JWKS_PUBLISH_KEY_COUNT ||
+      document.keys[0]!.kid !== DEMO_JWKS_PUBLISH_ED_KEY_ID ||
+      document.keys[1]!.kid !== DEMO_JWKS_PUBLISH_P256_KEY_ID ||
+      "d" in document.keys[0]! ||
+      "d" in document.keys[1]! ||
+      fetchCalls !== DEMO_JWKS_PUBLISH_FETCH_CALLS ||
+      store.size !== DEMO_JWKS_PUBLISH_KEY_COUNT
+    ) {
+      throw new Error(
+        `demo fixture broken: JWKS publish gave ${document.keys.length} keys ` +
+          `(${document.keys.map((k) => k.kid).join(", ")}) after ${fetchCalls} fetches with ` +
+          `store size ${store.size}, instead of ${DEMO_JWKS_PUBLISH_KEY_COUNT} keys ` +
+          `(${DEMO_JWKS_PUBLISH_ED_KEY_ID}, ${DEMO_JWKS_PUBLISH_P256_KEY_ID}) after ` +
+          `${DEMO_JWKS_PUBLISH_FETCH_CALLS} fetch`,
+      );
+    }
+    if (
+      !edVerification.ok ||
+      edVerification.label !== DEMO_JWKS_PUBLISH_LABEL ||
+      edVerification.keyId !== DEMO_JWKS_PUBLISH_ED_KEY_ID ||
+      edVerification.alg !== DEMO_JWKS_PUBLISH_ED_ALG ||
+      edVerification.nonce !== DEMO_JWKS_PUBLISH_ED_NONCE ||
+      !p256Verification.ok ||
+      p256Verification.label !== DEMO_JWKS_PUBLISH_LABEL ||
+      p256Verification.keyId !== DEMO_JWKS_PUBLISH_P256_KEY_ID ||
+      p256Verification.alg !== DEMO_JWKS_PUBLISH_P256_ALG ||
+      p256Verification.nonce !== DEMO_JWKS_PUBLISH_P256_NONCE
+    ) {
+      throw new Error(
+        `demo fixture broken: JWKS publish verification gave ed25519 ` +
+          `${JSON.stringify(edVerification)} and P-256 ${JSON.stringify(p256Verification)} ` +
+          `instead of ok with the pinned label/keyid/alg/nonce for both keys`,
+      );
+    }
+    return {
+      document,
+      fetchCalls,
+      storeSize: store.size,
+      edVerification,
+      p256Verification,
+    };
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    server.close();
+  }
+}
+
 export async function runDemo(): Promise<DemoResult> {
   const { publicKey, privateKey } = generateEd25519KeyPair();
 
@@ -7363,6 +7546,30 @@ export async function runDemo(): Promise<DemoResult> {
     }),
     { key: publicKey, now: DEMO_CREATED + 60 },
   );
+
+  // JWKS publish segment: the JWKS segment below only shows the
+  // consumption side — a verifier resolving keys from a document —
+  // so a reader never sees how the signer gets its public keys into
+  // the verifier's hands. This segment closes that loop: it
+  // generates an ed25519 pair and a P-256 pair, assembles their
+  // public halves into a JWKS document with `buildJwksDocument`,
+  // serves the document from a real loopback `http` server at
+  // `/.well-known/jwks.json` (zero external network), and a plain
+  // `JwksKeyStore` over that endpoint refreshes once and resolves
+  // both kids; one request signed with each private key then
+  // verifies through the store's resolver. The helper asserts the
+  // document shape (two keys, the pinned kids in order, no private
+  // material), the fetch count, the store size and both verified
+  // identities against the hand-pinned DEMO_JWKS_PUBLISH_*
+  // expectations. Only the kids, key types and outcomes are printed,
+  // never key material, so the segment is byte-identical between runs.
+  const {
+    document: jwksPublishDocument,
+    fetchCalls: jwksPublishFetchCalls,
+    storeSize: jwksPublishStoreSize,
+    edVerification: jwksPublishEdVerification,
+    p256Verification: jwksPublishP256Verification,
+  } = await fetchJwksPublishedDocument();
 
   // JWKS segment: production gateways do not hand the verifier a raw
   // key — they publish a JWKS and the verifier resolves the claimed
@@ -13932,6 +14139,14 @@ export async function runDemo(): Promise<DemoResult> {
       ? `Inbound verification with wrong scheme "${DEMO_INBOUND_WRONG_SCHEME}": OK (unexpected — scheme mismatch was not detected)`
       : `Inbound verification with wrong scheme "${DEMO_INBOUND_WRONG_SCHEME}": FAILED (code ${inboundWrongSchemeVerification.code}: ${inboundWrongSchemeVerification.reason})`,
     "",
+    `JWKS publishing: signer generated an ed25519 key (kid "${DEMO_JWKS_PUBLISH_ED_KEY_ID}") and a P-256 key (kid "${DEMO_JWKS_PUBLISH_P256_KEY_ID}"), published both public keys with buildJwksDocument at /.well-known/jwks.json (${jwksPublishDocument.keys.length} keys), and a JwksKeyStore fetched the document ${jwksPublishFetchCalls} time and resolved both kids`,
+    jwksPublishEdVerification.ok
+      ? `JWKS publish verification for keyid "${DEMO_JWKS_PUBLISH_ED_KEY_ID}": OK (label ${jwksPublishEdVerification.label}, keyid="${jwksPublishEdVerification.keyId}", alg="${jwksPublishEdVerification.alg}")`
+      : `JWKS publish verification for keyid "${DEMO_JWKS_PUBLISH_ED_KEY_ID}": FAILED (code ${jwksPublishEdVerification.code}: ${jwksPublishEdVerification.reason})`,
+    jwksPublishP256Verification.ok
+      ? `JWKS publish verification for keyid "${DEMO_JWKS_PUBLISH_P256_KEY_ID}": OK (label ${jwksPublishP256Verification.label}, keyid="${jwksPublishP256Verification.keyId}", alg="${jwksPublishP256Verification.alg}")`
+      : `JWKS publish verification for keyid "${DEMO_JWKS_PUBLISH_P256_KEY_ID}": FAILED (code ${jwksPublishP256Verification.code}: ${jwksPublishP256Verification.reason})`,
+    "",
     `JWKS key resolution: JwksKeyStore restored offline from a v1 snapshot (endpoint ${DEMO_JWKS_URL}, fetchedAtSec=${DEMO_JWKS_FETCHED_AT_SEC}, ${jwksStore.size} key)`,
     jwksVerification.ok
       ? `JWKS verification for keyid "${DEMO_KEY_ID}": OK (label ${jwksVerification.label}, keyid="${jwksVerification.keyId}", alg="${jwksVerification.alg}")`
@@ -14664,6 +14879,11 @@ export async function runDemo(): Promise<DemoResult> {
     inboundNormalized,
     inboundVerification,
     inboundWrongSchemeVerification,
+    jwksPublishDocument,
+    jwksPublishFetchCalls,
+    jwksPublishStoreSize,
+    jwksPublishEdVerification,
+    jwksPublishP256Verification,
     jwksSnapshot,
     jwksStoreSize: jwksStore.size,
     jwksVerification,

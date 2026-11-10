@@ -253,6 +253,14 @@ import {
   DEMO_JWKS_MAX_BODY_SECOND_KEY_ID,
   DEMO_JWKS_MAX_BODY_SIZE,
   DEMO_JWKS_MAX_BODY_TEXT_CALLS,
+  DEMO_JWKS_PUBLISH_ED_ALG,
+  DEMO_JWKS_PUBLISH_ED_KEY_ID,
+  DEMO_JWKS_PUBLISH_ED_NONCE,
+  DEMO_JWKS_PUBLISH_FETCH_CALLS,
+  DEMO_JWKS_PUBLISH_KEY_COUNT,
+  DEMO_JWKS_PUBLISH_P256_ALG,
+  DEMO_JWKS_PUBLISH_P256_KEY_ID,
+  DEMO_JWKS_PUBLISH_P256_NONCE,
   DEMO_JWKS_REQUIRE_HTTPS_DEFAULT_FETCH_CALLS,
   DEMO_JWKS_REQUIRE_HTTPS_ERROR,
   DEMO_JWKS_REQUIRE_HTTPS_KEY_ID,
@@ -1129,6 +1137,95 @@ test("demo lines contain the inbound segment (normalized shape, verified, wrong 
     new RegExp(
       `Inbound verification with wrong scheme "${DEMO_INBOUND_WRONG_SCHEME}": FAILED \\(code SIGNATURE_MISMATCH:`,
     ),
+  );
+});
+
+test("demo JWKS publish segment publishes both keys and verifies each through a fetched store", async () => {
+  const {
+    jwksPublishDocument,
+    jwksPublishFetchCalls,
+    jwksPublishStoreSize,
+    jwksPublishEdVerification,
+    jwksPublishP256Verification,
+  } = await runDemo();
+
+  // The published document is the hand-pinned two-key shape: the
+  // ed25519 key first, the P-256 key second, public halves only.
+  assert.equal(jwksPublishDocument.keys.length, DEMO_JWKS_PUBLISH_KEY_COUNT);
+  assert.equal(
+    jwksPublishDocument.keys[0]!.kid,
+    DEMO_JWKS_PUBLISH_ED_KEY_ID,
+  );
+  assert.equal(
+    jwksPublishDocument.keys[1]!.kid,
+    DEMO_JWKS_PUBLISH_P256_KEY_ID,
+  );
+  assert.equal(jwksPublishDocument.keys[0]!.kty, "OKP");
+  assert.equal(jwksPublishDocument.keys[1]!.kty, "EC");
+  assert.ok(!("d" in jwksPublishDocument.keys[0]!));
+  assert.ok(!("d" in jwksPublishDocument.keys[1]!));
+  // One fetch serves the whole document; the store holds both keys.
+  assert.equal(jwksPublishFetchCalls, DEMO_JWKS_PUBLISH_FETCH_CALLS);
+  assert.equal(jwksPublishStoreSize, DEMO_JWKS_PUBLISH_KEY_COUNT);
+
+  // Each private key's request verifies through the fetched store.
+  assert.equal(jwksPublishEdVerification.ok, true);
+  assert.equal(jwksPublishEdVerification.keyId, DEMO_JWKS_PUBLISH_ED_KEY_ID);
+  assert.equal(jwksPublishEdVerification.alg, DEMO_JWKS_PUBLISH_ED_ALG);
+  assert.equal(
+    jwksPublishEdVerification.nonce,
+    DEMO_JWKS_PUBLISH_ED_NONCE,
+  );
+  assert.equal(jwksPublishP256Verification.ok, true);
+  assert.equal(
+    jwksPublishP256Verification.keyId,
+    DEMO_JWKS_PUBLISH_P256_KEY_ID,
+  );
+  assert.equal(jwksPublishP256Verification.alg, DEMO_JWKS_PUBLISH_P256_ALG);
+  assert.equal(
+    jwksPublishP256Verification.nonce,
+    DEMO_JWKS_PUBLISH_P256_NONCE,
+  );
+});
+
+test("demo lines contain the JWKS publish segment (both keys verify, printed before the JWKS resolution segment)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /JWKS publishing: signer generated an ed25519 key \(kid "demo-jwks-publish-ed-1"\) and a P-256 key \(kid "demo-jwks-publish-p256-1"\), published both public keys with buildJwksDocument at \/.well-known\/jwks\.json \(2 keys\), and a JwksKeyStore fetched the document 1 time and resolved both kids/,
+  );
+  assert.match(
+    out,
+    /JWKS publish verification for keyid "demo-jwks-publish-ed-1": OK \(label sig1, keyid="demo-jwks-publish-ed-1", alg="ed25519"\)/,
+  );
+  assert.match(
+    out,
+    /JWKS publish verification for keyid "demo-jwks-publish-p256-1": OK \(label sig1, keyid="demo-jwks-publish-p256-1", alg="ecdsa-p256-sha256"\)/,
+  );
+  // The publish segment runs before the consumption segment it feeds.
+  const publishIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS publishing:"),
+  );
+  const resolutionIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS key resolution:"),
+  );
+  assert.ok(publishIdx !== -1);
+  assert.ok(resolutionIdx !== -1);
+  assert.ok(publishIdx < resolutionIdx);
+  // The segment's printed lines are identical between runs: the
+  // loopback port and the fresh key pairs are never printed.
+  const { lines: lines2 } = await runDemo();
+  const publishIdx2 = lines2.findIndex((l) =>
+    l.startsWith("JWKS publishing:"),
+  );
+  const resolutionIdx2 = lines2.findIndex((l) =>
+    l.startsWith("JWKS key resolution:"),
+  );
+  assert.deepEqual(
+    lines.slice(publishIdx, resolutionIdx),
+    lines2.slice(publishIdx2, resolutionIdx2),
   );
 });
 

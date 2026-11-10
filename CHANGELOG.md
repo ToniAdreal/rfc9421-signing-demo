@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo JWKS publishing segment (backlog #1023): `src/demo.ts`
+  gains the publish half of the JWKS loop the demo previously only
+  showed from the consumption side — a new `fetchJwksPublishedDocument`
+  helper generates an ed25519 pair and a P-256 pair, assembles their
+  public halves with `buildJwksDocument`, serves the document from a
+  real loopback `http` server at `/.well-known/jwks.json`, and a plain
+  `JwksKeyStore` fetches it once and resolves both kids; one request
+  signed with each private key verifies through the store's resolver.
+  The segment runs before the JWKS resolution segment, asserts the
+  document shape (two keys, pinned kids in order, no private
+  material), the fetch count, the store size and both verified
+  identities, and prints only kids, key types and outcomes — never
+  key material — so its lines are byte-identical between runs.
+  `test/demo.test.ts` gains two tests (structure + printed lines,
+  ordering and double-run determinism).
+
 - Benchmark row for the single-call `verifyAllResponseLabels`
   dual-label response path (backlog #1022): `bench/bench.ts` gains
   `benchmarkVerifyAllResponseLabels`, reusing the
