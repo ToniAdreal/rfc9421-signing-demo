@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1912 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1921 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2003,6 +2003,21 @@ const dual = addResponseSignature(merchantSigned, {
   runs in-process. The verifier
   checks one signature label per call; `verifyAllLabels` verifies every
   label in the request (one `VerifyResult` per label).
+- **Multi-value `set-cookie` is ambiguous when covered bare.** RFC 9421
+  §2.1 warns that fields like `Set-Cookie` "do not follow a syntax that
+  allows for the combination of field values in this manner", and
+  RFC 9421 §7.5.6 requires such fields to be "processed from their
+  separate field values, without being combined": a `Set-Cookie` value itself contains commas
+  (`Expires=Wed, 21 Oct …`), so once two cookies are joined with ", "
+  (the §2.5 combination this library applies in `joinHeaderValues`, and
+  the Node/fetch adapters apply too) the result cannot be split back
+  into the original cookies — two different cookie splittings produce
+  the identical signature base, verified in `test/setCookieComponent.test.ts`.
+  Cover `set-cookie` only when it carries a single value. `;bs` does not
+  remove the split ambiguity either: it binds the exact joined bytes, so
+  a tampered cookie still fails verification, but two splittings of the
+  same joined string still produce the identical `;bs` base. The
+  signature guarantees the joined string, not the individual cookies.
 - **Covered-component hygiene.** The verifier rejects a `signature-input`
   whose covered-components list repeats an identifier, or holds more
   than `MAX_COVERED_COMPONENTS` (64, exported from the package entry
@@ -4284,7 +4299,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1912 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1921 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

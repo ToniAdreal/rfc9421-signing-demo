@@ -185,6 +185,10 @@ export interface FromFetchResponseOptions {
  * stringifies whatever it is given — without this check a string
  * `"200"` would verify as status 200, so the adapter is the boundary
  * where the integer rule is enforced.
+ *
+ * Multi-value headers are combined with `joinHeaderValues` — see its
+ * warning before covering `set-cookie`: two cookies join into one
+ * string that cannot be split back into the original cookies.
  */
 export function fromNodeResponse(
   res: IncomingResponseLike,
@@ -263,6 +267,10 @@ export function fromNodeResponse(
  * non-integer status — the same boundary rule as `fromNodeResponse` —
  * and when neither `opts.request` nor the `opts.method` + `opts.url`
  * pair supplies the triggering request.
+ *
+ * Multi-value headers are combined with `joinHeaderValues` — see its
+ * warning before covering `set-cookie`: two cookies join into one
+ * string that cannot be split back into the original cookies.
  */
 export function fromFetchResponse(
   res: FetchResponseLike,
@@ -424,6 +432,10 @@ function normalizeTrailers(
  * `RequestLike` after this call. Throws a
  * descriptive `Error` on missing `method`, `url`, or `host` header —
  * those are caller configuration mistakes, never silently defaulted.
+ *
+ * Multi-value headers are combined with `joinHeaderValues` — see its
+ * warning before covering `set-cookie`: two cookies join into one
+ * string that cannot be split back into the original cookies.
  */
 export function fromNodeRequest(
   req: IncomingRequestLike,

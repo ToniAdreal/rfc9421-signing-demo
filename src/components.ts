@@ -215,6 +215,17 @@ function escapeRegExp(s: string): string {
  * trimmed, and a value like `["  a  ", "b "]` signed as `"a ,  b"` but
  * verified as `"a, b"`, failing its own round-trip with
  * SIGNATURE_MISMATCH.
+ *
+ * Warning — multi-value `set-cookie` is ambiguous when covered bare
+ * (RFC 9421 §2.1, §7.5.6): a `Set-Cookie` value itself contains commas
+ * (`Expires=Wed, 21 Oct …`), so once two cookies are joined with ", "
+ * the result cannot be split back into the original cookies — two
+ * different cookie splittings produce the identical signature base,
+ * and a verifier cannot tell them apart. Cover `set-cookie` only when
+ * it carries a single value. `;bs` does not remove the split ambiguity
+ * either: it binds the exact joined bytes (see `getHeaderRaw`), so a
+ * tampered cookie still fails verification, but two splittings of the
+ * same joined string still produce the identical `;bs` base.
  */
 export function joinHeaderValues(values: string[]): string {
   return values.map((x) => x.trim()).join(", ");
@@ -222,7 +233,9 @@ export function joinHeaderValues(values: string[]): string {
 
 /**
  * Case-insensitive header lookup. Multi-value headers are joined with
- * ", " per RFC 9421 §2.5 (see `joinHeaderValues`).
+ * ", " per RFC 9421 §2.5 (see `joinHeaderValues` — including its
+ * warning: a multi-value `set-cookie` covered bare is ambiguous,
+ * because `Expires` commas make the joined string unsplittable).
  */
 export function getHeader(
   headers: Record<string, string | string[] | undefined>,
@@ -245,6 +258,13 @@ export function getHeader(
  * ", " between the raw (untrimmed) elements — the same separator the
  * canonical combination uses, but without discarding per-element
  * whitespace, which is precisely the information `;bs` exists to bind.
+ *
+ * That join is also `;bs`'s limit for multi-value `set-cookie`: the
+ * base64 binds the exact joined bytes, so tampering with a cookie is
+ * still detected, but two different splittings of the same cookies
+ * still produce the identical `;bs` base — `;bs` cannot tell them
+ * apart either (see `joinHeaderValues`). Only a single-valued
+ * `set-cookie` is unambiguous to cover.
  */
 export function getHeaderRaw(
   headers: Record<string, string | string[] | undefined>,
