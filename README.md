@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1931 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1944 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1618,7 +1618,10 @@ values. Without a request to bind to, keep using the request-side API
   `requireNonce: true` alongside it when such signatures must be
   rejected instead: they then fail with `MISSING_NONCE` (an empty-string
   nonce counts as missing), checked after the cryptographic check and
-  before the cache query. By default the cache is shared across
+  before the cache query. A nonce longer than `MAX_NONCE_LENGTH`
+  (256 characters) is rejected by `signRequest` as a configuration
+  error; the cap is sign-side fail-fast only (see the tag bullet for
+  the rationale). By default the cache is shared across
   `verifyAllLabels` labels, while `requireNonce` is judged per label. The
   shared store is keyed by the bare nonce string with no per-label
   partitioning, so callers have a hard contract: **one nonce per label** — if two labels
@@ -2022,7 +2025,10 @@ const dual = addResponseSignature(merchantSigned, {
   whose covered-components list repeats an identifier, or holds more
   than `MAX_COVERED_COMPONENTS` (64, exported from the package entry
   point): both fail as `MALFORMED_SIGNATURE_INPUT` at parse time,
-  before any crypto runs, per label in `verifyAllLabels`. The
+  before any crypto runs, per label in `verifyAllLabels`. The sign
+  side refuses the same two shapes before signing — a repeated
+  component, or more than 64 — so the signer can never mint a
+  signature its own verifier refuses. The
   duplicate rule is the sign side's rule (`coveredComponentKey`):
   base lowercased, parameter names lowercased in listed order,
   parameter values verbatim — so `"@method"` + `"@method";req` is not
@@ -4299,7 +4305,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1931 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1944 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

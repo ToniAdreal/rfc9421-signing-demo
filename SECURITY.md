@@ -198,6 +198,17 @@ Read this before using it anywhere that matters.
   time instead of minting low-entropy signatures — and a secret that is
   only adequate for `hmac-sha256` is never silently accepted for
   `hmac-sha512`.
+- **Sign-side parameter lengths are capped (fail-fast, sign side only).**
+  `signRequest` rejects a `tag` / `nonce` / `keyid` longer than 256
+  characters (`MAX_TAG_LENGTH` / `MAX_NONCE_LENGTH` /
+  `MAX_KEY_ID_LENGTH`) and more than 64 covered components
+  (`MAX_COVERED_COMPONENTS`, the same bound the verify-side parser
+  applies), so the signer can never mint a signature its own verifier
+  refuses. The 256-character caps are deliberately sign-side only:
+  RFC 9421 sets no per-field length limit, so a validly signed longer
+  tag, nonce, or keyid from another implementation still verifies —
+  the 64 KiB `signature-input` cap bounds total header size on the
+  verify side instead.
 - **Timing.** HMAC comparison uses `timingSafeEqual` after a length check,
   and Ed25519 verification goes through `node:crypto`. No additional
   side-channel analysis has been done.

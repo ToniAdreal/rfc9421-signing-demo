@@ -2,6 +2,9 @@ export {
   addSignature,
   assertNoDuplicateCoveredComponents,
   coveredComponentKey,
+  MAX_KEY_ID_LENGTH,
+  MAX_NONCE_LENGTH,
+  MAX_TAG_LENGTH,
   signRequest,
 } from "./sign.js";
 export type { SignAlg, SignedHttpRequest, SignOptions } from "./sign.js";

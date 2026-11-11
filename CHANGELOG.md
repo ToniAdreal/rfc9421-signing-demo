@@ -4724,6 +4724,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `signRequest` now rejects over-long signing parameters (backlog
+  #1066): a `tag` / `nonce` / `keyid` longer than 256 characters
+  (`MAX_TAG_LENGTH` / `MAX_NONCE_LENGTH` / `MAX_KEY_ID_LENGTH`,
+  exported from the package entry point) and a covered-components
+  list longer than 64 (`MAX_COVERED_COMPONENTS`, the same bound the
+  verify-side parser already applied) are configuration errors,
+  thrown before the signature base is built or any crypto runs, with
+  the input request left untouched. Previously the signer would mint
+  signatures its own verifier refuses (a 65-component list fails at
+  parse time with `MALFORMED_SIGNATURE_INPUT`) or bloated with a
+  caller bug pasted into a label field. The 256-character caps are
+  deliberately sign-side only: RFC 9421 sets no per-field length
+  limit, so a validly signed longer tag, nonce, or keyid from another
+  implementation still verifies — the 64 KiB `signature-input` cap
+  bounds total header size on the verify side instead. `addSignature`
+  / `signResponse` inherit the guards through `signRequest`. 13 new
+  tests in `test/signParamLimits.test.ts` (over-long tag/nonce/keyId
+  rejections with input untouched, at-the-limit 256-character
+  round-trips, 65-component rejection with the parser's wording,
+  64-component round-trip, known-alg/wrong-key wording unchanged,
+  `addSignature` inheritance, and hand-minted 300-character
+  tag/nonce/keyId signatures that verify — pinning the deliberate
+  verify-side asymmetry).
+
 - `signRequest` now rejects an unknown `alg` as `unsupported alg`
   (backlog #1058): it previously fell through to the key-shape
   predicate, so the classic downgrade value `"none"` (and any other

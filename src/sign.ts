@@ -9,6 +9,7 @@ import {
   buildSignatureBase,
   joinHeaderValues,
   listSignatureLabels,
+  MAX_COVERED_COMPONENTS,
   signatureInputValue,
   type RequestLike,
   type SignatureParams,
@@ -20,6 +21,37 @@ import {
   assertStructuredFieldTypes,
   type StructuredFieldType,
 } from "./structuredFields.js";
+
+/**
+ * Longest `tag` / `nonce` / `keyid` a `signRequest` call may emit, in
+ * characters (`String.length`, UTF-16 code units). All three are short
+ * identifiers by nature — a tag names one application protocol, a
+ * nonce is one replay token, a keyid is a lookup key — so 256 leaves
+ * an order of magnitude of headroom over any realistic value, while
+ * an over-long value is almost certainly a caller bug (a payload
+ * pasted into a label field) and is rejected fail-fast, before the
+ * signature base is built or any crypto runs.
+ *
+ * Sign side only, deliberately: the verifier does NOT apply these
+ * caps. RFC 9421 sets no per-field length limit on `tag` / `nonce` /
+ * `keyid`, so a validly signed longer value from another
+ * implementation still verifies — rejecting it would be a
+ * non-conformant interop restriction. The 64 KiB
+ * `DEFAULT_MAX_SIGNATURE_INPUT_LENGTH` cap bounds total
+ * `signature-input` size on the verify side instead. This asymmetry
+ * is pinned by `test/signParamLimits.test.ts`: our signer refuses a
+ * 257-character tag, our verifier accepts a hand-minted 300-character
+ * one.
+ *
+ * Contrast `MAX_COVERED_COMPONENTS` (64, in `components.ts`): that
+ * cap IS symmetric — the verify-side parser refuses a longer list
+ * with `MALFORMED_SIGNATURE_INPUT` — so the sign side refusing more
+ * than 64 keeps the signer from minting signatures its own verifier
+ * refuses.
+ */
+export const MAX_TAG_LENGTH = 256;
+export const MAX_NONCE_LENGTH = 256;
+export const MAX_KEY_ID_LENGTH = 256;
 
 export type SignAlg =
   | "ed25519"
@@ -38,6 +70,10 @@ export interface SignOptions {
    * (the verifier returns `keyId: undefined`, and `keyResolver`/
    * `expectedKeyId` flows treat a missing `keyid` the way they already
    * do — e.g. `keyResolver` reports `KEY_RESOLUTION_FAILED`).
+   * Longer than `MAX_KEY_ID_LENGTH` (256) characters is rejected with
+   * a configuration error (a keyid is a short lookup key, not a
+   * payload); the verifier applies no such cap (see the constants
+   * above for the reasoning).
    */
   keyId?: string;
   alg: SignAlg;
@@ -81,6 +117,9 @@ export interface SignOptions {
    * returns it on `VerifyResult.nonce`; tracking seen nonces to detect
    * replays is the caller's job. An empty-string nonce is rejected with
    * a configuration error (it would silently bypass replay detection).
+   * Longer than `MAX_NONCE_LENGTH` (256) characters is rejected the
+   * same way; the verifier applies no such cap (see the constants
+   * above for the reasoning).
    */
   nonce?: string;
   /**
@@ -94,13 +133,19 @@ export interface SignOptions {
    * `TAG_MISMATCH`. The verifier returns the wire tag on
    * `VerifyResult.tag`. An empty-string tag is rejected with a
    * configuration error (it binds nothing and is indistinguishable
-   * from a signer that forgot to set one).
+   * from a signer that forgot to set one). Longer than
+   * `MAX_TAG_LENGTH` (256) characters is rejected the same way; the
+   * verifier applies no such cap (see the constants above for the
+   * reasoning).
    */
   tag?: string;
   /**
    * Covered components, in order. Defaults to
    * ["@method", "@authority", "@path"] plus "content-digest" when a body
-   * is present.
+   * is present. More than `MAX_COVERED_COMPONENTS` (64) entries are
+   * rejected with a configuration error — the verifier's parser
+   * refuses a longer list with `MALFORMED_SIGNATURE_INPUT`, so the
+   * signer must never mint one.
    */
   coveredComponents?: string[];
   /**
@@ -312,6 +357,22 @@ function assertLabelShape(label: string): void {
 }
 
 /**
+ * Fail fast on an over-long sign-side identifier (see
+ * `MAX_TAG_LENGTH` / `MAX_NONCE_LENGTH` / `MAX_KEY_ID_LENGTH`).
+ * The name in the message is the `SignOptions` field name.
+ */
+function assertSignParamLength(
+  name: "tag" | "nonce" | "keyId",
+  value: string,
+  max: number,
+): void {
+  if (value.length > max)
+    throw new Error(
+      `signRequest: "${name}" must be at most ${max} characters, got ${value.length}`,
+    );
+}
+
+/**
  * Whether `alg` names an algorithm this library implements (the
  * `SignAlg` union). Algorithm names are matched exactly — no case
  * folding: a wire or caller value of `"ED25519"` is not `"ed25519"`
@@ -359,6 +420,18 @@ function isSupportedAlg(alg: string): alg is SignAlg {
  *   rejected;
  * - `tag: ""` would bind the signature to no application protocol, so
  *   it is rejected;
+ * - `tag` / `nonce` / `keyid` longer than 256 characters
+ *   (`MAX_TAG_LENGTH` / `MAX_NONCE_LENGTH` / `MAX_KEY_ID_LENGTH`)
+ *   are rejected: all three are short identifiers by nature, and an
+ *   over-long value is almost certainly a caller bug. Sign side only —
+ *   the verifier applies no per-field cap (RFC 9421 sets none), so a
+ *   validly signed longer value from another implementation still
+ *   verifies; see the constants above;
+ * - more than 64 covered components (`MAX_COVERED_COMPONENTS`, the
+ *   same bound the verify-side parser applies) is rejected: the
+ *   verifier refuses a longer list with `MALFORMED_SIGNATURE_INPUT`,
+ *   so minting one would produce a signature this library itself
+ *   cannot verify;
  * - `label` must be an RFC 9421 token the verifier can parse back: commas
  *   and spaces would corrupt the `signature-input` dictionary (the label
  *   is the member key `verifyAllLabels` splits on), and `:`/`/`/leading
@@ -408,11 +481,32 @@ export function signRequest(
     throw new Error(
       'signRequest: "tag" must not be an empty string; an empty tag binds the signature to no application protocol',
     );
+  // Over-long identifiers fail fast for the same reason as the empty
+  // checks above: tag/nonce/keyid are short identifiers, and a value
+  // past 256 characters is almost certainly a caller bug. Checked
+  // here, before the base is built, so the input request is left
+  // untouched. Sign side only — the verifier applies no per-field cap
+  // (see MAX_TAG_LENGTH).
+  if (opts.keyId !== undefined)
+    assertSignParamLength("keyId", opts.keyId, MAX_KEY_ID_LENGTH);
+  if (opts.nonce !== undefined)
+    assertSignParamLength("nonce", opts.nonce, MAX_NONCE_LENGTH);
+  if (opts.tag !== undefined)
+    assertSignParamLength("tag", opts.tag, MAX_TAG_LENGTH);
   const covered =
     opts.coveredComponents ?? defaultCoveredComponents(req.body !== undefined);
   if (covered.length === 0)
     throw new Error(
       'signRequest: "coveredComponents" must cover at least one component; an empty list would sign nothing',
+    );
+  // The verify-side parser refuses a longer list with
+  // MALFORMED_SIGNATURE_INPUT (see MAX_COVERED_COMPONENTS), so
+  // minting one would produce a signature this library itself
+  // cannot verify — refuse it here, in the same words, before the
+  // base is built.
+  if (covered.length > MAX_COVERED_COMPONENTS)
+    throw new Error(
+      `signRequest: too many covered components: ${covered.length} (max ${MAX_COVERED_COMPONENTS})`,
     );
   assertNoDuplicateCoveredComponents("signRequest", covered);
   const digestAlg = opts.contentDigestAlg ?? "sha-512";
