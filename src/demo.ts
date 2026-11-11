@@ -1273,7 +1273,7 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { createServer, get, type IncomingMessage } from "node:http";
+import { createServer, get, request, type IncomingMessage } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import {
   createHmac,
@@ -1295,6 +1295,7 @@ import {
   canonicalizeStructuredFieldValue,
   contentDigest,
   contentDigestAlgOf,
+  createVerifiedHandler,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -4272,6 +4273,32 @@ export const DEMO_RESPONSE_SIGNING_BODY = JSON.stringify({
  */
 export const DEMO_RESPONSE_SIGNING_TAMPER_CODE: VerifyFailureCode =
   "SIGNATURE_MISMATCH";
+/** Path the verified-handler segment's loopback server listens on. */
+export const DEMO_VERIFIED_HANDLER_PATH = "/webhook";
+/** Key id the verified-handler segment's signed request carries. */
+export const DEMO_VERIFIED_HANDLER_KEY_ID = "demo-verified-handler-1";
+/** Nonce the verified-handler segment's signed request carries. */
+export const DEMO_VERIFIED_HANDLER_NONCE = "demo-nonce-verified-handler-001";
+/** Body the verified-handler segment's requests carry. */
+export const DEMO_VERIFIED_HANDLER_BODY = JSON.stringify({
+  settled: true,
+  amount: 100,
+});
+/**
+ * Hand-pinned failure code for the verified-handler segment's
+ * tampered-signature request (`SIGNATURE_MISMATCH`): flipping one
+ * base64 character of the signature breaks the cryptographic check,
+ * so the handler answers 401 and the business handler never runs.
+ */
+export const DEMO_VERIFIED_HANDLER_TAMPER_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
+/**
+ * Hand-pinned failure code for the verified-handler segment's
+ * unsigned request (`MISSING_SIGNATURE_INPUT`): no signature
+ * headers at all, so the handler answers 401 before any crypto.
+ */
+export const DEMO_VERIFIED_HANDLER_UNSIGNED_CODE: VerifyFailureCode =
+  "MISSING_SIGNATURE_INPUT";
 
 export interface DemoResult {
   signed: SignedHttpRequest;
@@ -6212,6 +6239,32 @@ export interface DemoResult {
    * member stripped: `DEMO_PRIVATE_JWK_IMPORT_ERROR`.
    */
   privateJwkImportError: string;
+  /**
+   * Status the verified-handler loopback answered for the signed
+   * request (200 — the business handler ran).
+   */
+  verifiedHandlerSignedStatus: number;
+  /**
+   * Status the verified-handler loopback answered for the
+   * tampered-signature request (401 — the business handler never
+   * ran).
+   */
+  verifiedHandlerTamperedStatus: number;
+  /**
+   * `code` from the 401 body for the tampered-signature request
+   * (`DEMO_VERIFIED_HANDLER_TAMPER_CODE`).
+   */
+  verifiedHandlerTamperedCode: string;
+  /**
+   * Status the verified-handler loopback answered for the unsigned
+   * request (401 — the business handler never ran).
+   */
+  verifiedHandlerUnsignedStatus: number;
+  /**
+   * `code` from the 401 body for the unsigned request
+   * (`DEMO_VERIFIED_HANDLER_UNSIGNED_CODE`).
+   */
+  verifiedHandlerUnsignedCode: string;
   lines: string[];
 }
 
@@ -7213,6 +7266,161 @@ async function fetchJwksPublishedDocument(): Promise<JwksPublishFixture> {
     };
   } finally {
     for (const socket of sockets) socket.destroy();
+    server.close();
+  }
+}
+
+/**
+ * The verified-handler segment's loopback fixture (backlog #1047):
+ * a real `http` server on 127.0.0.1 runs `createVerifiedHandler`
+ * (ed25519 key, verify instant pinned to the signature's `created`
+ * + 60s) with a business handler that answers 200 `{"ok":true}`.
+ * Three POSTs hit it: a `signRequest`-signed request, the same
+ * request with one base64 character of its signature flipped, and
+ * an unsigned request carrying no signature headers at all. The
+ * signed request reaches the business handler (200); the other two
+ * are answered 401 by the handler itself with the pinned failure
+ * codes, and the business handler never runs for them.
+ *
+ * Only statuses and failure codes are returned — no signature bytes,
+ * no port — so the printed segment is byte-identical between runs.
+ */
+interface VerifiedHandlerFixture {
+  /** Status the loopback answered for the signed request (200). */
+  signedStatus: number;
+  /** Status the loopback answered for the tampered-signature request (401). */
+  tamperedStatus: number;
+  /** `code` from the 401 body for the tampered-signature request. */
+  tamperedCode: string;
+  /** Status the loopback answered for the unsigned request (401). */
+  unsignedStatus: number;
+  /** `code` from the 401 body for the unsigned request. */
+  unsignedCode: string;
+}
+
+async function fetchVerifiedHandlerVerdicts(): Promise<VerifiedHandlerFixture> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const server = createServer(
+    createVerifiedHandler(
+      { key: publicKey, now: DEMO_CREATED + 60 },
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      },
+    ),
+  );
+  try {
+    const { port } = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    });
+    const url = `http://127.0.0.1:${port}${DEMO_VERIFIED_HANDLER_PATH}`;
+    const signed = signRequest(
+      {
+        method: "POST",
+        url,
+        headers: { "content-type": "application/json" },
+        body: DEMO_VERIFIED_HANDLER_BODY,
+      },
+      {
+        keyId: DEMO_VERIFIED_HANDLER_KEY_ID,
+        alg: "ed25519",
+        key: privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_VERIFIED_HANDLER_NONCE,
+      },
+    );
+    // Flip the first base64 character of the signature value
+    // (after `=:` — the label itself must stay untouched, or the
+    // failure would be a parse rejection, not a crypto one): the
+    // value stays well-formed, so the failure is the cryptographic
+    // check, not a parse rejection.
+    const tamperedSignature = (
+      signed.headers["signature"] as string
+    ).replace(/=:([A-Za-z0-9+/])/, (_match, c: string) =>
+      `=:${c === "A" ? "B" : "A"}`,
+    );
+    const wireHeaders = (
+      s: SignedHttpRequest,
+    ): Record<string, string | undefined> => ({
+      "Content-Type": "application/json",
+      "Signature-Input": s.headers["signature-input"] as string,
+      Signature: s.headers["signature"] as string,
+      "Content-Digest": s.headers["content-digest"] as string,
+    });
+    const post = (
+      headers: Record<string, string | undefined>,
+      body: string,
+    ): Promise<{ status: number; body: string }> =>
+      new Promise((resolve, reject) => {
+        const req = request(
+          {
+            host: "127.0.0.1",
+            port,
+            path: DEMO_VERIFIED_HANDLER_PATH,
+            method: "POST",
+            headers,
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on("data", (c: Buffer) => chunks.push(c));
+            res.on("end", () =>
+              resolve({
+                status: res.statusCode ?? 0,
+                body: Buffer.concat(chunks).toString("utf8"),
+              }),
+            );
+            res.on("error", reject);
+          },
+        );
+        req.on("error", reject);
+        req.end(body);
+      });
+    const signedVerdict = await post(
+      wireHeaders(signed),
+      DEMO_VERIFIED_HANDLER_BODY,
+    );
+    const tamperedVerdict = await post(
+      { ...wireHeaders(signed), Signature: tamperedSignature },
+      DEMO_VERIFIED_HANDLER_BODY,
+    );
+    const unsignedVerdict = await post(
+      { "Content-Type": "application/json" },
+      DEMO_VERIFIED_HANDLER_BODY,
+    );
+    const codeOf = (body: string): string => {
+      try {
+        const parsed = JSON.parse(body) as { code?: unknown };
+        return typeof parsed.code === "string" ? parsed.code : "";
+      } catch {
+        return "";
+      }
+    };
+    const fixture: VerifiedHandlerFixture = {
+      signedStatus: signedVerdict.status,
+      tamperedStatus: tamperedVerdict.status,
+      tamperedCode: codeOf(tamperedVerdict.body),
+      unsignedStatus: unsignedVerdict.status,
+      unsignedCode: codeOf(unsignedVerdict.body),
+    };
+    if (
+      fixture.signedStatus !== 200 ||
+      fixture.tamperedStatus !== 401 ||
+      fixture.tamperedCode !== DEMO_VERIFIED_HANDLER_TAMPER_CODE ||
+      fixture.unsignedStatus !== 401 ||
+      fixture.unsignedCode !== DEMO_VERIFIED_HANDLER_UNSIGNED_CODE
+    ) {
+      throw new Error(
+        `demo fixture broken: verified-handler segment gave signed ${fixture.signedStatus} / tampered ` +
+          `${fixture.tamperedStatus} (${fixture.tamperedCode}) / unsigned ${fixture.unsignedStatus} ` +
+          `(${fixture.unsignedCode}) instead of 200 / 401 (${DEMO_VERIFIED_HANDLER_TAMPER_CODE}) / 401 (${DEMO_VERIFIED_HANDLER_UNSIGNED_CODE})`,
+      );
+    }
+    return fixture;
+  } finally {
+    server.closeAllConnections();
     server.close();
   }
 }
@@ -14063,6 +14271,20 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Verified-handler segment (backlog #1047): the closing segment,
+  // and the server-side twin of the request-side sign -> verify
+  // story the demo opened with. A real loopback server runs
+  // `createVerifiedHandler`, so the three verdicts above come from
+  // the wire, not from calling `verifyRequest` in-process: a signed
+  // request reaches the business handler (200), a request whose
+  // signature bytes were flipped is answered 401 with
+  // `DEMO_VERIFIED_HANDLER_TAMPER_CODE`, and an unsigned request is
+  // answered 401 with `DEMO_VERIFIED_HANDLER_UNSIGNED_CODE` — both
+  // 401s before the business handler ever runs. Only statuses and
+  // failure codes are printed, never signature bytes or the port,
+  // so the segment is byte-identical between runs.
+  const verifiedHandler = await fetchVerifiedHandlerVerdicts();
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -14852,6 +15074,11 @@ export async function runDemo(): Promise<DemoResult> {
       ? `Private JWK round-trip verification: OK (label ${privateJwkVerification.label}, keyid="${privateJwkVerification.keyId}", alg="ed25519", nonce="${privateJwkVerification.nonce}")`
       : `Private JWK round-trip verification: FAILED (code ${privateJwkVerification.code}: ${privateJwkVerification.reason})`,
     `Private JWK without "d" rejected at import: ${privateJwkImportError}`,
+    "",
+    `Verified handler: a real loopback server runs createVerifiedHandler — it verifies each request before the business handler runs, so a signed request reaches the handler while a bad or missing signature never does`,
+    `Signed request to the verified handler: ${verifiedHandler.signedStatus} (verified, business handler ran)`,
+    `Tampered signature to the verified handler: ${verifiedHandler.tamperedStatus} (code ${verifiedHandler.tamperedCode})`,
+    `Unsigned request to the verified handler: ${verifiedHandler.unsignedStatus} (code ${verifiedHandler.unsignedCode})`,
   ];
 
   return {
@@ -15212,6 +15439,11 @@ export async function runDemo(): Promise<DemoResult> {
     privateJwkKid: DEMO_PRIVATE_JWK.kid,
     privateJwkVerification,
     privateJwkImportError,
+    verifiedHandlerSignedStatus: verifiedHandler.signedStatus,
+    verifiedHandlerTamperedStatus: verifiedHandler.tamperedStatus,
+    verifiedHandlerTamperedCode: verifiedHandler.tamperedCode,
+    verifiedHandlerUnsignedStatus: verifiedHandler.unsignedStatus,
+    verifiedHandlerUnsignedCode: verifiedHandler.unsignedCode,
     lines,
   };
 }

@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo `createVerifiedHandler` end-to-end segment (backlog
+  #1047): the demo closes with a real loopback `http` server running
+  `createVerifiedHandler` — a `signRequest`-signed POST reaches the
+  business handler (200), a POST with one base64 character of its
+  signature flipped is answered 401 with `SIGNATURE_MISMATCH`, and
+  an unsigned POST is answered 401 with `MISSING_SIGNATURE_INPUT`,
+  both 401s before the business handler ever runs. Only the
+  statuses and failure codes are printed, never signature bytes or
+  the port, so the segment is byte-identical between runs.
+  `DemoResult` gains the five verdict fields and the README demo
+  prose gains a paragraph for the segment.
+
 - End-to-end `createVerifiedHandler` benchmark rows (backlog #1027):
   `benchmarkCreateVerifiedHandler` and
   `benchmarkCreateVerifiedHandlerUnsigned` over a loopback `http`

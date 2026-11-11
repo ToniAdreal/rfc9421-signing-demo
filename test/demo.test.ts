@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createServer } from "node:http";
+import { createServer, request } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import {
   createHmac,
@@ -48,6 +48,7 @@ import {
   ReplayCache,
   buildSignatureBase,
   contentDigest,
+  createVerifiedHandler,
   resolveComponent,
   secretKey,
   signRequest,
@@ -577,6 +578,12 @@ import {
   DEMO_THROW_TAMPERED_CODE,
   DEMO_UNKNOWN_KEY_ID,
   DEMO_UNRECOGNIZED_DIGEST_VALUE,
+  DEMO_VERIFIED_HANDLER_BODY,
+  DEMO_VERIFIED_HANDLER_KEY_ID,
+  DEMO_VERIFIED_HANDLER_NONCE,
+  DEMO_VERIFIED_HANDLER_PATH,
+  DEMO_VERIFIED_HANDLER_TAMPER_CODE,
+  DEMO_VERIFIED_HANDLER_UNSIGNED_CODE,
   runDemo,
 } from "../src/demo.js";
 
@@ -7100,8 +7107,9 @@ test("demo private-key JWK segment imports a fixed ed25519 private JWK, signs wi
     /Private JWK without "d" rejected at import: importPrivateKeyJwk: invalid JWK: missing or empty "d"/,
   );
 
-  // Ordering: the segment follows the HMAC oct JWK segment and
-  // closes the demo — byte-exact lines, nothing after them.
+  // Ordering: the segment follows the HMAC oct JWK segment and is
+  // followed by the verified-handler segment that closes the demo
+  // (blank separator, then its header).
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Private-key JWK import:"),
   );
@@ -7116,7 +7124,10 @@ test("demo private-key JWK segment imports a fixed ed25519 private JWK, signs wi
     `Private JWK round-trip verification: OK (label sig1, keyid="${DEMO_PRIVATE_JWK_KEY_ID}", alg="ed25519", nonce="${DEMO_PRIVATE_JWK_NONCE}")`,
     `Private JWK without "d" rejected at import: ${DEMO_PRIVATE_JWK_IMPORT_ERROR}`,
   ]);
-  assert.equal(lines[headerIdx + 4], undefined);
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(
+    lines[headerIdx + 5]!.startsWith("Verified handler:"),
+  );
 });
 
 test("demo private-key JWK segment prints byte-identical lines across runs", async () => {
@@ -7124,12 +7135,192 @@ test("demo private-key JWK segment prints byte-identical lines across runs", asy
   const second = await runDemo();
   const start = (ls: string[]) =>
     ls.findIndex((l) => l.startsWith("Private-key JWK import:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Verified handler:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // Only fixed strings, the JWK shape and the pinned rejection are
+  // printed — the key bytes and the signature bytes never appear —
+  // so the segment is identical.
+  assert.deepEqual(
+    first.lines.slice(a, aEnd),
+    second.lines.slice(b, bEnd),
+  );
+});
+
+test("demo verified-handler segment runs a signed, a tampered-signature, and an unsigned request through createVerifiedHandler", async () => {
+  const {
+    lines,
+    verifiedHandlerSignedStatus,
+    verifiedHandlerTamperedStatus,
+    verifiedHandlerTamperedCode,
+    verifiedHandlerUnsignedStatus,
+    verifiedHandlerUnsignedCode,
+  } = await runDemo();
+
+  // Pinned segment constants.
+  assert.equal(DEMO_VERIFIED_HANDLER_PATH, "/webhook");
+  assert.equal(DEMO_VERIFIED_HANDLER_KEY_ID, "demo-verified-handler-1");
+  assert.equal(
+    DEMO_VERIFIED_HANDLER_NONCE,
+    "demo-nonce-verified-handler-001",
+  );
+  assert.equal(
+    DEMO_VERIFIED_HANDLER_BODY,
+    JSON.stringify({ settled: true, amount: 100 }),
+  );
+  assert.equal(DEMO_VERIFIED_HANDLER_TAMPER_CODE, "SIGNATURE_MISMATCH");
+  assert.equal(
+    DEMO_VERIFIED_HANDLER_UNSIGNED_CODE,
+    "MISSING_SIGNATURE_INPUT",
+  );
+
+  // The wire verdicts: signed reaches the business handler (200),
+  // the flipped signature and the missing signature are both
+  // answered 401 with the pinned codes before the handler runs.
+  assert.equal(verifiedHandlerSignedStatus, 200);
+  assert.equal(verifiedHandlerTamperedStatus, 401);
+  assert.equal(
+    verifiedHandlerTamperedCode,
+    DEMO_VERIFIED_HANDLER_TAMPER_CODE,
+  );
+  assert.equal(verifiedHandlerUnsignedStatus, 401);
+  assert.equal(
+    verifiedHandlerUnsignedCode,
+    DEMO_VERIFIED_HANDLER_UNSIGNED_CODE,
+  );
+
+  // Independent re-derivation: a fresh server with a fresh key pair
+  // gives the same three verdicts — the demo's numbers come from
+  // the handler, not from a fixture echo.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const server = createServer(
+    createVerifiedHandler(
+      { key: publicKey, now: DEMO_CREATED + 60 },
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      },
+    ),
+  );
+  try {
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const port = (server.address() as AddressInfo).port;
+    const url = `http://127.0.0.1:${port}${DEMO_VERIFIED_HANDLER_PATH}`;
+    const signed = signRequest(
+      {
+        method: "POST",
+        url,
+        headers: { "content-type": "application/json" },
+        body: DEMO_VERIFIED_HANDLER_BODY,
+      },
+      {
+        keyId: DEMO_VERIFIED_HANDLER_KEY_ID,
+        alg: "ed25519",
+        key: privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_VERIFIED_HANDLER_NONCE,
+      },
+    );
+    const tamperedSignature = (
+      signed.headers["signature"] as string
+    ).replace(/=:([A-Za-z0-9+/])/, (_match, c: string) =>
+      `=:${c === "A" ? "B" : "A"}`,
+    );
+    const post = (
+      headers: Record<string, string | undefined>,
+    ): Promise<{ status: number; body: string }> =>
+      new Promise((resolvePromise, rejectPromise) => {
+        const req = request(
+          {
+            host: "127.0.0.1",
+            port,
+            path: DEMO_VERIFIED_HANDLER_PATH,
+            method: "POST",
+            headers,
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on("data", (c: Buffer) => chunks.push(c));
+            res.on("end", () =>
+              resolvePromise({
+                status: res.statusCode ?? 0,
+                body: Buffer.concat(chunks).toString("utf8"),
+              }),
+            );
+            res.on("error", rejectPromise);
+          },
+        );
+        req.on("error", rejectPromise);
+        req.end(DEMO_VERIFIED_HANDLER_BODY);
+      });
+    const wireHeaders = {
+      "Content-Type": "application/json",
+      "Signature-Input": signed.headers["signature-input"] as string,
+      Signature: signed.headers["signature"] as string,
+      "Content-Digest": signed.headers["content-digest"] as string,
+    };
+    const reSigned = await post(wireHeaders);
+    assert.equal(reSigned.status, 200);
+    assert.equal(JSON.parse(reSigned.body).ok, true);
+    const reTampered = await post({
+      ...wireHeaders,
+      Signature: tamperedSignature,
+    });
+    assert.equal(reTampered.status, 401);
+    assert.equal(
+      (JSON.parse(reTampered.body) as { code: string }).code,
+      DEMO_VERIFIED_HANDLER_TAMPER_CODE,
+    );
+    const reUnsigned = await post({ "Content-Type": "application/json" });
+    assert.equal(reUnsigned.status, 401);
+    assert.equal(
+      (JSON.parse(reUnsigned.body) as { code: string }).code,
+      DEMO_VERIFIED_HANDLER_UNSIGNED_CODE,
+    );
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+
+  // Printed lines: header + three verdicts, byte-exact.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Verified handler:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "Verified handler: a real loopback server runs createVerifiedHandler — it verifies each request before the business handler runs, so a signed request reaches the handler while a bad or missing signature never does",
+    "Signed request to the verified handler: 200 (verified, business handler ran)",
+    "Tampered signature to the verified handler: 401 (code SIGNATURE_MISMATCH)",
+    "Unsigned request to the verified handler: 401 (code MISSING_SIGNATURE_INPUT)",
+  ]);
+
+  // Ordering: the segment follows the private-key JWK segment and
+  // closes the demo — byte-exact lines, nothing after them.
+  const jwkIdx = lines.findIndex((l) =>
+    l.startsWith("Private-key JWK import:"),
+  );
+  assert.ok(jwkIdx !== -1 && jwkIdx < headerIdx);
+  assert.equal(lines[headerIdx - 1], "");
+  assert.equal(lines[headerIdx + 4], undefined);
+});
+
+test("demo verified-handler segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Verified handler:"));
   const a = start(first.lines);
   const b = start(second.lines);
   assert.ok(a !== -1 && b !== -1);
-  // Only fixed strings, the JWK shape and the pinned rejection are
-  // printed — the key bytes and the signature bytes never appear —
-  // so the closing segment is identical.
+  // Only statuses and failure codes are printed — the key pair,
+  // the signature bytes and the port never appear — so the closing
+  // segment is identical.
   assert.deepEqual(second.lines.slice(b), first.lines.slice(a));
 });
 

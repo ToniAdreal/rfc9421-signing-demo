@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1910 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1912 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -237,7 +237,15 @@ completes an ed25519 sign -> verify round-trip — the asymmetric
 half of JWK key distribution, for KMS-exported signing keys —
 and a copy with its `d` member stripped is shown rejected at
 import; only the JWK's shape is printed, never the `d` or `x`
-bytes.
+bytes. The demo closes with a verified-handler segment: a real
+loopback server runs `createVerifiedHandler`, and three POSTs hit
+it — a `signRequest`-signed request reaches the business handler
+(200), a request with one base64 character of its signature
+flipped is answered 401 with `SIGNATURE_MISMATCH`, and an
+unsigned request is answered 401 with `MISSING_SIGNATURE_INPUT`
+— both 401s before the business handler ever runs; only the
+statuses and failure codes are printed, never the signature bytes
+or the port.
 
 ```bash
 npm run demo
@@ -4276,7 +4284,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1910 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1912 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
