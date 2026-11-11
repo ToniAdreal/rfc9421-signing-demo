@@ -377,7 +377,8 @@ test("a public key, a non-KeyObject key, or an unknown alg as signResponse throw
       }),
     /createVerifiedHandler: signResponse\.key must be a KeyObject/,
   );
-  // An unknown alg matches no key shape.
+  // An unknown alg is rejected as unsupported, not as a key mismatch
+  // (backlog #1058): no key of any shape can sign "rsa-md5-sha1".
   assert.throws(
     () =>
       createVerifiedHandler({ key: gateway.publicKey }, handler, {
@@ -386,7 +387,7 @@ test("a public key, a non-KeyObject key, or an unknown alg as signResponse throw
           alg: "rsa-md5-sha1",
         } as unknown as VerifiedHandlerSignResponseOptions,
       }),
-    /createVerifiedHandler: invalid signResponse options: signRequest: alg "rsa-md5-sha1" is incompatible/,
+    /createVerifiedHandler: invalid signResponse options: signRequest: unsupported alg "rsa-md5-sha1"/,
   );
   // An RSA key paired with ed25519 is the same swapped-pair failure.
   assert.throws(

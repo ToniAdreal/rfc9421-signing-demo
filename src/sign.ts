@@ -312,6 +312,28 @@ function assertLabelShape(label: string): void {
 }
 
 /**
+ * Whether `alg` names an algorithm this library implements (the
+ * `SignAlg` union). Algorithm names are matched exactly — no case
+ * folding: a wire or caller value of `"ED25519"` is not `"ed25519"`
+ * and is unsupported, the same verdict the verify side reaches for a
+ * miscased wire `alg` (`UNSUPPORTED_ALG`). Kept next to the dispatch
+ * chain below so the three listings (union, guard, dispatch) drift
+ * together, never apart.
+ */
+function isSupportedAlg(alg: string): alg is SignAlg {
+  return (
+    alg === "ed25519" ||
+    alg === "hmac-sha256" ||
+    alg === "hmac-sha512" ||
+    alg === "ecdsa-p256-sha256" ||
+    alg === "ecdsa-p384-sha384" ||
+    alg === "ecdsa-p521-sha512" ||
+    alg === "rsa-pss-sha512" ||
+    alg === "rsa-v1_5-sha256"
+  );
+}
+
+/**
  * Sign an HTTP request per RFC 9421. Returns a copy of the request with
  * `Signature-Input`, `Signature` (and `Content-Digest` when the body is
  * covered) headers attached. The input request is not mutated.
@@ -344,13 +366,17 @@ function assertLabelShape(label: string): void {
  *   whose keys contain them.
  * - `contentDigestAlg` must be `"sha-512"` or `"sha-256"` — anything else
  *   would emit a digest the verifier cannot name.
- * - `alg` must match the shape of `key` (ed25519 needs an Ed25519 key,
- *   `hmac-*` a secret key, each `ecdsa-p*-*` the EC key on the matching
- *   curve, `rsa-*` an RSA key) — checked here, before the signature
- *   base is built and before any crypto runs, so a swapped key or alg
- *   is a clear configuration error instead of a cryptic node:crypto
- *   complaint. `signResponse`, `addSignature`, and
- *   `addResponseSignature` inherit this check through `signRequest`.
+ * - `alg` must name an algorithm this library implements and match
+ *   the shape of `key` (ed25519 needs an Ed25519 key, `hmac-*` a secret
+ *   key, each `ecdsa-p*-*` the EC key on the matching curve, `rsa-*` an
+ *   RSA key) — checked here, before the signature base is built and
+ *   before any crypto runs, so a swapped key or alg is a clear
+ *   configuration error instead of a cryptic node:crypto complaint.
+ *   An unknown `alg` (including the classic downgrade value `"none"`)
+ *   is rejected first, as `unsupported alg`, so it is never misreported
+ *   as a key mismatch — no key of any shape can sign `"none"`.
+ *   `signResponse`, `addSignature`, and `addResponseSignature` inherit
+ *   these checks through `signRequest`.
  */
 export function signRequest(
   req: RequestLike,
@@ -399,6 +425,19 @@ export function signRequest(
   // two is wrong. The shape predicate is shared with the verify
   // side (`keys.algMatchesKeyShape`), so the two sides can never
   // disagree about which alg goes with which key.
+  //
+  // An unknown `alg` is rejected before the shape check, in its own
+  // words: the predicate returns false for every unknown value, so
+  // without this guard `alg: "none"` would be misreported as
+  // "incompatible with the key" — and the `unsupported alg` branch at
+  // the end of the crypto dispatch below could never be reached by an
+  // unknown value. That branch stays as the exhaustiveness guard (see
+  // below): it is unreachable today, and exists so a future algorithm
+  // added to `SignAlg` without a dispatch branch fails loudly instead
+  // of proceeding with an unassigned signature — and so TypeScript's
+  // definite-assignment analysis holds.
+  if (!isSupportedAlg(opts.alg))
+    throw new Error(`signRequest: unsupported alg "${opts.alg}"`);
   if (!algMatchesKeyShape(opts.alg, opts.key))
     throw new Error(
       `signRequest: alg "${opts.alg}" is incompatible with the key (${describeKey(opts.key)}) — pass a key of the matching type for the algorithm`,
@@ -517,7 +556,14 @@ export function signRequest(
     assertHmacSecretLength(opts.key, "hmac-sha512");
     sig = createHmac("sha512", opts.key).update(base, "utf8").digest();
   } else {
-    throw new Error(`unsupported alg "${opts.alg as string}"`);
+    // Exhaustiveness guard, unreachable today: the `isSupportedAlg`
+    // check above rejects every unknown value before the base is built,
+    // and the branches above cover all eight `SignAlg` members. Kept
+    // (rather than deleted) so a future algorithm added to the union
+    // without a branch here fails loudly instead of proceeding with an
+    // unassigned signature — and so TypeScript accepts `sig` as
+    // definitely assigned.
+    throw new Error(`unsupported alg "${opts.alg}"`);
   }
 
   headers["signature-input"] = signatureInputValue(label, covered, params);

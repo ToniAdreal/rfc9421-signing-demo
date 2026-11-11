@@ -4724,6 +4724,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `signRequest` now rejects an unknown `alg` as `unsupported alg`
+  (backlog #1058): it previously fell through to the key-shape
+  predicate, so the classic downgrade value `"none"` (and any other
+  unknown name, e.g. `"ed448"`) was misreported as `alg "…" is
+  incompatible with the key` — and the `unsupported alg` branch at
+  the end of the crypto dispatch could never be reached by an unknown
+  value. An explicit `isSupportedAlg` guard now runs before the shape
+  check, so unknown names fail in their own words before the signature
+  base is built or any crypto runs, the input request is left
+  untouched, and `addSignature` / `signResponse` inherit the guard
+  through `signRequest`. The dispatch's final `else` stays as the
+  exhaustiveness guard (unreachable today; it exists so a future
+  algorithm added to `SignAlg` without a branch fails loudly and so
+  TypeScript accepts the signature as definitely assigned), and the
+  stale `algMatchesKeyShape` comment that claimed unknown values
+  "still fail with `unsupported alg` in the dispatch below" now states
+  the real flow. Algorithm names are matched exactly on both sides —
+  a miscased `"ED25519"` is unsupported, not ed25519 — and the verify
+  side keeps returning `UNSUPPORTED_ALG` for unknown wire values. 10
+  new tests in `test/signUnknownAlg.test.ts` (sign-side `"none"` /
+  `"ed448"` / `""` / `"ED25519"` rejections with input untouched,
+  `"none"` with an HMAC key, known-alg/key-mismatch wording
+  unchanged, `addSignature` inheritance, ed25519 round-trip control,
+  verify-side `"none"` / `"ED25519"` → `UNSUPPORTED_ALG`); the
+  `createVerifiedHandler` unknown-alg case in
+  `test/nodeHttpVerifiedHandlerSignResponse.test.ts` now expects the
+  corrected message.
 - The verifier now rejects a repeated covered component (backlog
   #1001): `parseComponentIds` in `src/components.ts` previously only
   pushed identifiers, so `("@method" "@method" "@path")` was accepted

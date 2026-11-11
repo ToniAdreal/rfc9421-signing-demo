@@ -219,8 +219,11 @@ export function describeKey(key: KeyObject): string {
  * sign side throws before any crypto runs, the verify side (under
  * the `algFallback: "infer"` opt-in) throws instead of handing
  * node:crypto a mismatched pair. An unknown `alg` value is not
- * this predicate's job — it still fails with `UNSUPPORTED_ALG` /
- * `unsupported alg` in the dispatch below.
+ * this predicate's job — it returns false for every unknown value,
+ * so callers must reject unknown values first with their own
+ * `unsupported alg` wording: the sign side does that in
+ * `signRequest` (backlog #1058), the verify side fails unknown wire
+ * values with `UNSUPPORTED_ALG` in its crypto dispatch.
  */
 export function algMatchesKeyShape(alg: string, key: KeyObject): boolean {
   return (
