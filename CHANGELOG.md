@@ -4743,6 +4743,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `parseSignatureInput` now finds the inner list's closing
+  parenthesis with a quote-aware scan (backlog #1071): the first
+  `)` outside a quoted string, with backslash escapes skipped, instead
+  of a naive `indexOf(")")`. Previously a `)` inside a quoted value —
+  e.g. a header field named `x-a)b` or a `;name="a)b"` parameter —
+  truncated the component list, so the verifier rejected its own
+  signer's output (or a foreign header) as
+  `MALFORMED_SIGNATURE_INPUT`, while `listSignatureLabels` parsed
+  the same value correctly. A `)` in a `;name` value still cannot be
+  minted by this signer for `@query-param` (a literal `)` is not a
+  percent-encoded name, so the resolve step refuses it with
+  `SIGNATURE_BASE_BUILD_FAILED`); the parse fix means such a header
+  is now rejected semantically instead of mis-parsed. 11 new tests in
+  `test/parseSignatureInputQuotedParen.test.ts` (three `;name` paren
+  shapes, escaped quote / backslash, an `x-a)b` sign/verify
+  round-trip plus tamper to `SIGNATURE_MISMATCH`, semantic-vs-malformed
+  rejection, unterminated-list regression, multi-label agreement with
+  `listSignatureLabels`, a `)` inside a quoted `;tag`). A
+  short-circuit mutation (restoring the naive scan) was verified to
+  turn 8 of the 11 new tests red.
+
 - `signRequest` now rejects over-long signing parameters (backlog
   #1066): a `tag` / `nonce` / `keyid` longer than 256 characters
   (`MAX_TAG_LENGTH` / `MAX_NONCE_LENGTH` / `MAX_KEY_ID_LENGTH`,

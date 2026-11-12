@@ -951,7 +951,30 @@ export function parseSignatureInput(
   const rest = fieldValue.slice(m.index + m[0].length).trimStart();
   if (!rest.startsWith("("))
     throw new Error("malformed Signature-Input: expected inner list");
-  const close = rest.indexOf(")");
+  // Find the inner list's closing paren with a quote-aware scan: the
+  // first ")" outside a quoted string. A naive `rest.indexOf(")")`
+  // stops at a ")" inside a quoted value — e.g. `;name="a)b"` (a
+  // `parseComponentId`-legal percent-encoded query parameter name, or
+  // a header field name such as `"x-a)b"`) — truncating the list so
+  // the caller sees a wrong component id (or an "unterminated
+  // string" downstream) instead of the components that were signed.
+  // Backslash escapes are skipped exactly as `listSignatureLabels`
+  // and `parseComponentIds` do, so an escaped quote never ends the
+  // string early either.
+  let close = -1;
+  let inString = false;
+  for (let i = 1; i < rest.length; i++) {
+    const c = rest[i];
+    if (inString) {
+      if (c === "\\") i++; // skip escaped character
+      else if (c === '"') inString = false;
+    } else if (c === '"') {
+      inString = true;
+    } else if (c === ")") {
+      close = i;
+      break;
+    }
+  }
   if (close === -1)
     throw new Error("malformed Signature-Input: unterminated inner list");
   const componentIds = parseComponentIds(rest.slice(1, close));
