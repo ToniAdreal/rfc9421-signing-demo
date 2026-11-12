@@ -151,11 +151,23 @@ export interface VerifyOptions {
   candidateKeys?: KeyObject[];
   /** Signature label to verify. Defaults to "sig1". */
   label?: string;
-  /** Unix seconds. Defaults to now. */
+  /**
+   * Unix seconds. Defaults to now. Must be a non-negative integer
+   * number of Unix seconds — the same integer discipline the signing
+   * side enforces on `created`/`expires` (`assertTimestamp`): a
+   * fractional `now` would compare against integer wire timestamps,
+   * and a NaN `now` would silently disable every freshness check
+   * (all comparisons against NaN are false), so a bogus value throws
+   * a configuration `Error` before any header is read.
+   */
   now?: number;
   /**
    * Accept signatures created up to this many seconds in the future
    * (clock skew between signer and verifier). Defaults to 60.
+   * Must be a positive finite number — the same rule the per-label
+   * map enforces — so a zero, negative, NaN or infinite tolerance
+   * throws a configuration `Error` instead of silently rejecting
+   * (or never rejecting) future-dated signatures.
    * In `verifyAllLabels` the same tolerance applies to every label,
    * unless overridden per label via
    * `VerifyAllOptions.clockSkewToleranceSecByLabel`.
@@ -165,9 +177,12 @@ export interface VerifyOptions {
    * Accept signatures whose `expires` timestamp is up to this many
    * seconds in the past. Defaults to 0: expiry is enforced strictly,
    * with no grace period. Set a small positive value to tolerate
-   * verifier clock lag during deployments and key rollovers. In
-   * `verifyAllLabels` the same tolerance applies to every label,
-   * unless overridden per label via
+   * verifier clock lag during deployments and key rollovers. Must be
+   * a non-negative finite number — the same rule the per-label map
+   * enforces — so a negative, NaN or infinite tolerance throws a
+   * configuration `Error` instead of silently disabling the expiry
+   * check. In `verifyAllLabels` the same tolerance applies to every
+   * label, unless overridden per label via
    * `VerifyAllOptions.expiredToleranceSecByLabel`.
    */
   expiredToleranceSec?: number;
@@ -616,6 +631,51 @@ function assertMaxSignatureAgeSec(value: number | undefined): void {
 }
 
 /**
+ * Validate the global clock options (`now` / `clockSkewToleranceSec` /
+ * `expiredToleranceSec`). A bogus value is a caller configuration error
+ * (throw), not a verification failure — the same fail-fast rule as the
+ * per-label maps (`assertClockSkewToleranceSecByLabel` /
+ * `assertExpiredToleranceSecByLabel`), which this mirrors: `now` must
+ * be a non-negative integer number of Unix seconds (the signing side's
+ * `assertTimestamp` requires integer `created`/`expires`, and a
+ * fractional `now` would compare against integer wire timestamps);
+ * `clockSkewToleranceSec` must be a positive finite number; and
+ * `expiredToleranceSec` must be a non-negative finite number. A NaN
+ * `now` would silently disable every freshness check (all comparisons
+ * against NaN are false, so EXPIRED / CREATED_IN_FUTURE /
+ * SIGNATURE_TOO_OLD / NONCE_REPLAY could never trigger), and a NaN
+ * tolerance would disable its own check the same way — so both are
+ * rejected here, before any header is read and before any crypto runs.
+ * `caller` names the entry point for the message; the response-side
+ * entry points (`verifyResponse` / `verifyAllResponseLabels`) inherit
+ * this check through their delegation to `verifyRequest` /
+ * `verifyAllLabels`.
+ */
+function assertVerifyClockOptions(
+  now: number,
+  skew: number,
+  expiredTolerance: number,
+  caller: "verifyRequest" | "verifyAllLabels",
+): void {
+  if (typeof now !== "number" || !Number.isInteger(now) || now < 0)
+    throw new Error(
+      `${caller}: \`now\` must be a non-negative integer number of Unix seconds, got ${typeof now === "number" ? String(now) : typeof now}`,
+    );
+  if (typeof skew !== "number" || !Number.isFinite(skew) || skew <= 0)
+    throw new Error(
+      `${caller}: \`clockSkewToleranceSec\` must be a positive finite number, got ${typeof skew === "number" ? String(skew) : typeof skew}`,
+    );
+  if (
+    typeof expiredTolerance !== "number" ||
+    !Number.isFinite(expiredTolerance) ||
+    expiredTolerance < 0
+  )
+    throw new Error(
+      `${caller}: \`expiredToleranceSec\` must be a non-negative finite number, got ${typeof expiredTolerance === "number" ? String(expiredTolerance) : typeof expiredTolerance}`,
+    );
+}
+
+/**
  * Validate one signature-header length limit
  * (`maxSignatureInputLength` / `maxSignatureLength`). A bogus limit is
  * a caller configuration error (throw), not a verification failure —
@@ -843,6 +903,7 @@ export function verifyRequest(
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   const skew = opts.clockSkewToleranceSec ?? 60;
   const expiredTolerance = opts.expiredToleranceSec ?? 0;
+  assertVerifyClockOptions(now, skew, expiredTolerance, "verifyRequest");
 
   const sigInput = getHeader(req.headers, "signature-input");
   if (!sigInput)

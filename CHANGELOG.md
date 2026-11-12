@@ -4874,6 +4874,28 @@ change type; no entry describes a feature that is not in the history.
   tamper case for Display String, so one new test pins a tampered
   Display String value failing with `SIGNATURE_MISMATCH`.
 
+### Fixed
+
+- `verifyRequest` now validates the global clock options (backlog
+  #1074): `now` must be a non-negative integer number of Unix
+  seconds (the same integer discipline the signing side enforces on
+  `created`/`expires`), `clockSkewToleranceSec` must be a positive
+  finite number, and `expiredToleranceSec` must be a non-negative
+  finite number — the same rules the per-label maps already
+  enforced. Previously a NaN `now` (e.g. derived from a failed
+  `Date.parse` in a webhook receiver) silently disabled every
+  freshness check, since all comparisons against NaN are false, and
+  a NaN tolerance disabled its own check the same way; a negative
+  skew or tolerance silently rejected legal signatures. Bogus
+  values now throw a configuration `Error` before any header is
+  read and before any crypto runs. `verifyResponse` and
+  `verifyAllResponseLabels` inherit the check through delegation,
+  and `verifyAllLabels` through its per-label `verifyRequest`
+  calls; the per-label maps are still validated independently. 22
+  new tests in `test/verifyClockOptions.test.ts`. A short-circuit
+  mutation (disabling the new assertion) was verified to turn 19
+  of the 22 new tests red.
+
 ## [0.1.0]
 
 The only version declared in `package.json`. Entries cover the commit
