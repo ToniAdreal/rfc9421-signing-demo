@@ -4764,6 +4764,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- Response `status` is now validated against the registered HTTP
+  status-code range 100-599 (backlog #1080): `assertStatus`
+  (`signResponse` / `verifyResponse` / `verifyAllResponseLabels`)
+  and both response adapters (`fromNodeResponse`,
+  `fromFetchResponse`) reject a non-integer or out-of-range status
+  with the range named in the error (e.g. `… got 999 (expected
+  100-599)`). Previously only the integer check ran, so 0, 99, 600
+  and 999 could be signed and verified and `@status` bound a
+  meaningless value; 600-999 are undefined codes (RFC 9110 §15).
+  The existing error wording is kept verbatim with the range
+  appended, so existing message assertions still match.
+  `test/responseStatusRange.test.ts` gains 7 tests (rejection at all
+  four entry points for 0/99/600/999, 100/599 sign→verify round-trips
+  including `verifyAllResponseLabels`, and 100/599 pass-through in
+  both adapters); a mutation run with the range check removed turns
+  the new tests red.
+
 - `parseSignatureInput` now finds the inner list's closing
   parenthesis with a quote-aware scan (backlog #1071): the first
   `)` outside a quoted string, with backslash escapes skipped, instead

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1999 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2006 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1253,9 +1253,9 @@ get(url, (res) => {
 
 What `fromNodeResponse` does: takes the response `statusCode` (a covered
 `@status` binds it; a missing `statusCode` throws a configuration `Error`
-instead of silently defaulting, and so does a non-integer one — a string
-`"200"` would otherwise verify as status 200, while
-`signResponse`/`verifyResponse` reject non-integer statuses outright),
+instead of silently defaulting, and so does a non-integer or out-of-range
+(100-599) one — a string `"200"` would otherwise verify as status 200,
+while `signResponse`/`verifyResponse` reject non-integer statuses outright),
 lowercases header names and joins
 multi-value headers with `", "` (the same convention as
 `fromNodeRequest`), passes the buffered body through untouched, and
@@ -1290,8 +1290,9 @@ if (!result.ok) {
 
 What `fromFetchResponse` does: takes the response `status` (a covered
 `@status` binds it; a missing status throws a configuration `Error`
-instead of silently defaulting, and so does a non-integer one — the same
-boundary rule as `fromNodeResponse`), lowercases header names and joins
+instead of silently defaulting, and so does a non-integer or out-of-range
+(100-599) one — the same boundary rule as `fromNodeResponse`), lowercases
+header names and joins
 multi-value headers with `", "` (the same convention as
 `fromNodeResponse`), passes the already-read body through untouched (a
 `Uint8Array` body is copied into a `Buffer`; a string or `Buffer` passes
@@ -4333,7 +4334,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1999 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2006 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

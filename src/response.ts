@@ -229,13 +229,22 @@ function requestComponentError(
   );
 }
 
+// The range is the registered HTTP status-code range (RFC 9110 §15):
+// 100-599. Codes 600-999 are undefined, and an `@status` bound to one
+// would sign a meaningless value for a webhook/gateway verifier, so
+// they are rejected here rather than only below 100.
 function assertStatus(
   caller: "signResponse" | "verifyResponse" | "verifyAllResponseLabels",
   status: unknown,
 ): asserts status is number {
-  if (typeof status !== "number" || !Number.isInteger(status))
+  if (
+    typeof status !== "number" ||
+    !Number.isInteger(status) ||
+    status < 100 ||
+    status > 599
+  )
     throw new Error(
-      `${caller}: "status" must be an integer HTTP status code, got ${String(status)}`,
+      `${caller}: "status" must be an integer HTTP status code, got ${String(status)} (expected 100-599)`,
     );
 }
 
@@ -278,7 +287,7 @@ function responseToRequestLike(
  *
  * Fail-fast configuration errors (thrown, not embedded in the
  * signature): everything `signRequest` already rejects, plus
- * - a missing or non-integer `status` (`@status` is covered by
+ * - a missing, non-integer, or out-of-range (100-599) `status` (`@status` is covered by
  *   default, so a response without a status to bind is a caller
  *   mistake, never silently defaulted);
  * - a covered component that derives from the request without
@@ -343,7 +352,7 @@ export function signResponse(
  * are returned, never thrown.
  *
  * Two caller configuration errors still throw, matching the sign
- * side: a missing or non-integer `status`, and a wire signature
+ * side: a missing, non-integer, or out-of-range (100-599) `status`, and a wire signature
  * whose covered components derive from the request without `;req`,
  * or carry `;req` with no `request` attached (attach the triggering
  * request via the `request` option, or verify with `verifyRequest`
@@ -425,7 +434,7 @@ export function verifyResponse(
  * never throws on malformed input.
  *
  * Two caller configuration errors still throw, matching
- * `verifyResponse`: a missing or non-integer `status`, and a wire
+ * `verifyResponse`: a missing, non-integer, or out-of-range (100-599) `status`, and a wire
  * signature whose covered components derive from the request without
  * `;req`, or carry `;req` with no `request` attached — checked for
  * every label, not just the first. Per-label option maps (`keys`,

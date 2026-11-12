@@ -178,8 +178,9 @@ export interface FromFetchResponseOptions {
  * Throws a descriptive `Error` on a missing `res.statusCode`: `@status`
  * is the whole point of response verification, so a response without a
  * status is a caller configuration mistake, never silently defaulted.
- * The same fail-fast applies to a non-integer `statusCode` (a string
- * `"200"`, a float, `NaN`, a boolean): `signResponse` /
+ * The same fail-fast applies to a non-integer or out-of-range
+ * (100-599) `statusCode` (a string `"200"`, a float, `NaN`, a
+ * boolean, or an undefined code such as 999): `signResponse` /
  * `verifyResponse` reject non-integer statuses outright
  * (`assertStatus` in `response.ts`), and `@status` resolution
  * stringifies whatever it is given — without this check a string
@@ -200,9 +201,14 @@ export function fromNodeResponse(
     throw new Error(
       "fromNodeResponse: res.statusCode is missing — @status verification needs the response status",
     );
-  if (typeof status !== "number" || !Number.isInteger(status))
+  if (
+    typeof status !== "number" ||
+    !Number.isInteger(status) ||
+    status < 100 ||
+    status > 599
+  )
     throw new Error(
-      `fromNodeResponse: res.statusCode must be an integer HTTP status code, got ${String(status)}`,
+      `fromNodeResponse: res.statusCode must be an integer HTTP status code, got ${String(status)} (expected 100-599)`,
     );
 
   let method: string | undefined;
@@ -264,7 +270,7 @@ export function fromNodeResponse(
  * sent no trailers. Use `fromNodeResponse` when trailers matter.
  *
  * Throws a descriptive `Error` on a missing `res.status` or a
- * non-integer status — the same boundary rule as `fromNodeResponse` —
+ * non-integer or out-of-range (100-599) status — the same boundary rule as `fromNodeResponse` —
  * and when neither `opts.request` nor the `opts.method` + `opts.url`
  * pair supplies the triggering request.
  *
@@ -282,9 +288,14 @@ export function fromFetchResponse(
     throw new Error(
       "fromFetchResponse: res.status is missing — @status verification needs the response status",
     );
-  if (typeof status !== "number" || !Number.isInteger(status))
+  if (
+    typeof status !== "number" ||
+    !Number.isInteger(status) ||
+    status < 100 ||
+    status > 599
+  )
     throw new Error(
-      `fromFetchResponse: res.status must be an integer HTTP status code, got ${String(status)}`,
+      `fromFetchResponse: res.status must be an integer HTTP status code, got ${String(status)} (expected 100-599)`,
     );
 
   let method: string | undefined;
