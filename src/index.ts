@@ -134,6 +134,16 @@ export {
   fromNodeResponse,
 } from "./nodeHttp.js";
 export { addResponseSignature, signResponse, verifyAllResponseLabels, verifyResponse } from "./response.js";
+export { verifiedFetch } from "./verifiedFetch.js";
+export type {
+  VerifiedFetchFn,
+  VerifiedFetchInit,
+  VerifiedFetchOptions,
+  VerifiedFetchResponse,
+  VerifiedFetchResult,
+  VerifiedFetchSignOptions,
+  VerifiedFetchVerifyOptions,
+} from "./verifiedFetch.js";
 export type {
   HttpResponseLike,
   SignedHttpResponse,

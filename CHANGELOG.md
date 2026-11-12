@@ -11,6 +11,44 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Client one-call `verifiedFetch(input, init?, opts)` (backlog #1087):
+  signs the request (`opts.sign`, the `signRequest` options), fetches
+  it (`opts.fetchImpl`, defaulting to the global `fetch`), reads the
+  response body under `opts.maxBodyBytes` (default
+  `DEFAULT_MAX_BODY_BYTES`, 1 MiB, the same value as
+  `createVerifiedHandler` — the stream reader is cancelled as soon as
+  the cap is passed, so an unbounded body cannot be buffered; the
+  `arrayBuffer()` fallback for doubles without a stream reads fully
+  and then enforces the cap), adapts it with `fromFetchResponse`, and
+  verifies it with `verifyResponse` — returning `{ response, body,
+  verifyResult }` and throwing `VerifyError` on a failed verification
+  (the response API itself still returns wire failures; this helper
+  is the caller's explicit opt-in to the throwing entry point). The
+  response is anchored to the request just signed, so a peer covering
+  a `;req` component binds its signature to that request; a
+  caller-supplied `verify.request` is a configuration error. Invalid
+  sign/verify configuration (including a verifier with no key source,
+  and key+resolver together) throws before any network happens, via
+  the `signRequest` call and a pre-flight dry-run verification over a
+  synthetic unsigned response. A non-2xx response is still verified
+  and returned, never rejected on status alone; fetch-layer errors
+  pass through untouched. The body is returned as a UTF-8 string —
+  binary bodies are out of scope. `test/verifiedFetch.test.ts` gains
+  14 tests (loopback POST/GET round-trips with label/keyid/alg/
+  covered-components pinned, `;req` binding, tampered body →
+  `BODY_DIGEST_MISMATCH`, wrong key → `SIGNATURE_MISMATCH`, unsigned
+  response → `MISSING_SIGNATURE_INPUT`, non-2xx returned verified,
+  oversized body rejected over both the stream and the `arrayBuffer()`
+  fallback, zero-network injected-`fetchImpl` round-trip, and four
+  fail-fast configuration errors with zero fetch calls); a mutation
+  run with the `VerifyError` throw disabled turns the three
+  failure-mode tests red, and one with the cap checks disabled turns
+  the `arrayBuffer()` cap test red and hangs the stream cap test on
+  its never-ending stream (the cap is the only bound). README gains
+  a client section and a "What it implements" entry; SECURITY.md
+  gains the honest limits (no TLS replacement, binary bodies out of
+  scope, cap rejects rather than truncates).
+
 - `createVerifiedHandler` validates `verifyOpts` at creation time
   (backlog #1077): after the `maxBodyBytes` check, a dry-run
   `verifyRequest` over a synthetic unsigned request exercises every

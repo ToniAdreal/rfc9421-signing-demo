@@ -246,6 +246,12 @@ Read this before using it anywhere that matters.
   A valid signature on a request that arrived over plain HTTP (or with a
   swapped body whose digest header was also swapped) tells you only that
   whoever held the key signed *that* content.
+- `verifiedFetch` does not replace TLS either, and it returns the
+  response body as a UTF-8 string: a binary body is decoded lossily, so
+  use the manual `signRequest` + `fetch` + `fromFetchResponse` +
+  `verifyResponse` path when the body is not text. The body cap rejects
+  an over-long body before verification; it never truncates one into a
+  digest check.
 - Body binding only applies when a `content-digest` header is present, and
   only the `sha-512` entry is honored when present, with `sha-256` accepted
   as a fallback. Requests without a digest header

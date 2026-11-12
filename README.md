@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2018 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2032 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1303,6 +1303,45 @@ carries no trailers, so the resulting `RequestLike` never gains a
 `trailers` field and a covered `;tr` component cannot verify through
 this adapter — use `fromNodeResponse` when trailers matter.
 
+Client one-call: `verifiedFetch` — sign the request, fetch it, verify
+the signed response, in one call (the client twin of
+`createVerifiedHandler`):
+
+```ts
+import { verifiedFetch } from "./dist/src/index.js";
+
+const { response, body, verifyResult } = await verifiedFetch(
+  "https://gateway.example/v1/settlement",
+  { method: "POST", headers: { "content-type": "application/json" }, body: REQ_BODY },
+  {
+    sign: { keyId: "client-key", alg: "ed25519", key: clientPrivateKey },
+    verify: { key: gatewayPublicKey },
+  },
+);
+// `verifyResult.ok` is always true here: a failed verification throws
+// `VerifyError` (same code/reason/label fields as
+// `verifyRequestOrThrow`) instead of returning. A non-2xx response is
+// still verified and returned, never rejected on status alone.
+```
+
+`opts.sign` is exactly the `signRequest` options, `opts.verify` exactly
+the `verifyResponse` options minus `request` — the helper anchors
+`;req` components to the request it just signed, so a peer covering
+`"@method";req` binds its response signature to that request and the
+caller never passes a `request` (a caller-supplied one is a
+configuration error). `opts.fetchImpl` injects a transport (defaults to
+the global `fetch`); `opts.maxBodyBytes` caps the response body
+(default `DEFAULT_MAX_BODY_BYTES`, 1 MiB, the same value as
+`createVerifiedHandler`) — an over-long body is rejected before any
+verification runs, never truncated into a digest check. Invalid sign or
+verify configuration throws before any network happens; fetch-layer
+errors pass through untouched. The body is returned as a UTF-8 string:
+binary bodies are out of scope (verification itself runs over the exact
+raw bytes, so a lossy decode can never make an unverified body look
+verified — but use the four-step manual path when the body is not
+text). This helper does not replace TLS, and the signing key stays the
+caller's. See SECURITY.md for the honest limits.
+
 Signing responses directly, without assembling a `RequestLike` —
 `signResponse` / `verifyResponse` (thin wrappers, zero new
 cryptography):
@@ -1761,6 +1800,19 @@ values. Without a request to bind to, keep using the request-side API
   covered `;req` request-binding components. A fetch `Response` carries
   no trailers, so `;tr` components cannot verify through this adapter.
   See the Quickstart fetch receive→verify example.
+- **Verified fetch client**: `verifiedFetch(input, init?, opts)` signs
+  the request (`opts.sign`, the `signRequest` options), fetches it
+  (`opts.fetchImpl`, defaulting to the global `fetch`), reads the
+  response body under `opts.maxBodyBytes` (default
+  `DEFAULT_MAX_BODY_BYTES`, 1 MiB), and verifies it with
+  `verifyResponse` — returning `{ response, body, verifyResult }` and
+  throwing `VerifyError` on a failed verification, so the four-step
+  manual path cannot be half-remembered. `opts.verify` is the
+  `verifyResponse` options minus `request` (the helper anchors `;req`
+  to the request it just signed); a non-2xx response is still verified
+  and returned. The body is returned as a UTF-8 string — binary
+  bodies are out of scope. See the Quickstart client example and
+  SECURITY.md.
 - **Response signing entry points**: `signResponse(res, opts)` /
   `verifyResponse(res, opts)` wrap the request-side API for the
   response shape (`{ status, headers, body? }`), covering `@status`
@@ -4334,7 +4386,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2018 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2032 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
