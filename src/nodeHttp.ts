@@ -641,6 +641,82 @@ function assertSignResponseOptions(
 }
 
 /**
+ * Synthetic unsigned request the creation-time verify dry run checks
+ * against. It is never sent anywhere and carries no signature headers:
+ * it only exists so `verifyRequest` runs every configuration assertion
+ * it would run for a real request (key selection, candidate lists,
+ * freshness windows, header limits, required components, allowed
+ * algorithms, Structured Field types, clock options) before returning
+ * `MISSING_SIGNATURE_INPUT` — without touching the key resolver or
+ * the replay cache, which are only consulted once a signature header
+ * parses.
+ */
+const VERIFY_OPTIONS_VALIDATION_REQUEST: RequestLike = {
+  method: "POST",
+  url: "http://127.0.0.1/verified-handler-validation",
+  headers: {},
+  body: "",
+};
+
+/**
+ * Validate `CreateVerifiedHandlerOptions`-adjacent `verifyOpts` at
+ * handler-creation time, at the same level as the `maxBodyBytes` check
+ * and the `assertSignResponseOptions` dry run: a misconfigured verifier
+ * must fail when the handler is built, never on the first live request
+ * (where it would surface as a 500 `INTERNAL_ERROR` after the client
+ * already sent a signed body). The exact verify path the wrapper will
+ * use per request is dry-run once — a `verifyRequest` over the
+ * synthetic unsigned request above — so every configuration check
+ * `verifyRequest` runs is exercised here, and the expected
+ * `MISSING_SIGNATURE_INPUT` result is swallowed.
+ *
+ * One check cannot ride the dry run: `verifyRequest` only throws "one
+ * of `key`, `keyResolver`, or `candidateKeys` must be provided" after
+ * a signature header parses, so an unsigned request never reaches it —
+ * a verifier with no key source at all is checked explicitly here,
+ * with the same wording `verifyRequest` uses, so it still fails at
+ * creation time.
+ *
+ * Per-label maps (`VerifyAllOptions`, e.g. `keyResolvers`,
+ * `candidateKeysByLabel`) are not covered here on purpose: they belong
+ * to `verifyAllLabels`, which this handler never calls — `verifyOpts`
+ * is a `VerifyOptions` and carries no per-label map to validate.
+ */
+function assertVerifyOptions(verifyOpts: VerifyOptions): void {
+  try {
+    if (verifyOpts === null || typeof verifyOpts !== "object")
+      throw new Error(
+        `verifyOpts must be an object, got ${verifyOpts === null ? "null" : typeof verifyOpts}`,
+      );
+    if (
+      verifyOpts.key === undefined &&
+      verifyOpts.keyResolver === undefined &&
+      verifyOpts.candidateKeys === undefined
+    )
+      throw new Error(
+        "verifyRequest: one of `key`, `keyResolver`, or `candidateKeys` must be provided",
+      );
+    const result = verifyRequest(
+      VERIFY_OPTIONS_VALIDATION_REQUEST,
+      verifyOpts,
+    );
+    if (result.ok || result.code !== "MISSING_SIGNATURE_INPUT")
+      throw new Error(
+        `dry-run verification returned unexpected result: ${result.ok ? "ok" : result.code ?? "no code"}`,
+      );
+  } catch (e) {
+    if (
+      e instanceof Error &&
+      e.message.startsWith("createVerifiedHandler: invalid verifyOpts:")
+    )
+      throw e;
+    throw new Error(
+      `createVerifiedHandler: invalid verifyOpts: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/**
  * Build a standard `http.RequestListener` that verifies RFC 9421
  * signatures before any business logic runs — the four steps a webhook
  * receiver otherwise hand-rolls (buffer the body, adapt it with
@@ -659,8 +735,7 @@ function assertSignResponseOptions(
  *    at creation. A request that cannot even be adapted (missing
  *    method/url/host) is answered 400 `{ error: "malformed request",
  *    code: "MALFORMED_REQUEST" }`; a misconfigured `verifyOpts`
- *    (`verifyRequest` throws only on caller configuration errors) is
- *    answered 500 `{ error: "internal error", code: "INTERNAL_ERROR"
+ *    is answered 500 `{ error: "internal error", code: "INTERNAL_ERROR"
  *    }` — a server bug, never a client verdict, so no detail leaks.
  *    A stream that errors mid-body is answered 500 `{ error: "failed
  *    to read request body", code: "BODY_READ_FAILED" }` without
@@ -682,6 +757,14 @@ function assertSignResponseOptions(
  *    unsigned response reaches the wire. Rejections from steps 1–3
  *    (400/401/413/500) are never signed.
  *
+ * `verifyOpts` (and `opts.signResponse`, when present) are validated
+ * at handler-creation time by a dry run — a misconfigured verifier
+ * throws `createVerifiedHandler: invalid verifyOpts: …` when the
+ * handler is built, never on the first live request. The per-request
+ * 500 in step 2 therefore only remains as defense-in-depth: it can
+ * still fire if the caller mutates the `verifyOpts` object after
+ * creation (the wrapper reads the same object per request).
+ *
  * Honest limits (see also SECURITY.md): TLS is the caller's job —
  * this handler sees whatever the socket gives it, and `@scheme`
  * follows the `fromNodeRequest` default (https on a TLS socket, http
@@ -702,6 +785,7 @@ export function createVerifiedHandler(
     throw new Error(
       `createVerifiedHandler: maxBodyBytes must be a positive integer number of bytes, got ${String(opts?.maxBodyBytes)}`,
     );
+  assertVerifyOptions(verifyOpts);
   const signOpts = opts?.signResponse;
   if (signOpts !== undefined) assertSignResponseOptions(signOpts);
 

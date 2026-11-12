@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1979 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 1999 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1160,11 +1160,24 @@ with exactly `{ error: "signature verification failed", code }` — the
 `MISSING_SIGNATURE_INPUT`, …), no `reason`, no stack, no key material —
 and the business handler is never called. A request that cannot even be
 adapted (missing method/url/host) gets 400 `MALFORMED_REQUEST`; a
-misconfigured `verifyOpts` (which `verifyRequest` only throws for on caller
-configuration errors) gets 500 `INTERNAL_ERROR`. Honest limits: TLS is the
-caller's job, the body is held in memory up to the cap, and replay
-protection still needs an opt-in `VerifyOptions.replayCache` (see
-SECURITY.md).
+misconfigured `verifyOpts` throws at handler-creation time instead (see
+below) — the per-request 500 `INTERNAL_ERROR` only remains as
+defense-in-depth, e.g. if the caller mutates the `verifyOpts` object after
+creation. Honest limits: TLS is the caller's job, the body is held in
+memory up to the cap, and replay protection still needs an opt-in
+`VerifyOptions.replayCache` (see SECURITY.md).
+
+The `verifyOpts` are validated when the handler is built, at the same
+level as the `maxBodyBytes` check: a dry-run `verifyRequest` over a
+synthetic unsigned request exercises every configuration check the
+verifier runs (key selection, candidate lists, freshness windows, header
+limits, required components, allowed algorithms, Structured Field types,
+clock options), and a verifier with no key source at all is rejected with
+the same wording `verifyRequest` uses. A misconfiguration throws
+`createVerifiedHandler: invalid verifyOpts: …` at creation, never on the
+first live request. The dry run has no side effects: it never calls the
+key resolver and never fetches (a JWKS store stays untouched until a real
+request needs a key).
 
 Opt-in response signing — the other half of mutual authentication: pass
 `signResponse` and the wrapper signs the business handler's response
@@ -1722,9 +1735,14 @@ values. Without a request to bind to, keep using the request-side API
   verifies it, and only then calls `handler(req, res, result)` — a
   verification failure is answered 401 with exactly `{ error, code }`
   and the handler is never called, an oversized body is answered 413
-  before any verification runs. With opt-in `opts.signResponse` the
-  wrapper also signs the handler's response before sending it, bound
-  to the request it just verified. See the Quickstart handler example.
+  before any verification runs. `verifyOpts` is validated at
+  handler-creation time by a dry-run verification (a misconfigured
+  verifier throws `createVerifiedHandler: invalid verifyOpts: …` when
+  the handler is built, never on the first live request), and the dry
+  run never calls the key resolver or fetches. With opt-in
+  `opts.signResponse` the wrapper also signs the handler's response
+  before sending it, bound to the request it just verified. See the
+  Quickstart handler example.
 - **Node http client adapter**: `fromNodeResponse(res, body, opts?)`
   normalizes a client's received `http.IncomingMessage` into a
   `RequestLike` (response `statusCode` bound via `@status`, same header
@@ -4315,7 +4333,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 1979 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 1999 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

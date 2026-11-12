@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `createVerifiedHandler` validates `verifyOpts` at creation time
+  (backlog #1077): after the `maxBodyBytes` check, a dry-run
+  `verifyRequest` over a synthetic unsigned request exercises every
+  configuration check the verifier runs (key selection, candidate
+  lists, freshness windows, header limits, required components,
+  allowed algorithms, Structured Field types, clock options), and a
+  verifier with no key source at all is rejected explicitly (the
+  unsigned dry run cannot reach the check `verifyRequest` only throws
+  after a signature header parses). A misconfiguration throws
+  `createVerifiedHandler: invalid verifyOpts: …` when the handler is
+  built, never as a 500 `INTERNAL_ERROR` on the first live request;
+  the per-request 500 remains only as defense-in-depth (e.g. if the
+  caller mutates the `verifyOpts` object after creation). The dry run
+  has no side effects: it never calls the key resolver and never
+  fetches. `test/verifiedHandlerVerifyOptions.test.ts` gains 20 tests
+  (17 creation-time rejections, a counting-resolver zero-calls-at-
+  creation test, a JWKS no-fetch test, and a 200/401/401 loopback
+  behavior test); a mutation run with the validation disabled turns
+  17 of the 20 red. Per-label maps are out of scope by construction:
+  they belong to `VerifyAllOptions`, which this handler never calls.
+
 - CLI demo signing-side guard rejection segment (backlog #1070):
   the demo closes with the sign-side twin of its verify-side
   rejections — the same fixed payment request is signed three
