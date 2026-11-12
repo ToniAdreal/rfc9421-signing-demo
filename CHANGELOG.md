@@ -4764,6 +4764,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `addSignature` / `addResponseSignature` now name themselves in the
+  malformed-label error (backlog #1084): both append entry points
+  check the label shape with `assertLabelShape(label, caller)` right
+  after the empty check, so `"bad label"` / `"a,b"` throw
+  `addSignature: "label" must be an RFC 9421 token …` (resp.
+  `addResponseSignature: …`) instead of falling through to the
+  delegated `signRequest` and reporting `signRequest: …`. The
+  rejection itself is unchanged (still before any crypto, still
+  before the no-signature-headers and duplicate checks); only the
+  attribution is fixed. `assertLabelShape` is exported with an
+  optional caller parameter (default `"signRequest"`, so `signRequest`
+  / `signResponse` behavior is unchanged) and re-exported from the
+  package entry point. `test/appendLabelShape.test.ts` gains 12 tests
+  (both malformed labels at both entry points with the caller named
+  and `signRequest` absent, legal-label appends still verify on both
+  sides, duplicate legal labels still hit the duplicate check first,
+  empty-label wording unchanged, shape check before the
+  no-signature-headers check); the `labelShape.test.ts` append case
+  now pins the new attribution. A mutation run with the caller
+  argument dropped turns 7 of the new tests red.
+
 - Response `status` is now validated against the registered HTTP
   status-code range 100-599 (backlog #1080): `assertStatus`
   (`signResponse` / `verifyResponse` / `verifyAllResponseLabels`)

@@ -89,7 +89,7 @@ test('default label "sig1" is unchanged', () => {
   assert.equal(res.ok, true);
 });
 
-test("addSignature with an illegal label is rejected via signRequest", () => {
+test("addSignature with an illegal label is rejected naming addSignature (backlog #1084)", () => {
   const { privateKey } = generateEd25519KeyPair();
   const signed = signRequest(req, {
     keyId: "k",
@@ -97,15 +97,24 @@ test("addSignature with an illegal label is rejected via signRequest", () => {
     key: privateKey,
     created: CREATED,
   });
-  assert.throws(
-    () =>
-      addSignature(signed, {
-        keyId: "k2",
-        alg: "ed25519",
-        key: privateKey,
-        created: CREATED,
-        label: "bad label",
-      }),
-    /must be an RFC 9421 token/,
+  let message = "";
+  try {
+    addSignature(signed, {
+      keyId: "k2",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      label: "bad label",
+    });
+  } catch (e) {
+    message = (e as Error).message;
+  }
+  assert.ok(
+    message.startsWith('addSignature: "label" must be an RFC 9421 token'),
+    `expected the error to name addSignature, got: ${message}`,
+  );
+  assert.ok(
+    !message.includes("signRequest"),
+    `error must not name the delegated signRequest, got: ${message}`,
   );
 });

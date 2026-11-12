@@ -347,12 +347,22 @@ function assertTimestamp(name: "created" | "expires", value: number): void {
  * characters, so accepting them here would mint signatures
  * `verifyAllLabels` cannot read back. Labels like `sig1`, `merchant-1`,
  * or `gateway.key_sig` are accepted.
+ *
+ * `caller` names the entry point in the thrown message, so a malformed
+ * label is attributed to the function the caller actually used:
+ * `signRequest` (the default, also inherited by `signResponse` through
+ * delegation), or the append entry points `addSignature` /
+ * `addResponseSignature`, which check the shape themselves before
+ * delegating so the error never names the inner `signRequest`.
  */
 const LABEL_TOKEN_RE = /^[A-Za-z][A-Za-z0-9!#$%&'*+\-.^_`|~]*$/;
-function assertLabelShape(label: string): void {
+export function assertLabelShape(
+  label: string,
+  caller: "signRequest" | "addSignature" | "addResponseSignature" = "signRequest",
+): void {
   if (!LABEL_TOKEN_RE.test(label))
     throw new Error(
-      `signRequest: "label" must be an RFC 9421 token (start with a letter, then letters, digits, or one of !#$%&'*+-.^_\`|~ — no commas, spaces, colons, or slashes), got "${label}"`,
+      `${caller}: "label" must be an RFC 9421 token (start with a letter, then letters, digits, or one of !#$%&'*+-.^_\`|~ — no commas, spaces, colons, or slashes), got "${label}"`,
     );
 }
 
@@ -711,8 +721,10 @@ export function signRequest(
  * - the input has no `signature-input`/`signature` headers (nothing to
  *   append to — call `signRequest` first);
  * - the existing `signature-input` header is malformed;
- * - `opts.label` is empty or already present in the request (RFC 9421
- *   dictionary labels must be unique).
+ * - `opts.label` is empty, not an RFC 9421 token, or already present in
+ *   the request (RFC 9421 dictionary labels must be unique). A malformed
+ *   label is rejected here, naming `addSignature`, before any crypto
+ *   runs — the delegated `signRequest` never sees it.
  *
  * The input request is not mutated; a new `SignedHttpRequest` is
  * returned.
@@ -724,6 +736,7 @@ export function addSignature(
   const label = opts.label ?? "sig1";
   if (label.length === 0)
     throw new Error('addSignature: "label" must be a non-empty string');
+  assertLabelShape(label, "addSignature");
 
   let existingInput: string | undefined;
   let existingSig: string | undefined;

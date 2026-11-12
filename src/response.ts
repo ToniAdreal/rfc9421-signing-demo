@@ -49,7 +49,7 @@ import {
   type RequestLike,
 } from "./components.js";
 import { contentDigestAlgOf } from "./digest.js";
-import { signRequest, assertNoDuplicateCoveredComponents, type SignOptions } from "./sign.js";
+import { signRequest, assertLabelShape, assertNoDuplicateCoveredComponents, type SignOptions } from "./sign.js";
 import {
   checkSignatureHeaderLengths,
   verifyAllLabels,
@@ -550,8 +550,10 @@ export function verifyAllResponseLabels(
  * - the input has no `signature-input`/`signature` headers (nothing
  *   to append to — call `signResponse` first);
  * - the existing `signature-input` header is malformed;
- * - `opts.label` is empty or already present in the response
- *   (RFC 9421 dictionary labels must be unique).
+ * - `opts.label` is empty, not an RFC 9421 token, or already present in
+ *   the response (RFC 9421 dictionary labels must be unique). A
+ *   malformed label is rejected here, naming `addResponseSignature`,
+ *   before any crypto runs — the delegated `signResponse` never sees it.
  *
  * The input response is not mutated; a new `SignedHttpResponse` is
  * returned. The returned `coveredComponents` is the appended
@@ -568,6 +570,7 @@ export function addResponseSignature(
     throw new Error(
       'addResponseSignature: "label" must be a non-empty string',
     );
+  assertLabelShape(label, "addResponseSignature");
 
   let existingInput: string | undefined;
   let existingSig: string | undefined;

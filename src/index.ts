@@ -1,5 +1,6 @@
 export {
   addSignature,
+  assertLabelShape,
   assertNoDuplicateCoveredComponents,
   coveredComponentKey,
   MAX_KEY_ID_LENGTH,
