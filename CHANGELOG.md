@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo signing-side guard rejection segment (backlog #1070):
+  the demo closes with the sign-side twin of its verify-side
+  rejections — the same fixed payment request is signed three
+  ways that must all be refused (`alg: "none"`, a 257-character
+  tag, 65 covered components), each refusal printed with the
+  guard's exact message and asserted outside the printed lines
+  against hand-pinned `DEMO_SIGN_GUARD_ERRORS`, the input
+  request's headers shown byte-identical after the refusals, and
+  the same request signed the legal way with ed25519 printed
+  verifying. `DemoResult` gains `signGuardRejections`,
+  `signGuardRequestHeadersUnchanged`, `signGuardControlSigned`
+  and `signGuardControlVerification`. `test/demo.test.ts` gains
+  two tests (segment values + cross-check against `signRequest`
+  called directly, byte-exact closing lines + determinism), and
+  the verified-handler test's "closes the demo" assertion now
+  points at the guard segment. Two guard short-circuit
+  mutations (unknown-alg check, tag cap) were verified to turn
+  the new demo tests red.
+
 - CLI demo `createVerifiedHandler` end-to-end segment (backlog
   #1047): the demo closes with a real loopback `http` server running
   `createVerifiedHandler` — a `signRequest`-signed POST reaches the

@@ -43,6 +43,8 @@ import {
   importSymmetricKeyJwk,
   joinHeaderValues,
   JwksKeyStore,
+  MAX_COVERED_COMPONENTS,
+  MAX_TAG_LENGTH,
   parseSignatureField,
   parseSignatureInput,
   ReplayCache,
@@ -154,6 +156,11 @@ import {
   DEMO_DICT_MEMBER_VALUE,
   DEMO_SF_CANONICALIZATION,
   DEMO_SIG_PARAMS_SERIALIZATION,
+  DEMO_SIGN_GUARD_ERRORS,
+  DEMO_SIGN_GUARD_LONG_TAG,
+  DEMO_SIGN_GUARD_LONG_TAG_LENGTH,
+  DEMO_SIGN_GUARD_MANY_COMPONENTS_COUNT,
+  DEMO_SIGN_GUARD_UNKNOWN_ALG,
   DEMO_SIG_INPUT_ALT_COMPONENTS,
   DEMO_SIG_INPUT_ALT_EXPECTED,
   DEMO_SIG_INPUT_ALT_LABEL,
@@ -7301,13 +7308,17 @@ test("demo verified-handler segment runs a signed, a tampered-signature, and an 
   ]);
 
   // Ordering: the segment follows the private-key JWK segment and
-  // closes the demo — byte-exact lines, nothing after them.
+  // is followed by the signing-side guard segment that closes the
+  // demo — a blank separator, then the guard header.
   const jwkIdx = lines.findIndex((l) =>
     l.startsWith("Private-key JWK import:"),
   );
   assert.ok(jwkIdx !== -1 && jwkIdx < headerIdx);
   assert.equal(lines[headerIdx - 1], "");
-  assert.equal(lines[headerIdx + 4], undefined);
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(
+    lines[headerIdx + 5]!.startsWith("Signing-side guard rejections:"),
+  );
 });
 
 test("demo verified-handler segment prints byte-identical lines across runs", async () => {
@@ -7319,8 +7330,9 @@ test("demo verified-handler segment prints byte-identical lines across runs", as
   const b = start(second.lines);
   assert.ok(a !== -1 && b !== -1);
   // Only statuses and failure codes are printed — the key pair,
-  // the signature bytes and the port never appear — so the closing
-  // segment is identical.
+  // the signature bytes and the port never appear — so the tail
+  // of the demo (verified-handler segment plus the deterministic
+  // signing-side guard segment after it) is identical.
   assert.deepEqual(second.lines.slice(b), first.lines.slice(a));
 });
 
@@ -10051,5 +10063,153 @@ test("demo lines contain the request-target segment (four forms plus tampered ov
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 6),
     lines.slice(headerIdx, headerIdx + 6),
+  );
+});
+
+test("demo signing-side guard segment rejects unknown alg, over-long tag and 65 covered components (input untouched, ed25519 control verifies)", async () => {
+  const {
+    signGuardRejections,
+    signGuardRequestHeadersUnchanged,
+    signGuardControlSigned,
+    signGuardControlVerification,
+  } = await runDemo();
+
+  // Expectations are the literals hand-pinned in
+  // DEMO_SIGN_GUARD_UNKNOWN_ALG / DEMO_SIGN_GUARD_LONG_TAG /
+  // DEMO_SIGN_GUARD_LONG_TAG_LENGTH /
+  // DEMO_SIGN_GUARD_MANY_COMPONENTS_COUNT /
+  // DEMO_SIGN_GUARD_ERRORS and cross-checked against src/sign.ts
+  // (MAX_TAG_LENGTH 256, MAX_COVERED_COMPONENTS 64) and the
+  // signUnknownAlg / signParamLimits suites. The test pins the
+  // literals again here so a drift in either place fails.
+  assert.equal(DEMO_SIGN_GUARD_UNKNOWN_ALG, "none");
+  assert.equal(DEMO_SIGN_GUARD_LONG_TAG_LENGTH, 257);
+  assert.equal(DEMO_SIGN_GUARD_LONG_TAG, "t".repeat(257));
+  assert.equal(DEMO_SIGN_GUARD_LONG_TAG.length, 257);
+  assert.equal(DEMO_SIGN_GUARD_MANY_COMPONENTS_COUNT, 65);
+  assert.equal(MAX_TAG_LENGTH, 256);
+  assert.equal(MAX_COVERED_COMPONENTS, 64);
+  assert.deepEqual(DEMO_SIGN_GUARD_ERRORS, [
+    `signRequest: unsupported alg "none"`,
+    `signRequest: "tag" must be at most 256 characters, got 257`,
+    `signRequest: too many covered components: 65 (max 64)`,
+  ]);
+  assert.deepEqual(signGuardRejections, [...DEMO_SIGN_GUARD_ERRORS]);
+  assert.equal(signGuardRequestHeadersUnchanged, true);
+
+  // The ed25519 control: the same fixed request signs and verifies
+  // with the pinned identity.
+  assert.equal(signGuardControlVerification.ok, true);
+  assert.equal(signGuardControlVerification.label, "sig1");
+  assert.equal(signGuardControlVerification.keyId, DEMO_KEY_ID);
+  assert.equal(signGuardControlVerification.alg, "ed25519");
+  assert.equal(signGuardControlVerification.nonce, DEMO_NONCE);
+  assert.equal(signGuardControlSigned.headers["signature-input"] !== undefined, true);
+
+  // Cross-check against the library guard called directly: the same
+  // inputs throw with the same messages, the input request is left
+  // untouched, and the legal control verifies.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const req = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const before = JSON.stringify(req);
+  assert.throws(
+    () =>
+      signRequest(req, {
+        keyId: DEMO_KEY_ID,
+        alg: DEMO_SIGN_GUARD_UNKNOWN_ALG as never,
+        key: privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_NONCE,
+      }),
+    (e: unknown) =>
+      e instanceof Error && e.message === DEMO_SIGN_GUARD_ERRORS[0],
+  );
+  assert.throws(
+    () =>
+      signRequest(req, {
+        keyId: DEMO_KEY_ID,
+        alg: "ed25519",
+        key: privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_NONCE,
+        tag: DEMO_SIGN_GUARD_LONG_TAG,
+      }),
+    (e: unknown) =>
+      e instanceof Error && e.message === DEMO_SIGN_GUARD_ERRORS[1],
+  );
+  assert.throws(
+    () =>
+      signRequest(req, {
+        keyId: DEMO_KEY_ID,
+        alg: "ed25519",
+        key: privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_NONCE,
+        coveredComponents: Array.from(
+          { length: DEMO_SIGN_GUARD_MANY_COMPONENTS_COUNT },
+          (_, i) => `x-sign-guard-pad-${String(i + 1).padStart(2, "0")}`,
+        ),
+      }),
+    (e: unknown) =>
+      e instanceof Error && e.message === DEMO_SIGN_GUARD_ERRORS[2],
+  );
+  assert.equal(JSON.stringify(req), before);
+  const control = signRequest(req, {
+    keyId: DEMO_KEY_ID,
+    alg: "ed25519",
+    key: privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_NONCE,
+  });
+  const controlVerification = verifyRequest(control, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(controlVerification.ok, true);
+  assert.equal(controlVerification.label, "sig1");
+  assert.equal(controlVerification.keyId, DEMO_KEY_ID);
+  assert.equal(controlVerification.alg, "ed25519");
+  assert.equal(controlVerification.nonce, DEMO_NONCE);
+});
+
+test("demo lines contain the signing-side guard rejection segment (rejections then ed25519 control, closing the demo)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+
+  assert.match(out, /Signing-side guard rejections: signRequest fails fast/);
+  // The guard segment closes the demo: it sits after the
+  // verified-handler segment, with a blank separator between them.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Signing-side guard rejections:"),
+  );
+  const handlerIdx = lines.findIndex((l) =>
+    l.startsWith("Verified handler:"),
+  );
+  assert.ok(handlerIdx !== -1 && headerIdx !== -1 && handlerIdx < headerIdx);
+  assert.equal(lines[headerIdx - 1], "");
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), [
+    "Signing-side guard rejections: signRequest fails fast before the signature base is built or any crypto runs — an unknown alg (including the \"none\" downgrade), an over-long tag, and more than 64 covered components are all refused with an explicit error, and the input request is left untouched; the same request signed with ed25519 verifies",
+    `Unknown alg rejected at signing: ${DEMO_SIGN_GUARD_ERRORS[0]} (the input request headers are unchanged)`,
+    `Over-long tag rejected at signing: ${DEMO_SIGN_GUARD_ERRORS[1]}`,
+    `Too many covered components rejected at signing: ${DEMO_SIGN_GUARD_ERRORS[2]}`,
+    `Control: the same request signed with ed25519: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+  ]);
+  // The segment is the last one: nothing follows it.
+  assert.equal(headerIdx + 5, lines.length);
+
+  // Deterministic double run: the guard segment's lines are
+  // pinned constants, identical between runs.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Signing-side guard rejections:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 5),
+    lines.slice(headerIdx, headerIdx + 5),
   );
 });

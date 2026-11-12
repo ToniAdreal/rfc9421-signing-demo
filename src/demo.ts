@@ -1891,6 +1891,48 @@ export const DEMO_RSA_GUARD_ERRORS: ReadonlyArray<string> = [
   "assertRsaModulusLength demo: expected an RSA key, got an asymmetric ed25519 key",
 ];
 
+/**
+ * The downgrade algorithm value the closing signing-side guard
+ * segment tries to sign with: `signRequest` must refuse it as
+ * `unsupported alg` before any key-shape check runs, so it is
+ * never misreported as a key mismatch (backlog #1058).
+ */
+export const DEMO_SIGN_GUARD_UNKNOWN_ALG = "none";
+/**
+ * Length of the over-long tag the closing signing-side guard
+ * segment tries to sign with: one past `MAX_TAG_LENGTH` (256),
+ * so `signRequest` must refuse it before the signature base is
+ * built (backlog #1066).
+ */
+export const DEMO_SIGN_GUARD_LONG_TAG_LENGTH = 257;
+/**
+ * The over-long tag itself: 257 `t` characters. Only its length
+ * matters to the guard; the character is the same `t` the
+ * signParamLimits suite uses for its over-long tag.
+ */
+export const DEMO_SIGN_GUARD_LONG_TAG = "t".repeat(
+  DEMO_SIGN_GUARD_LONG_TAG_LENGTH,
+);
+/**
+ * Number of covered components the closing signing-side guard
+ * segment tries to sign with: one past `MAX_COVERED_COMPONENTS`
+ * (64), so `signRequest` must refuse it before the signature
+ * base is built (backlog #1066).
+ */
+export const DEMO_SIGN_GUARD_MANY_COMPONENTS_COUNT = 65;
+/**
+ * Hand-pinned rejection messages of the signing-side guard
+ * segment, in attempt order: the exact strings `signRequest`
+ * throws for the unknown alg, the over-long tag, and the
+ * 65-component list (written out here, never derived from the
+ * guard under test).
+ */
+export const DEMO_SIGN_GUARD_ERRORS: ReadonlyArray<string> = [
+  `signRequest: unsupported alg "none"`,
+  `signRequest: "tag" must be at most 256 characters, got 257`,
+  `signRequest: too many covered components: 65 (max 64)`,
+];
+
 /** Key id of the closing ECDSA P-256 segment's signed request. */
 export const DEMO_P256_KEY_ID = "demo-p256-key-1";
 /** Nonce of the closing ECDSA P-256 segment's signed request. */
@@ -6265,6 +6307,33 @@ export interface DemoResult {
    * (`DEMO_VERIFIED_HANDLER_UNSIGNED_CODE`).
    */
   verifiedHandlerUnsignedCode: string;
+  /**
+   * The closing signing-side guard segment's rejections: the exact
+   * error messages `signRequest` threw for the unknown alg, the
+   * over-long tag, and the 65-component list, in attempt order
+   * (`DEMO_SIGN_GUARD_ERRORS`).
+   */
+  signGuardRejections: ReadonlyArray<string>;
+  /**
+   * Whether the signing-side guard segment's input request
+   * headers were byte-identical after the three refused sign
+   * attempts — the guards fail before the signature base is
+   * built, so they never mutate the caller's request.
+   */
+  signGuardRequestHeadersUnchanged: boolean;
+  /**
+   * The control request of the signing-side guard segment: the
+   * same fixed payment request signed with ed25519 (keyid
+   * `DEMO_KEY_ID`, nonce `DEMO_NONCE`) — the legal control
+   * showing the guards refuse the parameters, not the request.
+   */
+  signGuardControlSigned: SignedHttpRequest;
+  /**
+   * Verification of `signGuardControlSigned` (ok — label, keyid,
+   * alg and nonce equal the hand-pinned `DEMO_KEY_ID` /
+   * `DEMO_NONCE` expectations).
+   */
+  signGuardControlVerification: VerifyResult;
   lines: string[];
 }
 
@@ -14271,8 +14340,8 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
-  // Verified-handler segment (backlog #1047): the closing segment,
-  // and the server-side twin of the request-side sign -> verify
+  // Verified-handler segment (backlog #1047): the last loopback
+  // segment, and the server-side twin of the request-side sign -> verify
   // story the demo opened with. A real loopback server runs
   // `createVerifiedHandler`, so the three verdicts above come from
   // the wire, not from calling `verifyRequest` in-process: a signed
@@ -14284,6 +14353,102 @@ export async function runDemo(): Promise<DemoResult> {
   // failure codes are printed, never signature bytes or the port,
   // so the segment is byte-identical between runs.
   const verifiedHandler = await fetchVerifiedHandlerVerdicts();
+
+  // Signing-side guard rejection segment (backlog #1070): the
+  // closing segment, and the sign-side twin of the verify-side
+  // rejections the demo already prints (tampered body, wrong
+  // scheme, stripped co-signature). The guards #1058 (unknown
+  // alg) and #1066 (parameter caps) fail fast in `signRequest`,
+  // before the signature base is built and before any crypto
+  // runs — so a caller bug surfaces as a clear configuration
+  // error instead of a minted signature this library itself
+  // cannot verify. The demo signs the same fixed payment
+  // request three ways that must all be refused — `alg:
+  // "none"` (the classic downgrade value), a 257-character tag
+  // (one past `MAX_TAG_LENGTH`), and 65 covered components (one
+  // past `MAX_COVERED_COMPONENTS`) — and once the legal way,
+  // with ed25519, which verifies. Outside the printed lines the
+  // demo asserts the three rejection messages equal the
+  // hand-pinned `DEMO_SIGN_GUARD_ERRORS`, the input request's
+  // headers are byte-identical after the refusals, and the
+  // control verification's identity equals the pinned
+  // `DEMO_KEY_ID` / `DEMO_NONCE` — a mismatch throws instead of
+  // printing a misleading segment.
+  const signGuardRequest = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: { "content-type": "application/json" },
+    body: DEMO_BODY,
+  };
+  const signGuardRequestHeadersBefore = JSON.stringify(
+    signGuardRequest.headers,
+  );
+  const signGuardManyComponents = Array.from(
+    { length: DEMO_SIGN_GUARD_MANY_COMPONENTS_COUNT },
+    (_, i) => `x-sign-guard-pad-${String(i + 1).padStart(2, "0")}`,
+  );
+  const signGuardAttempts: Array<{
+    alg: string;
+    tag?: string;
+    coveredComponents?: string[];
+  }> = [
+    { alg: DEMO_SIGN_GUARD_UNKNOWN_ALG },
+    { alg: "ed25519", tag: DEMO_SIGN_GUARD_LONG_TAG },
+    { alg: "ed25519", coveredComponents: signGuardManyComponents },
+  ];
+  const signGuardRejections: string[] = [];
+  for (const attempt of signGuardAttempts) {
+    let error = "";
+    try {
+      signRequest(signGuardRequest, {
+        keyId: DEMO_KEY_ID,
+        alg: attempt.alg as never,
+        key: privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_NONCE,
+        ...(attempt.tag !== undefined ? { tag: attempt.tag } : {}),
+        ...(attempt.coveredComponents !== undefined
+          ? { coveredComponents: [...attempt.coveredComponents] }
+          : {}),
+      });
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+    signGuardRejections.push(error);
+  }
+  const signGuardRequestHeadersUnchanged =
+    JSON.stringify(signGuardRequest.headers) ===
+    signGuardRequestHeadersBefore;
+  const signGuardControlSigned = signRequest(signGuardRequest, {
+    keyId: DEMO_KEY_ID,
+    alg: "ed25519",
+    key: privateKey,
+    created: DEMO_CREATED,
+    nonce: DEMO_NONCE,
+  });
+  const signGuardControlVerification = verifyRequest(
+    signGuardControlSigned,
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+  if (
+    signGuardRejections.some(
+      (error, i) => error !== DEMO_SIGN_GUARD_ERRORS[i],
+    ) ||
+    !signGuardRequestHeadersUnchanged ||
+    !signGuardControlVerification.ok ||
+    signGuardControlVerification.label !== "sig1" ||
+    signGuardControlVerification.keyId !== DEMO_KEY_ID ||
+    signGuardControlVerification.alg !== "ed25519" ||
+    signGuardControlVerification.nonce !== DEMO_NONCE
+  ) {
+    throw new Error(
+      `demo fixture broken: signing-side guard rejections ` +
+        `${JSON.stringify(signGuardRejections)} (headers unchanged: ${signGuardRequestHeadersUnchanged}) ` +
+        `with control verification ${JSON.stringify(signGuardControlVerification)} ` +
+        `instead of the pinned ${JSON.stringify(DEMO_SIGN_GUARD_ERRORS)} ` +
+        `and an ok ed25519 control (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519", nonce="${DEMO_NONCE}")`,
+    );
+  }
 
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
@@ -15079,6 +15244,16 @@ export async function runDemo(): Promise<DemoResult> {
     `Signed request to the verified handler: ${verifiedHandler.signedStatus} (verified, business handler ran)`,
     `Tampered signature to the verified handler: ${verifiedHandler.tamperedStatus} (code ${verifiedHandler.tamperedCode})`,
     `Unsigned request to the verified handler: ${verifiedHandler.unsignedStatus} (code ${verifiedHandler.unsignedCode})`,
+    "",
+    "Signing-side guard rejections: signRequest fails fast before the signature base is built or any crypto runs — an unknown alg (including the \"none\" downgrade), an over-long tag, and more than 64 covered components are all refused with an explicit error, and the input request is left untouched; the same request signed with ed25519 verifies",
+    signGuardRequestHeadersUnchanged
+      ? `Unknown alg rejected at signing: ${signGuardRejections[0]} (the input request headers are unchanged)`
+      : `Unknown alg rejected at signing: ${signGuardRejections[0]} (unexpected — the refused sign mutated the input request headers)`,
+    `Over-long tag rejected at signing: ${signGuardRejections[1]}`,
+    `Too many covered components rejected at signing: ${signGuardRejections[2]}`,
+    signGuardControlVerification.ok
+      ? `Control: the same request signed with ed25519: OK (label ${signGuardControlVerification.label}, keyid="${signGuardControlVerification.keyId}", alg="ed25519")`
+      : `Control: the same request signed with ed25519: FAILED (code ${signGuardControlVerification.code}: ${signGuardControlVerification.reason})`,
   ];
 
   return {
@@ -15444,6 +15619,10 @@ export async function runDemo(): Promise<DemoResult> {
     verifiedHandlerTamperedCode: verifiedHandler.tamperedCode,
     verifiedHandlerUnsignedStatus: verifiedHandler.unsignedStatus,
     verifiedHandlerUnsignedCode: verifiedHandler.unsignedCode,
+    signGuardRejections,
+    signGuardRequestHeadersUnchanged,
+    signGuardControlSigned,
+    signGuardControlVerification,
     lines,
   };
 }
