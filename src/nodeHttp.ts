@@ -39,7 +39,13 @@ import { KeyObject } from "node:crypto";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { joinHeaderValues, type RequestLike } from "./components.js";
 import { signResponse, type SignResponseOptions } from "./response.js";
-import { verifyRequest, type VerifyOptions, type VerifyResult } from "./verify.js";
+import {
+  verifyAllLabels,
+  verifyRequest,
+  type VerifyAllOptions,
+  type VerifyOptions,
+  type VerifyResult,
+} from "./verify.js";
 
 /**
  * The trailer fields an adapter actually reads, shared by the request
@@ -504,7 +510,12 @@ export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
  * verification never reaches this handler, it is answered 401 by the
  * wrapper. `result.keyId` / `result.alg` / `result.nonce` /
  * `result.created` are available for logging and audit; the handler
- * owns the response (status, headers, body) from here on.
+ * owns the response (status, headers, body) from here on. In
+ * multi-label mode (`CreateVerifiedHandlerOptions.verifyAllLabels`)
+ * the result is an aggregate — `label` is empty, no single label
+ * owns it — and `result.perLabelResults` carries each label's own
+ * `VerifyResult` in wire order, so the handler can log or audit per
+ * signer.
  */
 export type VerifiedRequestHandler = (
   req: IncomingMessage,
@@ -554,6 +565,46 @@ export interface CreateVerifiedHandlerOptions {
    * per-response `created: now` and no nonce.
    */
   signResponse?: VerifiedHandlerSignResponseOptions;
+  /**
+   * Opt-in multi-label verification: when present, the wrapper
+   * verifies with `verifyAllLabels` instead of `verifyRequest` —
+   * the dual-signature webhook case (a merchant signature plus a
+   * payment-gateway signature on the same request), where each label
+   * verifies against its own key, key resolver, candidate list, or
+   * pins. The option is exactly `VerifyAllOptions` minus `label`
+   * (there is no single label to verify); per-label maps
+   * (`keys` / `keyResolvers` / `candidateKeysByLabel` /
+   * `expectedKeyIds` / `expectedTags` / `requiredLabels` and the
+   * rest) work exactly as `verifyAllLabels` documents them.
+   *
+   * Every label must pass before the business handler runs: with
+   * `requiredLabels` set, a missing required label is a 401
+   * (`MISSING_REQUIRED_LABEL`); without it, every label present on
+   * the wire must pass, and a request carrying no signature at all
+   * is a 401 (`MISSING_SIGNATURE_INPUT`) — an unsigned request never
+   * slips through an empty-results pass. A failure is answered 401
+   * with exactly `{ error: "signature verification failed", code }`
+   * where `code` is the first failing label's `VerifyResult.code`,
+   * the same body shape as the single-label path. The business
+   * handler receives an aggregate `VerifyResult` (`ok: true`, empty
+   * `label`) whose `perLabelResults` carries each label's own result
+   * in wire order.
+   *
+   * The first argument `verifyOpts` is still required and still
+   * validated at handler-creation time, but it is not consulted per
+   * request while this option is set — it stays the single-label
+   * configuration for callers that do not opt into multi-label
+   * verification. Like `verifyOpts`, this option is validated at
+   * creation time (see `assertVerifyAllOptions`): a misconfigured
+   * multi-label verifier throws `createVerifiedHandler: invalid
+   * verifyAllLabels: …` when the handler is built, never on the
+   * first live request. An empty `requiredLabels` array is rejected
+   * at creation too — omit the field to require every label present
+   * on the wire (the bare `verifyAllLabels` treats `[]` as "no
+   * check", but at the handler entry an empty list is a caller
+   * mistake, not a policy).
+   */
+  verifyAllLabels?: Omit<VerifyAllOptions, "label">;
 }
 
 /**
@@ -690,8 +741,10 @@ const VERIFY_OPTIONS_VALIDATION_REQUEST: RequestLike = {
  *
  * Per-label maps (`VerifyAllOptions`, e.g. `keyResolvers`,
  * `candidateKeysByLabel`) are not covered here on purpose: they belong
- * to `verifyAllLabels`, which this handler never calls — `verifyOpts`
- * is a `VerifyOptions` and carries no per-label map to validate.
+ * to `verifyAllLabels`, which the single-label path never calls —
+ * `verifyOpts` is a `VerifyOptions` and carries no per-label map to
+ * validate. The multi-label path has its own dry run,
+ * `assertVerifyAllOptions`.
  */
 function assertVerifyOptions(verifyOpts: VerifyOptions): void {
   try {
@@ -728,6 +781,130 @@ function assertVerifyOptions(verifyOpts: VerifyOptions): void {
 }
 
 /**
+ * Synthetic signed request the creation-time multi-label dry run
+ * checks against. It is never sent anywhere: it only exists so
+ * `verifyAllLabels` runs every configuration assertion it would run
+ * for a real request — including the per-label map shape checks
+ * (`assertExpectedKeyIds`, `assertKeyResolvers`,
+ * `assertCandidateKeysByLabel`, `assertRequiredLabels`, …) that the
+ * unsigned single-label dry run cannot reach, because
+ * `verifyAllLabels` returns early for a request with no
+ * `signature-input` header before validating them. The signature
+ * itself is a dummy: 64 zero bytes, never signed by any configured
+ * key, so the per-label `verifyRequest` calls fail with a wire
+ * failure code (`SIGNATURE_MISMATCH` or a key/pinning failure) that
+ * is swallowed — the dry run only cares that no configuration
+ * `Error` is thrown. It carries no nonce, so a configured
+ * `replayCache` is never touched, and no key resolver is called for
+ * a label whose key source resolves statically.
+ *
+ * The label is chosen so the dry run exercises a label that actually
+ * has a key source: the first `requiredLabels` entry when set (a
+ * required label with no key source would 500 every live request,
+ * so failing creation is correct), else the first key of any
+ * per-label key-source map, else `"sig1"` (covered by a global key
+ * source, or correctly rejected as having no key source at all).
+ */
+const VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE_INPUT =
+  'dryrun=("@status");created=1700000000';
+const VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE =
+  "dryrun=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==:";
+
+function dryRunLabelForVerifyAll(
+  allOpts: Omit<VerifyAllOptions, "label">,
+): string {
+  if (allOpts.requiredLabels !== undefined && allOpts.requiredLabels.length > 0)
+    return allOpts.requiredLabels[0];
+  for (const map of [
+    allOpts.keys,
+    allOpts.keyResolvers,
+    allOpts.candidateKeysByLabel,
+  ]) {
+    if (map !== undefined) {
+      const first = Object.keys(map)[0];
+      if (first !== undefined) return first;
+    }
+  }
+  return "dryrun";
+}
+
+/**
+ * Validate `CreateVerifiedHandlerOptions.verifyAllLabels` at
+ * handler-creation time, at the same level as `assertVerifyOptions`:
+ * a misconfigured multi-label verifier must fail when the handler is
+ * built, never on the first live request (where it would surface as
+ * a 500 `INTERNAL_ERROR` after the client already sent a signed
+ * body). The exact verify path the wrapper will use per request is
+ * dry-run once — a `verifyAllLabels` over the synthetic signed
+ * request above — so every configuration check `verifyAllLabels` /
+ * `verifyRequest` runs is exercised here, and the expected wire
+ * failure results are swallowed. A verifier with no key source at
+ * all is rejected explicitly, with the same wording `verifyRequest`
+ * uses.
+ */
+function assertVerifyAllOptions(
+  allOpts: Omit<VerifyAllOptions, "label">,
+): void {
+  try {
+    if (allOpts === null || typeof allOpts !== "object")
+      throw new Error(
+        `verifyAllLabels must be an object, got ${allOpts === null ? "null" : typeof allOpts}`,
+      );
+    if (
+      allOpts.key === undefined &&
+      allOpts.keyResolver === undefined &&
+      allOpts.candidateKeys === undefined &&
+      allOpts.keys === undefined &&
+      allOpts.keyResolvers === undefined &&
+      allOpts.candidateKeysByLabel === undefined
+    )
+      throw new Error(
+        "verifyRequest: one of `key`, `keyResolver`, or `candidateKeys` must be provided",
+      );
+    if (
+      allOpts.requiredLabels !== undefined &&
+      allOpts.requiredLabels.length === 0
+    )
+      throw new Error(
+        "verifyAllLabels: `requiredLabels` must not be empty — omit it to require every label present on the wire",
+      );
+    const label = dryRunLabelForVerifyAll(allOpts);
+    const results = verifyAllLabels(
+      {
+        method: "POST",
+        url: "http://127.0.0.1/verified-handler-validation",
+        headers: {
+          host: "127.0.0.1",
+          "signature-input": VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE_INPUT.replace(
+            "dryrun",
+            label,
+          ),
+          signature: VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE.replace(
+            "dryrun",
+            label,
+          ),
+        },
+        body: "",
+      },
+      allOpts,
+    );
+    if (results.length > 0 && results.every((r) => r.ok))
+      throw new Error(
+        "dry-run verification returned unexpected result: ok",
+      );
+  } catch (e) {
+    if (
+      e instanceof Error &&
+      e.message.startsWith("createVerifiedHandler: invalid verifyAllLabels:")
+    )
+      throw e;
+    throw new Error(
+      `createVerifiedHandler: invalid verifyAllLabels: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/**
  * Build a standard `http.RequestListener` that verifies RFC 9421
  * signatures before any business logic runs — the four steps a webhook
  * receiver otherwise hand-rolls (buffer the body, adapt it with
@@ -743,21 +920,28 @@ function assertVerifyOptions(verifyOpts: VerifyOptions): void {
  *    413 is flushed, so a peer cannot keep uploading into a dead
  *    verification.
  * 2. `fromNodeRequest` + `verifyRequest` with the `verifyOpts` given
- *    at creation. A request that cannot even be adapted (missing
+ *    at creation — or, when `opts.verifyAllLabels` is set,
+ *    `verifyAllLabels` with those options, requiring every label to
+ *    pass (see `CreateVerifiedHandlerOptions.verifyAllLabels`).
+ *    A request that cannot even be adapted (missing
  *    method/url/host) is answered 400 `{ error: "malformed request",
- *    code: "MALFORMED_REQUEST" }`; a misconfigured `verifyOpts`
- *    is answered 500 `{ error: "internal error", code: "INTERNAL_ERROR"
- *    }` — a server bug, never a client verdict, so no detail leaks.
+ *    code: "MALFORMED_REQUEST" }`; a misconfigured `verifyOpts` /
+ *    `verifyAllLabels` is answered 500 `{ error: "internal error",
+ *    code: "INTERNAL_ERROR" }` — a server bug, never a client
+ *    verdict, so no detail leaks.
  *    A stream that errors mid-body is answered 500 `{ error: "failed
  *    to read request body", code: "BODY_READ_FAILED" }` without
  *    verifying.
  * 3. Verification failure is answered 401 with exactly `{ error:
  *    "signature verification failed", code }`, where `code` is the
  *    `VerifyResult.code` (e.g. `SIGNATURE_MISMATCH`, `EXPIRED`,
- *    `MISSING_SIGNATURE_INPUT`) — no `reason`, no stack, no key
+ *    `MISSING_SIGNATURE_INPUT`) — or, in multi-label mode, the first
+ *    failing label's code — no `reason`, no stack, no key
  *    material. The business handler is never called.
  * 4. Verification success calls `handler(req, res, result)` with the
- *    raw Node pair and the `VerifyResult`; the handler owns the
+ *    raw Node pair and the `VerifyResult`; in multi-label mode the
+ *    result is an aggregate whose `perLabelResults` carries each
+ *    label's own result. The handler owns the
  *    response from there. With opt-in `opts.signResponse`, the `res`
  *    handed to the handler buffers the response instead of sending
  *    it: on `end` the wrapper signs it with `signResponse` (the
@@ -768,9 +952,11 @@ function assertVerifyOptions(verifyOpts: VerifyOptions): void {
  *    unsigned response reaches the wire. Rejections from steps 1–3
  *    (400/401/413/500) are never signed.
  *
- * `verifyOpts` (and `opts.signResponse`, when present) are validated
+ * `verifyOpts` (and `opts.signResponse`, when present, and
+ * `opts.verifyAllLabels`, when present) are validated
  * at handler-creation time by a dry run — a misconfigured verifier
- * throws `createVerifiedHandler: invalid verifyOpts: …` when the
+ * throws `createVerifiedHandler: invalid verifyOpts: …` (or
+ * `createVerifiedHandler: invalid verifyAllLabels: …`) when the
  * handler is built, never on the first live request. The per-request
  * 500 in step 2 therefore only remains as defense-in-depth: it can
  * still fire if the caller mutates the `verifyOpts` object after
@@ -799,6 +985,8 @@ export function createVerifiedHandler(
   assertVerifyOptions(verifyOpts);
   const signOpts = opts?.signResponse;
   if (signOpts !== undefined) assertSignResponseOptions(signOpts);
+  const allOpts = opts?.verifyAllLabels;
+  if (allOpts !== undefined) assertVerifyAllOptions(allOpts);
 
   return (req, res) => {
     const chunks: Buffer[] = [];
@@ -876,22 +1064,63 @@ export function createVerifiedHandler(
         return;
       }
       let result: VerifyResult;
-      try {
-        result = verifyRequest(requestLike, verifyOpts);
-      } catch {
-        // verifyRequest throws only on caller configuration errors
-        // (bad key setup) — a server bug, never a client verdict.
-        reject(500, "internal error", "INTERNAL_ERROR", false);
-        return;
-      }
-      if (!result.ok) {
-        reject(
-          401,
-          "signature verification failed",
-          result.code ?? "SIGNATURE_MISMATCH",
-          false,
-        );
-        return;
+      if (allOpts !== undefined) {
+        // Multi-label mode: every label must pass before the business
+        // handler runs. An unsigned request yields no results at all
+        // (unless requiredLabels synthesizes failures), and an empty
+        // result set must not pass an `every` check vacuously — it is
+        // a missing signature, answered 401 like the single-label
+        // path. The first failing label's code is the 401 code, so a
+        // stripped co-signature (`MISSING_REQUIRED_LABEL`) and a
+        // tampered one (`SIGNATURE_MISMATCH`) are distinguishable.
+        let results: VerifyResult[];
+        try {
+          results = verifyAllLabels(requestLike, allOpts);
+        } catch {
+          // verifyAllLabels throws only on caller configuration
+          // errors (bad per-label key setup) — a server bug, never a
+          // client verdict.
+          reject(500, "internal error", "INTERNAL_ERROR", false);
+          return;
+        }
+        const failed = results.find((r) => !r.ok);
+        if (results.length === 0) {
+          reject(
+            401,
+            "signature verification failed",
+            "MISSING_SIGNATURE_INPUT",
+            false,
+          );
+          return;
+        }
+        if (failed !== undefined) {
+          reject(
+            401,
+            "signature verification failed",
+            failed.code ?? "SIGNATURE_MISMATCH",
+            false,
+          );
+          return;
+        }
+        result = { ok: true, label: "", perLabelResults: results };
+      } else {
+        try {
+          result = verifyRequest(requestLike, verifyOpts);
+        } catch {
+          // verifyRequest throws only on caller configuration errors
+          // (bad key setup) — a server bug, never a client verdict.
+          reject(500, "internal error", "INTERNAL_ERROR", false);
+          return;
+        }
+        if (!result.ok) {
+          reject(
+            401,
+            "signature verification failed",
+            result.code ?? "SIGNATURE_MISMATCH",
+            false,
+          );
+          return;
+        }
       }
       settled = true;
       cleanup();

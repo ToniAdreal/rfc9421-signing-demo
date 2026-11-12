@@ -515,6 +515,18 @@ export interface VerifyResult {
    * detached copy: mutating it never affects a later verification.
    */
   coveredComponents?: string[] | undefined;
+  /**
+   * Per-label results, in wire order. Set only on the aggregate
+   * result `createVerifiedHandler` passes to the business handler
+   * when it verifies with `verifyAllLabels` (`CreateVerifiedHandlerOptions.verifyAllLabels`):
+   * the aggregate itself has `ok: true` and an empty `label` (no
+   * single label owns it), and this field carries each label's own
+   * `VerifyResult` so the handler can log or audit per signer
+   * (`keyId` / `alg` / `nonce` / `created` per label). `verifyRequest`
+   * and `verifyAllLabels` never set it — they return one result per
+   * label directly.
+   */
+  perLabelResults?: VerifyResult[] | undefined;
 }
 
 /**

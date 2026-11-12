@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2032 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2044 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1154,7 +1154,8 @@ What the wrapper does per request: it streams the body into memory up to
 `maxBodyBytes` (default 1 MiB, `DEFAULT_MAX_BODY_BYTES`); past the cap it
 stops reading, answers 413 `{ error: "request body too large", code:
 "BODY_TOO_LARGE" }`, and never calls the key resolver. It then runs
-`fromNodeRequest` + `verifyRequest`; a verification failure is answered 401
+`fromNodeRequest` + `verifyRequest` — or `verifyAllLabels` when the
+opt-in `verifyAllLabels` is set (see below); a verification failure is answered 401
 with exactly `{ error: "signature verification failed", code }` — the
 `VerifyResult.code` (`SIGNATURE_MISMATCH`, `EXPIRED`,
 `MISSING_SIGNATURE_INPUT`, …), no `reason`, no stack, no key material —
@@ -1178,6 +1179,55 @@ the same wording `verifyRequest` uses. A misconfiguration throws
 first live request. The dry run has no side effects: it never calls the
 key resolver and never fetches (a JWKS store stays untouched until a real
 request needs a key).
+
+Multi-label verification — a dual-signed webhook (a merchant signature
+plus a payment-gateway signature on the same request) is received
+through the same handler with opt-in `verifyAllLabels` (exactly
+`VerifyAllOptions` minus `label` — per-label keys, resolvers,
+candidate lists, and pins work as `verifyAllLabels` documents them):
+
+```ts
+const server = createServer(
+  createVerifiedHandler(
+    { key: gatewayPublicKey }, // still required and validated, but unused per request in this mode
+    (req, res, result) => {
+      // The result is an aggregate: ok is true, label is "" (no single
+      // label owns it), and result.perLabelResults carries each label's
+      // own VerifyResult in wire order, for logging and audit.
+      res.writeHead(200).end("ok");
+    },
+    {
+      verifyAllLabels: {
+        keys: { merchant: merchantPublicKey, gateway: gatewayPublicKey },
+        requiredLabels: ["merchant", "gateway"],
+      },
+    },
+  ),
+);
+```
+
+Every label must pass before the business handler runs: with
+`requiredLabels` set, a missing required label is a 401
+`MISSING_REQUIRED_LABEL`; without it, every label present on the wire
+must pass, and a request carrying no signature at all is a 401
+`MISSING_SIGNATURE_INPUT` — an unsigned request never slips through
+an empty-results pass. A failure is answered 401 with exactly
+`{ error: "signature verification failed", code }`, where `code` is
+the first failing label's code, the same body shape as the
+single-label path. A `requiredLabels` subset is a real policy choice:
+list only the signatures you depend on — a label left out of the list
+is not checked at all, and an empty `requiredLabels` array is rejected
+at handler creation (omit the field to require every label on the
+wire). The multi-label options are validated at handler-creation time
+by a dry run over a synthetic signed request — the unsigned dry run
+cannot reach the per-label map checks, because `verifyAllLabels`
+returns early for a request with no `signature-input` header — so a
+bad per-label key, resolver, candidate list, or pin throws
+`createVerifiedHandler: invalid verifyAllLabels: …` when the handler
+is built, never on the first live request. Honest limits: two labels
+do not prove two independent signers — if both keys come from the same
+holder, the handler cannot tell — and multi-signature is not key
+distribution (see SECURITY.md).
 
 Opt-in response signing — the other half of mutual authentication: pass
 `signResponse` and the wrapper signs the business handler's response
@@ -4386,7 +4436,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2032 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2044 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

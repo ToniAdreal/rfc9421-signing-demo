@@ -11,6 +11,48 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `createVerifiedHandler` supports multi-label verification (backlog
+  #1090): opt-in `CreateVerifiedHandlerOptions.verifyAllLabels`
+  (exactly `VerifyAllOptions` minus `label` — per-label `keys` /
+  `keyResolvers` / `candidateKeysByLabel` / `expectedKeyIds` /
+  `expectedTags` / `requiredLabels` and the rest work as
+  `verifyAllLabels` documents them). When set, the wrapper verifies
+  with `verifyAllLabels` instead of `verifyRequest`: every label must
+  pass before the business handler runs — with `requiredLabels` set, a
+  missing required label is a 401 `MISSING_REQUIRED_LABEL`; without
+  it, every label present on the wire must pass, and a request
+  carrying no signature at all is a 401 `MISSING_SIGNATURE_INPUT`
+  (an empty result set never passes vacuously). A failure is answered
+  401 with exactly `{ error: "signature verification failed", code }`,
+  where `code` is the first failing label's code, the same body shape
+  as the single-label path. The business handler receives an aggregate
+  `VerifyResult` (`ok: true`, empty `label`) whose new
+  `perLabelResults` field carries each label's own `VerifyResult` in
+  wire order, for logging and audit per signer. The first argument
+  `verifyOpts` is still required and still validated at creation, but
+  is not consulted per request while this option is set. The
+  multi-label options are validated at handler-creation time by a dry
+  run over a synthetic signed request — an unsigned dry run cannot
+  reach the per-label map checks, because `verifyAllLabels` returns
+  early for a request with no `signature-input` header — so a bad
+  per-label key, resolver, candidate list, or pin throws
+  `createVerifiedHandler: invalid verifyAllLabels: …` when the handler
+  is built, never on the first live request; an empty
+  `requiredLabels` array is rejected the same way (omit the field to
+  require every label on the wire). `test/
+  nodeHttpVerifiedHandlerMultiLabel.test.ts` gains 12 tests (loopback
+  dual-signed round-trip with per-label results, tampered gateway
+  signature → 401, tampered body → 401 `BODY_DIGEST_MISMATCH`,
+  missing required label → 401, unsigned request → 401 with and
+  without `requiredLabels`, `requiredLabels` subset pass, per-label
+  keyid pin mismatch → 401, wrong-key merchant signature → 401,
+  four creation-time configuration errors, single-label regression,
+  and 401 answers never signed while 200 answers are). README gains
+  a multi-label handler section; SECURITY.md gains the honest limits
+  (multi-signature is not key distribution, two labels are not proof
+  of two signers, a label left out of `requiredLabels` is never
+  checked).
+
 - Client one-call `verifiedFetch(input, init?, opts)` (backlog #1087):
   signs the request (`opts.sign`, the `signRequest` options), fetches
   it (`opts.fetchImpl`, defaulting to the global `fetch`), reads the

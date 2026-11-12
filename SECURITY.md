@@ -114,6 +114,21 @@ Read this before using it anywhere that matters.
   without silently breaking every existing custom store. Callers signing
   multiple labels must generate one fresh nonce per label
   (`generateNonce()` per label, not per request).
+- **Multi-signature is not key distribution, and two labels are not
+  proof of two signers.** `createVerifiedHandler`'s opt-in
+  `verifyAllLabels` mode checks that every required label verifies
+  against the keys, resolvers, or candidate lists the caller
+  configured for that label — it does not fetch, rotate, or vouch for
+  those keys, and it cannot tell whether two labels were signed by two
+  independent parties: if the caller configures the same key for both
+  labels, both pass and the handler still reports two "signers". A
+  stripped co-signature is a 401 (`MISSING_REQUIRED_LABEL`) only when
+  the label is listed in `requiredLabels`; a label left out of the
+  list is never checked, so list every signature the business decision
+  depends on. The per-label results the business handler receives
+  (`result.perLabelResults`) are the audit trail — log them, don't
+  trust the aggregate `ok` alone when attributing a decision to a
+  signer.
 - **Fixed, configurable tolerance windows.** `verifyRequest` accepts
   `created` timestamps up to `clockSkewToleranceSec` seconds in the future
   (default 60 — generous, shrink it if your clocks are trustworthy) and
