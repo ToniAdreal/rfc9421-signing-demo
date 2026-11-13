@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- RFC 3230 `Digest` legacy gateway interop (backlog #1100):
+  `digest(body, alg)` emits a `Digest` header value in the same
+  `alg=:base64:` rendering as `contentDigest` (sha-256/sha-512 only;
+  the `alg` is required so the caller names the algorithm the peer
+  expects, and illegal body input or an unsupported algorithm throws).
+  On the verify side, a signature covering `digest` now binds the body
+  through the Digest value exactly like `content-digest`: a missing
+  header, an md5/unknown algorithm, or a value that does not match the
+  body fails with `BODY_DIGEST_MISMATCH` (sha-512 preferred when both
+  entries are present). An uncovered Digest header is not checked — the
+  binding only applies when `digest` is covered — and the classic bare
+  `SHA-256=base64` form is not accepted (fail-closed). Content-Digest
+  stays the preferred binding; Digest exists only for legacy gateways
+  that still send it. `test/digest.test.ts` gains 19 tests (sha-256 /
+  sha-512 golden values verbatim, sign→verify round-trips for both
+  algorithms, tampered body, signer-emitted wrong digest, post-sign
+  header swap → `SIGNATURE_MISMATCH`, dual Digest + Content-Digest
+  coverage, covered-but-missing header, md5 and unknown-algorithm
+  fail-closed, uncovered-Digest scope, no-body behavior, multi-entry
+  sha-512 preference, illegal input). README gains the Digest
+  explanation in "What it implements", Limitations, and
+  Interoperability, and the test count moves 2055 → 2074.
 - `generateHmacSecret(alg?, bytes?)` HMAC secret generator (backlog
   #1099): mints a fresh CSPRNG-drawn `Buffer` at exactly the
   per-algorithm floor by default — 32 bytes for `hmac-sha256`, 64 for

@@ -884,6 +884,28 @@ function assertAllowedAlgs(algs: SignAlg[] | undefined): void {
 }
 
 /**
+ * Whether the signature covers the whole `Digest` field of this
+ * message (RFC 3230 legacy body binding, backlog #1100). Component
+ * ids arrive base-lowercased with their parameters attached
+ * (`digest`, `digest;bs`, `digest;req`, … — see `parseComponentIds`),
+ * so the base name is the part before the first `;`. `;req` binds
+ * the associated request's Digest, `;tr` the trailers, and
+ * `;key="…"` one dictionary member — none of those is this message's
+ * whole Digest field, so they do not trigger the whole-field body
+ * binding check; `;bs`/`;sf` only change how the value enters the
+ * signature base, not which field is bound.
+ */
+function coversWholeDigestField(componentIds: string[]): boolean {
+  return componentIds.some((id) => {
+    const [base, ...params] = id.split(";");
+    if (base !== "digest") return false;
+    return !params.some(
+      (p) => p === "req" || p === "tr" || p.startsWith("key="),
+    );
+  });
+}
+
+/**
  * Verify an RFC 9421 signed request: rebuild the signature base from the
  * covered components, check the cryptographic signature, then enforce
  * freshness (expires / created).
@@ -1005,6 +1027,35 @@ export function verifyRequest(
       label,
       keyId: parsed.params.keyid,
       alg: wireAlg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
+  // Legacy `Digest` body binding, presence half (backlog #1100): a
+  // signature that covers the whole `digest` field claims the body is
+  // bound through the Digest header, so the header must actually be
+  // there. Checked here — after the header parsed, before the
+  // signature base is rebuilt — because a missing covered field
+  // would otherwise surface as SIGNATURE_BASE_BUILD_FAILED from
+  // `resolveComponent`; the settled code for a missing Digest is
+  // BODY_DIGEST_MISMATCH, the same code as every other Digest
+  // binding failure (see `verifyWithKey`). Only the whole field of
+  // this message counts: `;req` binds the associated request's
+  // Digest, `;tr` the trailers, and `;key="…"` one dictionary member.
+  if (
+    coversWholeDigestField(parsed.componentIds) &&
+    getHeader(req.headers, "digest") === undefined
+  )
+    return {
+      ok: false,
+      code: "BODY_DIGEST_MISMATCH",
+      reason:
+        'body cannot be bound: signature covers "digest" but no Digest header is present',
+      label,
+      keyId: parsed.params.keyid,
+      alg: parsed.params.alg,
       nonce: parsed.params.nonce,
       tag: parsed.params.tag,
       created: parsed.params.created,
@@ -1486,6 +1537,77 @@ function verifyWithKey(
       expires: parsed.params.expires,
       coveredComponents: [...parsed.componentIds],
       };
+  }
+
+  // Body binding via the legacy RFC 3230 `Digest` header (backlog
+  // #1100): when the signature covers `digest`, the Digest value
+  // must match the body, under exactly the same rules as
+  // `content-digest` above — sha-512 preferred when present, sha-256
+  // fallback. Content-Digest stays the preferred binding; Digest
+  // exists only so a legacy payment gateway that still sends
+  // `Digest` instead of `Content-Digest` gets its body checked
+  // instead of passing through unverified. A missing header is
+  // reported earlier, before the signature base is rebuilt (see
+  // `verifyRequest`), so the header is present here; a value with
+  // no sha-256/sha-512 entry (md5 and unknown algorithms fail
+  // closed) or a value that does not match the body is
+  // BODY_DIGEST_MISMATCH — the same code as a content-digest
+  // binding failure. Unlike the content-digest check, this one only
+  // runs when `digest` is covered: an uncovered Digest header is
+  // opaque data the signature does not bind.
+  if (coversWholeDigestField(parsed.componentIds)) {
+    const legacyDigestHeader = getHeader(req.headers, "digest");
+    if (legacyDigestHeader !== undefined) {
+      const bodyBytes =
+        req.body === undefined
+          ? Buffer.alloc(0)
+          : typeof req.body === "string"
+            ? Buffer.from(req.body, "utf8")
+            : req.body;
+      const dm512 = /(?:^|,)\s*sha-512\s*=:([A-Za-z0-9+/=]+):/.exec(
+        legacyDigestHeader,
+      );
+      const dm256 = /(?:^|,)\s*sha-256\s*=:([A-Za-z0-9+/=]+):/.exec(
+        legacyDigestHeader,
+      );
+      const dm = dm512 ?? dm256;
+      if (!dm)
+        return {
+          ok: false,
+          code: "BODY_DIGEST_MISMATCH",
+          reason:
+            "cannot verify body: no sha-256 or sha-512 Digest present (md5 and unknown algorithms are not accepted)",
+          label,
+          keyId: parsed.params.keyid,
+          alg: effectiveAlg,
+          nonce: parsed.params.nonce,
+        tag: parsed.params.tag,
+        created: parsed.params.created,
+        expires: parsed.params.expires,
+        coveredComponents: [...parsed.componentIds],
+        };
+      const expected = createHash(dm === dm512 ? "sha512" : "sha256")
+        .update(bodyBytes)
+        .digest();
+      const actual = Buffer.from(dm[1], "base64");
+      if (
+        actual.length !== expected.length ||
+        !timingSafeEqual(actual, expected)
+      )
+        return {
+          ok: false,
+          code: "BODY_DIGEST_MISMATCH",
+          reason: "body does not match Digest",
+          label,
+          keyId: parsed.params.keyid,
+          alg: effectiveAlg,
+          nonce: parsed.params.nonce,
+        tag: parsed.params.tag,
+        created: parsed.params.created,
+        expires: parsed.params.expires,
+        coveredComponents: [...parsed.componentIds],
+        };
+    }
   }
 
   // Freshness: the `created`/`expires` parameters are optional on the

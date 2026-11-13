@@ -56,3 +56,47 @@ export function contentDigestAlgOf(value: string): ContentDigestAlg | undefined 
   const alg = value.slice(0, value.indexOf("="));
   return alg === "sha-512" || alg === "sha-256" ? alg : undefined;
 }
+
+/**
+ * RFC 3230 `Digest` hash algorithms this library can emit and verify
+ * for legacy gateway interop. Only sha-256/sha-512: md5 is explicitly
+ * out of scope — it is not a supported `DigestAlg`, `digest()` refuses
+ * to emit it, and the verifier fails closed on it (see src/verify.ts).
+ */
+export type DigestAlg = "sha-256" | "sha-512";
+
+/**
+ * Fail fast on an unsupported `Digest` algorithm. This is a caller
+ * configuration error (thrown), never a verification failure: the
+ * signer must never emit a digest it cannot name on the wire.
+ * Mirrors `assertContentDigestAlg` for the legacy header.
+ */
+export function assertDigestAlg(alg: unknown): asserts alg is DigestAlg {
+  if (alg !== "sha-256" && alg !== "sha-512")
+    throw new Error(
+      `digest: "alg" must be "sha-256" or "sha-512", got ${JSON.stringify(alg)}`,
+    );
+}
+
+/**
+ * RFC 3230 `Digest` field value for a request body, emitted in the
+ * same `alg=:base64:` rendering as `contentDigest` (e.g.
+ * `sha-256=:qHycHWk7IkbwexRKk+xxmcx9yK3dOFd1TTawJhW6NrQ=:`).
+ * Prefer `contentDigest` for new integrations: `Digest` exists only
+ * for legacy payment gateways that still send `Digest` instead of
+ * `Content-Digest`. Covering `digest` binds the body to the signature
+ * on the verify side (see src/verify.ts): any tampering with the body
+ * fails with `BODY_DIGEST_MISMATCH`, exactly like a `content-digest`
+ * binding failure. The `alg` is required (no default) so the caller
+ * names the algorithm the peer expects instead of silently getting
+ * the library's preferred one.
+ */
+export function digest(body: string | Buffer, alg: DigestAlg): string {
+  assertDigestAlg(alg);
+  if (typeof body !== "string" && !Buffer.isBuffer(body))
+    throw new Error(
+      `digest: "body" must be a string or a Buffer, got ${typeof body}`,
+    );
+  const buf = typeof body === "string" ? Buffer.from(body, "utf8") : body;
+  return `${alg}=:${createHash(NODE_HASH_ALG[alg]).update(buf).digest("base64")}:`;
+}

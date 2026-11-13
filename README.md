@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2055 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2074 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1692,7 +1692,12 @@ values. Without a request to bind to, keep using the request-side API
   back to `sha-256` when the header carries no `sha-512` entry (for foreign
   signers that only send `sha-256`); signing emits `sha-512` by default and
   `sha-256` when `SignOptions.contentDigestAlg` is set to `"sha-256"` (for
-  peers that only accept sha-256 digests).
+  peers that only accept sha-256 digests). The legacy RFC 3230 `Digest`
+  header is bound the same way when `digest` is covered: `digest(body, alg)`
+  emits the value, the verifier checks it against the body, and a missing
+  header, an md5/unknown algorithm, or a mismatched value fails with
+  `BODY_DIGEST_MISMATCH`. Content-Digest stays preferred; Digest is
+  legacy-gateway interop only (see Limitations).
 - **Freshness**: `created` enforced with a configurable clock-skew
   tolerance (`clockSkewToleranceSec`, default 60s); `expires` enforced
   strictly by default, with an optional grace period
@@ -2189,7 +2194,16 @@ const dual = addResponseSignature(merchantSigned, {
   (preferred when present) and `sha-256` (fallback when no `sha-512` entry
   exists); signing emits `sha-512` by default, `sha-256` with
   `contentDigestAlg: "sha-256"`. Other `content-digest` algorithms
-  are rejected with `MISSING_CONTENT_DIGEST`.
+  are rejected with `MISSING_CONTENT_DIGEST`. The legacy RFC 3230
+  `Digest` header is bound under the same two algorithms, but only
+  when `digest` is a covered component (an uncovered Digest header is
+  not checked); a covered Digest that is missing, carries only
+  md5/unknown algorithms, or does not match the body fails with
+  `BODY_DIGEST_MISMATCH`. `digest(body, alg)` emits the value in the
+  same `alg=:base64:` rendering. Content-Digest is preferred for new
+  integrations; Digest exists only for legacy gateways that still send
+  it, and the classic bare `SHA-256=base64` form (no `=:…:` wrapping)
+  is not accepted — it fails closed as no supported Digest entry.
 - **In-memory replay cache only.** The optional `ReplayCache` is a
   per-process helper with a configurable TTL and LRU capacity cap. It
   can survive its *own* process's restart — export a snapshot before
@@ -2291,7 +2305,13 @@ most also appear in [Limitations](#limitations)):
   to `sha-512`; set `SignOptions.contentDigestAlg: "sha-256"` for a peer
   that only accepts sha-256 digests. A peer sending
   only other digest algorithms fails with "no sha-512 or sha-256
-  content-digest present".
+  content-digest present". The legacy RFC 3230 `Digest` header follows
+  the same two algorithms when `digest` is covered (missing / md5 /
+  unknown / mismatch → `BODY_DIGEST_MISMATCH`); a peer sending Digest
+  in the classic bare `SHA-256=base64` form (no `=:…:` wrapping) fails
+  closed, because this library only accepts the `alg=:base64:` rendering
+  it emits itself — Content-Digest is preferred, Digest is legacy
+  interop only.
 - **Signature algorithms.** Implemented: `ed25519`, `ecdsa-p256-sha256`
   (raw r‖s encoding per RFC 9421 §3.3.4, so the official B.2.4 vector
   verifies end-to-end; see the verified list above — note the breaking
@@ -4451,7 +4471,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2055 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2074 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
