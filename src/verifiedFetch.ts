@@ -29,11 +29,23 @@
  *   deliberate, documented split from the response API itself, which
  *   returns wire failures instead of throwing them: `verifiedFetch`
  *   is the caller's explicit opt-in to the throwing entry point.
+ *   In multi-label mode (`verify.verifyAllLabels`, backlog #1105)
+ *   the thrown error carries the first failing label's code /
+ *   reason / label, with the full per-label array attached as
+ *   `verifyResults` — a bad gateway signature never hides the
+ *   merchant signature that verified — and a successful call
+ *   returns the same array as `verifyResults`, with `verifyResult`
+ *   as the aggregate (`ok: true`, empty `label`, `perLabelResults`),
+ *   exactly as `createVerifiedHandler` reports it.
  * - Caller configuration errors throw before any network happens:
  *   an invalid sign configuration (via `signRequest`), an invalid
  *   verify configuration (via the pre-flight dry run below), a bad
  *   `maxBodyBytes`, or a `verify.request` the caller tried to supply
- *   (the helper anchors `;req` to the request it just signed).
+ *   (the helper anchors `;req` to the request it just signed). In
+ *   multi-label mode, an illegal label policy — an empty,
+ *   duplicate, or non-string `requiredLabels` entry, no key source
+ *   at all, or a verification option left on the outer `verify`
+ *   object — likewise throws before any network happens.
  * - Fetch-layer errors (DNS, connection refused, TLS, a GET with a
  *   body) pass through untouched, unwrapped.
  *
@@ -74,7 +86,9 @@ import {
   type FetchResponseLike,
 } from "./nodeHttp.js";
 import {
+  verifyAllResponseLabels,
   verifyResponse,
+  type VerifyAllResponseOptions,
   type VerifyResponseOptions,
 } from "./response.js";
 import { signRequest, type SignOptions } from "./sign.js";
@@ -104,11 +118,46 @@ export type VerifiedFetchSignOptions = SignOptions;
  * documents. To bind the response to the triggering request, the
  * peer covers a `;req` component (e.g. `"@method";req`); it resolves
  * against the request this call sent.
+ *
+ * Multi-label responses (backlog #1105): set `verifyAllLabels` to
+ * verify every signature on the response with
+ * `verifyAllResponseLabels` instead — the client-side mirror of the
+ * `createVerifiedHandler` multi-label mode (#1090), for the
+ * merchant-ed25519-signs / gateway-hmac-appends settlement flow.
+ * The value is exactly the `VerifyAllResponseOptions` the response
+ * API takes, minus `request` (anchored by this helper as above):
+ * per-label keys / resolvers / candidate lists (`keys` /
+ * `keyResolvers` / `candidateKeysByLabel`), per-label freshness
+ * windows and pins, and `requiredLabels` — the label list: every
+ * label named there that never appears on the wire is a synthetic
+ * `MISSING_REQUIRED_LABEL` failure, so a stripped co-signature can
+ * never pass. The mode is fail-closed: every label must pass, and
+ * the first failing label's code / reason / label is thrown as the
+ * `VerifyError`, with the full per-label array attached to the error
+ * as `verifyResults` (and to a successful result as `verifyResults`)
+ * so a bad gateway signature never hides the merchant signature
+ * that verified. An unsigned response in this mode yields no results
+ * at all, which must not pass vacuously — it throws
+ * `MISSING_SIGNATURE_INPUT` like the single-label path. A caller
+ * that sets `verifyAllLabels` must put *every* verification option
+ * inside it: any other field on the outer `verify` object (`key`,
+ * `now`, …) is rejected as a configuration error before any network
+ * happens, because it would otherwise be silently ignored — the
+ * multi-label options object is self-contained, exactly as in
+ * `createVerifiedHandler`.
  */
 export type VerifiedFetchVerifyOptions = Omit<
   VerifyResponseOptions,
   "request"
->;
+> & {
+  /**
+   * Multi-label verification options. When present, the response is
+   * verified with `verifyAllResponseLabels` (see the
+   * `VerifiedFetchVerifyOptions` documentation); when absent, the
+   * existing single-label `verifyResponse` behavior is unchanged.
+   */
+  verifyAllLabels?: Omit<VerifyAllResponseOptions, "request">;
+};
 
 /**
  * The `fetch()` `Response` fields `verifiedFetch` actually reads.
@@ -209,9 +258,23 @@ export interface VerifiedFetchResult {
    * a failed verification throws `VerifyError` instead of returning
    * (see the module docstring). `label` / `keyId` / `alg` /
    * `nonce` / `tag` / `created` / `coveredComponents` are available
-   * for logging and audit.
+   * for logging and audit. In multi-label mode (`verify.verifyAllLabels`)
+   * this is the aggregate result — `ok: true`, an empty `label` (no
+   * single label owns it), and `perLabelResults` carrying each
+   * label's own result, exactly as `createVerifiedHandler` reports
+   * it; read `verifyResults` for the per-label array directly.
    */
   verifyResult: VerifyResult;
+  /**
+   * Per-label verification results, in wire order — set only in
+   * multi-label mode (`verify.verifyAllLabels`). Each entry is one
+   * label's own `VerifyResult` (`label` / `keyId` / `alg` /
+   * `nonce` / `tag` / `created` / `coveredComponents`), so the
+   * caller can audit every signer (merchant and gateway) without
+   * re-parsing the `signature-input` header. Absent in single-label
+   * mode, where `verifyResult` alone carries the one result.
+   */
+  verifyResults?: VerifyResult[];
 }
 
 /**
@@ -278,6 +341,150 @@ function assertVerifyOptionsPreflight(
     if (result.ok || result.code !== "MISSING_SIGNATURE_INPUT")
       throw new Error(
         `dry-run verification returned unexpected result: ${result.ok ? "ok" : result.code ?? "no code"}`,
+      );
+  } catch (e) {
+    if (
+      e instanceof Error &&
+      e.message.startsWith("verifiedFetch: invalid verify options:")
+    )
+      throw e;
+    throw new Error(
+      `verifiedFetch: invalid verify options: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/**
+ * Synthetic signed response the multi-label verify pre-flight checks
+ * against. It is never sent anywhere: it only exists so
+ * `verifyAllResponseLabels` runs every configuration assertion it
+ * would run for a real response (per-label key selection, candidate
+ * lists, freshness windows, header limits, required components,
+ * Structured Field types, clock options) before returning failure
+ * results for the bogus all-zero signature — without touching the
+ * replay cache, which is only consulted for a signature carrying a
+ * nonce. Mirrors `VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE_INPUT` /
+ * `VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE` in `nodeHttp.ts`, on the
+ * response side: the canned `signature-input` covers `@status` only
+ * (no `;req`, so no triggering request is needed for the dry run),
+ * and the label is swapped for the dry-run label below.
+ */
+const VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE_INPUT =
+  'dryrun=("@status");created=1700000000';
+const VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE =
+  "dryrun=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==:";
+
+/**
+ * Pick the label the multi-label dry run signs as: the first
+ * required label when one is named (a required label with no key
+ * source must fail the pre-flight, not the first live call), else
+ * the first label named in a per-label key map, else `"dryrun"`.
+ * Mirrors `dryRunLabelForVerifyAll` in `nodeHttp.ts`.
+ */
+function dryRunLabelForVerifyAllResponse(
+  allOpts: Omit<VerifyAllResponseOptions, "request">,
+): string {
+  if (allOpts.requiredLabels !== undefined && allOpts.requiredLabels.length > 0)
+    return allOpts.requiredLabels[0] as string;
+  for (const map of [
+    allOpts.keys,
+    allOpts.keyResolvers,
+    allOpts.candidateKeysByLabel,
+  ]) {
+    if (map !== undefined) {
+      const first = Object.keys(map)[0];
+      if (first !== undefined) return first;
+    }
+  }
+  return "dryrun";
+}
+
+/**
+ * Validate `opts.verify.verifyAllLabels` at call time, before any
+ * network happens — the multi-label twin of
+ * `assertVerifyOptionsPreflight`, mirroring `assertVerifyAllOptions`
+ * in `nodeHttp.ts` for the client side. A misconfigured multi-label
+ * verifier must fail here, never after the peer has already answered
+ * (where it would surface as a `VerifyError` on a response the
+ * caller already paid to fetch, or — worse — as a verification that
+ * never ran). The exact verify path the helper will use is dry-run
+ * once — a `verifyAllResponseLabels` over the synthetic signed
+ * response above, with the request this call just signed attached
+ * as `request` — so every configuration check
+ * `verifyAllResponseLabels` / `verifyRequest` runs is exercised
+ * here, and the expected failure results are swallowed.
+ *
+ * Three checks cannot ride the dry run and are explicit, with the
+ * same wording the response / handler side uses: a verifier with no
+ * key source at all; an empty `requiredLabels` (omit it to require
+ * every label present on the wire); and any verification option left
+ * on the outer `verify` object, which the multi-label path never
+ * reads — silently ignoring a caller's `key` or `now` would be worse
+ * than rejecting it.
+ *
+ * The dry run has one accepted side effect: a `keyResolver` for the
+ * dry-run label may be consulted once for the bogus signature, as in
+ * the handler's dry run. It never touches the replay cache (the
+ * canned signature carries no nonce).
+ */
+function assertVerifyAllOptionsPreflight(
+  verifyOpts: VerifiedFetchVerifyOptions,
+  request: RequestLike,
+): void {
+  try {
+    const allOpts = verifyOpts.verifyAllLabels;
+    if (allOpts === null || typeof allOpts !== "object")
+      throw new Error(
+        `verifyAllLabels must be an object, got ${allOpts === null ? "null" : typeof allOpts}`,
+      );
+    const outerKeys = Object.keys(verifyOpts).filter(
+      (k) => k !== "verifyAllLabels",
+    );
+    if (outerKeys.length > 0)
+      throw new Error(
+        `verifyAllLabels is set: pass every verification option inside verifyAllLabels — ` +
+          `outer verify option${outerKeys.length === 1 ? "" : "s"} ${outerKeys.map((k) => `"${k}"`).join(", ")} ${outerKeys.length === 1 ? "is" : "are"} never read in multi-label mode`,
+      );
+    if (
+      allOpts.key === undefined &&
+      allOpts.keyResolver === undefined &&
+      allOpts.candidateKeys === undefined &&
+      allOpts.keys === undefined &&
+      allOpts.keyResolvers === undefined &&
+      allOpts.candidateKeysByLabel === undefined
+    )
+      throw new Error(
+        "verifyRequest: one of `key`, `keyResolver`, or `candidateKeys` must be provided",
+      );
+    if (
+      allOpts.requiredLabels !== undefined &&
+      allOpts.requiredLabels.length === 0
+    )
+      throw new Error(
+        "verifyAllLabels: `requiredLabels` must not be empty — omit it to require every label present on the wire",
+      );
+    const label = dryRunLabelForVerifyAllResponse(allOpts);
+    const results = verifyAllResponseLabels(
+      {
+        status: VERIFY_OPTIONS_VALIDATION_RESPONSE.status,
+        headers: {
+          "signature-input":
+            VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE_INPUT.replace(
+              "dryrun",
+              label,
+            ),
+          signature: VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE.replace(
+            "dryrun",
+            label,
+          ),
+        },
+        body: "",
+      },
+      { ...allOpts, request },
+    );
+    if (results.length > 0 && results.every((r) => r.ok))
+      throw new Error(
+        "dry-run verification returned unexpected result: ok",
       );
   } catch (e) {
     if (
@@ -376,13 +583,20 @@ async function readResponseBodyCapped(
  *
  * Steps, in order: build the request from `input` + `init`; sign it
  * with `signRequest` (`opts.sign`); validate the verifier with the
- * pre-flight dry run (`opts.verify`); fetch it (`opts.fetchImpl`,
+ * pre-flight dry run (`opts.verify` — or, when
+ * `opts.verify.verifyAllLabels` is set, the multi-label pre-flight
+ * over `verifyAllResponseLabels`); fetch it (`opts.fetchImpl`,
  * defaulting to the global `fetch`); read the response body under
  * `opts.maxBodyBytes`; adapt it with `fromFetchResponse` (the request
  * just signed attached as `request`, so covered `;req` components
  * bind the response signature to it); verify it with
- * `verifyResponse`. Returns `{ response, body, verifyResult }` on a
- * verified response; throws `VerifyError` on a failed verification.
+ * `verifyResponse` — or, in multi-label mode, with
+ * `verifyAllResponseLabels`, requiring every label to pass. Returns
+ * `{ response, body, verifyResult }` on a verified response (plus
+ * `verifyResults` in multi-label mode); throws `VerifyError` on a
+ * failed verification — in multi-label mode the first failing
+ * label's code / reason / label, with the full per-label array
+ * attached to the error as `verifyResults`.
  *
  * Fail-fast configuration errors (thrown, before any network):
  * everything `signRequest` already rejects, plus a verifier with no
@@ -451,8 +665,11 @@ export async function verifiedFetch(
   const signed = signRequest(request, opts.sign);
 
   // Verifier pre-flight, also before any network: a misconfigured
-  // verifier throws here, never after the peer has answered.
-  assertVerifyOptionsPreflight(opts.verify, signed);
+  // verifier throws here, never after the peer has answered. The
+  // multi-label pre-flight runs when `verifyAllLabels` is set.
+  if (opts.verify.verifyAllLabels !== undefined)
+    assertVerifyAllOptionsPreflight(opts.verify, signed);
+  else assertVerifyOptionsPreflight(opts.verify, signed);
 
   const fetchImpl: VerifiedFetchFn =
     opts.fetchImpl ??
@@ -489,6 +706,51 @@ export async function verifiedFetch(
   // spread pins a definite status (the adapter validated it is an
   // integer 100-599) for the `HttpResponseLike` shape.
   const resLike = fromFetchResponse(res, bodyBuf, { request: signed });
+  const allOpts = opts.verify.verifyAllLabels;
+  if (allOpts !== undefined) {
+    // Multi-label mode: every label must pass before the response is
+    // returned. An unsigned response yields no results at all (unless
+    // requiredLabels synthesizes failures), and an empty result set
+    // must not pass an `every` check vacuously — it is a missing
+    // signature, thrown like the single-label path. The first failing
+    // label's code is the thrown code, so a stripped co-signature
+    // (`MISSING_REQUIRED_LABEL`) and a tampered one
+    // (`SIGNATURE_MISMATCH`) stay distinguishable — and the full
+    // per-label array rides on the error, so the label that did
+    // verify stays visible to the caller.
+    const results = verifyAllResponseLabels(
+      { ...resLike, status: res.status },
+      { ...allOpts, request: signed },
+    );
+    if (results.length === 0)
+      throw new VerifyError(
+        "MISSING_SIGNATURE_INPUT",
+        "response carries no signature-input header",
+        { label: "", verifyResults: results },
+      );
+    const failed = results.find((r) => !r.ok);
+    if (failed !== undefined)
+      throw new VerifyError(
+        failed.code ?? "VERIFICATION_ERROR",
+        failed.reason ?? "verification failed",
+        {
+          label: failed.label,
+          keyId: failed.keyId,
+          alg: failed.alg,
+          nonce: failed.nonce,
+          tag: failed.tag,
+          created: failed.created,
+          expires: failed.expires,
+          verifyResults: results,
+        },
+      );
+    return {
+      response: res,
+      body: bodyBuf.toString("utf8"),
+      verifyResult: { ok: true, label: "", perLabelResults: results },
+      verifyResults: results,
+    };
+  }
   const verifyResult = verifyResponse(
     { ...resLike, status: res.status },
     { ...opts.verify, request: signed },

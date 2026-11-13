@@ -11,6 +11,36 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifiedFetch` verifies multi-label responses (backlog #1105):
+  `verify.verifyAllLabels` (exactly the `VerifyAllResponseOptions`
+  the response API takes, minus `request`, which the helper still
+  anchors to the request it just signed) verifies every signature
+  on the response with `verifyAllResponseLabels` in the same one
+  call — the merchant-ed25519 / gateway-hmac settlement flow,
+  mirroring the `createVerifiedHandler` multi-label mode (#1090).
+  Fail-closed: every label must pass; the first failing label's
+  code / reason / label is thrown as the `VerifyError`, with the
+  full per-label array attached to the error as `verifyResults`
+  (`VerifyError` gains the optional `verifyResults` field) and to
+  a successful result as `verifyResults`, with `verifyResult` as
+  the aggregate (`ok: true`, empty `label`, `perLabelResults`,
+  exactly as `createVerifiedHandler` reports it). An unsigned
+  response throws `MISSING_SIGNATURE_INPUT`, never passes
+  vacuously; `requiredLabels` names the labels that must be
+  present (a stripped co-signature is a synthetic
+  `MISSING_REQUIRED_LABEL` failure). Illegal label policies —
+  empty / duplicate / non-string `requiredLabels`, no key source,
+  or a verification option left on the outer `verify` object —
+  throw before any network happens, via a pre-flight dry run over
+  a synthetic signed response mirroring the handler's. Without
+  `verifyAllLabels`, the single-label behavior is unchanged.
+  `test/verifiedFetchMultiLabel.test.ts` gains 11 tests
+  (loopback dual-sign round-trip, one bad label failing the whole
+  call with the other label's result visible on the error, missing
+  required label, unsigned response, single-label default
+  unchanged, four fail-fast policy cases, `;req` binding success
+  and mismatch), and the test count moves 2088 → 2099.
+
 - Optional `expiresAt` expiry on both signed snapshot envelopes
   (backlog #1104), mirroring the dataquest (#1076) and escrow
   (#1103) envelopes: `ReplayCacheSignedSnapshotEnvelope` and

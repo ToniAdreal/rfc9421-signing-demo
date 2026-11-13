@@ -1,3 +1,5 @@
+import type { VerifyResult } from "./verify.js";
+
 /**
  * Machine-readable verification failure codes.
  *
@@ -163,6 +165,19 @@ export interface VerifyErrorOptions {
   tag?: string | undefined;
   created?: number | undefined;
   expires?: number | undefined;
+  /**
+   * Per-label results, in wire order, when the failure came out of a
+   * multi-label verification (`verifyAllLabels` /
+   * `verifyAllResponseLabels` / `verifiedFetch` with
+   * `verifyAllLabels`). The throwing call reports the first failing
+   * label's code / reason / label on the error itself, but the whole
+   * array rides along here so a caller can still see which labels
+   * passed — a bad gateway signature must not hide the merchant
+   * signature that verified. Absent on single-label failures.
+   * Always a detached copy: mutating it never affects a later
+   * verification.
+   */
+  verifyResults?: VerifyResult[] | undefined;
 }
 
 /**
@@ -180,6 +195,7 @@ export class VerifyError extends Error {
   readonly tag?: string | undefined;
   readonly created?: number | undefined;
   readonly expires?: number | undefined;
+  readonly verifyResults?: VerifyResult[] | undefined;
 
   constructor(
     code: VerifyFailureCode,
@@ -197,6 +213,7 @@ export class VerifyError extends Error {
     this.tag = opts.tag;
     this.created = opts.created;
     this.expires = opts.expires;
+    this.verifyResults = opts.verifyResults;
   }
 }
 
