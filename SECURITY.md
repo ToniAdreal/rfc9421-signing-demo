@@ -128,11 +128,16 @@ Read this before using it anywhere that matters.
   configured for that label — it does not fetch, rotate, or vouch for
   those keys, and it cannot tell whether two labels were signed by two
   independent parties: if the caller configures the same key for both
-  labels, both pass and the handler still reports two "signers". A
-  stripped co-signature is a 401 (`MISSING_REQUIRED_LABEL`) only when
-  the label is listed in `requiredLabels`; a label left out of the
-  list is never checked, so list every signature the business decision
-  depends on. The per-label results the business handler receives
+  labels, both pass and the handler still reports two "signers". The
+  same holds for the opt-in `signResponses` mode on the signing side:
+  it signs each label with the key the caller configured for that
+  entry, and a response carrying two labels proves only that two
+  signatures were minted — not that two independent parties hold the
+  keys. If both entries use keys from the same holder, the response
+  still carries two "signatures". A stripped co-signature is a 401
+  (`MISSING_REQUIRED_LABEL`) only when the label is listed in
+  `requiredLabels`; a label left out of the list is never checked, so
+  list every signature the business decision depends on. The per-label results the business handler receives
   (`result.perLabelResults`) are the audit trail — log them, don't
   trust the aggregate `ok` alone when attributing a decision to a
   signer.

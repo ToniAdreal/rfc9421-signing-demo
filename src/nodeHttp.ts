@@ -38,7 +38,11 @@
 import { KeyObject } from "node:crypto";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { joinHeaderValues, type RequestLike } from "./components.js";
-import { signResponse, type SignResponseOptions } from "./response.js";
+import {
+  addResponseSignature,
+  signResponse,
+  type SignResponseOptions,
+} from "./response.js";
 import {
   verifyAllLabels,
   verifyRequest,
@@ -562,9 +566,45 @@ export interface CreateVerifiedHandlerOptions {
    * ages out of the verifier's freshness window and a pinned
    * `nonce` repeats on every response (a verifier with a replay
    * cache rejects the repeats). Leave them unset for the usual
-   * per-response `created: now` and no nonce.
+   * per-response `created: now` and no nonce. Mutually exclusive
+   * with `signResponses` — pass one of them, never both.
    */
   signResponse?: VerifiedHandlerSignResponseOptions;
+  /**
+   * Opt-in multi-label response signing: the response-signing twin
+   * of `verifyAllLabels` — when present, the wrapper signs the
+   * business handler's response once per entry, in array order:
+   * the first entry is signed with `signResponse`, each later entry
+   * is appended with `addResponseSignature`, so the response
+   * carries one signature per label (the dual-signature settlement
+   * case: a merchant signature plus a payment-gateway signature on
+   * the same response, each under its own key, keyid, and covered
+   * components). Every entry follows exactly the `signResponse`
+   * rules — the just-verified request is attached as `request`, so
+   * covered `;req` components bind each signature to it — and the
+   * whole response is still buffered and flushed in one go, so a
+   * failure in any label is answered 500 `INTERNAL_ERROR` with
+   * nothing unsigned on the wire, exactly like the single-label
+   * failure path. A 401/400/413/500 rejection from the wrapper
+   * itself is never signed.
+   *
+   * Mutually exclusive with `signResponse` (both set throws when
+   * the handler is built). An empty array throws too — omit the
+   * field to leave responses unsigned. Two entries with the same
+   * label (an omitted label counts as `"sig1"`) throw at creation:
+   * RFC 9421 dictionary labels must be unique, and the duplicate
+   * check `addResponseSignature` runs per request is repeated here
+   * so the mistake fails when the handler is built, not on the
+   * first live response. Each entry is validated at creation by the
+   * same dry-run sign `signResponse` gets (see
+   * `assertSignResponsesOptions`), so a bad key, alg, label, or
+   * covered component in any entry throws
+   * `createVerifiedHandler: invalid signResponses[i] options: …`
+   * at build time. Leave `created` / `expires` / `nonce` unset
+   * unless you rotate them per label — the same caveats as
+   * `signResponse` apply, per entry.
+   */
+  signResponses?: VerifiedHandlerSignResponseOptions[];
   /**
    * Opt-in multi-label verification: when present, the wrapper
    * verifies with `verifyAllLabels` instead of `verifyRequest` —
@@ -675,17 +715,22 @@ function isSignResponseContentError(e: Error): boolean {
  * request-component guard) is exercised here. Only
  * content-dependent failures are forgiven (see
  * `isSignResponseContentError`).
+ *
+ * `optionName` names the option in the thrown message: `"signResponse"`
+ * for the single-label option, `signResponses[i]` for one entry of
+ * the multi-label option — the dry run is the same either way.
  */
 function assertSignResponseOptions(
   sign: VerifiedHandlerSignResponseOptions,
+  optionName: string = "signResponse",
 ): void {
   if (typeof sign !== "object" || sign === null)
     throw new Error(
-      `createVerifiedHandler: signResponse must be an object, got ${sign === null ? "null" : typeof sign}`,
+      `createVerifiedHandler: ${optionName} must be an object, got ${sign === null ? "null" : typeof sign}`,
     );
   if (!(sign.key instanceof KeyObject))
     throw new Error(
-      "createVerifiedHandler: signResponse.key must be a KeyObject " +
+      `createVerifiedHandler: ${optionName}.key must be a KeyObject ` +
         "(a private key from keys.generate*KeyPair / importPrivateKey / secretKey), got " +
         (sign.key === null ? "null" : typeof sign.key),
     );
@@ -697,9 +742,56 @@ function assertSignResponseOptions(
   } catch (e) {
     if (e instanceof Error && isSignResponseContentError(e)) return;
     throw new Error(
-      `createVerifiedHandler: invalid signResponse options: ${e instanceof Error ? e.message : String(e)}`,
+      `createVerifiedHandler: invalid ${optionName} options: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
+}
+
+/**
+ * Validate `CreateVerifiedHandlerOptions.signResponses` at
+ * handler-creation time, at the same level as
+ * `assertSignResponseOptions`: a misconfigured multi-label response
+ * signer must fail when the handler is built, never on the first
+ * live response. The list itself is checked first — it must be an
+ * array, must not be empty, and must not repeat a label (an omitted
+ * label counts as `"sig1"`, the same default `signResponse` /
+ * `addResponseSignature` use, so an explicit `"sig1"` entry and a
+ * labelless entry collide) — then every entry is dry-run through
+ * `assertSignResponseOptions` with its own `signResponses[i]` name,
+ * so the per-entry error names the entry that failed. A duplicate
+ * label is also re-checked per request by `addResponseSignature`
+ * inside the wrapper (defense in depth), but creation-time failure
+ * is the point: the caller learns before serving traffic.
+ */
+function assertSignResponsesOptions(
+  signs: VerifiedHandlerSignResponseOptions[],
+): void {
+  if (!Array.isArray(signs))
+    throw new Error(
+      `createVerifiedHandler: signResponses must be an array, got ${signs === null ? "null" : typeof signs}`,
+    );
+  if (signs.length === 0)
+    throw new Error(
+      "createVerifiedHandler: signResponses must not be empty — omit it to leave responses unsigned",
+    );
+  const seen = new Set<string>();
+  for (const sign of signs) {
+    // A non-object entry is rejected by the per-entry dry run below
+    // with its own shape error — the duplicate check only applies to
+    // entries that actually carry a label.
+    if (sign === null || typeof sign !== "object") continue;
+    const label = sign.label !== undefined ? sign.label : "sig1";
+    if (typeof label === "string") {
+      if (seen.has(label))
+        throw new Error(
+          `createVerifiedHandler: signResponses: duplicate label "${label}" — every response signature must use a distinct label`,
+        );
+      seen.add(label);
+    }
+  }
+  signs.forEach((sign, i) =>
+    assertSignResponseOptions(sign, `signResponses[${i}]`),
+  );
 }
 
 /**
@@ -942,25 +1034,35 @@ function assertVerifyAllOptions(
  *    raw Node pair and the `VerifyResult`; in multi-label mode the
  *    result is an aggregate whose `perLabelResults` carries each
  *    label's own result. The handler owns the
- *    response from there. With opt-in `opts.signResponse`, the `res`
+ *    response from there. With opt-in `opts.signResponse` (or
+ *    `opts.signResponses` for multi-label signing), the `res`
  *    handed to the handler buffers the response instead of sending
  *    it: on `end` the wrapper signs it with `signResponse` (the
  *    just-verified request attached as `request`, so covered `;req`
- *    components bind the signature to it) and flushes the signed
- *    headers and body in one go. A signing failure at request time
- *    is answered 500 `INTERNAL_ERROR` — nothing was sent yet, so no
- *    unsigned response reaches the wire. Rejections from steps 1–3
- *    (400/401/413/500) are never signed.
+ *    components bind the signature to it) — for `signResponses`,
+ *    once per entry, the first with `signResponse` and each later
+ *    one appended with `addResponseSignature` — and flushes the
+ *    signed headers and body in one go. A signing failure at
+ *    request time is answered 500 `INTERNAL_ERROR` — nothing was
+ *    sent yet, so no unsigned response reaches the wire. Rejections
+ *    from steps 1–3 (400/401/413/500) are never signed.
  *
- * `verifyOpts` (and `opts.signResponse`, when present, and
- * `opts.verifyAllLabels`, when present) are validated
- * at handler-creation time by a dry run — a misconfigured verifier
- * throws `createVerifiedHandler: invalid verifyOpts: …` (or
- * `createVerifiedHandler: invalid verifyAllLabels: …`) when the
- * handler is built, never on the first live request. The per-request
- * 500 in step 2 therefore only remains as defense-in-depth: it can
- * still fire if the caller mutates the `verifyOpts` object after
- * creation (the wrapper reads the same object per request).
+ * `verifyOpts` (and `opts.signResponse` / `opts.signResponses`,
+ * when present, and `opts.verifyAllLabels`, when present) are
+ * validated at handler-creation time by a dry run — a misconfigured
+ * verifier throws `createVerifiedHandler: invalid verifyOpts: …`
+ * (or `createVerifiedHandler: invalid verifyAllLabels: …`), a
+ * misconfigured response signer throws
+ * `createVerifiedHandler: invalid signResponse options: …` (or
+ * `createVerifiedHandler: invalid signResponses[i] options: …` for
+ * one bad entry of a multi-label list), and `signResponse` plus
+ * `signResponses` together, an empty `signResponses` array, or a
+ * repeated label throw their own creation-time errors — all when
+ * the handler is built, never on the first live request. The
+ * per-request 500 in step 2 therefore only remains as
+ * defense-in-depth: it can still fire if the caller mutates the
+ * `verifyOpts` object after creation (the wrapper reads the same
+ * object per request).
  *
  * Honest limits (see also SECURITY.md): TLS is the caller's job —
  * this handler sees whatever the socket gives it, and `@scheme`
@@ -984,7 +1086,14 @@ export function createVerifiedHandler(
     );
   assertVerifyOptions(verifyOpts);
   const signOpts = opts?.signResponse;
+  const signOptsList = opts?.signResponses;
+  if (signOpts !== undefined && signOptsList !== undefined)
+    throw new Error(
+      "createVerifiedHandler: signResponse and signResponses are mutually exclusive — pass one of them",
+    );
   if (signOpts !== undefined) assertSignResponseOptions(signOpts);
+  if (signOptsList !== undefined)
+    assertSignResponsesOptions(signOptsList);
   const allOpts = opts?.verifyAllLabels;
   if (allOpts !== undefined) assertVerifyAllOptions(allOpts);
 
@@ -1127,8 +1236,10 @@ export function createVerifiedHandler(
       handler(
         req,
         signOpts !== undefined
-          ? wrapResponseForSigning(res, signOpts, requestLike)
-          : res,
+          ? wrapResponseForSigning(res, [signOpts], requestLike)
+          : signOptsList !== undefined
+            ? wrapResponseForSigning(res, signOptsList, requestLike)
+            : res,
         result,
       );
     }
@@ -1150,9 +1261,13 @@ export function createVerifiedHandler(
  * headers (via `setHeader`, so later `setHeader` calls still land)
  * without flushing; `write` buffers each chunk and reports success
  * (its callback fires on the next tick, as if flushed); `end`
- * buffers the final chunk, signs `{ status, headers, body }` with
- * `signResponse` — the just-verified request attached as `request`,
- * so covered `;req` components bind the signature to it — and then
+ * buffers the final chunk, signs `{ status, headers, body }` —
+ * once per entry of `signOptsList`, in order: the first entry with
+ * `signResponse`, each later entry appended with
+ * `addResponseSignature` (which is also where a repeated label is
+ * rejected again per request, after the creation-time check) — the
+ * just-verified request attached as `request` to every sign, so
+ * covered `;req` components bind each signature to it — and then
  * flushes the signed headers and the original body in one go.
  * `flushHeaders` is held to a no-op while signing: flushing early
  * would send the headers unsigned.
@@ -1170,7 +1285,7 @@ export function createVerifiedHandler(
  */
 function wrapResponseForSigning(
   res: ServerResponse,
-  signOpts: VerifiedHandlerSignResponseOptions,
+  signOptsList: VerifiedHandlerSignResponseOptions[],
   requestLike: RequestLike,
 ): ServerResponse {
   const origWriteHead = res.writeHead.bind(res);
@@ -1254,10 +1369,23 @@ function wrapResponseForSigning(
     const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
     let signed;
     try {
+      // First label signs the bare response; every later label is
+      // appended onto the signed one, so the wire carries one
+      // signature-input/signature pair per label and each label's
+      // base covers the same status, headers, and body. Any entry
+      // failing — a covered header the handler never set, a label
+      // repeated despite the creation-time check — aborts the whole
+      // flush below with 500 and no signature headers.
       signed = signResponse(
         { status: res.statusCode, headers, body },
-        { ...signOpts, request: requestLike },
+        { ...signOptsList[0], request: requestLike },
       );
+      for (const extra of signOptsList.slice(1)) {
+        signed = addResponseSignature(signed, {
+          ...extra,
+          request: requestLike,
+        });
+      }
     } catch {
       origWriteHead(500, { "content-type": "application/json" });
       origEnd(

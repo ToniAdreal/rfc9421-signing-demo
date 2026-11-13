@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2128 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2139 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1303,6 +1303,41 @@ signed. Leave `created` / `expires` / `nonce` unset unless you rotate
 them: the same options sign every response, so a pinned `created` ages
 out of the verifier's freshness window and a pinned `nonce` repeats on
 every response. See SECURITY.md for the key-custody limit.
+
+For a dual-signed response — the merchant signature plus the payment
+gateway's on the same response — pass `signResponses` instead, one
+entry per label, in the order they should appear on the wire:
+
+```ts
+const server = createServer(
+  createVerifiedHandler(
+    { key: gatewayPublicKey },
+    (req, res, result) => {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+    },
+    {
+      signResponses: [
+        { key: merchantPrivateKey, alg: "ed25519", keyId: "merchant-key", label: "merchant" },
+        { key: gatewaySecret, alg: "hmac-sha256", keyId: "gateway-key", label: "gateway" },
+      ],
+    },
+  ),
+);
+```
+
+The first entry is signed with `signResponse`, each later entry is
+appended with `addResponseSignature`, and every entry gets the
+just-verified request attached as `request`, so a covered `;req`
+component binds each label to it. `signResponses` is mutually
+exclusive with `signResponse` (both set throws when the handler is
+built); an empty array throws, and two entries with the same label
+(an omitted label counts as `"sig1"`) throw too. Each entry is
+validated at creation by the same dry-run sign, and a failure in any
+label at request time is answered 500 `INTERNAL_ERROR` with nothing
+on the wire — including the labels that signed fine. Verify the
+result with `verifyAllResponseLabels` (per-label keys, `requiredLabels`
+to fail closed on a stripped co-signature). Two labels are not proof
+of two signers — see SECURITY.md.
 
 Verifying signed *responses* with a Node `http` client — the
 receive→verify chain via `fromNodeResponse`:
@@ -4538,7 +4573,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2128 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2139 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

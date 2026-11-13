@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `CreateVerifiedHandlerOptions.signResponses` (backlog #1121):
+  multi-label response signing — the signing twin of the
+  `verifyAllLabels` verify mode. One entry per label, in wire
+  order: the first is signed with `signResponse`, each later entry
+  appended with `addResponseSignature`, every entry bound to the
+  just-verified request (covered `;req` components resolve against
+  it). Mutually exclusive with `signResponse` (both set throws at
+  creation); an empty array throws, and a repeated label (an
+  omitted label counts as `"sig1"`) throws at creation too. Each
+  entry is validated at creation by the same dry-run sign as
+  `signResponse`, and a failure in any label at request time is
+  answered 500 `INTERNAL_ERROR` with nothing on the wire —
+  including labels that signed fine. `test/
+  nodeHttpVerifiedHandlerSignResponses.test.ts` gains 11 tests
+  (loopback dual-label re-sign verified via
+  `verifyAllResponseLabels`, per-label `;req` independence,
+  single-label regression, 401 never re-signed, second-label
+  failure → 500 with no bytes, mutual-exclusion / empty-array /
+  duplicate-label / invalid-entry creation throws, tampered body
+  fails both labels, wrong key fails only its label), and the test
+  count moves 2128 → 2139.
 - Demo gains a multi-label `verifiedFetch` segment (backlog #1119):
   the same loopback settlement response, now dual-signed (merchant
   ed25519 via `signResponse`, gateway hmac-sha256 via
