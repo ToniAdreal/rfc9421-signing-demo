@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark gains a `verifiedFetch` end-to-end row (backlog #1107):
+  one `verifiedFetch` call per op over a loopback server (a POST
+  with a JSON settlement instruction, signed with a fixed client
+  ed25519 key; the gateway re-signs the same settlement response
+  with its own ed25519 key, `now` pinned to the signature's
+  `created` + 60s) prices the whole client round trip — request
+  signing + fetch + response verification. Every measured pass
+  pins the 200 status, the exact settlement body, and the
+  verification identity (label `sig1`, pinned gateway keyid /
+  `ed25519` / nonce, covered `@status content-digest`); a delivery
+  whose body was flipped after signing is pinned outside timing to
+  throw `VerifyError` with `BODY_DIGEST_MISMATCH`. Real run
+  (2026-11-13, Node v24.22.1, linux/x64, AMD EPYC 9D25):
+  `verifiedFetch (signed POST, loopback)` ~470.5 ops/sec
+  (2125.49 µs/op); the Benchmarks table is refreshed from the same
+  run (121 → 122 rows). Numbers are machine-local, not guarantees.
+
 - CLI demo gains a `verifiedFetch` segment (backlog #1106): the
   loopback settlement response is now also exercised through the
   client one-call helper — one `verifiedFetch` call per

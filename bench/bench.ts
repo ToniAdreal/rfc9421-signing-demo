@@ -834,7 +834,16 @@
  * self-checked (the signed row), and the unsigned 401 rejection
  * on the same server with the handler never called (the unsigned
  * row) — these two rows time a full HTTP round trip per op, TCP
- * loopback included, unlike the adapter-only rows above.
+ * loopback included, unlike the adapter-only rows above, plus the
+ * client-side mirror of that receive path: `verifiedFetch` over
+ * the same loopback shape (one gateway ed25519 key signing the
+ * settlement response, one client ed25519 key signing the request,
+ * `now` pinned to the response signature's `created` + 60s), one
+ * full sign → fetch → verify round trip per measured op with the
+ * 200 status, the exact settlement body, and the pinned label /
+ * keyid / alg / nonce self-checked — and a tampered-body delivery
+ * pinned outside timing to fail with `BODY_DIGEST_MISMATCH`, so
+ * the row cannot be measuring a path that skips verification.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -906,6 +915,7 @@ import {
   signRequest,
   signResponse,
   signatureInputValue,
+  verifiedFetch,
   verifyAllLabels,
   verifyAllResponseLabels,
   verifyRequest,
@@ -13034,6 +13044,190 @@ async function benchmarkCreateVerifiedHandlerUnsigned(): Promise<number> {
 }
 
 /**
+ * Fixed fixture for the `verifiedFetch` end-to-end row (backlog
+ * #1107): the client twin of the `createVerifiedHandler` rows — one
+ * `verifiedFetch` call per measured op signs the request, fetches
+ * it over loopback, and verifies the signed response, so the row
+ * prices the whole client round trip a settlement caller pays
+ * (request signing + TCP loopback + response verification), not
+ * any one half. The gateway signs the same fixed settlement
+ * response every time (`VERIFIED_FETCH_RESPONSE_BODY`, status 200,
+ * covered `@status` + `content-digest`, the `signResponse`
+ * default); the client signs a fixed settlement-instruction POST
+ * (`VERIFIED_FETCH_REQUEST_BODY`) with its own ed25519 key. Both
+ * key pairs are fresh per bench run, generated once before timing;
+ * nothing measured depends on their values and no replay cache is
+ * configured, so the pinned `created` / `now` (+60s) / nonce can
+ * be reused across passes without a replay rejection.
+ */
+const VERIFIED_FETCH_CREATED = 1_700_000_000;
+const VERIFIED_FETCH_NOW = VERIFIED_FETCH_CREATED + 60;
+const VERIFIED_FETCH_KEY_ID = "bench-verified-fetch-1";
+const VERIFIED_FETCH_CLIENT_KEY_ID = "bench-verified-fetch-client-1";
+const VERIFIED_FETCH_NONCE = "bench-verified-fetch-nonce-1";
+const VERIFIED_FETCH_CLIENT_NONCE = "bench-verified-fetch-client-nonce-1";
+const VERIFIED_FETCH_REQUEST_BODY = JSON.stringify({
+  amount: 10000,
+  currency: "USD",
+});
+const VERIFIED_FETCH_RESPONSE_BODY = JSON.stringify({
+  settled: true,
+  amount: 10000,
+  currency: "USD",
+});
+/** Tampered form of the settlement response body: one digit flipped. */
+const VERIFIED_FETCH_TAMPERED_BODY = VERIFIED_FETCH_RESPONSE_BODY.replace(
+  '"amount":10000',
+  '"amount":10001',
+);
+
+/**
+ * Pinned shape of one `verifiedFetch` round trip: the 200 status,
+ * the exact settlement body, and the verification identity (label
+ * `sig1`, the pinned gateway keyid / `ed25519` / nonce, the pinned
+ * `created`, covered `@status content-digest`).
+ */
+function assertVerifiedFetchRoundTrip(
+  result: Awaited<ReturnType<typeof verifiedFetch>>,
+  where: string,
+): void {
+  const v = result.verifyResult;
+  if (
+    result.response.status !== 200 ||
+    result.body !== VERIFIED_FETCH_RESPONSE_BODY ||
+    !v.ok ||
+    v.label !== "sig1" ||
+    v.keyId !== VERIFIED_FETCH_KEY_ID ||
+    v.alg !== "ed25519" ||
+    v.nonce !== VERIFIED_FETCH_NONCE ||
+    v.created !== VERIFIED_FETCH_CREATED ||
+    v.coveredComponents?.join(" ") !== "@status content-digest"
+  )
+    throw new Error(
+      `benchmark self-check failed: verifiedFetch ${where} round trip gave ` +
+        `${result.response.status} ${JSON.stringify(result.body)} ${JSON.stringify(v)}`,
+    );
+}
+
+/**
+ * Shared harness for the `verifiedFetch` row: one loopback server
+ * and one gateway ed25519 key pair. `/settled` signs the fixed
+ * settlement response and sends it verbatim; `/tampered` signs the
+ * same response but sends the body with one digit flipped, so the
+ * `content-digest` header no longer matches the bytes on the wire.
+ * The server never verifies the request itself — that direction is
+ * the `createVerifiedHandler` rows' job. Returns the port, the
+ * gateway public key the client verifies against, and a close that
+ * drains connections first so `server.close` cannot hang on a
+ * keep-alive socket.
+ */
+async function startVerifiedFetchServer(): Promise<{
+  port: number;
+  gatewayPublicKey: KeyObject;
+  close: () => Promise<void>;
+}> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const server = createServer((req, res) => {
+    const tampered = req.url === "/tampered";
+    const signed = signResponse(
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: VERIFIED_FETCH_RESPONSE_BODY,
+      },
+      {
+        keyId: VERIFIED_FETCH_KEY_ID,
+        alg: "ed25519",
+        key: privateKey,
+        created: VERIFIED_FETCH_CREATED,
+        nonce: VERIFIED_FETCH_NONCE,
+      },
+    );
+    res.writeHead(200, {
+      "content-type": "application/json",
+      "content-digest": signed.headers["content-digest"] as string,
+      "signature-input": signed.headers["signature-input"] as string,
+      signature: signed.headers["signature"] as string,
+    });
+    res.end(
+      tampered ? VERIFIED_FETCH_TAMPERED_BODY : VERIFIED_FETCH_RESPONSE_BODY,
+    );
+  });
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", resolve),
+  );
+  const port = (server.address() as AddressInfo).port;
+  return {
+    port,
+    gatewayPublicKey: publicKey,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+/**
+ * `verifiedFetch` signed round-trip steady state: the whole client
+ * path — request signing, the global `fetch` over loopback, body
+ * buffering under the default cap, and ed25519 response
+ * verification — priced as one HTTP round trip per op. Self-checks
+ * on every measured pass pin the 200 status, the exact settlement
+ * body, and the verification identity (see
+ * {@link assertVerifiedFetchRoundTrip}); asserted outside timing:
+ * one probe round trip returns the same pinned fields, and a
+ * delivery whose body was flipped after signing throws a
+ * `VerifyError` with the pinned `BODY_DIGEST_MISMATCH` code — the
+ * row cannot be measuring a path that skips verification.
+ */
+async function benchmarkVerifiedFetch(): Promise<number> {
+  const s = await startVerifiedFetchServer();
+  try {
+    const clientPair = generateEd25519KeyPair();
+    const sign = {
+      keyId: VERIFIED_FETCH_CLIENT_KEY_ID,
+      alg: "ed25519" as const,
+      key: clientPair.privateKey,
+      created: VERIFIED_FETCH_CREATED,
+      nonce: VERIFIED_FETCH_CLIENT_NONCE,
+    };
+    const verify = { key: s.gatewayPublicKey, now: VERIFIED_FETCH_NOW };
+    const base = `http://127.0.0.1:${s.port}`;
+    const init = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: VERIFIED_FETCH_REQUEST_BODY,
+    };
+    assertVerifiedFetchRoundTrip(
+      await verifiedFetch(`${base}/settled`, init, { sign, verify }),
+      "probe",
+    );
+    let tampered: unknown;
+    try {
+      await verifiedFetch(`${base}/tampered`, init, { sign, verify });
+    } catch (e) {
+      tampered = e;
+    }
+    if (!isVerifyError(tampered) || tampered.code !== "BODY_DIGEST_MISMATCH")
+      throw new Error(
+        `benchmark self-check failed: tampered verifiedFetch delivery gave ` +
+          `${tampered instanceof Error ? `${tampered.name}: ${tampered.message}` : "no throw"} ` +
+          `(expected VerifyError BODY_DIGEST_MISMATCH)`,
+      );
+    const ops = await measureAsync(async () => {
+      assertVerifiedFetchRoundTrip(
+        await verifiedFetch(`${base}/settled`, init, { sign, verify }),
+        "timed",
+      );
+    }, ITERATIONS);
+    return ops;
+  } finally {
+    await s.close();
+  }
+}
+
+/**
  * Per-curve JWK round-trip steady state: for one key shape, a measured
  * call runs `exportPublicKeyJwk*` on a fixed public key, pushes the
  * JWK through a JSON stringify/parse round trip (the wire form a JWKS
@@ -16073,6 +16267,11 @@ results.push({
   alg: "createVerifiedHandler (unsigned POST, loopback)",
   op: "verify",
   ops: await benchmarkCreateVerifiedHandlerUnsigned(),
+});
+results.push({
+  alg: "verifiedFetch (signed POST, loopback)",
+  op: "sign+fetch+verify",
+  ops: await benchmarkVerifiedFetch(),
 });
 results.push({
   alg: "JWK round-trip P-256",
