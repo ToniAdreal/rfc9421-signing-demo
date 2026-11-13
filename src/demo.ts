@@ -4248,6 +4248,22 @@ export const DEMO_VERIFIED_FETCH_POST_BODY = JSON.stringify({
   amount: 10000,
   currency: "USD",
 });
+/** Label of the merchant signature in the multi-label verified-fetch segment. */
+export const DEMO_VERIFIED_FETCH_MULTI_MERCHANT_LABEL = "merchant";
+/** Label of the gateway signature in the multi-label verified-fetch segment. */
+export const DEMO_VERIFIED_FETCH_MULTI_GATEWAY_LABEL = "gateway";
+/** Key id the multi-label verified-fetch segment's merchant signature carries. */
+export const DEMO_VERIFIED_FETCH_MULTI_MERCHANT_KEY_ID =
+  "demo-verified-fetch-multi-merchant-1";
+/** Key id the multi-label verified-fetch segment's gateway signature carries. */
+export const DEMO_VERIFIED_FETCH_MULTI_GATEWAY_KEY_ID =
+  "demo-verified-fetch-multi-gateway-1";
+/** Nonce the multi-label verified-fetch segment's merchant signature carries. */
+export const DEMO_VERIFIED_FETCH_MULTI_MERCHANT_NONCE =
+  "demo-verified-fetch-multi-merchant-nonce-1";
+/** Nonce the multi-label verified-fetch segment's gateway signature carries. */
+export const DEMO_VERIFIED_FETCH_MULTI_GATEWAY_NONCE =
+  "demo-verified-fetch-multi-gateway-nonce-1";
 /** Label of the merchant signature in the dual-signed response segment. */
 export const DEMO_DUAL_RESPONSE_MERCHANT_LABEL = "merchant";
 /** Label of the gateway signature in the dual-signed response segment. */
@@ -6263,6 +6279,25 @@ export interface DemoResult {
    * nonce `DEMO_VERIFIED_FETCH_POST_NONCE`).
    */
   verifiedFetchPostVerification: VerifyResult;
+  /** Status of the verified-fetch multi-label segment's round-trip (200). */
+  verifiedFetchMultiLabelStatus: number;
+  /**
+   * Response body of the verified-fetch multi-label segment's round-trip
+   * (the pinned `DEMO_GATEWAY_RESPONSE_BODY` settlement body).
+   */
+  verifiedFetchMultiLabelBody: string;
+  /**
+   * Aggregate verification of the verified-fetch multi-label segment's
+   * dual-signed response (ok — empty `label`, per-label results in
+   * `perLabelResults`).
+   */
+  verifiedFetchMultiLabelVerification: VerifyResult;
+  /**
+   * Per-label verifications of the verified-fetch multi-label segment's
+   * dual-signed response, in wire order (merchant ed25519, gateway
+   * hmac-sha256).
+   */
+  verifiedFetchMultiLabelVerifications: VerifyResult[];
   /**
    * Verification of the whitelisted ed25519 signature in the
    * allowed-algs segment (ok under `allowedAlgs: ["ed25519"]`).
@@ -7399,6 +7434,146 @@ async function fetchVerifiedFetchRoundTrip(): Promise<VerifiedFetchFixture> {
     ) {
       throw new Error(
         `demo fixture broken: verified-fetch segment gave GET ${fixture.getStatus}/${JSON.stringify(fixture.getVerification)} (request signed: ${getRequestSigned}) / POST ${fixture.postStatus}/${JSON.stringify(fixture.postVerification)} (request signed: ${postRequestSigned}, digested: ${postRequestDigested}) instead of two ok round-trips with the pinned label/keyid/alg/nonces and "@status content-digest" covered`,
+      );
+    }
+    return fixture;
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+}
+
+/**
+ * The multi-label verified-fetch segment's loopback fixture (backlog
+ * #1119): the client twin of the `addResponseSignature` segment —
+ * the same loopback settlement response
+ * (`DEMO_GATEWAY_RESPONSE_*`), but dual-signed (merchant ed25519
+ * via `signResponse`, gateway hmac-sha256 via
+ * `addResponseSignature`) and verified in a single `verifiedFetch`
+ * call with `verify.verifyAllLabels`, so the merchant and gateway
+ * co-signatures are both checked in the one call that signs the
+ * request and fetches the response — a stripped gateway label
+ * fails `requiredLabels` instead of passing silently.
+ *
+ * Only the status, body and verification identities are returned —
+ * no signature bytes, no port — so the printed segment is
+ * byte-identical between runs even though the port and both key
+ * pairs are fresh per run.
+ */
+interface VerifiedFetchMultiLabelFixture {
+  /** Status the loopback answered for the multi-label GET (200). */
+  status: number;
+  /** Response body of the multi-label GET (the pinned settlement body). */
+  body: string;
+  /**
+   * Aggregate verification of the dual-signed response (ok — empty
+   * `label`, per-label results in `perLabelResults`).
+   */
+  verification: VerifyResult;
+  /** Per-label verifications, in wire order (merchant, gateway). */
+  verifications: VerifyResult[];
+}
+
+async function fetchVerifiedFetchMultiLabelRoundTrip(): Promise<VerifiedFetchMultiLabelFixture> {
+  const merchantPair = generateEd25519KeyPair();
+  const clientPair = generateEd25519KeyPair();
+  const gatewaySecret = secretKey(DEMO_GATEWAY_SECRET);
+  const server = createServer((req, res) => {
+    const merchantSigned = signResponse(
+      {
+        status: DEMO_GATEWAY_RESPONSE_STATUS,
+        headers: { "content-type": "application/json" },
+        body: DEMO_GATEWAY_RESPONSE_BODY,
+      },
+      {
+        keyId: DEMO_VERIFIED_FETCH_MULTI_MERCHANT_KEY_ID,
+        alg: "ed25519",
+        key: merchantPair.privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_VERIFIED_FETCH_MULTI_MERCHANT_NONCE,
+        label: DEMO_VERIFIED_FETCH_MULTI_MERCHANT_LABEL,
+      },
+    );
+    const dual = addResponseSignature(merchantSigned, {
+      keyId: DEMO_VERIFIED_FETCH_MULTI_GATEWAY_KEY_ID,
+      alg: "hmac-sha256",
+      key: gatewaySecret,
+      created: DEMO_CREATED,
+      nonce: DEMO_VERIFIED_FETCH_MULTI_GATEWAY_NONCE,
+      label: DEMO_VERIFIED_FETCH_MULTI_GATEWAY_LABEL,
+    });
+    res.writeHead(DEMO_GATEWAY_RESPONSE_STATUS, {
+      "content-type": "application/json",
+      "content-digest": dual.headers["content-digest"] as string,
+      "signature-input": dual.headers["signature-input"] as string,
+      signature: dual.headers["signature"] as string,
+    });
+    res.end(DEMO_GATEWAY_RESPONSE_BODY);
+  });
+  try {
+    const { port } = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    });
+    const url = `http://127.0.0.1:${port}${DEMO_GATEWAY_RESPONSE_PATH}`;
+    const result = await verifiedFetch(url, undefined, {
+      sign: {
+        keyId: DEMO_VERIFIED_FETCH_CLIENT_KEY_ID,
+        alg: "ed25519",
+        key: clientPair.privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_VERIFIED_FETCH_CLIENT_NONCE,
+      },
+      verify: {
+        verifyAllLabels: {
+          keys: {
+            merchant: merchantPair.publicKey,
+            gateway: gatewaySecret,
+          },
+          requiredLabels: [
+            DEMO_VERIFIED_FETCH_MULTI_MERCHANT_LABEL,
+            DEMO_VERIFIED_FETCH_MULTI_GATEWAY_LABEL,
+          ],
+          now: DEMO_CREATED + 60,
+        },
+      },
+    });
+    const fixture: VerifiedFetchMultiLabelFixture = {
+      status: result.response.status,
+      body: result.body,
+      verification: result.verifyResult,
+      verifications: result.verifyResults ?? [],
+    };
+    if (
+      fixture.status !== DEMO_GATEWAY_RESPONSE_STATUS ||
+      fixture.body !== DEMO_GATEWAY_RESPONSE_BODY ||
+      !fixture.verification.ok ||
+      fixture.verification.label !== "" ||
+      fixture.verifications.length !== 2 ||
+      fixture.verifications[0]?.label !==
+        DEMO_VERIFIED_FETCH_MULTI_MERCHANT_LABEL ||
+      fixture.verifications[0]?.keyId !==
+        DEMO_VERIFIED_FETCH_MULTI_MERCHANT_KEY_ID ||
+      fixture.verifications[0]?.alg !== "ed25519" ||
+      fixture.verifications[0]?.nonce !==
+        DEMO_VERIFIED_FETCH_MULTI_MERCHANT_NONCE ||
+      fixture.verifications[0]?.coveredComponents?.join(" ") !==
+        "@status content-digest" ||
+      fixture.verifications[1]?.label !==
+        DEMO_VERIFIED_FETCH_MULTI_GATEWAY_LABEL ||
+      fixture.verifications[1]?.keyId !==
+        DEMO_VERIFIED_FETCH_MULTI_GATEWAY_KEY_ID ||
+      fixture.verifications[1]?.alg !== "hmac-sha256" ||
+      fixture.verifications[1]?.nonce !==
+        DEMO_VERIFIED_FETCH_MULTI_GATEWAY_NONCE ||
+      fixture.verifications[1]?.coveredComponents?.join(" ") !==
+        "@status content-digest" ||
+      fixture.verification.perLabelResults?.length !== 2
+    ) {
+      throw new Error(
+        `demo fixture broken: verified-fetch multi-label segment gave ${fixture.status}/${JSON.stringify(fixture.verification)} instead of an ok dual-label round-trip with the pinned merchant/gateway label/keyid/alg/nonces and "@status content-digest" covered`,
       );
     }
     return fixture;
@@ -12274,6 +12449,19 @@ export async function runDemo(): Promise<DemoResult> {
   // segment's printed lines are byte-identical between runs.
   const verifiedFetchRoundTrip = await fetchVerifiedFetchRoundTrip();
 
+  // Verified-fetch multi-label segment (client direction): the
+  // dual-signed twin of the verified-fetch segment above — the same
+  // loopback settlement response, now signed by both the merchant
+  // (ed25519) and the gateway (hmac-sha256), and verified in a single
+  // `verifiedFetch` call with `verify.verifyAllLabels`, so both
+  // co-signatures are checked in the one call that signs the request
+  // and fetches the response. The helper's fail-fast asserts already
+  // pinned every outcome outside the printed lines; only the port
+  // (never printed) and the key pairs are fresh per run, so the
+  // segment's printed lines are byte-identical between runs.
+  const verifiedFetchMultiLabelRoundTrip =
+    await fetchVerifiedFetchMultiLabelRoundTrip();
+
   // Allowed-algs whitelist segment: a gateway that only accepts
   // ed25519 should not have to hand-roll a pre-check before
   // verifying — `allowedAlgs: ["ed25519"]` (backlog #851) is
@@ -15237,6 +15425,13 @@ export async function runDemo(): Promise<DemoResult> {
       : `Verified fetch POST verification: FAILED (code ${verifiedFetchRoundTrip.postVerification.code}: ${verifiedFetchRoundTrip.postVerification.reason})`,
     `Verified fetch POST body: ${verifiedFetchRoundTrip.postBody}`,
     "",
+    "Verified fetch multi-label client: the same loopback settlement response, now dual-signed — merchant ed25519 signs, gateway hmac appends — and verified in one verifiedFetch call with verify.verifyAllLabels, so both co-signatures are checked in the call that signs the request and fetches the response, and a stripped gateway label fails requiredLabels instead of passing silently",
+    `Verified fetch multi-label status: ${verifiedFetchMultiLabelRoundTrip.status}`,
+    verifiedFetchMultiLabelRoundTrip.verification.ok
+      ? `Verified fetch multi-label verification: OK (aggregate label "", merchant OK (label ${verifiedFetchMultiLabelRoundTrip.verifications[0].label}, keyid="${verifiedFetchMultiLabelRoundTrip.verifications[0].keyId}", alg="${verifiedFetchMultiLabelRoundTrip.verifications[0].alg}", nonce="${verifiedFetchMultiLabelRoundTrip.verifications[0].nonce}"), gateway OK (label ${verifiedFetchMultiLabelRoundTrip.verifications[1].label}, keyid="${verifiedFetchMultiLabelRoundTrip.verifications[1].keyId}", alg="${verifiedFetchMultiLabelRoundTrip.verifications[1].alg}", nonce="${verifiedFetchMultiLabelRoundTrip.verifications[1].nonce}"))`
+      : `Verified fetch multi-label verification: FAILED (code ${verifiedFetchMultiLabelRoundTrip.verification.code}: ${verifiedFetchMultiLabelRoundTrip.verification.reason})`,
+    `Verified fetch multi-label body: ${verifiedFetchMultiLabelRoundTrip.body}`,
+    "",
     "Allowed-algs whitelist: a gateway that only accepts ed25519 verifies both signatures under allowedAlgs [\"ed25519\"] — the ed25519 signature verifies, the RSA-PSS signature is rejected with ALG_NOT_ALLOWED before any cryptographic verification, so a foreign algorithm never reaches the crypto path",
     allowedAlgsEdVerification.ok
       ? `Whitelisted algorithm verifies: the same request signed with ed25519 verified under allowedAlgs ["ed25519"]: OK (label ${allowedAlgsEdVerification.label}, keyid="${allowedAlgsEdVerification.keyId}", alg="${allowedAlgsEdVerification.alg}", nonce="${allowedAlgsEdVerification.nonce}")`
@@ -15762,6 +15957,12 @@ export async function runDemo(): Promise<DemoResult> {
     verifiedFetchPostStatus: verifiedFetchRoundTrip.postStatus,
     verifiedFetchPostBody: verifiedFetchRoundTrip.postBody,
     verifiedFetchPostVerification: verifiedFetchRoundTrip.postVerification,
+    verifiedFetchMultiLabelStatus: verifiedFetchMultiLabelRoundTrip.status,
+    verifiedFetchMultiLabelBody: verifiedFetchMultiLabelRoundTrip.body,
+    verifiedFetchMultiLabelVerification:
+      verifiedFetchMultiLabelRoundTrip.verification,
+    verifiedFetchMultiLabelVerifications:
+      verifiedFetchMultiLabelRoundTrip.verifications,
     allowedAlgsEdVerification,
     allowedAlgsRsaVerification,
     jwksRequireHttpsError,

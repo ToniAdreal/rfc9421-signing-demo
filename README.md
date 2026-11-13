@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2125 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2128 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -225,7 +225,13 @@ makes a single `verifiedFetch` call per round-trip — a GET with
 no body and a POST with a JSON settlement instruction — that
 signs the request, fetches it, and verifies the signed
 response, so no step can be skipped; each response verifies
-under the pinned gateway keyid with its own nonce. The demo
+under the pinned gateway keyid with its own nonce. A multi-label
+verified-fetch segment follows: the same settlement response
+dual-signed (merchant ed25519 + gateway hmac) and verified in
+one `verifiedFetch` call with `verify.verifyAllLabels` — the
+aggregate result carries an empty label and the per-label
+results ride on `verifyResults`, so a stripped co-signature
+fails `requiredLabels` instead of passing silently. The demo
 closes with an HMAC `oct` JWK key distribution segment: a
 fixed 32-byte HMAC secret is exported as an `oct` JWK
 (`exportSymmetricKeyJwk`, HS256 + kid), read back through a
@@ -4532,7 +4538,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2125 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2128 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

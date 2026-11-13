@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo gains a multi-label `verifiedFetch` segment (backlog #1119):
+  the same loopback settlement response, now dual-signed (merchant
+  ed25519 via `signResponse`, gateway hmac-sha256 via
+  `addResponseSignature`), is verified in a single `verifiedFetch`
+  call with `verify.verifyAllLabels` (`requiredLabels: ["merchant",
+  "gateway"]`, per-label keys) — the client twin of the
+  `addResponseSignature` segment, so both co-signatures are checked
+  in the one call that signs the request and fetches the response.
+  `DemoResult` gains `verifiedFetchMultiLabelStatus` /
+  `verifiedFetchMultiLabelBody` /
+  `verifiedFetchMultiLabelVerification` (the aggregate: `ok`, empty
+  `label`, per-label results in `perLabelResults`) /
+  `verifiedFetchMultiLabelVerifications` (wire order: merchant,
+  gateway). `test/demo.test.ts` gains 3 tests (per-label field
+  assertions, printed lines and placement between the single-label
+  verified-fetch and allowed-algs segments, byte-identical output
+  across runs), and the test count moves 2125 → 2128.
 - `SignOptions.expiresInSec` (backlog #1117): relative expiry — the wire
   `expires` is exactly `created + expiresInSec` (explicit `created`, or
   the defaulted now), so "valid for five minutes" is `expiresInSec: 300`

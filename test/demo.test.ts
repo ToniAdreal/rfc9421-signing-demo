@@ -118,6 +118,12 @@ import {
   DEMO_FETCH_RESPONSE_TAMPERED_BODY,
   DEMO_VERIFIED_FETCH_GET_NONCE,
   DEMO_VERIFIED_FETCH_KEY_ID,
+  DEMO_VERIFIED_FETCH_MULTI_GATEWAY_KEY_ID,
+  DEMO_VERIFIED_FETCH_MULTI_GATEWAY_LABEL,
+  DEMO_VERIFIED_FETCH_MULTI_GATEWAY_NONCE,
+  DEMO_VERIFIED_FETCH_MULTI_MERCHANT_KEY_ID,
+  DEMO_VERIFIED_FETCH_MULTI_MERCHANT_LABEL,
+  DEMO_VERIFIED_FETCH_MULTI_MERCHANT_NONCE,
   DEMO_VERIFIED_FETCH_POST_BODY,
   DEMO_VERIFIED_FETCH_POST_NONCE,
   DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID,
@@ -6576,7 +6582,7 @@ test("demo verifiedFetch segment prints the GET and POST round-trips between the
   assert.equal(lines[headerIdx - 1], "");
   assert.equal(lines[headerIdx + 7], "");
   assert.ok(
-    lines[headerIdx + 8]!.startsWith("Allowed-algs whitelist:"),
+    lines[headerIdx + 8]!.startsWith("Verified fetch multi-label client:"),
   );
 });
 
@@ -6596,6 +6602,129 @@ test("demo verifiedFetch segment prints byte-identical lines across runs", async
   // per run and the signatures themselves are never printed, so
   // the segment's printed lines — header, both statuses, both
   // verifications and both bodies — are byte-identical.
+  assert.deepEqual(
+    first.lines.slice(a, aEnd),
+    second.lines.slice(b, bEnd),
+  );
+});
+
+test("demo verifiedFetch multi-label segment verifies both labels in one call", async () => {
+  const {
+    verifiedFetchMultiLabelStatus,
+    verifiedFetchMultiLabelBody,
+    verifiedFetchMultiLabelVerification,
+    verifiedFetchMultiLabelVerifications,
+  } = await runDemo();
+
+  // One GET round-trip: the loopback settlement response, dual-signed
+  // (merchant ed25519 + gateway hmac), verified in a single call.
+  assert.equal(verifiedFetchMultiLabelStatus, DEMO_GATEWAY_RESPONSE_STATUS);
+  assert.equal(verifiedFetchMultiLabelBody, DEMO_GATEWAY_RESPONSE_BODY);
+  // Aggregate result: no single label owns it — the empty label is
+  // the tell that this is the multi-label aggregate, not a
+  // single-label result.
+  assert.equal(verifiedFetchMultiLabelVerification.ok, true);
+  assert.equal(verifiedFetchMultiLabelVerification.label, "");
+  assert.deepEqual(
+    verifiedFetchMultiLabelVerification.perLabelResults?.map((r) => r.label),
+    [
+      DEMO_VERIFIED_FETCH_MULTI_MERCHANT_LABEL,
+      DEMO_VERIFIED_FETCH_MULTI_GATEWAY_LABEL,
+    ],
+  );
+  // Per-label results, in wire order: merchant first, gateway second.
+  assert.equal(verifiedFetchMultiLabelVerifications.length, 2);
+  const [merchant, gateway] = verifiedFetchMultiLabelVerifications;
+  assert.equal(merchant.ok, true);
+  assert.equal(merchant.label, DEMO_VERIFIED_FETCH_MULTI_MERCHANT_LABEL);
+  assert.equal(
+    merchant.keyId,
+    DEMO_VERIFIED_FETCH_MULTI_MERCHANT_KEY_ID,
+  );
+  assert.equal(merchant.alg, "ed25519");
+  assert.equal(
+    merchant.nonce,
+    DEMO_VERIFIED_FETCH_MULTI_MERCHANT_NONCE,
+  );
+  assert.deepEqual(merchant.coveredComponents, [
+    "@status",
+    "content-digest",
+  ]);
+  assert.equal(gateway.ok, true);
+  assert.equal(gateway.label, DEMO_VERIFIED_FETCH_MULTI_GATEWAY_LABEL);
+  assert.equal(
+    gateway.keyId,
+    DEMO_VERIFIED_FETCH_MULTI_GATEWAY_KEY_ID,
+  );
+  assert.equal(gateway.alg, "hmac-sha256");
+  assert.equal(
+    gateway.nonce,
+    DEMO_VERIFIED_FETCH_MULTI_GATEWAY_NONCE,
+  );
+  assert.deepEqual(gateway.coveredComponents, [
+    "@status",
+    "content-digest",
+  ]);
+  // The aggregate's per-label array is the same array the demo
+  // returns on its own field.
+  assert.deepEqual(
+    verifiedFetchMultiLabelVerification.perLabelResults,
+    verifiedFetchMultiLabelVerifications,
+  );
+  // The two labels are distinct signatures, not one result reused.
+  assert.notEqual(
+    DEMO_VERIFIED_FETCH_MULTI_MERCHANT_NONCE,
+    DEMO_VERIFIED_FETCH_MULTI_GATEWAY_NONCE,
+  );
+});
+
+test("demo verifiedFetch multi-label segment prints the dual-signed round-trip between the verified-fetch and allowed-algs segments", async () => {
+  const { lines } = await runDemo();
+
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Verified fetch multi-label client: the same loopback settlement response, now dual-signed/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Verified fetch multi-label client:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 4), [
+    `Verified fetch multi-label status: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
+    `Verified fetch multi-label verification: OK (aggregate label "", merchant OK (label ${DEMO_VERIFIED_FETCH_MULTI_MERCHANT_LABEL}, keyid="${DEMO_VERIFIED_FETCH_MULTI_MERCHANT_KEY_ID}", alg="ed25519", nonce="${DEMO_VERIFIED_FETCH_MULTI_MERCHANT_NONCE}"), gateway OK (label ${DEMO_VERIFIED_FETCH_MULTI_GATEWAY_LABEL}, keyid="${DEMO_VERIFIED_FETCH_MULTI_GATEWAY_KEY_ID}", alg="hmac-sha256", nonce="${DEMO_VERIFIED_FETCH_MULTI_GATEWAY_NONCE}"))`,
+    `Verified fetch multi-label body: ${DEMO_GATEWAY_RESPONSE_BODY}`,
+  ]);
+  // The segment sits between the single-label verified-fetch and
+  // allowed-algs segments: a blank line on each side.
+  const fetchHeaderIdx = lines.findIndex((l) =>
+    l.startsWith("Verified fetch client:"),
+  );
+  assert.ok(fetchHeaderIdx !== -1);
+  assert.equal(headerIdx, fetchHeaderIdx + 8);
+  assert.equal(lines[headerIdx - 1], "");
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(
+    lines[headerIdx + 5]!.startsWith("Allowed-algs whitelist:"),
+  );
+});
+
+test("demo verifiedFetch multi-label segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Verified fetch multi-label client:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Allowed-algs whitelist:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // Only the port (never printed) and the key pairs are fresh per
+  // run and the signatures themselves are never printed, so the
+  // segment's printed lines — header, status, verification and
+  // body — are byte-identical.
   assert.deepEqual(
     first.lines.slice(a, aEnd),
     second.lines.slice(b, bEnd),
