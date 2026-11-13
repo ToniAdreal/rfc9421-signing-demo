@@ -66,7 +66,14 @@ Read this before using it anywhere that matters.
   `ReplayCache.restoreSignedSnapshot(envelope, secret)` (HMAC-SHA256
   over the snapshot's canonical JSON; the secret is never written
   into the envelope): a tampered entry, a tampered `seenAt`, or a
-  wrong secret is rejected at restore and installs nothing. Per-label
+  wrong secret is rejected at restore and installs nothing. Either
+  export accepts an optional expiry — `exportSignedSnapshot(secret,
+  { expiresAt })` or `{ maxAgeMs, now }` — written into the envelope
+  and covered by the MAC, so a stolen envelope cannot resurrect an
+  expired nonce set: restore rejects it once `now` is past
+  `expiresAt` (restoring at exactly `expiresAt` still succeeds),
+  before any snapshot parsing; an envelope without `expiresAt` never
+  expires. Per-label
   caches (`replayCacheByLabel`) get the same treatment one envelope
   per label — `exportSignedSnapshotsByLabel(caches, secret)` /
   `ReplayCache.restoreSignedSnapshotsByLabel(envelopes, secret,
@@ -173,7 +180,14 @@ Read this before using it anywhere that matters.
   hole for the persisted form: a rewritten key or timestamp, or a
   wrong secret, is rejected at restore with the old snapshot
   untouched (the envelope is integrity protection only, not
-  encryption, and the secret is never stored in it). There is still
+  encryption, and the secret is never stored in it). Either call
+  accepts an optional expiry — `exportSignedSnapshot(secret,
+  { expiresAt })` or `{ maxAgeMs, now }` — written into the envelope
+  and covered by the MAC, so a stolen envelope cannot resurrect
+  retired keys: restore rejects it once `now` is past `expiresAt`
+  (restoring at exactly `expiresAt` still succeeds), before any
+  snapshot parsing, with the old snapshot untouched. An envelope
+  without `expiresAt` never expires. There is still
   no built-in persistent keystore and no automatic rotation schedule:
   how keys are generated and stored, how often the JWKS snapshot is
   re-fetched, and the mapping of `keyid` values are on the caller.

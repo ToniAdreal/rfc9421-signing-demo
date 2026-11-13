@@ -19,6 +19,7 @@ export type {
   NonceStore,
   ReplayCacheOptions,
   ReplayCacheSignedSnapshotEnvelope,
+  ReplayCacheSignedSnapshotExportOptions,
   ReplayCacheSignedSnapshotsByLabelOptions,
   ReplayCacheSnapshot,
   ReplayCacheStats,
@@ -34,6 +35,8 @@ export type {
   JwksKeyStoreStats,
   JwksSetIntervalImpl,
   JwksSignedSnapshotEnvelope,
+  JwksSignedSnapshotExportOptions,
+  JwksSignedSnapshotRestoreOptions,
   JwksSleepImpl,
   JwksSnapshotKey,
 } from "./jwks.js";

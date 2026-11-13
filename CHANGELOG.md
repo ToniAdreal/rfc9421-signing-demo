@@ -11,6 +11,35 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Optional `expiresAt` expiry on both signed snapshot envelopes
+  (backlog #1104), mirroring the dataquest (#1076) and escrow
+  (#1103) envelopes: `ReplayCacheSignedSnapshotEnvelope` and
+  `JwksSignedSnapshotEnvelope` gain an optional `expiresAt`
+  (canonical ISO-8601 UTC string), set via
+  `exportSignedSnapshot(secret, { expiresAt })` or
+  `{ maxAgeMs, now }` (`ReplayCacheSignedSnapshotExportOptions` /
+  `JwksSignedSnapshotExportOptions`; `expiresAt` and `maxAgeMs` are
+  mutually exclusive, `now` without `maxAgeMs` is a configuration
+  error). The timestamp sits inside the MAC coverage (MAC over
+  `{ expiresAt, snapshot }` when present, over the snapshot alone
+  otherwise, so pre-expiry envelopes still verify byte-identically),
+  and restore rejects an expired envelope after the MAC verifies and
+  before any snapshot parsing (`now > expiresAt` is expired,
+  restoring at exactly `expiresAt` still succeeds; a non-canonical
+  `expiresAt` fails the envelope before the MAC is computed). The
+  restore clock is injectable — `ReplayCache` reuses the
+  `ReplayCacheOptions.now` seconds clock, `JwksKeyStore` takes an
+  optional `JwksSignedSnapshotRestoreOptions.now` (default the
+  store's own clock) — and a failed restore leaves the current
+  snapshot untouched; the per-label by-label restore stays atomic,
+  so one expired label rejects the whole batch.
+  `test/signedSnapshotExpiry.test.ts` gains 14 tests (both families:
+  legacy no-expiry restore, future-expiry round-trip, inclusive
+  boundary, tampered `expiresAt` → MAC mismatch, illegal `expiresAt`
+  and option misuse at export, `maxAgeMs` resolution, expiry-before-
+  parsing with a MAC-valid malformed snapshot, by-label atomic
+  rejection with the valid label unaffected, JWKS store untouched on
+  expired restore), and the test count moves 2074 → 2088.
 - RFC 3230 `Digest` legacy gateway interop (backlog #1100):
   `digest(body, alg)` emits a `Digest` header value in the same
   `alg=:base64:` rendering as `contentDigest` (sha-256/sha-512 only;

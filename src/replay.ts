@@ -143,9 +143,20 @@ export interface ReplayCacheSnapshot {
  * - `snapshot`: the wrapped {@link ReplayCacheSnapshot}, exactly as
  *   `exportSnapshot()` produces it (live nonces only, with their
  *   original first-seen timestamps).
+ * - `expiresAt`: optional absolute expiry for the envelope, a
+ *   canonical ISO-8601 UTC timestamp string (backlog #1104). It is
+ *   covered by the MAC, so it cannot be extended without the secret.
+ *   An envelope without it never expires, exactly as before; an
+ *   expired envelope is rejected at restore, before any snapshot
+ *   parsing, when `now` is past `expiresAt` (restoring at exactly
+ *   `expiresAt` still succeeds).
  * - `mac`: lowercase hex HMAC-SHA256 over the canonical JSON of
  *   `snapshot` (object keys sorted recursively, array order
- *   preserved) under the caller's secret.
+ *   preserved) under the caller's secret — or, when `expiresAt` is
+ *   present, over the canonical JSON of `{ expiresAt, snapshot }`,
+ *   so the expiry timestamp is inside the MAC coverage. Envelopes
+ *   without `expiresAt` MAC exactly as before, so envelopes exported
+ *   before this field existed still verify.
  *
  * The envelope carries no secret: the secret is caller configuration,
  * never persisted in the envelope, and the same secret must be
@@ -161,7 +172,42 @@ export interface ReplayCacheSnapshot {
 export interface ReplayCacheSignedSnapshotEnvelope {
   v: 1;
   snapshot: ReplayCacheSnapshot;
+  expiresAt?: string;
   mac: string;
+}
+
+/**
+ * Options for {@link ReplayCache.exportSignedSnapshot} (and the
+ * per-label {@link exportSignedSnapshotsByLabel}), backlog #1104:
+ * an optional expiry for the envelope. Exactly one of `expiresAt` /
+ * `maxAgeMs` may be set; `now` is only used with `maxAgeMs`. The
+ * resolved timestamp is written into the envelope and covered by
+ * its MAC, so it cannot be extended without the secret. An envelope
+ * exported with neither option never expires.
+ */
+export interface ReplayCacheSignedSnapshotExportOptions {
+  /**
+   * Absolute expiry for the envelope, a canonical ISO-8601 UTC
+   * timestamp string (`new Date(ms).toISOString()` form — exactly
+   * what `Date.parse` round-trips). Mutually exclusive with
+   * `maxAgeMs`.
+   */
+  expiresAt?: string;
+  /**
+   * Relative expiry in milliseconds from `now` (below): the
+   * envelope's `expiresAt` is set to
+   * `new Date(now + maxAgeMs).toISOString()`. Mutually exclusive
+   * with `expiresAt`. Must be a positive finite number.
+   */
+  maxAgeMs?: number;
+  /**
+   * Clock override (milliseconds since the epoch) used only with
+   * `maxAgeMs` to compute `expiresAt`; defaults to `Date.now()`.
+   * Inject a fixed time for deterministic tests. Supplying it
+   * without `maxAgeMs` is a configuration error — there is nothing
+   * for it to compute.
+   */
+  now?: number;
 }
 
 /**
@@ -200,11 +246,15 @@ export interface ReplayCacheSignedSnapshotsByLabelOptions
  * `ReplayCache` throws a configuration `Error` before any envelope
  * is produced. The secret is validated the same way as
  * {@link ReplayCache.exportSignedSnapshot} (non-empty string or
- * `Buffer`). An empty map exports to an empty map.
+ * `Buffer`). An empty map exports to an empty map. `opts` optionally
+ * bounds every envelope's life (see
+ * {@link ReplayCacheSignedSnapshotExportOptions}): one `expiresAt` /
+ * `maxAgeMs` applies to all labels.
  */
 export function exportSignedSnapshotsByLabel(
   caches: Record<string, ReplayCache>,
   secret: string | Buffer,
+  opts?: ReplayCacheSignedSnapshotExportOptions,
 ): Record<string, ReplayCacheSignedSnapshotEnvelope> {
   const secretBytes = signedSnapshotSecretBytes(secret);
   if (
@@ -226,9 +276,136 @@ export function exportSignedSnapshotsByLabel(
       throw new Error(
         `ReplayCache: signed snapshot export: caches["${label}"] must be a ReplayCache`,
       );
-    envelopes[label] = cache.exportSignedSnapshot(secretBytes);
+    envelopes[label] = cache.exportSignedSnapshot(secretBytes, opts);
   }
   return envelopes;
+}
+
+/**
+ * Canonical ISO-8601 UTC timestamp check: the string must parse
+ * and re-render to itself via `toISOString()` — the same
+ * round-trip rule the sibling escrow/dataquest snapshot envelopes
+ * use (backlog #1103/#1076). A non-UTC offset form, a missing
+ * millisecond part, or any unparseable text fails.
+ */
+function isCanonicalIsoTimestamp(s: unknown): boolean {
+  if (typeof s !== "string") return false;
+  const ms = Date.parse(s);
+  return !Number.isNaN(ms) && new Date(ms).toISOString() === s;
+}
+
+/**
+ * Resolve the `expiresAt` for a signed snapshot export from
+ * `ReplayCacheSignedSnapshotExportOptions` (backlog #1104):
+ * `expiresAt` must already be a canonical ISO-8601 UTC string,
+ * `maxAgeMs` must be a positive finite number and is resolved
+ * against `now` (default `Date.now()`), the two are mutually
+ * exclusive, and `now` without `maxAgeMs` is a configuration error.
+ * Returns `undefined` when the caller set neither (no expiry).
+ */
+function resolveSignedSnapshotExpiresAt(
+  opts: ReplayCacheSignedSnapshotExportOptions | undefined,
+): string | undefined {
+  if (opts === undefined) return undefined;
+  if (typeof opts !== "object" || opts === null || Array.isArray(opts))
+    throw new Error(
+      "ReplayCache: exportSignedSnapshot options must be an object",
+    );
+  const { expiresAt, maxAgeMs, now } = opts;
+  if (expiresAt !== undefined && maxAgeMs !== undefined)
+    throw new Error(
+      "ReplayCache: exportSignedSnapshot options must not combine expiresAt and maxAgeMs",
+    );
+  if (now !== undefined && maxAgeMs === undefined)
+    throw new Error(
+      "ReplayCache: exportSignedSnapshot option now is only used with maxAgeMs",
+    );
+  if (
+    now !== undefined &&
+    (typeof now !== "number" || !Number.isFinite(now))
+  )
+    throw new Error(
+      "ReplayCache: exportSignedSnapshot option now must be a finite number of milliseconds since the epoch",
+    );
+  if (expiresAt !== undefined) {
+    if (!isCanonicalIsoTimestamp(expiresAt))
+      throw new Error(
+        "ReplayCache: exportSignedSnapshot option expiresAt must be a canonical ISO-8601 UTC timestamp string",
+      );
+    return expiresAt;
+  }
+  if (maxAgeMs !== undefined) {
+    if (
+      typeof maxAgeMs !== "number" ||
+      !Number.isFinite(maxAgeMs) ||
+      maxAgeMs <= 0
+    )
+      throw new Error(
+        "ReplayCache: exportSignedSnapshot option maxAgeMs must be a positive finite number",
+      );
+    return new Date((now ?? Date.now()) + maxAgeMs).toISOString();
+  }
+  return undefined;
+}
+
+/**
+ * Read and validate an envelope's `expiresAt` field (backlog
+ * #1104): absent means no expiry; present must be a canonical
+ * ISO-8601 UTC timestamp string, anything else fails the envelope
+ * before the MAC is even computed. Reports through `fail`.
+ */
+function signedSnapshotExpiresAt(
+  record: Record<string, unknown>,
+  fail: (detail: string) => never,
+): string | undefined {
+  const raw: unknown = record.expiresAt;
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "string" || !isCanonicalIsoTimestamp(raw))
+    fail("expiresAt must be a canonical ISO-8601 UTC timestamp string");
+  return raw;
+}
+
+/**
+ * Resolve the clock (unix seconds) for a signed snapshot expiry
+ * check from a restore options object's `now` clock function
+ * (default the wall clock in seconds — the same convention as
+ * `ReplayCacheOptions.now`). A non-function clock, or one that does
+ * not return a finite number, fails with a configuration error
+ * before any snapshot parsing.
+ */
+function signedSnapshotRestoreNowSec(
+  nowOpt: (() => number) | undefined,
+): number {
+  if (nowOpt === undefined) return Math.floor(Date.now() / 1000);
+  if (typeof nowOpt !== "function")
+    throw new Error(
+      "ReplayCache: invalid signed snapshot envelope: restore option now must be a function",
+    );
+  const now = nowOpt();
+  if (typeof now !== "number" || !Number.isFinite(now))
+    throw new Error(
+      "ReplayCache: invalid signed snapshot envelope: restore option now must return a finite number of unix seconds",
+    );
+  return now;
+}
+
+/**
+ * Fail-closed expiry check for a signed snapshot envelope (backlog
+ * #1104), run after the MAC verifies and before any snapshot
+ * parsing: an envelope is expired only when
+ * `nowSec * 1000 > Date.parse(expiresAt)` — restoring at exactly
+ * `expiresAt` still succeeds, the same inclusive boundary the
+ * settlement webhook freshness window uses. The seconds clock
+ * compares at one-second granularity.
+ */
+function assertSignedSnapshotNotExpired(
+  expiresAt: string | undefined,
+  nowSec: number,
+): void {
+  if (expiresAt !== undefined && nowSec * 1000 > Date.parse(expiresAt))
+    throw new Error(
+      `ReplayCache: signed snapshot envelope expired at ${expiresAt}`,
+    );
 }
 
 /**
@@ -299,13 +476,21 @@ function signedSnapshotSecretBytes(secret: unknown): Buffer {
   );
 }
 
-/** HMAC-SHA256 (hex) over the canonical JSON of a snapshot. */
+/** HMAC-SHA256 (hex) over the canonical JSON of a snapshot — or,
+ * when `expiresAt` is present, over the canonical JSON of
+ * `{ expiresAt, snapshot }`, so the expiry timestamp is inside the
+ * MAC coverage and cannot be extended without the secret. Envelopes
+ * without `expiresAt` MAC exactly as before, so envelopes exported
+ * before this field existed still verify. */
 function computeSnapshotMac(
   snapshot: ReplayCacheSnapshot,
   secretBytes: Buffer,
+  expiresAt?: string,
 ): string {
+  const macInput =
+    expiresAt === undefined ? snapshot : { expiresAt, snapshot };
   return createHmac("sha256", secretBytes)
-    .update(canonicalJson(snapshot), "utf8")
+    .update(canonicalJson(macInput), "utf8")
     .digest("hex");
 }
 
@@ -427,6 +612,14 @@ export class ReplayCache implements NonceStore {
    * who rewrites the persisted entries without the secret is caught
    * at restore instead of silently reopening the replay window.
    *
+   * `opts` optionally bounds the envelope's life (see
+   * {@link ReplayCacheSignedSnapshotExportOptions}): `expiresAt` (an
+   * absolute canonical ISO-8601 UTC timestamp) or `maxAgeMs`
+   * (relative to `opts.now`, default `Date.now()`). The timestamp
+   * is written into the envelope and covered by the MAC, so it
+   * cannot be extended without the secret; an envelope exported
+   * with neither option never expires, exactly as before.
+   *
    * The secret is never written into the envelope, and the envelope
    * is integrity protection only, not encryption: the nonces inside
    * are wire-visible values, so the envelope itself needs no secrecy,
@@ -436,10 +629,17 @@ export class ReplayCache implements NonceStore {
    * path is unchanged: this envelope is opt-in, and a caller that
    * never signs keeps the old trusted-configuration semantics.
    */
-  exportSignedSnapshot(secret: string | Buffer): ReplayCacheSignedSnapshotEnvelope {
+  exportSignedSnapshot(
+    secret: string | Buffer,
+    opts?: ReplayCacheSignedSnapshotExportOptions,
+  ): ReplayCacheSignedSnapshotEnvelope {
     const secretBytes = signedSnapshotSecretBytes(secret);
     const snapshot = this.exportSnapshot();
-    return { v: 1, snapshot, mac: computeSnapshotMac(snapshot, secretBytes) };
+    const expiresAt = resolveSignedSnapshotExpiresAt(opts);
+    const mac = computeSnapshotMac(snapshot, secretBytes, expiresAt);
+    return expiresAt === undefined
+      ? { v: 1, snapshot, mac }
+      : { v: 1, snapshot, expiresAt, mac };
   }
 
   /**
@@ -553,6 +753,18 @@ export class ReplayCache implements NonceStore {
    * MAC comparison is constant-time over equal-length hex digests; a
    * wrong-length `mac` is rejected as malformed before comparison.
    *
+   * An envelope carrying `expiresAt` is additionally checked for
+   * expiry after the MAC verifies and before any snapshot parsing:
+   * when the restore clock (`opts.now`, default the wall clock in
+   * unix seconds — the same clock the new cache runs on) is past
+   * `expiresAt`, restore throws
+   * `ReplayCache: signed snapshot envelope expired at …`; restoring
+   * at exactly `expiresAt` still succeeds. A non-canonical
+   * `expiresAt` fails the envelope before the MAC is even computed,
+   * so a forged expiry can never smuggle itself past the MAC check
+   * by being unparseable. An envelope without `expiresAt` never
+   * expires, exactly as before.
+   *
    * On success the semantics are exactly {@link ReplayCache.restore}'s:
    * expired entries are dropped, over-capacity snapshots keep the
    * newest entries, TTLs keep counting from each entry's original
@@ -571,7 +783,7 @@ export class ReplayCache implements NonceStore {
       fail("expected an object of the form { v: 1, snapshot, mac }");
     const record = envelope as Record<string, unknown>;
     for (const key of Object.keys(record)) {
-      if (key !== "v" && key !== "snapshot" && key !== "mac")
+      if (key !== "v" && key !== "snapshot" && key !== "expiresAt" && key !== "mac")
         fail(`unknown field "${key}"`);
     }
     if (record.v !== 1)
@@ -586,9 +798,11 @@ export class ReplayCache implements NonceStore {
     const snapshot = record.snapshot;
     if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot))
       fail('"snapshot" must be an object');
+    const expiresAt = signedSnapshotExpiresAt(record, fail);
     const expectedMac = computeSnapshotMac(
       snapshot as ReplayCacheSnapshot,
       secretBytes,
+      expiresAt,
     );
     const macBytes = Buffer.from(mac, "hex");
     const expectedBytes = Buffer.from(expectedMac, "hex");
@@ -599,6 +813,12 @@ export class ReplayCache implements NonceStore {
       throw new Error(
         "ReplayCache: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
       );
+    // MAC verified — expiry next, before any snapshot parsing, so a
+    // stolen envelope cannot resurrect an expired nonce set.
+    assertSignedSnapshotNotExpired(
+      expiresAt,
+      signedSnapshotRestoreNowSec(opts.now),
+    );
     // MAC verified — now the same strict structural validation as restore().
     return ReplayCache.restore(snapshot, opts);
   }
@@ -627,7 +847,7 @@ export class ReplayCache implements NonceStore {
    * and restored into a scratch map first, and the map is only
    * returned when every label succeeded — any label failure (a
    * tampered entry, a tampered `seenAt`, a wrong secret, a malformed
-   * envelope, an unknown/extra or missing label against
+   * envelope, an expired envelope, an unknown/extra or missing label against
    * `expectedLabels`) throws a descriptive configuration `Error`
    * and installs nothing, so a failed restore can never partially
    * reopen one label's replay window while leaving another

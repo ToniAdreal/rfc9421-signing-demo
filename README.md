@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2074 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2088 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1085,7 +1085,15 @@ the caller's secret, and `store.restoreSignedSnapshot(envelope,
 secret)` rejects a tampered key, a tampered `fetchedAtSec`, or a
 wrong secret with the old snapshot untouched — checking authenticity
 before snapshot parsing, so a MAC-valid but malformed snapshot still
-fails on validation, never partially installs. The secret is never
+fails on validation, never partially installs. Either call accepts an
+optional expiry — `exportSignedSnapshot(secret, { expiresAt })` or
+`{ maxAgeMs, now }` — written into the envelope as `expiresAt` and
+covered by the MAC, so a stolen envelope cannot resurrect retired
+keys: restore rejects it once `now` is past `expiresAt` (restoring
+at exactly `expiresAt` still succeeds), before any snapshot parsing,
+and the old snapshot stays untouched; `restoreSignedSnapshot` takes
+an optional `{ now }` clock override (unix seconds, default this
+store's own clock). An envelope without `expiresAt` never expires. The secret is never
 written into the envelope, and the envelope is integrity protection
 only, not encryption (the keys inside are public keys). Honest
 caveats: the *unsigned* snapshot is **not signed** — treat that
@@ -1792,7 +1800,13 @@ values. Without a request to bind to, keep using the request-side API
   the MAC before parsing the snapshot, so a tampered entry, a tampered
   `seenAt`, or a wrong secret is rejected at restore and installs
   nothing (a MAC-valid but structurally broken snapshot still fails
-  the strict snapshot validation). A multi-signature deployment
+  the strict snapshot validation). Either export accepts an optional
+  expiry — `exportSignedSnapshot(secret, { expiresAt })` or
+  `{ maxAgeMs, now }` — written into the envelope as `expiresAt` and
+  covered by the MAC, so a stolen envelope cannot resurrect an expired
+  nonce set: restore rejects it once `now` is past `expiresAt`
+  (restoring at exactly `expiresAt` still succeeds), before any
+  snapshot parsing. An envelope without `expiresAt` never expires. A multi-signature deployment
   keeps one cache per label in `replayCacheByLabel`, so the same
   treatment exists per label: `exportSignedSnapshotsByLabel(caches,
   secret)` returns one signed envelope per label, and
@@ -4471,7 +4485,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2074 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2088 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
