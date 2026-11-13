@@ -116,6 +116,10 @@ import {
   DEMO_FETCH_RESPONSE_NONCE,
   DEMO_FETCH_RESPONSE_TAMPER_CODE,
   DEMO_FETCH_RESPONSE_TAMPERED_BODY,
+  DEMO_VERIFIED_FETCH_GET_NONCE,
+  DEMO_VERIFIED_FETCH_KEY_ID,
+  DEMO_VERIFIED_FETCH_POST_BODY,
+  DEMO_VERIFIED_FETCH_POST_NONCE,
   DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID,
   DEMO_DUAL_RESPONSE_GATEWAY_LABEL,
   DEMO_DUAL_RESPONSE_GATEWAY_NONCE,
@@ -6478,10 +6482,123 @@ test("demo fetch-adapter segment verifies a gateway-signed settlement response f
     `Fetch response body: ${DEMO_GATEWAY_RESPONSE_BODY}`,
     `Fetch response verification after body tampering (amount 10000 -> 10001): FAILED (code ${DEMO_FETCH_RESPONSE_TAMPER_CODE}: ${fetchResponseTamperedVerification.reason})`,
   ]);
-  // The allowed-algs segment follows the fetch-adapter segment.
+  // The verified-fetch segment follows the fetch-adapter segment.
   assert.equal(lines[headerIdx + 5], "");
   assert.ok(
-    lines[headerIdx + 6]!.startsWith("Allowed-algs whitelist:"),
+    lines[headerIdx + 6]!.startsWith("Verified fetch client:"),
+  );
+});
+
+test("demo verifiedFetch segment signs, fetches and verifies a GET and a POST round-trip in one call each", async () => {
+  const {
+    verifiedFetchGetStatus,
+    verifiedFetchGetBody,
+    verifiedFetchGetVerification,
+    verifiedFetchPostStatus,
+    verifiedFetchPostBody,
+    verifiedFetchPostVerification,
+  } = await runDemo();
+
+  // GET with no body: the loopback settlement response, verified
+  // in the same call that signed the request.
+  assert.equal(verifiedFetchGetStatus, DEMO_GATEWAY_RESPONSE_STATUS);
+  assert.equal(verifiedFetchGetBody, DEMO_GATEWAY_RESPONSE_BODY);
+  assert.equal(verifiedFetchGetVerification.ok, true);
+  assert.equal(verifiedFetchGetVerification.label, "sig1");
+  assert.equal(
+    verifiedFetchGetVerification.keyId,
+    DEMO_VERIFIED_FETCH_KEY_ID,
+  );
+  assert.equal(verifiedFetchGetVerification.alg, "ed25519");
+  assert.equal(
+    verifiedFetchGetVerification.nonce,
+    DEMO_VERIFIED_FETCH_GET_NONCE,
+  );
+  assert.deepEqual(verifiedFetchGetVerification.coveredComponents, [
+    "@status",
+    "content-digest",
+  ]);
+
+  // POST with a JSON settlement instruction: the same response
+  // shape, verified under its own nonce.
+  assert.equal(verifiedFetchPostStatus, DEMO_GATEWAY_RESPONSE_STATUS);
+  assert.equal(verifiedFetchPostBody, DEMO_GATEWAY_RESPONSE_BODY);
+  assert.equal(verifiedFetchPostVerification.ok, true);
+  assert.equal(verifiedFetchPostVerification.label, "sig1");
+  assert.equal(
+    verifiedFetchPostVerification.keyId,
+    DEMO_VERIFIED_FETCH_KEY_ID,
+  );
+  assert.equal(verifiedFetchPostVerification.alg, "ed25519");
+  assert.equal(
+    verifiedFetchPostVerification.nonce,
+    DEMO_VERIFIED_FETCH_POST_NONCE,
+  );
+  assert.deepEqual(verifiedFetchPostVerification.coveredComponents, [
+    "@status",
+    "content-digest",
+  ]);
+  // The two round-trips are distinct signatures, not one result
+  // reused: the nonces differ.
+  assert.notEqual(
+    DEMO_VERIFIED_FETCH_GET_NONCE,
+    DEMO_VERIFIED_FETCH_POST_NONCE,
+  );
+});
+
+test("demo verifiedFetch segment prints the GET and POST round-trips between the fetch-adapter and allowed-algs segments", async () => {
+  const { lines } = await runDemo();
+
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Verified fetch client: one verifiedFetch call signs the request/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Verified fetch client:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 7), [
+    `Verified fetch GET status: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
+    `Verified fetch GET verification: OK (label sig1, keyid="${DEMO_VERIFIED_FETCH_KEY_ID}", alg="ed25519", nonce="${DEMO_VERIFIED_FETCH_GET_NONCE}")`,
+    `Verified fetch GET body: ${DEMO_GATEWAY_RESPONSE_BODY}`,
+    `Verified fetch POST status: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
+    `Verified fetch POST verification: OK (label sig1, keyid="${DEMO_VERIFIED_FETCH_KEY_ID}", alg="ed25519", nonce="${DEMO_VERIFIED_FETCH_POST_NONCE}")`,
+    `Verified fetch POST body: ${DEMO_GATEWAY_RESPONSE_BODY}`,
+  ]);
+  // The segment sits between the fetch-adapter and allowed-algs
+  // segments: a blank line on each side.
+  const fetchHeaderIdx = lines.findIndex((l) =>
+    l.startsWith("Fetch-adapter response verification:"),
+  );
+  assert.ok(fetchHeaderIdx !== -1);
+  assert.equal(headerIdx, fetchHeaderIdx + 6);
+  assert.equal(lines[headerIdx - 1], "");
+  assert.equal(lines[headerIdx + 7], "");
+  assert.ok(
+    lines[headerIdx + 8]!.startsWith("Allowed-algs whitelist:"),
+  );
+});
+
+test("demo verifiedFetch segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Verified fetch client:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Allowed-algs whitelist:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // Only the port (never printed) and the two key pairs are fresh
+  // per run and the signatures themselves are never printed, so
+  // the segment's printed lines — header, both statuses, both
+  // verifications and both bodies — are byte-identical.
+  assert.deepEqual(
+    first.lines.slice(a, aEnd),
+    second.lines.slice(b, bEnd),
   );
 });
 

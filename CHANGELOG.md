@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo gains a `verifiedFetch` segment (backlog #1106): the
+  loopback settlement response is now also exercised through the
+  client one-call helper — one `verifiedFetch` call per
+  round-trip (a GET with no body, a POST with a JSON settlement
+  instruction) signs the request, fetches it, and verifies the
+  signed response, so no step can be skipped; each response
+  verifies under the pinned gateway keyid with its own nonce
+  (`demo-verified-fetch-get-nonce-1` / `demo-verified-fetch-post-nonce-1`),
+  and the fixture also asserts each request arrived signed and
+  the POST carried a `content-digest` header. `DemoResult`
+  gains `verifiedFetchGetStatus` / `verifiedFetchGetBody` /
+  `verifiedFetchGetVerification` and the POST counterparts.
+  `test/demo.test.ts` gains 3 tests (GET + POST round-trip
+  fields with label/keyid/alg/nonce pinned, the printed lines
+  between the fetch-adapter and allowed-algs segments, and
+  byte-identical output across runs), and the test count moves
+  2099 → 2102.
+
 - `verifiedFetch` verifies multi-label responses (backlog #1105):
   `verify.verifyAllLabels` (exactly the `VerifyAllResponseOptions`
   the response API takes, minus `request`, which the helper still

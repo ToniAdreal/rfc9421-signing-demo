@@ -1342,6 +1342,7 @@ import {
   signRequest,
   signResponse,
   signatureInputValue,
+  verifiedFetch,
   verifyAllLabels,
   verifyRequest,
   verifyRequestOrThrow,
@@ -4224,6 +4225,29 @@ export const DEMO_FETCH_RESPONSE_TAMPERED_BODY =
  */
 export const DEMO_FETCH_RESPONSE_TAMPER_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
+/** Key id the verified-fetch segment's gateway signature carries. */
+export const DEMO_VERIFIED_FETCH_KEY_ID = "demo-verified-fetch-1";
+/** Key id the verified-fetch segment's client request signature carries. */
+export const DEMO_VERIFIED_FETCH_CLIENT_KEY_ID =
+  "demo-verified-fetch-client-1";
+/** Nonce the verified-fetch segment's client request signature carries. */
+export const DEMO_VERIFIED_FETCH_CLIENT_NONCE =
+  "demo-verified-fetch-client-nonce-1";
+/** Nonce the verified-fetch segment's gateway signature carries on the GET response. */
+export const DEMO_VERIFIED_FETCH_GET_NONCE =
+  "demo-verified-fetch-get-nonce-1";
+/** Nonce the verified-fetch segment's gateway signature carries on the POST response. */
+export const DEMO_VERIFIED_FETCH_POST_NONCE =
+  "demo-verified-fetch-post-nonce-1";
+/**
+ * Request body the verified-fetch segment's POST call sends: a
+ * settlement instruction for the same amount the loopback gateway
+ * confirms in `DEMO_GATEWAY_RESPONSE_BODY`.
+ */
+export const DEMO_VERIFIED_FETCH_POST_BODY = JSON.stringify({
+  amount: 10000,
+  currency: "USD",
+});
 /** Label of the merchant signature in the dual-signed response segment. */
 export const DEMO_DUAL_RESPONSE_MERCHANT_LABEL = "merchant";
 /** Label of the gateway signature in the dual-signed response segment. */
@@ -6213,6 +6237,32 @@ export interface DemoResult {
    * `DEMO_FETCH_RESPONSE_TAMPER_CODE`.
    */
   fetchResponseTamperedVerification: VerifyResult;
+  /** Status of the verified-fetch segment's GET round-trip (200). */
+  verifiedFetchGetStatus: number;
+  /**
+   * Response body of the verified-fetch segment's GET round-trip
+   * (the pinned `DEMO_GATEWAY_RESPONSE_BODY` settlement body).
+   */
+  verifiedFetchGetBody: string;
+  /**
+   * Verification of the verified-fetch segment's GET response
+   * (ok — label `sig1`, keyid `DEMO_VERIFIED_FETCH_KEY_ID`,
+   * nonce `DEMO_VERIFIED_FETCH_GET_NONCE`).
+   */
+  verifiedFetchGetVerification: VerifyResult;
+  /** Status of the verified-fetch segment's POST round-trip (200). */
+  verifiedFetchPostStatus: number;
+  /**
+   * Response body of the verified-fetch segment's POST round-trip
+   * (the pinned `DEMO_GATEWAY_RESPONSE_BODY` settlement body).
+   */
+  verifiedFetchPostBody: string;
+  /**
+   * Verification of the verified-fetch segment's POST response
+   * (ok — label `sig1`, keyid `DEMO_VERIFIED_FETCH_KEY_ID`,
+   * nonce `DEMO_VERIFIED_FETCH_POST_NONCE`).
+   */
+  verifiedFetchPostVerification: VerifyResult;
   /**
    * Verification of the whitelisted ed25519 signature in the
    * allowed-algs segment (ok under `allowedAlgs: ["ed25519"]`).
@@ -7206,6 +7256,154 @@ async function fetchFetchSignedResponse(): Promise<FetchSignedResponseFixture> {
     }
     return { requestLike, verification, tamperedVerification };
   } finally {
+    server.close();
+  }
+}
+
+/**
+ * The verified-fetch segment's loopback fixture (backlog #1106):
+ * the client twin of the `createVerifiedHandler` segment — one
+ * `verifiedFetch` call per round-trip signs the request, fetches
+ * it, and verifies the signed response, so the four hand-written
+ * steps of the fetch-adapter segment above collapse into a single
+ * call that cannot skip the verification. A real `http` server on
+ * 127.0.0.1 signs the same loopback settlement response
+ * (`DEMO_GATEWAY_RESPONSE_*`) with the gateway key — the GET
+ * response under `DEMO_VERIFIED_FETCH_GET_NONCE`, the POST
+ * response under `DEMO_VERIFIED_FETCH_POST_NONCE` — and the
+ * client calls `verifiedFetch` twice: a GET with no body and a
+ * POST carrying `DEMO_VERIFIED_FETCH_POST_BODY`. The server also
+ * records that each request arrived signed (a `signature-input`
+ * header is present) and that the POST carried a
+ * `content-digest` header, so the fixture proves the signing
+ * half ran too — the server never verifies the request itself,
+ * that direction is the `createVerifiedHandler` segment's job.
+ *
+ * Only statuses, bodies and verification identities are
+ * returned — no signature bytes, no port — so the printed
+ * segment is byte-identical between runs even though the port
+ * and both key pairs are fresh per run.
+ */
+interface VerifiedFetchFixture {
+  /** Status the loopback answered for the verifiedFetch GET (200). */
+  getStatus: number;
+  /** Response body of the verifiedFetch GET (the pinned settlement body). */
+  getBody: string;
+  /** Verification of the verifiedFetch GET response (ok). */
+  getVerification: VerifyResult;
+  /** Status the loopback answered for the verifiedFetch POST (200). */
+  postStatus: number;
+  /** Response body of the verifiedFetch POST (the pinned settlement body). */
+  postBody: string;
+  /** Verification of the verifiedFetch POST response (ok). */
+  postVerification: VerifyResult;
+}
+
+async function fetchVerifiedFetchRoundTrip(): Promise<VerifiedFetchFixture> {
+  const gatewayPair = generateEd25519KeyPair();
+  const clientPair = generateEd25519KeyPair();
+  let getRequestSigned = false;
+  let postRequestSigned = false;
+  let postRequestDigested = false;
+  const server = createServer((req, res) => {
+    const isPost = req.method === "POST";
+    if (isPost) {
+      postRequestSigned = req.headers["signature-input"] !== undefined;
+      postRequestDigested = req.headers["content-digest"] !== undefined;
+    } else {
+      getRequestSigned = req.headers["signature-input"] !== undefined;
+    }
+    const signed = signResponse(
+      {
+        status: DEMO_GATEWAY_RESPONSE_STATUS,
+        headers: { "content-type": "application/json" },
+        body: DEMO_GATEWAY_RESPONSE_BODY,
+      },
+      {
+        keyId: DEMO_VERIFIED_FETCH_KEY_ID,
+        alg: "ed25519",
+        key: gatewayPair.privateKey,
+        created: DEMO_CREATED,
+        nonce: isPost
+          ? DEMO_VERIFIED_FETCH_POST_NONCE
+          : DEMO_VERIFIED_FETCH_GET_NONCE,
+      },
+    );
+    res.writeHead(DEMO_GATEWAY_RESPONSE_STATUS, {
+      "content-type": "application/json",
+      "content-digest": signed.headers["content-digest"] as string,
+      "signature-input": signed.headers["signature-input"] as string,
+      signature: signed.headers["signature"] as string,
+    });
+    res.end(DEMO_GATEWAY_RESPONSE_BODY);
+  });
+  try {
+    const { port } = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    });
+    const url = `http://127.0.0.1:${port}${DEMO_GATEWAY_RESPONSE_PATH}`;
+    const sign = {
+      keyId: DEMO_VERIFIED_FETCH_CLIENT_KEY_ID,
+      alg: "ed25519" as const,
+      key: clientPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_VERIFIED_FETCH_CLIENT_NONCE,
+    };
+    const verify = {
+      key: gatewayPair.publicKey,
+      now: DEMO_CREATED + 60,
+    };
+    const getResult = await verifiedFetch(url, undefined, { sign, verify });
+    const postResult = await verifiedFetch(
+      url,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: DEMO_VERIFIED_FETCH_POST_BODY,
+      },
+      { sign, verify },
+    );
+    const fixture: VerifiedFetchFixture = {
+      getStatus: getResult.response.status,
+      getBody: getResult.body,
+      getVerification: getResult.verifyResult,
+      postStatus: postResult.response.status,
+      postBody: postResult.body,
+      postVerification: postResult.verifyResult,
+    };
+    if (
+      !getRequestSigned ||
+      !postRequestSigned ||
+      !postRequestDigested ||
+      fixture.getStatus !== DEMO_GATEWAY_RESPONSE_STATUS ||
+      fixture.getBody !== DEMO_GATEWAY_RESPONSE_BODY ||
+      !fixture.getVerification.ok ||
+      fixture.getVerification.label !== "sig1" ||
+      fixture.getVerification.keyId !== DEMO_VERIFIED_FETCH_KEY_ID ||
+      fixture.getVerification.alg !== "ed25519" ||
+      fixture.getVerification.nonce !== DEMO_VERIFIED_FETCH_GET_NONCE ||
+      fixture.getVerification.coveredComponents?.join(" ") !==
+        "@status content-digest" ||
+      fixture.postStatus !== DEMO_GATEWAY_RESPONSE_STATUS ||
+      fixture.postBody !== DEMO_GATEWAY_RESPONSE_BODY ||
+      !fixture.postVerification.ok ||
+      fixture.postVerification.label !== "sig1" ||
+      fixture.postVerification.keyId !== DEMO_VERIFIED_FETCH_KEY_ID ||
+      fixture.postVerification.alg !== "ed25519" ||
+      fixture.postVerification.nonce !== DEMO_VERIFIED_FETCH_POST_NONCE ||
+      fixture.postVerification.coveredComponents?.join(" ") !==
+        "@status content-digest"
+    ) {
+      throw new Error(
+        `demo fixture broken: verified-fetch segment gave GET ${fixture.getStatus}/${JSON.stringify(fixture.getVerification)} (request signed: ${getRequestSigned}) / POST ${fixture.postStatus}/${JSON.stringify(fixture.postVerification)} (request signed: ${postRequestSigned}, digested: ${postRequestDigested}) instead of two ok round-trips with the pinned label/keyid/alg/nonces and "@status content-digest" covered`,
+      );
+    }
+    return fixture;
+  } finally {
+    server.closeAllConnections();
     server.close();
   }
 }
@@ -12064,6 +12262,18 @@ export async function runDemo(): Promise<DemoResult> {
   // runs.
   const fetchResponse = await fetchFetchSignedResponse();
 
+  // Verified-fetch segment (client direction): the one-call twin
+  // of the fetch-adapter segment above — the same loopback
+  // settlement response, but the client makes a single
+  // `verifiedFetch` call per round-trip (GET with no body, POST
+  // with a JSON settlement instruction) that signs the request,
+  // fetches it, and verifies the signed response, so no step can
+  // be skipped. The helper's fail-fast asserts already pinned
+  // every outcome outside the printed lines; only the port (never
+  // printed) and the two key pairs are fresh per run, so the
+  // segment's printed lines are byte-identical between runs.
+  const verifiedFetchRoundTrip = await fetchVerifiedFetchRoundTrip();
+
   // Allowed-algs whitelist segment: a gateway that only accepts
   // ed25519 should not have to hand-roll a pre-check before
   // verifying — `allowedAlgs: ["ed25519"]` (backlog #851) is
@@ -15015,6 +15225,18 @@ export async function runDemo(): Promise<DemoResult> {
       ? "Fetch response verification after body tampering (amount 10000 -> 10001): OK (unexpected — the tampered body was not detected)"
       : `Fetch response verification after body tampering (amount 10000 -> 10001): FAILED (code ${fetchResponse.tamperedVerification.code}: ${fetchResponse.tamperedVerification.reason})`,
     "",
+    "Verified fetch client: one verifiedFetch call signs the request, fetches it, and verifies the signed response — the client twin of the createVerifiedHandler segment, shown for a GET with no body and a POST with a JSON settlement instruction against the same loopback settlement endpoint",
+    `Verified fetch GET status: ${verifiedFetchRoundTrip.getStatus}`,
+    verifiedFetchRoundTrip.getVerification.ok
+      ? `Verified fetch GET verification: OK (label ${verifiedFetchRoundTrip.getVerification.label}, keyid="${verifiedFetchRoundTrip.getVerification.keyId}", alg="${verifiedFetchRoundTrip.getVerification.alg}", nonce="${verifiedFetchRoundTrip.getVerification.nonce}")`
+      : `Verified fetch GET verification: FAILED (code ${verifiedFetchRoundTrip.getVerification.code}: ${verifiedFetchRoundTrip.getVerification.reason})`,
+    `Verified fetch GET body: ${verifiedFetchRoundTrip.getBody}`,
+    `Verified fetch POST status: ${verifiedFetchRoundTrip.postStatus}`,
+    verifiedFetchRoundTrip.postVerification.ok
+      ? `Verified fetch POST verification: OK (label ${verifiedFetchRoundTrip.postVerification.label}, keyid="${verifiedFetchRoundTrip.postVerification.keyId}", alg="${verifiedFetchRoundTrip.postVerification.alg}", nonce="${verifiedFetchRoundTrip.postVerification.nonce}")`
+      : `Verified fetch POST verification: FAILED (code ${verifiedFetchRoundTrip.postVerification.code}: ${verifiedFetchRoundTrip.postVerification.reason})`,
+    `Verified fetch POST body: ${verifiedFetchRoundTrip.postBody}`,
+    "",
     "Allowed-algs whitelist: a gateway that only accepts ed25519 verifies both signatures under allowedAlgs [\"ed25519\"] — the ed25519 signature verifies, the RSA-PSS signature is rejected with ALG_NOT_ALLOWED before any cryptographic verification, so a foreign algorithm never reaches the crypto path",
     allowedAlgsEdVerification.ok
       ? `Whitelisted algorithm verifies: the same request signed with ed25519 verified under allowedAlgs ["ed25519"]: OK (label ${allowedAlgsEdVerification.label}, keyid="${allowedAlgsEdVerification.keyId}", alg="${allowedAlgsEdVerification.alg}", nonce="${allowedAlgsEdVerification.nonce}")`
@@ -15534,6 +15756,12 @@ export async function runDemo(): Promise<DemoResult> {
     fetchResponseRequest: fetchResponse.requestLike,
     fetchResponseVerification: fetchResponse.verification,
     fetchResponseTamperedVerification: fetchResponse.tamperedVerification,
+    verifiedFetchGetStatus: verifiedFetchRoundTrip.getStatus,
+    verifiedFetchGetBody: verifiedFetchRoundTrip.getBody,
+    verifiedFetchGetVerification: verifiedFetchRoundTrip.getVerification,
+    verifiedFetchPostStatus: verifiedFetchRoundTrip.postStatus,
+    verifiedFetchPostBody: verifiedFetchRoundTrip.postBody,
+    verifiedFetchPostVerification: verifiedFetchRoundTrip.postVerification,
     allowedAlgsEdVerification,
     allowedAlgsRsaVerification,
     jwksRequireHttpsError,

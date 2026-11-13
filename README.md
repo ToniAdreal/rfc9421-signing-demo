@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2099 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2102 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -219,7 +219,13 @@ adapted with `fromFetchResponse` and verified with
 callback arrives as a fetch `Response` — and tampering one
 body byte (the settlement amount `10000` -> `10001`) through
 the same adapted path is rejected with
-`BODY_DIGEST_MISMATCH`. The demo
+`BODY_DIGEST_MISMATCH`. The demo then runs a verified-fetch
+segment: the same loopback settlement response, but the client
+makes a single `verifiedFetch` call per round-trip — a GET with
+no body and a POST with a JSON settlement instruction — that
+signs the request, fetches it, and verifies the signed
+response, so no step can be skipped; each response verifies
+under the pinned gateway keyid with its own nonce. The demo
 closes with an HMAC `oct` JWK key distribution segment: a
 fixed 32-byte HMAC secret is exported as an `oct` JWK
 (`exportSymmetricKeyJwk`, HS256 + kid), read back through a
@@ -4506,7 +4512,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2099 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2102 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
