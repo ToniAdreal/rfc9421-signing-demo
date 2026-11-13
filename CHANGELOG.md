@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifiedFetch` supports `AbortSignal` (backlog #1112):
+  `VerifiedFetchInit` gains `signal?: AbortSignal`, forwarded to the
+  fetch implementation — the default global `fetch` and any injected
+  `fetchImpl` receive it (`VerifiedFetchFn`'s init gains the same
+  field). A signal already aborted throws `verifiedFetch: request
+  aborted` before any network happens (the `verifiedFetch` wording
+  of the `webhook delivery aborted` shape `deliverSettlementWebhook`
+  uses, #112); an abort while the fetch is in flight passes the
+  fetch's own abort error through untouched, never wrapped as a
+  verification failure; an abort while the response body streams
+  cancels the reader and throws the signal's abort reason — a
+  cancelled read resolving `done: true` cannot let a partial body
+  through to verification. A non-`AbortSignal` value is a
+  configuration error, thrown before any network happens.
+  `test/verifiedFetchAbortSignal.test.ts` gains 10 tests (pre-abort
+  fail-fast with zero fetch calls, in single- and multi-label mode;
+  illegal signal values; non-aborted signal round-trip over an
+  injected `fetchImpl`, which receives the exact signal object;
+  in-flight abort of a hung `fetchImpl`; body-stream abort cancelling
+  the reader; abort winning over a bad signature so verification
+  never runs on a partial body; default-fetch pass-through against a
+  hung loopback server, and a normal default-fetch round-trip with a
+  live signal), and the test count moves 2102 → 2112.
+
 - Benchmark gains a `verifiedFetch` end-to-end row (backlog #1107):
   one `verifiedFetch` call per op over a loopback server (a POST
   with a JSON settlement instruction, signed with a fixed client

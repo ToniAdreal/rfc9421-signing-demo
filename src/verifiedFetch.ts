@@ -48,6 +48,17 @@
  *   object — likewise throws before any network happens.
  * - Fetch-layer errors (DNS, connection refused, TLS, a GET with a
  *   body) pass through untouched, unwrapped.
+ * - Cancellation: pass an `AbortSignal` as `init.signal` — the same
+ *   signal the request is sent with and the body is read under. A
+ *   signal already aborted throws `verifiedFetch: request aborted`
+ *   before any network happens (the `verifiedFetch` wording of the
+ *   `webhook delivery aborted` shape `deliverSettlementWebhook`
+ *   uses, backlog #112); an abort while the fetch is in flight
+ *   passes the fetch's own abort error through untouched, never
+ *   wrapped as a verification failure; an abort while the response
+ *   body is streaming cancels the reader and throws the signal's
+ *   abort reason. A non-`AbortSignal` value is a configuration
+ *   error, thrown before any network happens.
  *
  * Honest scope limits (see also SECURITY.md):
  * - The body is returned as a string: binary bodies are out of
@@ -190,14 +201,17 @@ export interface VerifiedFetchResponse extends FetchResponseLike {
  * The `fetch()` implementation `verifiedFetch` calls. The global
  * `fetch` (Node ≥ 20) satisfies this shape; pass a double to test
  * without a network, or to point the call at a non-global transport.
- * Called as `fetchImpl(url, { method, headers, body })` with the
+ * Called as `fetchImpl(url, { method, headers, body, signal })` with the
  * signed request's method, headers (including `signature-input` /
  * `signature` / `content-digest`), and body. `body` is omitted when
- * the request has none.
+ * the request has none; `signal` is the caller's `init.signal` when
+ * one was passed, so an implementation that honors it can stop a
+ * hung request — an implementation that ignores its signal cannot be
+ * force-stopped by the caller.
  */
 export type VerifiedFetchFn = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body?: string | Buffer },
+  init: { method: string; headers: Record<string, string>; body?: string | Buffer; signal?: AbortSignal },
 ) => Promise<VerifiedFetchResponse>;
 
 /** The `fetch()` request `verifiedFetch` builds and signs. */
@@ -213,6 +227,19 @@ export interface VerifiedFetchInit {
   headers?: Headers | Record<string, string | string[] | undefined>;
   /** Request body. Defaults to none. */
   body?: string | Buffer;
+  /**
+   * Abort signal for the whole call (backlog #1112): forwarded to
+   * the fetch implementation — the default global `fetch` and any
+   * injected `fetchImpl` receive it — and watched while the
+   * response body streams. A signal already aborted throws
+   * `verifiedFetch: request aborted` before any network happens; an
+   * abort in flight passes the fetch's abort error through
+   * untouched; an abort while the body streams cancels the reader
+   * and throws the signal's abort reason. Must be an `AbortSignal`
+   * when present; anything else is a configuration error, thrown
+   * before any network happens.
+   */
+  signal?: AbortSignal;
 }
 
 export interface VerifiedFetchOptions {
@@ -527,6 +554,61 @@ function normalizeInitHeaders(
 }
 
 /**
+ * The abort error for a signal that fired while the response body
+ * was streaming: the signal's own reason when it is an `Error`
+ * (a plain `controller.abort()` yields the standard `AbortError`
+ * `DOMException`), else a fresh `AbortError` — so the caller sees
+ * the abort the way the fetch itself would have reported it, never
+ * wrapped as a verification failure.
+ */
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("The operation was aborted", "AbortError");
+}
+
+/**
+ * Await one `reader.read()` unless the signal aborts first: on
+ * abort the reader is cancelled — so the pending read settles and
+ * the peer stops streaming — and the signal's abort reason is
+ * thrown. The listener is removed once the read settles either way,
+ * so a completed call leaves no listener behind.
+ *
+ * A cancelled read resolves `done: true` as the cancel settles it,
+ * so the race can settle with that resolved read instead of the
+ * abort rejection: the post-race `signal.aborted` check makes the
+ * caller's abort win either way — a body that only arrived because
+ * the reader was cancelled must never verify.
+ */
+async function readWithAbort(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let onAbort: (() => void) | undefined;
+  try {
+    const result = await Promise.race([
+      reader.read(),
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => {
+          // Cancel first so the pending read settles; the rejection
+          // below is what the caller sees, whether the cancel
+          // itself succeeds or not.
+          void reader.cancel().then(
+            () => reject(abortError(signal)),
+            () => reject(abortError(signal)),
+          );
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+    if (signal.aborted) throw abortError(signal);
+    return result;
+  } finally {
+    if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
  * Read the response body under the cap, as exact raw bytes.
  *
  * Over the stream path the reader is cancelled as soon as the
@@ -539,10 +621,20 @@ function normalizeInitHeaders(
  * after: the cap still bounds what is verified, never what is
  * buffered, so a real `Response` is preferred for untrusted peers.
  * A body exactly at the cap is accepted.
+ *
+ * When `signal` is passed, each stream read races against it: an
+ * abort while waiting cancels the reader and throws the signal's
+ * abort reason (see `readWithAbort`), and an abort noticed between
+ * reads does the same — so a hung peer cannot hold the call past
+ * the caller's cancellation. The `arrayBuffer()` fallback has no
+ * stream to cancel, so it is not raced; it still runs under the
+ * cap, and the pre-abort fail-fast in `verifiedFetch` already
+ * rejects a signal that was aborted before the fetch.
  */
 async function readResponseBodyCapped(
   res: VerifiedFetchResponse,
   maxBodyBytes: number,
+  signal?: AbortSignal,
 ): Promise<Buffer> {
   const stream = res.body;
   if (stream !== undefined && stream !== null) {
@@ -551,7 +643,14 @@ async function readResponseBodyCapped(
     let size = 0;
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        if (signal?.aborted) {
+          await reader.cancel();
+          throw abortError(signal);
+        }
+        const { done, value } =
+          signal === undefined
+            ? await reader.read()
+            : await readWithAbort(reader, signal);
         if (done) break;
         if (value === undefined) continue;
         const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
@@ -565,7 +664,16 @@ async function readResponseBodyCapped(
         chunks.push(buf);
       }
     } finally {
-      reader.releaseLock();
+      // `releaseLock` throws when a read is still pending — which is
+      // exactly the state an abort rejection can leave behind if it
+      // won the race before the cancelled read settled. Swallow
+      // that, so the abort error surfaces, not a lock error; the
+      // reader and its stream are discarded with the call either way.
+      try {
+        reader.releaseLock();
+      } catch {
+        // Pending read already rejected by the abort; nothing to do.
+      }
     }
     return Buffer.concat(chunks);
   }
@@ -601,11 +709,14 @@ async function readResponseBodyCapped(
  * Fail-fast configuration errors (thrown, before any network):
  * everything `signRequest` already rejects, plus a verifier with no
  * key source or any other misconfiguration the dry run catches, a
- * non-positive-integer `maxBodyBytes`, and a caller-supplied
- * `verify.request` (managed by this helper — pass no `request`).
- * Fetch-layer errors pass through untouched. See the module
+ * non-positive-integer `maxBodyBytes`, a caller-supplied
+ * `verify.request` (managed by this helper — pass no `request`),
+ * and a non-`AbortSignal` `init.signal`. A signal already aborted
+ * likewise throws before any network — `verifiedFetch: request
+ * aborted` — so a cancelled call never signs, never fetches, and
+ * never verifies. Fetch-layer errors pass through untouched. See the module
  * docstring for the full contract (non-2xx, binary bodies, the body
- * cap, trailers).
+ * cap, trailers, cancellation).
  */
 export async function verifiedFetch(
   input: string | URL,
@@ -628,6 +739,18 @@ export async function verifiedFetch(
     throw new Error(
       `verifiedFetch: opts.fetchImpl must be a function, got ${typeof opts.fetchImpl}`,
     );
+  // A non-AbortSignal `signal` is a configuration error, like a bad
+  // `maxBodyBytes` — and a signal already aborted fails fast here,
+  // before signing or fetching, so a cancelled call costs no work
+  // and no network. The message shape mirrors #112's
+  // `webhook delivery aborted` (`deliverSettlementWebhook`).
+  const signal = init?.signal;
+  if (signal !== undefined && !(signal instanceof AbortSignal))
+    throw new Error(
+      `verifiedFetch: init.signal must be an AbortSignal, got ${String(signal)}`,
+    );
+  if (signal?.aborted)
+    throw new Error("verifiedFetch: request aborted");
   const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0)
     throw new Error(
@@ -689,15 +812,21 @@ export async function verifiedFetch(
         method: init.method,
         headers: init.headers,
         ...(body !== undefined ? { body } : {}),
+        ...(init.signal !== undefined ? { signal: init.signal } : {}),
       });
     });
+  // The caller's signal rides along, so the fetch itself can be
+  // cancelled in flight: an abort here rejects with the fetch's own
+  // abort error, passed through untouched — never wrapped as a
+  // verification failure.
   const res = await fetchImpl(url, {
     method: signed.method,
     headers: signed.headers,
     ...(signed.body !== undefined ? { body: signed.body } : {}),
+    ...(signal !== undefined ? { signal } : {}),
   });
 
-  const bodyBuf = await readResponseBodyCapped(res, maxBodyBytes);
+  const bodyBuf = await readResponseBodyCapped(res, maxBodyBytes, signal);
 
   // `fromFetchResponse` normalizes the fetch headers and binds the
   // signed request as the triggering request; `verifyResponse` gets
