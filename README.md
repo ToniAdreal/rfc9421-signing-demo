@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2044 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2055 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -340,6 +340,19 @@ import { secretKey } from "./dist/src/index.js";
 const secret = secretKey("a-shared-hmac-secret-of-32-bytes!!");
 const signed = signRequest(req, { keyId: "k", alg: "hmac-sha256", key: secret });
 const result = verifyRequest(signed, { key: secret });
+```
+
+Mint a fresh secret instead of hand-rolling one — `generateHmacSecret()`
+draws from the CSPRNG at exactly the per-algorithm floor (32 bytes for
+`hmac-sha256`, 64 for `hmac-sha512`); pass an explicit length only to go
+longer, and a below-floor length throws with the same wording the
+sign/verify side uses for a weak key:
+
+```ts
+import { generateHmacSecret, secretKey } from "./dist/src/index.js";
+const fresh = secretKey(generateHmacSecret()); // hmac-sha256, 32 bytes
+const fresh512 = secretKey(generateHmacSecret("hmac-sha512")); // 64 bytes
+const longLived = secretKey(generateHmacSecret("hmac-sha256", 64));
 ```
 
 Nonce for replay detection (CSPRNG-backed base64url, default 128 bits — never hand-roll with `Math.random`):
@@ -2316,7 +2329,9 @@ most also appear in [Limitations](#limitations)):
   bytes (the `hmac-sha256` floor), and the sign/verify paths pair the
   floor with the chosen algorithm: `hmac-sha256` → ≥ 32 bytes,
   `hmac-sha512` → ≥ 64 bytes (RFC 2104 §3: the key SHOULD be at least as
-  long as the hash output). A short key is a caller configuration error
+  long as the hash output). Mint fresh secrets with
+  `generateHmacSecret()` (32 bytes by default, 64 for `hmac-sha512`)
+  instead of hand-rolling `crypto.randomBytes` and counting bytes. A short key is a caller configuration error
   and throws on both sides — a signer can never mint signatures that the
   verifier would also (correctly) refuse to check, and a secret adequate
   only for `hmac-sha256` is never silently accepted for `hmac-sha512`.
@@ -4436,7 +4451,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2044 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2055 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

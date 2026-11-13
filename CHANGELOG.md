@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `generateHmacSecret(alg?, bytes?)` HMAC secret generator (backlog
+  #1099): mints a fresh CSPRNG-drawn `Buffer` at exactly the
+  per-algorithm floor by default — 32 bytes for `hmac-sha256`, 64 for
+  `hmac-sha512` (RFC 2104 §3) — so webhook/gateway callers no longer
+  hand-roll `crypto.randomBytes` and count bytes themselves. An explicit
+  `bytes` only ever goes longer: a below-floor length throws with exactly
+  the same wording `assertHmacSecretLength` uses on the sign/verify
+  side, and non-integer / negative / NaN lengths fail fast. Wrap the
+  result with `secretKey()` before passing it to `signRequest` /
+  `verifyRequest`.
 - `createVerifiedHandler` supports multi-label verification (backlog
   #1090): opt-in `CreateVerifiedHandlerOptions.verifyAllLabels`
   (exactly `VerifyAllOptions` minus `label` — per-label `keys` /

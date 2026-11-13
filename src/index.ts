@@ -59,6 +59,7 @@ export {
   exportPublicKeyPem,
   exportSymmetricKeyJwk,
   generateEd25519KeyPair,
+  generateHmacSecret,
   generateNonce,
   generateP256KeyPair,
   generateP384KeyPair,

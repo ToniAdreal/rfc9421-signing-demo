@@ -199,6 +199,61 @@ export function assertHmacSecretLength(
 }
 
 /**
+ * Generate a fresh random HMAC shared secret of the right length for the
+ * chosen algorithm, drawn from node:crypto's CSPRNG (`randomBytes`) — the
+ * webhook/gateway counterpart of the asymmetric key-pair generators above,
+ * so a caller provisioning a webhook HMAC secret never hand-rolls
+ * `crypto.randomBytes` and counts bytes itself. The default length is the
+ * per-algorithm floor: `hmac-sha256` → {@link MIN_HMAC_SECRET_BYTES} (32)
+ * bytes, `hmac-sha512` → {@link MIN_HMAC_SHA512_SECRET_BYTES} (64) bytes
+ * (RFC 2104 §3: the key SHOULD be at least as long as the hash output).
+ * An explicit `bytes` only ever goes longer — a value below the floor
+ * throws with exactly the same wording {@link assertHmacSecretLength}
+ * uses on the sign/verify side, so a too-short secret is caught here
+ * instead of at first-signature time.
+ *
+ * The result is a raw `Buffer`: wrap it with {@link secretKey} before
+ * passing it to `signRequest` / `verifyRequest`, which take a secret
+ * `KeyObject`.
+ *
+ * @example
+ * ```ts
+ * const secret = secretKey(generateHmacSecret()); // hmac-sha256, 32 bytes
+ * const secret512 = secretKey(generateHmacSecret("hmac-sha512")); // 64 bytes
+ * const longLived = secretKey(generateHmacSecret("hmac-sha256", 64));
+ * ```
+ */
+export function generateHmacSecret(
+  alg: "hmac-sha256" | "hmac-sha512" = "hmac-sha256",
+  bytes?: number,
+): Buffer {
+  if (alg !== "hmac-sha256" && alg !== "hmac-sha512")
+    throw new Error(
+      `generateHmacSecret: unsupported alg ${JSON.stringify(alg)} ` +
+        `(expected "hmac-sha256" or "hmac-sha512")`,
+    );
+  if (
+    bytes !== undefined &&
+    (typeof bytes !== "number" || !Number.isInteger(bytes) || bytes < 0)
+  )
+    throw new Error(
+      `generateHmacSecret: \`bytes\` must be a non-negative integer, got ${String(
+        bytes,
+      )}`,
+    );
+  const length =
+    bytes ??
+    (alg === "hmac-sha512"
+      ? MIN_HMAC_SHA512_SECRET_BYTES
+      : MIN_HMAC_SECRET_BYTES);
+  const raw = randomBytes(length);
+  // Reuse the sign/verify side's exact weak-key wording for a below-floor
+  // explicit length, so the failure reads identically wherever it surfaces.
+  assertHmacSecretLength(createSecretKey(raw), alg);
+  return raw;
+}
+
+/**
  * Human-readable description of a KeyObject's shape, used in caller
  * configuration error messages on both the sign and verify sides.
  */
