@@ -109,6 +109,24 @@ export interface SignOptions {
   created?: number;
   /** Unix seconds. Optional; verifiers reject the signature after this time. */
   expires?: number;
+  /**
+   * Relative expiry in whole seconds from `created` (or from now when
+   * `created` is omitted): `expiresInSec: 300` mints a signature whose
+   * wire `expires` is exactly `created + 300`, so a caller wanting
+   * "valid for five minutes" never has to compute `now + 300` by hand
+   * and can never fat-finger the arithmetic. Mutually exclusive with
+   * `expires` — pass an absolute expiry or a relative one, not both
+   * (both set is a configuration error). Must be a positive integer:
+   * 0 would mint an already-expired signature, a negative or
+   * fractional value has no meaning as a duration, and `NaN` /
+   * `Infinity` are rejected the same way. The wire value is still the
+   * absolute `expires` parameter, so verifiers need no change — this
+   * is signer-side convenience only. `signResponse`,
+   * `addSignature`, and `addResponseSignature` inherit it through
+   * `signRequest` delegation (`SignResponseOptions` is `SignOptions`
+   * plus the attached request).
+   */
+  expiresInSec?: number;
   /** Signature label. Defaults to "sig1". */
   label?: string;
   /**
@@ -426,6 +444,11 @@ function isSupportedAlg(alg: string): alg is SignAlg {
  *   verifier;
  * - `expires < created` would mint a signature that is already expired, so
  *   it is rejected (`expires === created` is allowed);
+ * - `expiresInSec` is the relative form of `expires` (wire `expires` =
+ *   `created + expiresInSec`): it must be a positive integer
+ *   (0 / negative / fractional / NaN / Infinity are rejected), and it is
+ *   mutually exclusive with `expires` — setting both is a configuration
+ *   error, because the two would name the same wire parameter;
  * - `nonce: ""` would be emitted yet bypass the replay cache, so it is
  *   rejected;
  * - `tag: ""` would bind the signature to no application protocol, so
@@ -469,11 +492,39 @@ export function signRequest(
   assertLabelShape(label);
   const created = opts.created ?? Math.floor(Date.now() / 1000);
   assertTimestamp("created", created);
-  if (opts.expires !== undefined) {
-    assertTimestamp("expires", opts.expires);
-    if (opts.expires < created)
+  // `expires` and `expiresInSec` name the same wire parameter two
+  // ways — absolute vs relative — so accepting both would leave the
+  // signer guessing which one wins. Refuse the combination outright
+  // (checked before either value is used, so the input request is
+  // left untouched).
+  if (opts.expires !== undefined && opts.expiresInSec !== undefined)
+    throw new Error(
+      'signRequest: "expires" and "expiresInSec" are mutually exclusive; pass an absolute expiry or a relative one, not both',
+    );
+  // A relative expiry is a duration, so it must be a positive whole
+  // number of seconds: 0 would mint a signature expired at birth,
+  // a negative or fractional value has no meaning, and NaN/Infinity
+  // are not durations at all. Validated here, before the base is
+  // built, so a bad value can never reach the wire.
+  if (opts.expiresInSec !== undefined) {
+    if (!Number.isInteger(opts.expiresInSec) || opts.expiresInSec <= 0)
       throw new Error(
-        `signRequest: "expires" (${opts.expires}) must not be earlier than "created" (${created}); the signature would be expired at birth`,
+        `signRequest: "expiresInSec" must be a positive integer number of seconds, got ${opts.expiresInSec}`,
+      );
+  }
+  // The wire parameter is always absolute: a relative expiry is
+  // resolved against `created` (explicit or defaulted to now) right
+  // here, so everything downstream — the base, the params, the
+  // verifier — sees the same absolute `expires` either way.
+  const expires =
+    opts.expiresInSec !== undefined
+      ? created + opts.expiresInSec
+      : opts.expires;
+  if (expires !== undefined) {
+    assertTimestamp("expires", expires);
+    if (expires < created)
+      throw new Error(
+        `signRequest: "expires" (${expires}) must not be earlier than "created" (${created}); the signature would be expired at birth`,
       );
   }
   // An empty-string nonce would be emitted into signature-input yet
@@ -563,7 +614,7 @@ export function signRequest(
   // signer would produce.
   const params: SignatureParams = { created, alg: opts.alg };
   if (opts.keyId !== undefined) params.keyid = opts.keyId;
-  if (opts.expires !== undefined) params.expires = opts.expires;
+  if (expires !== undefined) params.expires = expires;
   if (opts.nonce !== undefined) params.nonce = opts.nonce;
   if (opts.tag !== undefined) params.tag = opts.tag;
 

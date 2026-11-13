@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `SignOptions.expiresInSec` (backlog #1117): relative expiry — the wire
+  `expires` is exactly `created + expiresInSec` (explicit `created`, or
+  the defaulted now), so "valid for five minutes" is `expiresInSec: 300`
+  instead of a hand-computed `now + 300`. Must be a positive integer and
+  is mutually exclusive with `expires` (both set is a configuration
+  error). The wire value stays the absolute `expires` parameter, so
+  verifiers need no change; `signResponse`, `addSignature`, and
+  `addResponseSignature` inherit it through delegation.
 - `verifiedFetch` supports `AbortSignal` (backlog #1112):
   `VerifiedFetchInit` gains `signal?: AbortSignal`, forwarded to the
   fetch implementation — the default global `fetch` and any injected
