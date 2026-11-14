@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo fetch-request segment (backlog #1131): the demo now covers
+  the fetch-API inbound direction — the same signed payment request
+  (`DEMO_BODY`, `@method`/`@authority`/`@path`/`content-digest`/
+  `content-type` covered) is sent with the global `fetch()` to a
+  real loopback server, which rebuilds a standard fetch `Request`
+  from the wire message, adapts it with `fromFetchRequest(req, body)`
+  and verifies it with `verifyRequest` (label/keyid/alg/nonce
+  pinned). A one-byte body tamper (amount `100` -> `101`) through
+  the same adapted path is rejected with `BODY_DIGEST_MISMATCH`, and
+  the same message rebuilt under a different authority is rejected
+  with `SIGNATURE_MISMATCH` (the covered `@authority` binds the
+  exact URL). `DemoResult` gains `fetchRequestRequest`,
+  `fetchRequestVerification` and `fetchRequestTamperedVerification`;
+  `test/demo.test.ts` gains 4 tests (segment assertions, printed
+  lines, byte-identical output across runs, authority binding with
+  a re-sign round-trip), and the test count moves 2162 → 2166.
 - `ReplayCache.has(nonce, now?)` (backlog #1128): a read-only probe
   for the replay cache — reports whether the nonce was already seen
   within the TTL without recording anything. An unseen nonce stays

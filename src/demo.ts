@@ -1305,6 +1305,7 @@ import {
   exportPublicKeyPem,
   exportSignedSnapshotsByLabel,
   exportSymmetricKeyJwk,
+  fromFetchRequest,
   fromFetchResponse,
   fromNodeRequest,
   fromNodeResponse,
@@ -4225,6 +4226,33 @@ export const DEMO_FETCH_RESPONSE_TAMPERED_BODY =
  */
 export const DEMO_FETCH_RESPONSE_TAMPER_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
+/** Key id the fetch-request segment's client signature carries. */
+export const DEMO_FETCH_REQUEST_KEY_ID = "demo-fetch-request-1";
+/** Nonce the fetch-request segment's client signature carries. */
+export const DEMO_FETCH_REQUEST_NONCE = "demo-fetch-request-nonce-1";
+/** Path the fetch-request segment's loopback server serves. */
+export const DEMO_FETCH_REQUEST_PATH = "/v1/payments";
+/**
+ * Covered components the fetch-request segment's signed request
+ * carries: the request target (`@method`, `@authority`, `@path`)
+ * plus the body digest and the content type, so the signature
+ * binds the exact URL the fetch `Request` carries.
+ */
+export const DEMO_FETCH_REQUEST_COVERED_COMPONENTS: string[] = [
+  "@method",
+  "@authority",
+  "@path",
+  "content-digest",
+  "content-type",
+];
+/**
+ * Hand-pinned failure code for the fetch-request segment's
+ * one-byte body tamper (`BODY_DIGEST_MISMATCH`): the demo body
+ * amount `100` -> `101`, exactly one byte — verification of the
+ * same adapted path must reject it.
+ */
+export const DEMO_FETCH_REQUEST_TAMPER_CODE: VerifyFailureCode =
+  "BODY_DIGEST_MISMATCH";
 /** Key id the verified-fetch segment's gateway signature carries. */
 export const DEMO_VERIFIED_FETCH_KEY_ID = "demo-verified-fetch-1";
 /** Key id the verified-fetch segment's client request signature carries. */
@@ -6253,6 +6281,21 @@ export interface DemoResult {
    * `DEMO_FETCH_RESPONSE_TAMPER_CODE`.
    */
   fetchResponseTamperedVerification: VerifyResult;
+  /**
+   * The server's adapted `RequestLike` for the fetch-request
+   * segment's signed request: the same `DEMO_BODY` payment
+   * request, carried as a standard fetch `Request` and adapted
+   * with `fromFetchRequest`.
+   */
+  fetchRequestRequest: RequestLike;
+  /** Verification of the fetch-adapted signed request (ok). */
+  fetchRequestVerification: VerifyResult;
+  /**
+   * Verification after one body byte was tampered (the payment
+   * amount `100` -> `101`): rejected with
+   * `DEMO_FETCH_REQUEST_TAMPER_CODE`.
+   */
+  fetchRequestTamperedVerification: VerifyResult;
   /** Status of the verified-fetch segment's GET round-trip (200). */
   verifiedFetchGetStatus: number;
   /**
@@ -7290,6 +7333,201 @@ async function fetchFetchSignedResponse(): Promise<FetchSignedResponseFixture> {
       );
     }
     return { requestLike, verification, tamperedVerification };
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * The fetch-request segment's loopback fixture (backlog #1131): the
+ * fetch-API twin of the inbound `fromNodeRequest` segment — the same
+ * signed payment request (`DEMO_BODY`, the request target plus
+ * `content-digest` and `content-type` covered), but the client sends
+ * it with the global `fetch()` to a real loopback `http` server, and
+ * the server rebuilds a standard fetch `Request` from the wire
+ * message — the shape a WinterCG/edge runtime hands its handler —
+ * reads the raw body bytes, adapts with `fromFetchRequest(req, body)`
+ * and verifies with `verifyRequest`. The server never touches the
+ * `Request` through a Node adapter: the fetch `Request` is the
+ * message, so the absolute URL (host with port) is exactly what the
+ * signer signed, and a covered `@authority` binds it.
+ *
+ * A second verification tampers one body byte
+ * (`DEMO_TAMPERED_BODY`, the payment amount `100` -> `101`)
+ * through the same adapted path and must be rejected with
+ * `DEMO_FETCH_REQUEST_TAMPER_CODE`: the digest is part of the
+ * signed bytes, so a tampered webhook payload cannot pass as the
+ * signed one. Only the loopback port (never printed) and the key
+ * pair are fresh per run, so the printed segment is byte-identical
+ * between runs.
+ */
+interface FetchSignedRequestFixture {
+  /** The server's adapted `RequestLike` for the fetch-signed request. */
+  requestLike: RequestLike;
+  /** Verification of the fetch-adapted signed request (ok). */
+  verification: VerifyResult;
+  /**
+   * Verification after one body byte was tampered (rejected with
+   * `DEMO_FETCH_REQUEST_TAMPER_CODE`).
+   */
+  tamperedVerification: VerifyResult;
+}
+
+async function fetchFetchSignedRequest(): Promise<FetchSignedRequestFixture> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  let outcome: FetchSignedRequestFixture | undefined;
+  let handlerError: unknown;
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      try {
+        const body = Buffer.concat(chunks);
+        // Rebuild the fetch Request the way an edge runtime hands a
+        // handler the inbound message: absolute URL from the host
+        // header + path, the wire headers verbatim, the raw body.
+        // Repeated headers arrive from Node as arrays; each element
+        // is appended so `fromFetchRequest` sees the same multi-value
+        // shape a real `Request` carries.
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(req.headers)) {
+          if (value === undefined) continue;
+          if (Array.isArray(value)) {
+            for (const v of value) headers.append(name, v);
+          } else {
+            headers.set(name, value);
+          }
+        }
+        const fetchReq = new Request(
+          `http://${req.headers.host}${req.url}`,
+          {
+            ...(req.method !== undefined ? { method: req.method } : {}),
+            headers,
+            ...(body.length > 0 ? { body } : {}),
+          },
+        );
+        const requestLike = fromFetchRequest(fetchReq, body);
+        const verifyOptions = { key: publicKey, now: DEMO_CREATED + 60 };
+        const verification = verifyRequest(requestLike, verifyOptions);
+        // The wire said amount 100; the tampered view claims 101 —
+        // one byte the client never signed.
+        const tamperedVerification = verifyRequest(
+          { ...requestLike, body: DEMO_TAMPERED_BODY },
+          verifyOptions,
+        );
+        if (
+          requestLike.method !== "POST" ||
+          requestLike.url !== fetchReq.url ||
+          requestLike.body?.toString() !== DEMO_BODY ||
+          requestLike.headers["content-type"] !== "application/json" ||
+          requestLike.headers["content-digest"] === undefined ||
+          requestLike.trailers !== undefined
+        ) {
+          throw new Error(
+            `demo fixture broken: fetch-request segment adapted ` +
+              `${requestLike.method} ${requestLike.url} / body ` +
+              `${JSON.stringify(requestLike.body?.toString())} instead of ` +
+              `POST with the pinned payment body`,
+          );
+        }
+        if (
+          !verification.ok ||
+          verification.label !== "sig1" ||
+          verification.keyId !== DEMO_FETCH_REQUEST_KEY_ID ||
+          verification.alg !== "ed25519" ||
+          verification.nonce !== DEMO_FETCH_REQUEST_NONCE ||
+          verification.coveredComponents?.join(" ") !==
+            DEMO_FETCH_REQUEST_COVERED_COMPONENTS.join(" ")
+        ) {
+          throw new Error(
+            `demo fixture broken: fetch-request segment verification gave ` +
+              `${JSON.stringify(verification)} instead of ok with the pinned ` +
+              `label/keyid/alg/nonce and covered components`,
+          );
+        }
+        if (
+          tamperedVerification.ok !== false ||
+          tamperedVerification.code !== DEMO_FETCH_REQUEST_TAMPER_CODE
+        ) {
+          throw new Error(
+            `demo fixture broken: fetch-request segment body tamper gave ` +
+              `${JSON.stringify(tamperedVerification)} instead of ` +
+              `${DEMO_FETCH_REQUEST_TAMPER_CODE}`,
+          );
+        }
+        // Authority binding: the same adapted message rebuilt under a
+        // different authority must fail — the signature covers
+        // `@authority`, so the two sides disagree on the exact URL
+        // that was signed.
+        const wrongAuthorityVerification = verifyRequest(
+          {
+            ...requestLike,
+            url: requestLike.url.replace(/:\d+\//, ":9/"),
+          },
+          verifyOptions,
+        );
+        if (
+          wrongAuthorityVerification.ok !== false ||
+          wrongAuthorityVerification.code !== "SIGNATURE_MISMATCH"
+        ) {
+          throw new Error(
+            `demo fixture broken: fetch-request segment authority swap gave ` +
+              `${JSON.stringify(wrongAuthorityVerification)} instead of ` +
+              `SIGNATURE_MISMATCH`,
+          );
+        }
+        outcome = { requestLike, verification, tamperedVerification };
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("ok");
+      } catch (e) {
+        handlerError = e;
+        res.writeHead(500, { "content-type": "text/plain" });
+        res.end("demo fixture broken");
+      }
+    });
+  });
+  try {
+    const { port } = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    });
+    const url = `http://127.0.0.1:${port}${DEMO_FETCH_REQUEST_PATH}`;
+    const signed = signRequest(
+      {
+        method: "POST",
+        url,
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        keyId: DEMO_FETCH_REQUEST_KEY_ID,
+        alg: "ed25519",
+        key: privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_FETCH_REQUEST_NONCE,
+        coveredComponents: [...DEMO_FETCH_REQUEST_COVERED_COMPONENTS],
+      },
+    );
+    const res = await fetch(url, {
+      method: "POST",
+      headers: signed.headers,
+      body: DEMO_BODY,
+    });
+    if (res.status !== 200) {
+      throw new Error(
+        `demo fixture broken: fetch-request segment loopback answered ` +
+          `${res.status} instead of 200` +
+          (handlerError instanceof Error ? `: ${handlerError.message}` : ""),
+      );
+    }
+    if (outcome === undefined) {
+      throw new Error(
+        "demo fixture broken: fetch-request segment server never recorded an outcome",
+      );
+    }
+    return outcome;
   } finally {
     server.close();
   }
@@ -12437,6 +12675,19 @@ export async function runDemo(): Promise<DemoResult> {
   // runs.
   const fetchResponse = await fetchFetchSignedResponse();
 
+  // Fetch-request segment (server direction): the fetch-API twin of
+  // the inbound Node segment above — the same signed payment
+  // request, now carried as a standard fetch `Request` to a
+  // loopback server, adapted with `fromFetchRequest` and verified
+  // with `verifyRequest`. A second pass tampers one body byte (the
+  // payment amount 100 -> 101) through the same adapted path and is
+  // rejected with `BODY_DIGEST_MISMATCH`. The helper's fail-fast
+  // asserts already pinned every outcome outside the printed lines;
+  // only the port (never printed) and the key pair are fresh per
+  // run, so the segment's printed lines are byte-identical between
+  // runs.
+  const fetchRequest = await fetchFetchSignedRequest();
+
   // Verified-fetch segment (client direction): the one-call twin
   // of the fetch-adapter segment above — the same loopback
   // settlement response, but the client makes a single
@@ -15413,6 +15664,15 @@ export async function runDemo(): Promise<DemoResult> {
       ? "Fetch response verification after body tampering (amount 10000 -> 10001): OK (unexpected — the tampered body was not detected)"
       : `Fetch response verification after body tampering (amount 10000 -> 10001): FAILED (code ${fetchResponse.tamperedVerification.code}: ${fetchResponse.tamperedVerification.reason})`,
     "",
+    "Fetch-adapter request verification: the fetch-API twin of the inbound Node segment — the same signed payment request, now carried as a standard fetch Request to a loopback server, adapted with fromFetchRequest and verified with verifyRequest — the shape a WinterCG/edge handler sees when the callback arrives as a fetch Request",
+    `Fetch request normalized: ${fetchRequest.requestLike.method} ${DEMO_FETCH_REQUEST_PATH} (content-type "${fetchRequest.requestLike.headers["content-type"]}", body "${fetchRequest.requestLike.body?.toString()}")`,
+    fetchRequest.verification.ok
+      ? `Fetch request verification: OK (label ${fetchRequest.verification.label}, keyid="${fetchRequest.verification.keyId}", alg="${fetchRequest.verification.alg}", nonce="${fetchRequest.verification.nonce}")`
+      : `Fetch request verification: FAILED (code ${fetchRequest.verification.code}: ${fetchRequest.verification.reason})`,
+    fetchRequest.tamperedVerification.ok
+      ? "Fetch request verification after body tampering (amount 100 -> 101): OK (unexpected — the tampered body was not detected)"
+      : `Fetch request verification after body tampering (amount 100 -> 101): FAILED (code ${fetchRequest.tamperedVerification.code}: ${fetchRequest.tamperedVerification.reason})`,
+    "",
     "Verified fetch client: one verifiedFetch call signs the request, fetches it, and verifies the signed response — the client twin of the createVerifiedHandler segment, shown for a GET with no body and a POST with a JSON settlement instruction against the same loopback settlement endpoint",
     `Verified fetch GET status: ${verifiedFetchRoundTrip.getStatus}`,
     verifiedFetchRoundTrip.getVerification.ok
@@ -15951,6 +16211,9 @@ export async function runDemo(): Promise<DemoResult> {
     fetchResponseRequest: fetchResponse.requestLike,
     fetchResponseVerification: fetchResponse.verification,
     fetchResponseTamperedVerification: fetchResponse.tamperedVerification,
+    fetchRequestRequest: fetchRequest.requestLike,
+    fetchRequestVerification: fetchRequest.verification,
+    fetchRequestTamperedVerification: fetchRequest.tamperedVerification,
     verifiedFetchGetStatus: verifiedFetchRoundTrip.getStatus,
     verifiedFetchGetBody: verifiedFetchRoundTrip.getBody,
     verifiedFetchGetVerification: verifiedFetchRoundTrip.getVerification,

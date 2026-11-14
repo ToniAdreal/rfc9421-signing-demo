@@ -116,6 +116,11 @@ import {
   DEMO_FETCH_RESPONSE_NONCE,
   DEMO_FETCH_RESPONSE_TAMPER_CODE,
   DEMO_FETCH_RESPONSE_TAMPERED_BODY,
+  DEMO_FETCH_REQUEST_COVERED_COMPONENTS,
+  DEMO_FETCH_REQUEST_KEY_ID,
+  DEMO_FETCH_REQUEST_NONCE,
+  DEMO_FETCH_REQUEST_PATH,
+  DEMO_FETCH_REQUEST_TAMPER_CODE,
   DEMO_VERIFIED_FETCH_GET_NONCE,
   DEMO_VERIFIED_FETCH_KEY_ID,
   DEMO_VERIFIED_FETCH_MULTI_GATEWAY_KEY_ID,
@@ -6488,11 +6493,143 @@ test("demo fetch-adapter segment verifies a gateway-signed settlement response f
     `Fetch response body: ${DEMO_GATEWAY_RESPONSE_BODY}`,
     `Fetch response verification after body tampering (amount 10000 -> 10001): FAILED (code ${DEMO_FETCH_RESPONSE_TAMPER_CODE}: ${fetchResponseTamperedVerification.reason})`,
   ]);
-  // The verified-fetch segment follows the fetch-adapter segment.
+  // The fetch-request segment follows the fetch-adapter segment.
   assert.equal(lines[headerIdx + 5], "");
   assert.ok(
-    lines[headerIdx + 6]!.startsWith("Verified fetch client:"),
+    lines[headerIdx + 6]!.startsWith("Fetch-adapter request verification:"),
   );
+});
+
+test("demo fetch-request segment verifies a signed fetch Request adapted with fromFetchRequest and rejects a one-byte body tamper", async () => {
+  const {
+    fetchRequestRequest,
+    fetchRequestVerification,
+    fetchRequestTamperedVerification,
+  } = await runDemo();
+
+  // Structure: the adapted request carries the pinned method/URL/body
+  // and the lowercased wire headers — the fetch `Request` shape, not
+  // the Node `IncomingMessage` shape.
+  assert.equal(fetchRequestRequest.method, "POST");
+  assert.match(
+    fetchRequestRequest.url,
+    new RegExp(`^http://127\\.0\\.0\\.1:\\d+${DEMO_FETCH_REQUEST_PATH}$`),
+  );
+  assert.equal(fetchRequestRequest.body?.toString(), DEMO_BODY);
+  assert.equal(fetchRequestRequest.headers["content-type"], "application/json");
+  assert.ok(fetchRequestRequest.headers["content-digest"] !== undefined);
+  assert.equal(fetchRequestRequest.trailers, undefined);
+  assert.equal(fetchRequestRequest.status, undefined);
+
+  // Verification identity is the pinned fetch-segment keyid/alg/nonce,
+  // covering the request target plus content-digest and content-type.
+  assert.equal(fetchRequestVerification.ok, true);
+  assert.equal(fetchRequestVerification.label, "sig1");
+  assert.equal(fetchRequestVerification.keyId, DEMO_FETCH_REQUEST_KEY_ID);
+  assert.equal(fetchRequestVerification.alg, "ed25519");
+  assert.equal(fetchRequestVerification.nonce, DEMO_FETCH_REQUEST_NONCE);
+  assert.deepEqual(fetchRequestVerification.coveredComponents, [
+    ...DEMO_FETCH_REQUEST_COVERED_COMPONENTS,
+  ]);
+  // The one-byte body tamper (amount 100 -> 101) is rejected with the
+  // pinned code, and the tampered body is exactly one byte off the
+  // signed body.
+  assert.equal(fetchRequestTamperedVerification.ok, false);
+  assert.equal(
+    fetchRequestTamperedVerification.code,
+    DEMO_FETCH_REQUEST_TAMPER_CODE,
+  );
+  assert.equal(DEMO_TAMPERED_BODY.length, DEMO_BODY.length);
+  assert.notEqual(DEMO_TAMPERED_BODY, DEMO_BODY);
+
+  // Cross-check with direct library calls: the same adapted message
+  // verified under an unrelated key is rejected (the struct is a real
+  // verifiable message, not a demo stub).
+  const { publicKey: otherKey } = generateEd25519KeyPair();
+  const crossCheck = verifyRequest(fetchRequestRequest, {
+    key: otherKey,
+    now: DEMO_CREATED + 60,
+    requiredComponents: [...DEMO_FETCH_REQUEST_COVERED_COMPONENTS],
+  });
+  assert.equal(crossCheck.ok, false);
+  assert.equal(crossCheck.code, "SIGNATURE_MISMATCH");
+});
+
+test("demo lines contain the fetch-request segment (normalized shape, verified, tamper rejected, followed by the verified-fetch segment)", async () => {
+  const { lines, fetchRequestTamperedVerification } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Fetch-adapter request verification: the fetch-API twin of the inbound Node segment/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Fetch-adapter request verification:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 4), [
+    `Fetch request normalized: POST ${DEMO_FETCH_REQUEST_PATH} (content-type "application/json", body "${DEMO_BODY}")`,
+    `Fetch request verification: OK (label sig1, keyid="${DEMO_FETCH_REQUEST_KEY_ID}", alg="ed25519", nonce="${DEMO_FETCH_REQUEST_NONCE}")`,
+    `Fetch request verification after body tampering (amount 100 -> 101): FAILED (code ${DEMO_FETCH_REQUEST_TAMPER_CODE}: ${fetchRequestTamperedVerification.reason})`,
+  ]);
+  // The verified-fetch segment follows the fetch-request segment.
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(lines[headerIdx + 5]!.startsWith("Verified fetch client:"));
+});
+
+test("demo fetch-request segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Fetch-adapter request verification:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Verified fetch client:"));
+  assert.ok(start(first.lines) !== -1 && end(first.lines) !== -1);
+  assert.ok(start(second.lines) !== -1 && end(second.lines) !== -1);
+  // The loopback port is never printed, so the whole segment —
+  // header, normalized line, verification and tamper lines — is
+  // identical between runs.
+  assert.deepEqual(
+    second.lines.slice(start(second.lines), end(second.lines)),
+    first.lines.slice(start(first.lines), end(first.lines)),
+  );
+});
+
+test("demo fetch-request segment binds the signature to the loopback authority", async () => {
+  const { fetchRequestRequest } = await runDemo();
+  // The adapted URL carries the loopback host with its (fresh) port,
+  // and the host header agrees with it: the signer signed exactly
+  // this authority, which the covered `@authority` component binds.
+  const host = fetchRequestRequest.headers["host"];
+  assert.ok(typeof host === "string");
+  assert.match(host, /^127\.0\.0\.1:\d+$/);
+  assert.equal(fetchRequestRequest.url, `http://${host}${DEMO_FETCH_REQUEST_PATH}`);
+  // The adapted struct is a real verifiable message: re-signing it
+  // under a fresh known key verifies, so the adapter output plugs
+  // straight back into the signing path.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const resigned = signRequest(
+    {
+      method: fetchRequestRequest.method,
+      url: fetchRequestRequest.url,
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: "demo-fetch-request-resign-1",
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: "demo-fetch-request-resign-nonce-1",
+      coveredComponents: [...DEMO_FETCH_REQUEST_COVERED_COMPONENTS],
+    },
+  );
+  const reVerification = verifyRequest(resigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(reVerification.ok, true);
+  assert.equal(reVerification.label, "sig1");
+  assert.equal(reVerification.alg, "ed25519");
 });
 
 test("demo verifiedFetch segment signs, fetches and verifies a GET and a POST round-trip in one call each", async () => {
@@ -6572,13 +6709,13 @@ test("demo verifiedFetch segment prints the GET and POST round-trips between the
     `Verified fetch POST verification: OK (label sig1, keyid="${DEMO_VERIFIED_FETCH_KEY_ID}", alg="ed25519", nonce="${DEMO_VERIFIED_FETCH_POST_NONCE}")`,
     `Verified fetch POST body: ${DEMO_GATEWAY_RESPONSE_BODY}`,
   ]);
-  // The segment sits between the fetch-adapter and allowed-algs
+  // The segment sits between the fetch-request and allowed-algs
   // segments: a blank line on each side.
   const fetchHeaderIdx = lines.findIndex((l) =>
     l.startsWith("Fetch-adapter response verification:"),
   );
   assert.ok(fetchHeaderIdx !== -1);
-  assert.equal(headerIdx, fetchHeaderIdx + 6);
+  assert.equal(headerIdx, fetchHeaderIdx + 11);
   assert.equal(lines[headerIdx - 1], "");
   assert.equal(lines[headerIdx + 7], "");
   assert.ok(

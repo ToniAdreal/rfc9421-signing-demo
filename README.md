@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2162 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2166 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -219,6 +219,13 @@ adapted with `fromFetchResponse` and verified with
 callback arrives as a fetch `Response` — and tampering one
 body byte (the settlement amount `10000` -> `10001`) through
 the same adapted path is rejected with
+`BODY_DIGEST_MISMATCH`. The demo then runs a fetch-request
+segment: the same signed payment request, now carried as a standard
+fetch `Request` to a loopback server, adapted with
+`fromFetchRequest` and verified with `verifyRequest` — the shape a
+WinterCG/edge handler sees when the callback arrives as a fetch
+`Request` — and tampering one body byte (the payment amount `100`
+-> `101`) through the same adapted path is rejected with
 `BODY_DIGEST_MISMATCH`. The demo then runs a verified-fetch
 segment: the same loopback settlement response, but the client
 makes a single `verifiedFetch` call per round-trip — a GET with
@@ -4645,7 +4652,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2162 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2166 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
