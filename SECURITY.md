@@ -290,9 +290,10 @@ Read this before using it anywhere that matters.
   swapped body whose digest header was also swapped) tells you only that
   whoever held the key signed *that* content.
 - `verifiedFetch` does not replace TLS either, and it returns the
-  response body as a UTF-8 string: a binary body is decoded lossily, so
-  use the manual `signRequest` + `fetch` + `fromFetchResponse` +
-  `verifyResponse` path when the body is not text. The body cap rejects
+  response body as a UTF-8 string by default: a binary body is
+  decoded lossily in that mode, so pass `responseBody: "bytes"` to
+  receive the raw `Buffer` instead. Verification runs over the exact
+  raw bytes in both modes. The body cap rejects
   an over-long body before verification; it never truncates one into a
   digest check.
 - Body binding only applies when a `content-digest` header is present, and

@@ -61,14 +61,16 @@
  *   error, thrown before any network happens.
  *
  * Honest scope limits (see also SECURITY.md):
- * - The body is returned as a string: binary bodies are out of
- *   scope. Verification itself always runs over the exact raw bytes
- *   (the `content-digest` check recomputes over them), so a lossy
- *   UTF-8 decode can never make an unverified body look verified —
- *   but a binary payload decoded this way is mangled, so use the
- *   four-step manual path (`signRequest` + `fetch` +
- *   `fromFetchResponse` + `verifyResponse`) when the body is not
- *   text.
+ * - The body is returned as a UTF-8 string by default
+ *   (`responseBody: "text"`): pass `responseBody: "bytes"` when the
+ *   peer answers with binary (a PDF statement, a protobuf
+ *   settlement receipt) and the raw `Buffer` is returned instead,
+ *   byte-for-byte, with no decode at all. Verification runs over
+ *   the exact raw bytes in both modes (the `content-digest` check
+ *   recomputes over them), so a lossy UTF-8 decode can never make
+ *   an unverified body look verified — but in text mode a binary
+ *   payload is still mangled on the way out, so callers that need
+ *   the bytes must ask for `"bytes"`.
  * - `maxBodyBytes` (default `DEFAULT_MAX_BODY_BYTES`, 1 MiB, the
  *   same value and semantics as `createVerifiedHandler`) bounds the
  *   response body before any verification runs: an over-long body is
@@ -268,18 +270,41 @@ export interface VerifiedFetchOptions {
    * network happens. A body exactly at the cap still verifies.
    */
   maxBodyBytes?: number;
+  /**
+   * How the response body is returned (backlog #1141). `"text"`
+   * (default) decodes the verified bytes as UTF-8, exactly as
+   * before — a binary payload decoded this way is mangled, so
+   * callers that need the bytes must ask for `"bytes"`, which
+   * returns the raw `Buffer` byte-for-byte with no decode at all.
+   * The content-digest verification runs over the exact raw bytes
+   * in both modes, so the choice only changes what the caller
+   * receives, never what is verified. The `maxBodyBytes` cap is
+   * enforced on the raw byte count in both modes. Anything other
+   * than `"text"` / `"bytes"` throws a configuration `Error` at
+   * call time, before any network happens.
+   */
+  responseBody?: "text" | "bytes";
 }
 
-/** What a successful `verifiedFetch` call returns. */
-export interface VerifiedFetchResult {
+/**
+ * What a successful `verifiedFetch` call returns. `Body` is the
+ * response-body type for the requested `responseBody` mode:
+ * `string` in the default text mode, `Buffer` in bytes mode.
+ */
+export interface VerifiedFetchResult<Body extends string | Buffer = string> {
   /**
    * The raw fetch response, for status / headers access. Its body
    * stream is already consumed by the helper — read `body` below,
    * do not call `arrayBuffer()` / `text()` on it again.
    */
   response: VerifiedFetchResponse;
-  /** The response body decoded as a UTF-8 string (see module docstring: binary bodies are out of scope). */
-  body: string;
+  /**
+   * The response body: decoded as a UTF-8 string in the default
+   * text mode, the raw bytes as a `Buffer` in bytes mode (see
+   * `VerifiedFetchOptions.responseBody`). Verification always runs
+   * over the exact raw bytes, in both modes.
+   */
+  body: Body;
   /**
    * The response verification result. `ok` is always `true` here —
    * a failed verification throws `VerifyError` instead of returning
@@ -701,7 +726,9 @@ async function readResponseBodyCapped(
  * `verifyResponse` — or, in multi-label mode, with
  * `verifyAllResponseLabels`, requiring every label to pass. Returns
  * `{ response, body, verifyResult }` on a verified response (plus
- * `verifyResults` in multi-label mode); throws `VerifyError` on a
+ * `verifyResults` in multi-label mode); `body` is a UTF-8 string by
+ * default, or the raw `Buffer` when `opts.responseBody` is
+ * `"bytes"`. Throws `VerifyError` on a
  * failed verification — in multi-label mode the first failing
  * label's code / reason / label, with the full per-label array
  * attached to the error as `verifyResults`.
@@ -709,7 +736,8 @@ async function readResponseBodyCapped(
  * Fail-fast configuration errors (thrown, before any network):
  * everything `signRequest` already rejects, plus a verifier with no
  * key source or any other misconfiguration the dry run catches, a
- * non-positive-integer `maxBodyBytes`, a caller-supplied
+ * non-positive-integer `maxBodyBytes`, an illegal `responseBody`
+ * value, a caller-supplied
  * `verify.request` (managed by this helper — pass no `request`),
  * and a non-`AbortSignal` `init.signal`. A signal already aborted
  * likewise throws before any network — `verifiedFetch: request
@@ -717,12 +745,26 @@ async function readResponseBodyCapped(
  * never verifies. Fetch-layer errors pass through untouched. See the module
  * docstring for the full contract (non-2xx, binary bodies, the body
  * cap, trailers, cancellation).
+ *
+ * The overloads pin the returned body type to the requested mode:
+ * `responseBody: "bytes"` returns a `Buffer`, anything else a
+ * `string` — so a caller that asks for bytes never has to cast.
  */
 export async function verifiedFetch(
   input: string | URL,
   init: VerifiedFetchInit | undefined,
+  opts: VerifiedFetchOptions & { responseBody: "bytes" },
+): Promise<VerifiedFetchResult<Buffer>>;
+export async function verifiedFetch(
+  input: string | URL,
+  init: VerifiedFetchInit | undefined,
   opts: VerifiedFetchOptions,
-): Promise<VerifiedFetchResult> {
+): Promise<VerifiedFetchResult<string>>;
+export async function verifiedFetch(
+  input: string | URL,
+  init: VerifiedFetchInit | undefined,
+  opts: VerifiedFetchOptions,
+): Promise<VerifiedFetchResult<string | Buffer>> {
   if (opts === null || typeof opts !== "object")
     throw new Error(
       `verifiedFetch: opts must be an object, got ${opts === null ? "null" : typeof opts}`,
@@ -755,6 +797,15 @@ export async function verifiedFetch(
   if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0)
     throw new Error(
       `verifiedFetch: maxBodyBytes must be a positive integer number of bytes, got ${String(opts.maxBodyBytes)}`,
+    );
+  // An illegal `responseBody` is a configuration error, like a bad
+  // `maxBodyBytes` — it must fail here, before any network happens,
+  // never after the peer has answered with a body the caller cannot
+  // read in the mode they asked for.
+  const responseBody = opts.responseBody ?? "text";
+  if (responseBody !== "text" && responseBody !== "bytes")
+    throw new Error(
+      `verifiedFetch: responseBody must be "text" or "bytes", got ${String(opts.responseBody)}`,
     );
   // `verify.request` is managed by this helper: the response is
   // anchored to the request this call just signed. A caller-supplied
@@ -875,7 +926,7 @@ export async function verifiedFetch(
       );
     return {
       response: res,
-      body: bodyBuf.toString("utf8"),
+      body: responseBody === "bytes" ? bodyBuf : bodyBuf.toString("utf8"),
       verifyResult: { ok: true, label: "", perLabelResults: results },
       verifyResults: results,
     };
@@ -901,7 +952,7 @@ export async function verifiedFetch(
 
   return {
     response: res,
-    body: bodyBuf.toString("utf8"),
+    body: responseBody === "bytes" ? bodyBuf : bodyBuf.toString("utf8"),
     verifyResult,
   };
 }

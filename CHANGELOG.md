@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifiedFetch` binary response bodies (backlog #1141):
+  `VerifiedFetchOptions.responseBody?: "text" | "bytes"` (default
+  `"text"`, backward compatible). In `"bytes"` mode the verified
+  response body is returned as the raw `Buffer`, byte-for-byte with
+  no UTF-8 decode — a signed binary receipt (a PDF statement, a
+  protobuf settlement credential) no longer comes back mangled by
+  lossy decoding. The content-digest verification runs over the
+  exact raw bytes in both modes, so the option only changes what
+  the caller receives, never what is verified; `maxBodyBytes` is
+  enforced on the raw byte count in both modes. The returned body
+  type is pinned to the mode by overloads (`"bytes"` returns
+  `Buffer`, anything else `string`), and an illegal `responseBody`
+  value throws a configuration error before any network happens.
+  `test/verifiedFetchBinaryBody.test.ts` gains 9 tests (full
+  0x00–0xFF round-trip, tampered body rejected with
+  `BODY_DIGEST_MISMATCH`, default and explicit text mode unchanged,
+  Buffer request body plus binary response, byte cap in bytes mode,
+  empty binary body, illegal mode fail-fast with zero fetch calls,
+  multi-label mode returning the raw `Buffer`); test count moves
+  2195 → 2204.
 - `ReplayCache.release(nonce, now?)` (backlog #1138): a single-nonce
   release for the replay cache — the missing half of the "verified
   but never executed" retry story. When a verified request's
