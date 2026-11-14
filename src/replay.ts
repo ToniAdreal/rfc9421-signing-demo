@@ -553,6 +553,34 @@ export class ReplayCache implements NonceStore {
   }
 
   /**
+   * Read-only probe: returns `true` when the nonce was already seen
+   * within the TTL, `false` otherwise — without recording anything.
+   *
+   * Unlike `check()`, this never mutates the cache: an unseen nonce is
+   * not recorded (a later `check()` still sees it as first-seen), a
+   * seen nonce's LRU recency is not refreshed, expired entries are
+   * treated as unseen without triggering reclamation, and the
+   * observability counters (`hits`/`misses`/`evictions`) are untouched.
+   * Use it for diagnostics — e.g. a gateway pre-checking whether a
+   * nonce was already seen — where the probe itself must not change
+   * the replay verdict.
+   *
+   * Accepts an explicit `now` (unix seconds) like `check()`; defaults
+   * to the injected clock. The TTL boundary matches `check()`: a nonce
+   * seen exactly `ttlSec` ago counts as expired. An empty or
+   * non-string nonce throws a configuration `Error`, the same caliber
+   * as `check()`.
+   */
+  has(nonce: string, now?: number): boolean {
+    if (typeof nonce !== "string" || nonce === "")
+      throw new Error("ReplayCache: nonce must be a non-empty string");
+    const t = now ?? this.clock();
+    const prev = this.seenAt.get(nonce);
+    if (prev === undefined) return false;
+    return t - prev < this.ttlSec;
+  }
+
+  /**
    * Number of live (unexpired) entries tracked, computed against the
    * cache's injected clock. If callers pass their own `now` to `check`
    * (as `verifyRequest` does with the verification time), give the cache

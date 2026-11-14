@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2152 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2162 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1903,7 +1903,12 @@ values. Without a request to bind to, keep using the request-side API
   Limitations and SECURITY.md). Call `cache.stats()` for observability:
   it returns a `{ size, hits, misses, evictions }` snapshot (expired-entry
   reclamation and LRU eviction both count as evictions); `cache.clear()`
-  also resets the counters. A single process can carry the cache across
+  also resets the counters. For a read-only probe that must not change
+  the verdict, `cache.has(nonce)` reports whether the nonce was already
+  seen within the TTL — without recording an unseen nonce, refreshing
+  the recency of a seen one, reclaiming expired entries, or touching
+  the counters (an expired nonce reports as unseen, at the same TTL
+  boundary `check()` uses). A single process can carry the cache across
   its own restart: `cache.exportSnapshot()` returns a detached,
   JSON-serializable `{ v: 1, entries }` snapshot of the live nonces with
   their original first-seen timestamps, and
@@ -4640,7 +4645,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2152 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2162 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

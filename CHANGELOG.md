@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `ReplayCache.has(nonce, now?)` (backlog #1128): a read-only probe
+  for the replay cache — reports whether the nonce was already seen
+  within the TTL without recording anything. An unseen nonce stays
+  unseen (a later `check()` still sees it as first-seen), a seen
+  nonce's LRU recency is not refreshed, expired entries report as
+  unseen without triggering reclamation, and the `stats()` counters
+  are untouched. The TTL boundary matches `check()` (a nonce seen
+  exactly `ttlSec` ago counts as expired). An empty or non-string
+  nonce throws a configuration error, the same caliber as `check()`.
+  `test/replayCacheHas.test.ts` gains 10 tests (seen/unseen,
+  probe-does-not-record, TTL boundary via injected and explicit
+  clocks, stats untouched, invalid-nonce throws, clear resets,
+  no LRU refresh, expired probe triggers no reclamation, size
+  unchanged), and the test count moves 2152 → 2162.
 - `fromFetchRequest(req, body)` (backlog #1125): the inbound fetch-API
   twin of `fromNodeRequest` — normalizes a fetch-style server's
   `Request` (undici / WinterCG / edge runtime) into a `RequestLike`
