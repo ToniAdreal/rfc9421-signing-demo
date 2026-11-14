@@ -11,6 +11,37 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `createVerifiedFetchHandler(verifyOpts, handler, opts?)` (backlog
+  #1136): the fetch-API twin of `createVerifiedHandler` — the same
+  buffer→adapt→verify→401 loop for WinterCG / edge runtimes, returning
+  `(req: Request) => Promise<Response>`. It streams the request body
+  through the reader up to `maxBodyBytes` (default
+  `DEFAULT_MAX_BODY_BYTES`, 1 MiB; past the cap it cancels the reader
+  and answers 413 before any verification runs, so the key resolver is
+  never called), adapts it with `fromFetchRequest`, and verifies it
+  with `verifyRequest` (or `verifyAllLabels` when opt-in, every label
+  must pass, an unsigned request is a 401 `MISSING_SIGNATURE_INPUT`).
+  A verification failure is answered 401 with exactly `{ error, code }`
+  and the business handler is never called; a request that cannot be
+  adapted is answered 400 `MALFORMED_REQUEST`. Opt-in `signResponse` /
+  `signResponses` sign the handler's `Response` bound to the request it
+  just verified (same options and creation-time dry-run validation as
+  the Node handler, with `createVerifiedFetchHandler:`-prefixed error
+  messages); a signing failure, or a business handler that throws, is
+  answered 500 `INTERNAL_ERROR` with nothing unsigned returned. Honest
+  limits (README + SECURITY.md): TLS is still the caller's job, the
+  body is held in memory up to the cap, a fetch `Request` carries no
+  trailers so a covered `;tr` component cannot verify through this
+  handler, and the request body stream is consumed by verification.
+  `test/nodeHttpVerifiedFetchHandler.test.ts` gains 18 tests (signed
+  POST pass with `VerifyResult`, unsigned/tampered/wrong-key/expired
+  401s, 401 body shape, over-cap 413 with zero resolver calls,
+  exactly-at-cap pass, creation-time `maxBodyBytes`/`verifyOpts`/
+  mutual-exclusion/`requiredLabels` validation, single- and dual-label
+  response signing verified via `verifyResponse` /
+  `verifyAllResponseLabels`, multi-label verification with an aggregate
+  result, stripped co-signature 401, handler-throw 500, malformed 400,
+  consumed-body pin), and the test count moves 2166 → 2184.
 - CLI demo fetch-request segment (backlog #1131): the demo now covers
   the fetch-API inbound direction — the same signed payment request
   (`DEMO_BODY`, `@method`/`@authority`/`@path`/`content-digest`/

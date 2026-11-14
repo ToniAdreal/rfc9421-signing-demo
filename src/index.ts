@@ -131,6 +131,7 @@ export {
 } from "./structuredFields.js";
 export type { StructuredFieldType } from "./structuredFields.js";
 export {
+  createVerifiedFetchHandler,
   createVerifiedHandler,
   DEFAULT_MAX_BODY_BYTES,
   fromFetchRequest,
@@ -157,6 +158,7 @@ export type {
   VerifyResponseOptions,
 } from "./response.js";
 export type {
+  CreateVerifiedFetchHandlerOptions,
   CreateVerifiedHandlerOptions,
   FetchRequestLike,
   FetchResponseLike,
@@ -166,6 +168,7 @@ export type {
   IncomingRequestLike,
   IncomingResponseLike,
   IncomingTrailersLike,
+  VerifiedFetchHandler,
   VerifiedHandlerSignResponseOptions,
   VerifiedRequestHandler,
 } from "./nodeHttp.js";

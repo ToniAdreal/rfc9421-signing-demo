@@ -37,6 +37,10 @@
  * instead of an `IncomingMessage`): same normalization, only the
  * input shape differs (`Request.method` / `Request.url` /
  * `Request.headers`, an absolute URL passed through verbatim).
+ * `createVerifiedFetchHandler` is the fetch twin of
+ * `createVerifiedHandler` — the same buffer→adapt→verify→401 loop
+ * returning `(req: Request) => Promise<Response>` for runtimes with
+ * no `IncomingMessage`.
  * The `node:http` import below is type-only (erased at
  * compile time): the runtime dependency count stays zero.
  */
@@ -874,14 +878,15 @@ function isSignResponseContentError(e: Error): boolean {
 function assertSignResponseOptions(
   sign: VerifiedHandlerSignResponseOptions,
   optionName: string = "signResponse",
+  fnName: string = "createVerifiedHandler",
 ): void {
   if (typeof sign !== "object" || sign === null)
     throw new Error(
-      `createVerifiedHandler: ${optionName} must be an object, got ${sign === null ? "null" : typeof sign}`,
+      `${fnName}: ${optionName} must be an object, got ${sign === null ? "null" : typeof sign}`,
     );
   if (!(sign.key instanceof KeyObject))
     throw new Error(
-      `createVerifiedHandler: ${optionName}.key must be a KeyObject ` +
+      `${fnName}: ${optionName}.key must be a KeyObject ` +
         "(a private key from keys.generate*KeyPair / importPrivateKey / secretKey), got " +
         (sign.key === null ? "null" : typeof sign.key),
     );
@@ -893,7 +898,7 @@ function assertSignResponseOptions(
   } catch (e) {
     if (e instanceof Error && isSignResponseContentError(e)) return;
     throw new Error(
-      `createVerifiedHandler: invalid ${optionName} options: ${e instanceof Error ? e.message : String(e)}`,
+      `${fnName}: invalid ${optionName} options: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 }
@@ -916,14 +921,15 @@ function assertSignResponseOptions(
  */
 function assertSignResponsesOptions(
   signs: VerifiedHandlerSignResponseOptions[],
+  fnName: string = "createVerifiedHandler",
 ): void {
   if (!Array.isArray(signs))
     throw new Error(
-      `createVerifiedHandler: signResponses must be an array, got ${signs === null ? "null" : typeof signs}`,
+      `${fnName}: signResponses must be an array, got ${signs === null ? "null" : typeof signs}`,
     );
   if (signs.length === 0)
     throw new Error(
-      "createVerifiedHandler: signResponses must not be empty — omit it to leave responses unsigned",
+      `${fnName}: signResponses must not be empty — omit it to leave responses unsigned`,
     );
   const seen = new Set<string>();
   for (const sign of signs) {
@@ -935,13 +941,13 @@ function assertSignResponsesOptions(
     if (typeof label === "string") {
       if (seen.has(label))
         throw new Error(
-          `createVerifiedHandler: signResponses: duplicate label "${label}" — every response signature must use a distinct label`,
+          `${fnName}: signResponses: duplicate label "${label}" — every response signature must use a distinct label`,
         );
       seen.add(label);
     }
   }
   signs.forEach((sign, i) =>
-    assertSignResponseOptions(sign, `signResponses[${i}]`),
+    assertSignResponseOptions(sign, `signResponses[${i}]`, fnName),
   );
 }
 
@@ -989,7 +995,10 @@ const VERIFY_OPTIONS_VALIDATION_REQUEST: RequestLike = {
  * validate. The multi-label path has its own dry run,
  * `assertVerifyAllOptions`.
  */
-function assertVerifyOptions(verifyOpts: VerifyOptions): void {
+function assertVerifyOptions(
+  verifyOpts: VerifyOptions,
+  fnName: string = "createVerifiedHandler",
+): void {
   try {
     if (verifyOpts === null || typeof verifyOpts !== "object")
       throw new Error(
@@ -1014,11 +1023,11 @@ function assertVerifyOptions(verifyOpts: VerifyOptions): void {
   } catch (e) {
     if (
       e instanceof Error &&
-      e.message.startsWith("createVerifiedHandler: invalid verifyOpts:")
+      e.message.startsWith(`${fnName}: invalid verifyOpts:`)
     )
       throw e;
     throw new Error(
-      `createVerifiedHandler: invalid verifyOpts: ${e instanceof Error ? e.message : String(e)}`,
+      `${fnName}: invalid verifyOpts: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 }
@@ -1087,6 +1096,7 @@ function dryRunLabelForVerifyAll(
  */
 function assertVerifyAllOptions(
   allOpts: Omit<VerifyAllOptions, "label">,
+  fnName: string = "createVerifiedHandler",
 ): void {
   try {
     if (allOpts === null || typeof allOpts !== "object")
@@ -1138,11 +1148,11 @@ function assertVerifyAllOptions(
   } catch (e) {
     if (
       e instanceof Error &&
-      e.message.startsWith("createVerifiedHandler: invalid verifyAllLabels:")
+      e.message.startsWith(`${fnName}: invalid verifyAllLabels:`)
     )
       throw e;
     throw new Error(
-      `createVerifiedHandler: invalid verifyAllLabels: ${e instanceof Error ? e.message : String(e)}`,
+      `${fnName}: invalid verifyAllLabels: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 }
@@ -1554,4 +1564,481 @@ function wrapResponseForSigning(
   } as typeof res.end;
 
   return res;
+}
+
+/**
+ * The business handler a verified fetch request is handed to: the
+ * received `Request` plus the `VerifyResult` of the signature that
+ * was just checked. `result.ok` is always `true` here — a failed
+ * verification never reaches this handler, it is answered 401 by the
+ * wrapper. `result.keyId` / `result.alg` / `result.nonce` /
+ * `result.created` are available for logging and audit. The handler
+ * returns the `Response` to send (a plain `Response` or a promise of
+ * one); with opt-in `signResponse` / `signResponses` the wrapper
+ * signs it before it is returned. In multi-label mode
+ * (`CreateVerifiedFetchHandlerOptions.verifyAllLabels`) the result is
+ * an aggregate — `label` is empty, no single label owns it — and
+ * `result.perLabelResults` carries each label's own `VerifyResult` in
+ * wire order.
+ *
+ * The request body stream was already read for verification, so the
+ * `Request` handed here has a consumed body: `req.arrayBuffer()` /
+ * `req.text()` in the handler throws (undici reports a disturbed
+ * body). The handler still sees the method, URL, and headers — and
+ * the verification result — which is what a webhook acknowledgement
+ * needs; it cannot re-read the payload from this `Request`.
+ */
+export type VerifiedFetchHandler = (
+  req: Request,
+  result: VerifyResult,
+) => Response | Promise<Response>;
+
+export interface CreateVerifiedFetchHandlerOptions {
+  /**
+   * Maximum request body size in bytes. A body larger than this is
+   * rejected with 413 before any verification runs — the key resolver
+   * is never called, the reader is cancelled so the peer stops
+   * uploading, and the buffered prefix is discarded. Defaults to
+   * `DEFAULT_MAX_BODY_BYTES` (1 MiB). Must be a positive integer;
+   * anything else throws a configuration `Error` at handler-creation
+   * time, never per request. A body exactly at the cap still verifies.
+   */
+  maxBodyBytes?: number;
+  /**
+   * Opt-in response signing: when present, the wrapper signs the
+   * business handler's `Response` with `signResponse` before it is
+   * returned, binding it to the request that was just verified — the
+   * wrapper passes that request as the `request` option, so a covered
+   * `;req` component (e.g. `"@method";req`) resolves against it and
+   * the response signature cannot be transplanted onto a different
+   * request. Absent, the handler's `Response` is returned exactly as
+   * built.
+   *
+   * The response body is read in full (a signature over
+   * `content-digest` needs the complete body, so a streaming
+   * response cannot be signed this way), then signed and returned as
+   * a fresh `Response` carrying the same status, headers, and body
+   * plus the signature headers. A signing failure at request time
+   * (e.g. a covered header the handler did not set) is answered 500
+   * `{ error: "internal error", code: "INTERNAL_ERROR" }` — the
+   * unsigned response never reaches the caller. A 401/400/413/500
+   * rejection from the wrapper itself is never signed.
+   *
+   * Pass `created` / `expires` / `nonce` only if you rotate them:
+   * the same options sign every response, so a pinned `created`
+   * ages out of the verifier's freshness window and a pinned
+   * `nonce` repeats on every response (a verifier with a replay
+   * cache rejects the repeats). Mutually exclusive with
+   * `signResponses` — pass one of them, never both.
+   */
+  signResponse?: VerifiedHandlerSignResponseOptions;
+  /**
+   * Opt-in multi-label response signing: the response-signing twin
+   * of `verifyAllLabels` — when present, the wrapper signs the
+   * business handler's `Response` once per entry, in array order:
+   * the first entry is signed with `signResponse`, each later entry
+   * is appended with `addResponseSignature`, so the response
+   * carries one signature per label (the dual-signature settlement
+   * case: a merchant signature plus a payment-gateway signature on
+   * the same response, each under its own key, keyid, and covered
+   * components). Every entry follows exactly the `signResponse`
+   * rules — the just-verified request is attached as `request`, so
+   * covered `;req` components bind each signature to it — and a
+   * failure in any label is answered 500 `INTERNAL_ERROR` with
+   * nothing unsigned returned, exactly like the single-label
+   * failure path. A 401/400/413/500 rejection from the wrapper
+   * itself is never signed.
+   *
+   * Mutually exclusive with `signResponse` (both set throws when
+   * the handler is built). An empty array throws too — omit the
+   * field to leave responses unsigned. Two entries with the same
+   * label (an omitted label counts as `"sig1"`) throw at creation:
+   * RFC 9421 dictionary labels must be unique. Each entry is
+   * validated at creation by the same dry-run sign `signResponse`
+   * gets (see `assertSignResponsesOptions`), so a bad key, alg,
+   * label, or covered component in any entry throws
+   * `createVerifiedFetchHandler: invalid signResponses[i] options: …`
+   * at build time. Leave `created` / `expires` / `nonce` unset
+   * unless you rotate them per label — the same caveats as
+   * `signResponse` apply, per entry.
+   */
+  signResponses?: VerifiedHandlerSignResponseOptions[];
+  /**
+   * Opt-in multi-label verification: when present, the wrapper
+   * verifies with `verifyAllLabels` instead of `verifyRequest` —
+   * the dual-signature webhook case (a merchant signature plus a
+   * payment-gateway signature on the same request), where each label
+   * verifies against its own key, key resolver, candidate list, or
+   * pins. The option is exactly `VerifyAllOptions` minus `label`
+   * (there is no single label to verify); per-label maps
+   * (`keys` / `keyResolvers` / `candidateKeysByLabel` /
+   * `expectedKeyIds` / `expectedTags` / `requiredLabels` and the
+   * rest) work exactly as `verifyAllLabels` documents them.
+   *
+   * Every label must pass before the business handler runs: with
+   * `requiredLabels` set, a missing required label is a 401
+   * (`MISSING_REQUIRED_LABEL`); without it, every label present on
+   * the wire must pass, and a request carrying no signature at all
+   * is a 401 (`MISSING_SIGNATURE_INPUT`) — an unsigned request never
+   * slips through an empty-results pass. A failure is answered 401
+   * with exactly `{ error: "signature verification failed", code }`
+   * where `code` is the first failing label's `VerifyResult.code`,
+   * the same body shape as the single-label path. The business
+   * handler receives an aggregate `VerifyResult` (`ok: true`, empty
+   * `label`) whose `perLabelResults` carries each label's own result
+   * in wire order.
+   *
+   * The first argument `verifyOpts` is still required and still
+   * validated at handler-creation time, but it is not consulted per
+   * request while this option is set — it stays the single-label
+   * configuration for callers that do not opt into multi-label
+   * verification. Like `verifyOpts`, this option is validated at
+   * creation time (see `assertVerifyAllOptions`): a misconfigured
+   * multi-label verifier throws
+   * `createVerifiedFetchHandler: invalid verifyAllLabels: …` when
+   * the handler is built, never on the first live request. An empty
+   * `requiredLabels` array is rejected at creation too — omit the
+   * field to require every label present on the wire (the bare
+   * `verifyAllLabels` treats `[]` as "no check", but at the handler
+   * entry an empty list is a caller mistake, not a policy).
+   */
+  verifyAllLabels?: Omit<VerifyAllOptions, "label">;
+}
+
+/**
+ * The wrapper's rejection shape: exactly `{ error, code }` as JSON,
+ * no `reason`, no stack, no key material — the same body shape
+ * `createVerifiedHandler` answers with.
+ */
+function fetchErrorResponse(
+  status: number,
+  error: string,
+  code: string,
+): Response {
+  return new Response(JSON.stringify({ error, code }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * Result of `readFetchBody`: either the buffered body, or the
+ * rejection the wrapper answers without ever verifying.
+ */
+type FetchBodyRead =
+  | { ok: true; body: Buffer }
+  | { ok: false; code: "BODY_TOO_LARGE" | "BODY_READ_FAILED" };
+
+/**
+ * Stream a fetch `Request` body into memory up to `maxBodyBytes`.
+ * Past the cap the reader is cancelled (the peer stops uploading)
+ * and the result is `BODY_TOO_LARGE`; the buffered prefix is
+ * discarded and the key resolver is never called. A stream error
+ * mid-body is `BODY_READ_FAILED`. A bodyless request (`req.body`
+ * null) yields an empty buffer. The caller answers the rejection;
+ * this helper never builds a `Response` itself.
+ */
+async function readFetchBody(
+  req: Request,
+  maxBodyBytes: number,
+): Promise<FetchBodyRead> {
+  const stream = req.body;
+  if (stream === null) return { ok: true, body: Buffer.alloc(0) };
+  const reader = stream.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const buf = Buffer.from(value);
+      size += buf.length;
+      if (size > maxBodyBytes) {
+        // Fail-closed: stop reading, drop the buffered prefix, never
+        // verify. The cancel itself must not mask the verdict, so a
+        // cancel error is swallowed here.
+        try {
+          await reader.cancel();
+        } catch {
+          // The stream is already stopping; nothing left to cancel.
+        }
+        return { ok: false, code: "BODY_TOO_LARGE" };
+      }
+      chunks.push(buf);
+    }
+  } catch {
+    // A stream error mid-body: stop reading and report it as a read
+    // failure, never as a signature verdict.
+    try {
+      await reader.cancel();
+    } catch {
+      // The stream is already broken; nothing left to cancel.
+    }
+    return { ok: false, code: "BODY_READ_FAILED" };
+  }
+  return { ok: true, body: Buffer.concat(chunks) };
+}
+
+/**
+ * Sign a business handler's `Response` once per entry of
+ * `signOptsList`, in order — the fetch twin of the Node handler's
+ * `wrapResponseForSigning` flush: the first entry with
+ * `signResponse`, each later entry appended with
+ * `addResponseSignature`, the just-verified request attached as
+ * `request` to every sign so covered `;req` components bind each
+ * signature to it. The response body is read in full (a signature
+ * over `content-digest` needs the complete body); a bodyless
+ * response signs without one, exactly like the Node wrapper's
+ * no-chunks case. Returns a fresh `Response` with the same status
+ * and body plus the signature headers. Throws on any signing
+ * failure (or on a `Response` that cannot be rebuilt) — the caller
+ * answers 500 with nothing unsigned on the wire.
+ */
+async function signFetchResponse(
+  response: Response,
+  signOptsList: VerifiedHandlerSignResponseOptions[],
+  requestLike: RequestLike,
+): Promise<Response> {
+  const headers = normalizeFetchHeaders(response.headers);
+  const rawBody = Buffer.from(await response.arrayBuffer());
+  const body = rawBody.length > 0 ? rawBody : undefined;
+  let signed = signResponse(
+    { status: response.status, headers, body },
+    { ...signOptsList[0], request: requestLike },
+  );
+  for (const extra of signOptsList.slice(1)) {
+    signed = addResponseSignature(signed, {
+      ...extra,
+      request: requestLike,
+    });
+  }
+  return new Response(
+    signed.body === undefined
+      ? null
+      : typeof signed.body === "string"
+        ? signed.body
+        : new Uint8Array(signed.body),
+    {
+      status: signed.status,
+      headers: signed.headers,
+    },
+  );
+}
+
+/**
+ * Build a `(req: Request) => Promise<Response>` handler that verifies
+ * RFC 9421 signatures before any business logic runs — the fetch-API
+ * twin of `createVerifiedHandler` (which returns a Node
+ * `http.RequestListener`): the four steps a WinterCG / edge webhook
+ * receiver otherwise hand-rolls (read the body, adapt it with
+ * `fromFetchRequest`, verify it, answer 401 on failure) in one place,
+ * so a missed step cannot let an unverified request into the handler.
+ * The client-side counterpart is `verifiedFetch`; the server-side
+ * Node counterpart is `createVerifiedHandler`.
+ *
+ * Flow per request:
+ * 1. Stream the body into memory, up to `opts.maxBodyBytes`
+ *    (default 1 MiB). Past the cap the handler cancels the reader,
+ *    answers 413 with `{ error: "request body too large", code:
+ *    "BODY_TOO_LARGE" }`, and never calls the key resolver — the
+ *    buffered prefix is discarded and the peer stops uploading.
+ *    A stream that errors mid-body is answered 500 `{ error: "failed
+ *    to read request body", code: "BODY_READ_FAILED" }` without
+ *    verifying.
+ * 2. `fromFetchRequest` + `verifyRequest` with the `verifyOpts` given
+ *    at creation — or, when `opts.verifyAllLabels` is set,
+ *    `verifyAllLabels` with those options, requiring every label to
+ *    pass (see `CreateVerifiedFetchHandlerOptions.verifyAllLabels`).
+ *    A request that cannot even be adapted (missing method/url/host)
+ *    is answered 400 `{ error: "malformed request", code:
+ *    "MALFORMED_REQUEST" }`; a misconfigured `verifyOpts` /
+ *    `verifyAllLabels` is answered 500 `{ error: "internal error",
+ *    code: "INTERNAL_ERROR" }` — a server bug, never a client
+ *    verdict, so no detail leaks.
+ * 3. Verification failure is answered 401 with exactly `{ error:
+ *    "signature verification failed", code }`, where `code` is the
+ *    `VerifyResult.code` (e.g. `SIGNATURE_MISMATCH`, `EXPIRED`,
+ *    `MISSING_SIGNATURE_INPUT`) — or, in multi-label mode, the first
+ *    failing label's code — no `reason`, no stack, no key
+ *    material. The business handler is never called.
+ * 4. Verification success calls `handler(req, result)` with the
+ *    received `Request` and the `VerifyResult`; in multi-label mode
+ *    the result is an aggregate whose `perLabelResults` carries each
+ *    label's own result. The handler's `Response` is returned as
+ *    built — or, with opt-in `opts.signResponse` (or
+ *    `opts.signResponses` for multi-label signing), signed first
+ *    with `signResponse` (the just-verified request attached as
+ *    `request`, so covered `;req` components bind the signature to
+ *    it) — for `signResponses`, once per entry, the first with
+ *    `signResponse` and each later one appended with
+ *    `addResponseSignature` — and returned in one go. A signing
+ *    failure at request time is answered 500 `INTERNAL_ERROR` —
+ *    the unsigned response never reaches the caller. A business
+ *    handler that throws is answered 500 `INTERNAL_ERROR` too: a
+ *    server bug, never a client verdict. Rejections from steps 1–3
+ *    (400/401/413/500) are never signed.
+ *
+ * `verifyOpts` (and `opts.signResponse` / `opts.signResponses`,
+ * when present, and `opts.verifyAllLabels`, when present) are
+ * validated at handler-creation time by a dry run — a misconfigured
+ * verifier throws `createVerifiedFetchHandler: invalid verifyOpts: …`
+ * (or `createVerifiedFetchHandler: invalid verifyAllLabels: …`), a
+ * misconfigured response signer throws
+ * `createVerifiedFetchHandler: invalid signResponse options: …` (or
+ * `createVerifiedFetchHandler: invalid signResponses[i] options: …`
+ * for one bad entry of a multi-label list), and `signResponse` plus
+ * `signResponses` together, an empty `signResponses` array, or a
+ * repeated label throw their own creation-time errors — all when
+ * the handler is built, never on the first live request. The
+ * per-request 500 in step 2 therefore only remains as
+ * defense-in-depth: it can still fire if the caller mutates the
+ * `verifyOpts` object after creation (the wrapper reads the same
+ * object per request).
+ *
+ * Honest limits (see also SECURITY.md): TLS is the caller's job —
+ * this handler sees whatever the runtime gives it, and `@scheme`
+ * follows the absolute `Request.url` the signer signed — this
+ * wrapper takes no scheme option, so behind a TLS-terminating proxy
+ * sign over the URL the runtime rebuilds, or terminate TLS in front
+ * of it. The body is held in memory up to the cap. A fetch
+ * `Request` carries no trailers, so a covered `;tr` component cannot
+ * verify through this handler — use `createVerifiedHandler` when
+ * trailers matter. The handler is single-process and stateless:
+ * replay protection still needs an opt-in `VerifyOptions.replayCache`
+ * (see SECURITY.md). The request body stream is consumed by
+ * verification: the `Request` the business handler receives cannot
+ * be re-read for its body.
+ */
+export function createVerifiedFetchHandler(
+  verifyOpts: VerifyOptions,
+  handler: VerifiedFetchHandler,
+  opts?: CreateVerifiedFetchHandlerOptions,
+): (req: Request) => Promise<Response> {
+  const maxBodyBytes = opts?.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0)
+    throw new Error(
+      `createVerifiedFetchHandler: maxBodyBytes must be a positive integer number of bytes, got ${String(opts?.maxBodyBytes)}`,
+    );
+  assertVerifyOptions(verifyOpts, "createVerifiedFetchHandler");
+  const signOpts = opts?.signResponse;
+  const signOptsList = opts?.signResponses;
+  if (signOpts !== undefined && signOptsList !== undefined)
+    throw new Error(
+      "createVerifiedFetchHandler: signResponse and signResponses are mutually exclusive — pass one of them",
+    );
+  if (signOpts !== undefined)
+    assertSignResponseOptions(signOpts, "signResponse", "createVerifiedFetchHandler");
+  if (signOptsList !== undefined)
+    assertSignResponsesOptions(signOptsList, "createVerifiedFetchHandler");
+  const allOpts = opts?.verifyAllLabels;
+  if (allOpts !== undefined)
+    assertVerifyAllOptions(allOpts, "createVerifiedFetchHandler");
+
+  return async (req: Request): Promise<Response> => {
+    let read: FetchBodyRead;
+    try {
+      read = await readFetchBody(req, maxBodyBytes);
+    } catch {
+      // `readFetchBody` guards its own stream errors, so this only
+      // fires for a caller bug (e.g. a non-Request object): still a
+      // read failure, never a signature verdict.
+      return fetchErrorResponse(
+        500,
+        "failed to read request body",
+        "BODY_READ_FAILED",
+      );
+    }
+    if (!read.ok) {
+      return fetchErrorResponse(
+        read.code === "BODY_TOO_LARGE" ? 413 : 500,
+        read.code === "BODY_TOO_LARGE"
+          ? "request body too large"
+          : "failed to read request body",
+        read.code,
+      );
+    }
+    let requestLike: RequestLike;
+    try {
+      requestLike = fromFetchRequest(req, read.body);
+    } catch {
+      // A real fetch `Request` always carries method/url; a missing
+      // host (e.g. an origin-form test double without one) is the
+      // realistic miss — the request cannot even be adapted, so it is
+      // malformed, not a signature verdict.
+      return fetchErrorResponse(400, "malformed request", "MALFORMED_REQUEST");
+    }
+    let result: VerifyResult;
+    if (allOpts !== undefined) {
+      // Multi-label mode: every label must pass before the business
+      // handler runs. An unsigned request yields no results at all
+      // (unless requiredLabels synthesizes failures), and an empty
+      // result set must not pass an `every` check vacuously — it is
+      // a missing signature, answered 401 like the single-label
+      // path. The first failing label's code is the 401 code, so a
+      // stripped co-signature (`MISSING_REQUIRED_LABEL`) and a
+      // tampered one (`SIGNATURE_MISMATCH`) are distinguishable.
+      let results: VerifyResult[];
+      try {
+        results = verifyAllLabels(requestLike, allOpts);
+      } catch {
+        // verifyAllLabels throws only on caller configuration
+        // errors (bad per-label key setup) — a server bug, never a
+        // client verdict.
+        return fetchErrorResponse(500, "internal error", "INTERNAL_ERROR");
+      }
+      const failed = results.find((r) => !r.ok);
+      if (results.length === 0) {
+        return fetchErrorResponse(
+          401,
+          "signature verification failed",
+          "MISSING_SIGNATURE_INPUT",
+        );
+      }
+      if (failed !== undefined) {
+        return fetchErrorResponse(
+          401,
+          "signature verification failed",
+          failed.code ?? "SIGNATURE_MISMATCH",
+        );
+      }
+      result = { ok: true, label: "", perLabelResults: results };
+    } else {
+      try {
+        result = verifyRequest(requestLike, verifyOpts);
+      } catch {
+        // verifyRequest throws only on caller configuration errors
+        // (bad key setup) — a server bug, never a client verdict.
+        return fetchErrorResponse(500, "internal error", "INTERNAL_ERROR");
+      }
+      if (!result.ok) {
+        return fetchErrorResponse(
+          401,
+          "signature verification failed",
+          result.code ?? "SIGNATURE_MISMATCH",
+        );
+      }
+    }
+    let response: Response;
+    try {
+      response = await handler(req, result);
+    } catch {
+      // A business handler that throws is a server bug, never a
+      // client verdict — and any partial response it built never
+      // reaches the caller.
+      return fetchErrorResponse(500, "internal error", "INTERNAL_ERROR");
+    }
+    const signing =
+      signOpts !== undefined ? [signOpts] : signOptsList;
+    if (signing !== undefined) {
+      try {
+        return await signFetchResponse(response, signing, requestLike);
+      } catch {
+        // A signing failure at request time (e.g. a covered header
+        // the handler did not set) — the unsigned response never
+        // reaches the caller.
+        return fetchErrorResponse(500, "internal error", "INTERNAL_ERROR");
+      }
+    }
+    return response;
+  };
 }

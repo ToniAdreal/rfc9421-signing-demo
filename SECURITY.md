@@ -273,6 +273,15 @@ Read this before using it anywhere that matters.
   `nonce` in `signResponse` repeats on every response: the former ages
   out of the verifier's freshness window, the latter trips any replay
   cache on the verify side — leave both unset unless you rotate them.
+  The same limits apply to `createVerifiedFetchHandler`, the fetch
+  twin: it returns `(req: Request) => Promise<Response>`, reads the
+  body through the request stream up to the same cap (cancelling the
+  reader past it), and a fetch `Request` carries no trailers, so a
+  covered `;tr` component cannot verify through it — use
+  `createVerifiedHandler` when trailers matter. The request body
+  stream is consumed by verification, so the business handler receives
+  a `Request` whose body it cannot re-read; a business handler that
+  throws is answered 500 with nothing returned.
 
 ## What verification does *not* guarantee
 

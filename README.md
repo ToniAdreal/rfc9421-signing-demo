@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2166 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2184 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1385,6 +1385,62 @@ result with `verifyAllResponseLabels` (per-label keys, `requiredLabels`
 to fail closed on a stripped co-signature). Two labels are not proof
 of two signers — see SECURITY.md.
 
+Fetch servers — the same receive→verify chain as a ready-made handler
+for WinterCG / edge runtimes, where the handler receives a standard
+`Request` instead of an `IncomingMessage`. `createVerifiedFetchHandler`
+is the fetch twin of `createVerifiedHandler`: same options
+(`maxBodyBytes`, `verifyAllLabels`, `signResponse`, `signResponses`),
+same 400/401/413/500 answers, but it returns `(req: Request) =>
+Promise<Response>`:
+
+```ts
+// An edge function, a WinterCG service worker, an undici-based server:
+// the runtime calls this with the incoming Request and sends back the
+// returned Response — no Node http server involved.
+const verifiedFetchHandler = createVerifiedFetchHandler(
+  { key: gatewayPublicKey }, // any VerifyOptions: key, keyResolver, …
+  async (req, result) => {
+    // The business handler only ever runs for a verified request: it
+    // gets the received Request plus the VerifyResult (result.keyId /
+    // result.alg / result.nonce / result.created are available for
+    // logging and audit).
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  },
+  { maxBodyBytes: 1_048_576 }, // default cap; a larger body gets 413
+);
+```
+
+What the wrapper does per request: it streams the body through the
+request's reader up to `maxBodyBytes` (default 1 MiB,
+`DEFAULT_MAX_BODY_BYTES`); past the cap it cancels the reader, answers
+413 `{ error: "request body too large", code: "BODY_TOO_LARGE" }`, and
+never calls the key resolver. It then runs `fromFetchRequest` +
+`verifyRequest` — or `verifyAllLabels` when the opt-in
+`verifyAllLabels` is set (same semantics as the Node handler: every
+label must pass, an unsigned request is a 401
+`MISSING_SIGNATURE_INPUT`, the first failing label's code is the 401
+code); a verification failure is answered 401 with exactly
+`{ error: "signature verification failed", code }` — no `reason`, no
+stack, no key material — and the business handler is never called. A
+request that cannot even be adapted (missing method/url/host) gets 400
+`MALFORMED_REQUEST`; a misconfigured `verifyOpts` throws at
+handler-creation time (`createVerifiedFetchHandler: invalid verifyOpts:
+…`). With opt-in `signResponse` / `signResponses` the wrapper reads
+the handler's `Response` in full, signs it bound to the request it
+just verified, and returns a fresh `Response` with the same status,
+headers, and body plus the signature headers — a signing failure at
+request time, or a business handler that throws, is answered 500
+`INTERNAL_ERROR` with nothing unsigned returned. Honest limits: TLS
+is the caller's job, the body is held in memory up to the cap, a fetch
+`Request` carries no trailers so a covered `;tr` component cannot
+verify through this handler (use `createVerifiedHandler` when trailers
+matter), and the request body stream is consumed by verification — the
+`Request` the business handler receives cannot be re-read for its body
+(see SECURITY.md).
+
 Verifying signed *responses* with a Node `http` client — the
 receive→verify chain via `fromNodeResponse`:
 
@@ -2011,6 +2067,21 @@ values. Without a request to bind to, keep using the request-side API
   `opts.signResponse` the wrapper also signs the handler's response
   before sending it, bound to the request it just verified. See the
   Quickstart handler example.
+- **Fetch verified handler**: `createVerifiedFetchHandler(verifyOpts,
+  handler, opts?)` is the fetch-API twin of `createVerifiedHandler`
+  for WinterCG / edge runtimes: it returns `(req: Request) =>
+  Promise<Response>`, streams the request body through the reader up
+  to the same default cap (1 MiB, `DEFAULT_MAX_BODY_BYTES`, 413 past
+  it before any verification runs), verifies it with `verifyRequest`
+  (or `verifyAllLabels` when opt-in), and only then calls
+  `handler(req, result)` — a verification failure is answered 401
+  with exactly `{ error, code }` and the handler is never called.
+  With opt-in `opts.signResponse` / `opts.signResponses` the wrapper
+  also signs the handler's `Response` before returning it, bound to
+  the request it just verified. The request body stream is consumed
+  by verification, and a fetch `Request` carries no trailers, so a
+  covered `;tr` component cannot verify through this handler. See the
+  Quickstart fetch handler example.
 - **Node http client adapter**: `fromNodeResponse(res, body, opts?)`
   normalizes a client's received `http.IncomingMessage` into a
   `RequestLike` (response `statusCode` bound via `@status`, same header
@@ -4652,7 +4723,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2166 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2184 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
