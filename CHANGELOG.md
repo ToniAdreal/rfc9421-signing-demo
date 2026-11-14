@@ -11,6 +11,38 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `ReplayCache.release(nonce, now?)` (backlog #1138): a single-nonce
+  release for the replay cache — the missing half of the "verified
+  but never executed" retry story. When a verified request's
+  downstream processing fails (e.g. the business write to the
+  database fails after the signature verified) and the caller wants
+  the client to retry the *same* request verbatim, `release()` forgets
+  exactly that nonce: it returns `true` when the nonce was seen within
+  the TTL and is now forgotten, `false` when it was unseen or already
+  expired (in which case nothing changes — the expired entry is left
+  for the next recording `check()` to reclaim, exactly as a `has()`
+  probe leaves it). After a release `has()` reports `false` and a
+  later `check()` records the nonce as first-seen; `stats().size`
+  drops by one while hits/misses/evictions are untouched (a release
+  is neither a hit, a miss, nor an eviction); sibling nonces keep
+  their LRU recency; and a later `exportSnapshot()` no longer
+  contains the released nonce. The TTL boundary matches `check()` (a
+  nonce seen exactly `ttlSec` ago counts as expired and is not
+  released), an explicit `now` (unix seconds) is accepted like
+  `check()`/`has()`, and an empty or non-string nonce throws a
+  configuration error, the same caliber as `has()`. The JSDoc states
+  the safety boundary explicitly: release reopens the replay window
+  for exactly that nonce, so only release a nonce whose request was
+  *never executed* — releasing one after its request ran lets the
+  same signed request run twice — and the library never releases
+  anything on its own. `test/replayCacheRelease.test.ts` gains 11
+  tests (release true + has false, unseen release false + no state
+  change, post-release check first-seen, expired release false at
+  the TTL boundary via injected and explicit clocks, counters
+  untouched except size, no sibling LRU refresh, snapshot excludes
+  the released nonce, invalid-nonce throws, release after clear
+  false, re-record after release leaves siblings intact), and the
+  test count moves 2184 → 2195.
 - `createVerifiedFetchHandler(verifyOpts, handler, opts?)` (backlog
   #1136): the fetch-API twin of `createVerifiedHandler` — the same
   buffer→adapt→verify→401 loop for WinterCG / edge runtimes, returning

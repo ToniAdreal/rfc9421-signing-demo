@@ -581,6 +581,54 @@ export class ReplayCache implements NonceStore {
   }
 
   /**
+   * Release one tracked nonce: returns `true` when the nonce was seen
+   * within the TTL and is now forgotten, `false` when it was unseen or
+   * already expired (in which case nothing changes — the expired entry
+   * is left for the next recording `check()` to reclaim, exactly as a
+   * `has()` probe leaves it).
+   *
+   * The use case is a verified request whose downstream processing
+   * failed — e.g. the business write to the database failed after the
+   * signature verified — and the caller wants the client to retry the
+   * *same* request verbatim instead of minting a fresh nonce. Without
+   * this, the retry would be misjudged `NONCE_REPLAY` until the TTL
+   * ran out, and the only escape was `clear()`, which reopens the
+   * replay window for every in-flight nonce at once.
+   *
+   * After a successful release the nonce is unseen again: `has()`
+   * reports `false` and a later `check()` records it as first-seen.
+   * The observability counters are untouched except `stats().size`,
+   * which drops by one — a release is neither a hit, a miss, nor an
+   * eviction, and it does not reset the counters the way `clear()`
+   * does. It does not refresh the LRU recency of the remaining
+   * nonces (the released entry no longer exists to be refreshed),
+   * and a later `exportSnapshot()` no longer contains it.
+   *
+   * Safety boundary, and the reason this is an explicit method rather
+   * than something the library does on its own: release reopens the
+   * replay window for exactly that nonce, so only release a nonce
+   * whose request was *never executed* — releasing a nonce after its
+   * request ran lets the same signed request run twice. The library
+   * never releases anything automatically.
+   *
+   * Accepts an explicit `now` (unix seconds) like `check()`; defaults
+   * to the injected clock. The TTL boundary matches `check()`: a nonce
+   * seen exactly `ttlSec` ago counts as expired and is not released.
+   * An empty or non-string nonce throws a configuration `Error`, the
+   * same caliber as `has()`.
+   */
+  release(nonce: string, now?: number): boolean {
+    if (typeof nonce !== "string" || nonce === "")
+      throw new Error("ReplayCache: nonce must be a non-empty string");
+    const t = now ?? this.clock();
+    const prev = this.seenAt.get(nonce);
+    if (prev === undefined) return false;
+    if (t - prev >= this.ttlSec) return false;
+    this.seenAt.delete(nonce);
+    return true;
+  }
+
+  /**
    * Number of live (unexpired) entries tracked, computed against the
    * cache's injected clock. If callers pass their own `now` to `check`
    * (as `verifyRequest` does with the verification time), give the cache

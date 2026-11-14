@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2184 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2195 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1971,7 +1971,19 @@ values. Without a request to bind to, keep using the request-side API
   seen within the TTL — without recording an unseen nonce, refreshing
   the recency of a seen one, reclaiming expired entries, or touching
   the counters (an expired nonce reports as unseen, at the same TTL
-  boundary `check()` uses). A single process can carry the cache across
+  boundary `check()` uses). When a verified request's downstream
+  processing fails and the client should retry the *same* request
+  verbatim instead of minting a fresh nonce, `cache.release(nonce)`
+  forgets exactly that nonce (returns `true` when it was tracked and
+  is now forgotten, `false` when it was unseen or already expired, in
+  which case nothing changes): after a release `has()` reports `false`
+  and a later `check()` records it as first-seen, `stats().size` drops
+  by one while the other counters are untouched, the released nonce no
+  longer appears in `exportSnapshot()`, and sibling nonces keep their
+  LRU recency. Only release a nonce whose request was *never executed*:
+  releasing a nonce after its request ran reopens the replay window for
+  that signed request, which is why the library never releases anything
+  on its own. A single process can carry the cache across
   its own restart: `cache.exportSnapshot()` returns a detached,
   JSON-serializable `{ v: 1, entries }` snapshot of the live nonces with
   their original first-seen timestamps, and
@@ -4723,7 +4735,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2184 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2195 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
