@@ -693,6 +693,21 @@
  * `test/replayStats.test.ts` pin for their own clear
  * cases). The clock never moves, so the segment's printed
  * lines are identical between runs.
+ * The demo then shows a ReplayCache release segment: a
+ * fresh `ReplayCache` under the demo's fixed clock records
+ * one pinned nonce, `has()` reports it tracked, `release()`
+ * forgets exactly that nonce, `has()` reports it gone, and
+ * the same nonce checks in as first-seen again — while the
+ * counters are untouched by the release itself, so `size`
+ * drops by one and nothing else moves. Releasing a
+ * never-seen nonce returns `false` with the stats unchanged,
+ * and an illegal nonce (empty string, or a non-string) is
+ * rejected with a configuration error. Outside the printed
+ * lines the demo asserts every outcome and reading equals
+ * the hand-pinned expectations below (the same release
+ * semantics `test/replayCacheRelease.test.ts` pins). The
+ * clock never moves, so the segment's printed lines are
+ * identical between runs.
  * The demo then closes with a maximum signature age segment:
  * one ed25519 signature pinned at `DEMO_CREATED` with no
  * `expires` is verified under the opt-in
@@ -3170,6 +3185,101 @@ export const DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK: ReplayCacheStats = {
   misses: 1,
   evictions: 0,
 };
+
+/** Nonce of the closing ReplayCache release segment. */
+export const DEMO_REPLAY_RELEASE_NONCE = "demo-nonce-replay-release-001";
+/**
+ * Nonce the release segment releases without ever
+ * recording it: a nonce the cache has never seen.
+ */
+export const DEMO_REPLAY_RELEASE_UNSEEN_NONCE =
+  "demo-nonce-replay-release-unseen-001";
+/**
+ * Hand-pinned `check()` outcomes of the closing release
+ * segment, in call order: the first check records the
+ * nonce (a miss, `false`), and the post-release check of
+ * the same nonce records it again as first-seen (`false`).
+ * Written out here, never derived from the cache the demo
+ * is checking.
+ */
+export const DEMO_REPLAY_RELEASE_CHECKS: ReadonlyArray<boolean> = [
+  false,
+  false,
+];
+/**
+ * Hand-pinned `has()` of the release segment before
+ * `release()`: the nonce is tracked.
+ */
+export const DEMO_REPLAY_RELEASE_HAS_BEFORE = true;
+/**
+ * Hand-pinned `release()` outcome of the release segment:
+ * the tracked nonce is forgotten.
+ */
+export const DEMO_REPLAY_RELEASE_RELEASED = true;
+/**
+ * Hand-pinned `has()` of the release segment after
+ * `release()`: the nonce is no longer tracked.
+ */
+export const DEMO_REPLAY_RELEASE_HAS_AFTER = false;
+/**
+ * Hand-pinned `stats()` of the release segment after the
+ * first check, before `release()`: one recorded nonce and
+ * one miss, no hits. The same counting rules
+ * `test/replayStats.test.ts` pins.
+ */
+export const DEMO_REPLAY_RELEASE_STATS_BEFORE: ReplayCacheStats = {
+  size: 1,
+  hits: 0,
+  misses: 1,
+  evictions: 0,
+};
+/**
+ * Hand-pinned `stats()` of the release segment right after
+ * `release()`: the size dropped by one while the counters
+ * are untouched — a release is neither a hit, a miss, nor
+ * an eviction.
+ */
+export const DEMO_REPLAY_RELEASE_STATS_AFTER_RELEASE: ReplayCacheStats = {
+  size: 0,
+  hits: 0,
+  misses: 1,
+  evictions: 0,
+};
+/**
+ * Hand-pinned `stats()` of the release segment after the
+ * post-release recheck: the nonce is recorded anew, so a
+ * second miss accumulates.
+ */
+export const DEMO_REPLAY_RELEASE_STATS_AFTER_RECHECK: ReplayCacheStats = {
+  size: 1,
+  hits: 0,
+  misses: 2,
+  evictions: 0,
+};
+/**
+ * Hand-pinned `release()` outcome for the never-seen nonce:
+ * `false` — nothing to forget.
+ */
+export const DEMO_REPLAY_RELEASE_UNSEEN_RELEASED = false;
+/**
+ * Hand-pinned `stats()` after releasing the never-seen
+ * nonce: identical to after the recheck — an unseen release
+ * changes nothing.
+ */
+export const DEMO_REPLAY_RELEASE_STATS_AFTER_UNSEEN: ReplayCacheStats = {
+  size: 1,
+  hits: 0,
+  misses: 2,
+  evictions: 0,
+};
+/**
+ * Hand-pinned rejection of the release segment's illegal
+ * nonce: an empty or non-string nonce is a configuration
+ * error, the same caliber as `has()` (the same message
+ * `test/replayCacheRelease.test.ts` pins).
+ */
+export const DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR =
+  "ReplayCache: nonce must be a non-empty string";
 
 /**
  * Opt-in maximum signature age of the closing max-age
@@ -5914,6 +6024,77 @@ export interface DemoResult {
    * counters re-accumulated from zero).
    */
   replayClearStatsAfterRecheck: ReplayCacheStats;
+  /**
+   * The closing ReplayCache release segment's first
+   * `check()` outcome: `false` — the pinned nonce was
+   * recorded (a miss).
+   */
+  replayReleaseFirstCheck: boolean;
+  /**
+   * The segment's `has()` before `release()`: `true` —
+   * the nonce is tracked.
+   */
+  replayReleaseHasBefore: boolean;
+  /**
+   * The segment's `stats()` after the first check, before
+   * `release()` (equals the hand-pinned
+   * `DEMO_REPLAY_RELEASE_STATS_BEFORE`).
+   */
+  replayReleaseStatsBefore: ReplayCacheStats;
+  /**
+   * The segment's `release()` outcome: `true` — the
+   * tracked nonce is forgotten.
+   */
+  replayReleaseReleased: boolean;
+  /**
+   * The segment's `has()` after `release()`: `false` —
+   * the nonce is no longer tracked.
+   */
+  replayReleaseHasAfter: boolean;
+  /**
+   * The segment's `stats()` right after `release()`
+   * (equals the hand-pinned
+   * `DEMO_REPLAY_RELEASE_STATS_AFTER_RELEASE` — size
+   * dropped by one, counters untouched).
+   */
+  replayReleaseStatsAfterRelease: ReplayCacheStats;
+  /**
+   * The segment's post-release `check()` of the same
+   * nonce: `false` — it is first-seen again and recorded
+   * anew.
+   */
+  replayReleaseRecheck: boolean;
+  /**
+   * The segment's `stats()` after the post-release
+   * recheck (equals the hand-pinned
+   * `DEMO_REPLAY_RELEASE_STATS_AFTER_RECHECK` — a second
+   * miss recorded).
+   */
+  replayReleaseStatsAfterRecheck: ReplayCacheStats;
+  /**
+   * The segment's `release()` of the never-seen nonce:
+   * `false` — nothing to forget.
+   */
+  replayReleaseUnseenReleased: boolean;
+  /**
+   * The segment's `stats()` after the unseen release
+   * (equals the hand-pinned
+   * `DEMO_REPLAY_RELEASE_STATS_AFTER_UNSEEN` — unchanged).
+   */
+  replayReleaseStatsAfterUnseen: ReplayCacheStats;
+  /**
+   * The segment's illegal-nonce rejection: the empty-string
+   * `release("")` error message (equals the hand-pinned
+   * `DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR`).
+   */
+  replayReleaseInvalidNonceError: string;
+  /**
+   * The segment's illegal-nonce rejection for a non-string
+   * nonce: the `release(123)` error message (equals the
+   * same hand-pinned
+   * `DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR`).
+   */
+  replayReleaseInvalidNonceNonStringError: string;
   /**
    * The closing max-age segment's dated signature: an
    * ed25519 signature pinned at `DEMO_CREATED` with no
@@ -11387,6 +11568,105 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // ReplayCache release segment: the clear segment above
+  // drops every tracked nonce at once, but a gateway whose
+  // downstream write failed after a signature verified
+  // needs the opposite granularity — forget exactly one
+  // nonce so the client can retry the same request
+  // verbatim. This segment drives a fresh cache under the
+  // demo's fixed clock: the pinned nonce is recorded (a
+  // miss), `has()` reports it tracked, `release()` forgets
+  // it, `has()` reports it gone, and the same nonce checks
+  // in as first-seen again; releasing a never-seen nonce
+  // returns `false` with the stats unchanged, and an
+  // illegal nonce (an empty string, or a non-string) is
+  // rejected with a configuration error. Outside the
+  // printed lines the demo asserts every outcome equals
+  // the hand-pinned DEMO_REPLAY_RELEASE_* expectations
+  // (the same release semantics
+  // `test/replayCacheRelease.test.ts` pins).
+  const replayReleaseCache = new ReplayCache({ now: () => DEMO_CREATED });
+  const replayReleaseFirstCheck = replayReleaseCache.check(
+    DEMO_REPLAY_RELEASE_NONCE,
+  );
+  const replayReleaseHasBefore = replayReleaseCache.has(
+    DEMO_REPLAY_RELEASE_NONCE,
+  );
+  const replayReleaseStatsBefore = replayReleaseCache.stats();
+  const replayReleaseReleased = replayReleaseCache.release(
+    DEMO_REPLAY_RELEASE_NONCE,
+  );
+  const replayReleaseHasAfter = replayReleaseCache.has(
+    DEMO_REPLAY_RELEASE_NONCE,
+  );
+  const replayReleaseStatsAfterRelease = replayReleaseCache.stats();
+  const replayReleaseRecheck = replayReleaseCache.check(
+    DEMO_REPLAY_RELEASE_NONCE,
+  );
+  const replayReleaseStatsAfterRecheck = replayReleaseCache.stats();
+  const replayReleaseUnseenReleased = replayReleaseCache.release(
+    DEMO_REPLAY_RELEASE_UNSEEN_NONCE,
+  );
+  const replayReleaseStatsAfterUnseen = replayReleaseCache.stats();
+  let replayReleaseInvalidNonceError = "";
+  try {
+    replayReleaseCache.release("");
+  } catch (e) {
+    if (e instanceof Error) replayReleaseInvalidNonceError = e.message;
+  }
+  let replayReleaseInvalidNonceNonStringError = "";
+  try {
+    replayReleaseCache.release(123 as unknown as string);
+  } catch (e) {
+    if (e instanceof Error)
+      replayReleaseInvalidNonceNonStringError = e.message;
+  }
+  if (
+    replayReleaseFirstCheck !== DEMO_REPLAY_RELEASE_CHECKS[0] ||
+    replayReleaseHasBefore !== DEMO_REPLAY_RELEASE_HAS_BEFORE ||
+    !replayStatsMatches(
+      replayReleaseStatsBefore,
+      DEMO_REPLAY_RELEASE_STATS_BEFORE,
+    ) ||
+    replayReleaseReleased !== DEMO_REPLAY_RELEASE_RELEASED ||
+    replayReleaseHasAfter !== DEMO_REPLAY_RELEASE_HAS_AFTER ||
+    !replayStatsMatches(
+      replayReleaseStatsAfterRelease,
+      DEMO_REPLAY_RELEASE_STATS_AFTER_RELEASE,
+    ) ||
+    replayReleaseRecheck !== DEMO_REPLAY_RELEASE_CHECKS[1] ||
+    !replayStatsMatches(
+      replayReleaseStatsAfterRecheck,
+      DEMO_REPLAY_RELEASE_STATS_AFTER_RECHECK,
+    ) ||
+    replayReleaseUnseenReleased !== DEMO_REPLAY_RELEASE_UNSEEN_RELEASED ||
+    !replayStatsMatches(
+      replayReleaseStatsAfterUnseen,
+      DEMO_REPLAY_RELEASE_STATS_AFTER_UNSEEN,
+    ) ||
+    replayReleaseInvalidNonceError !==
+      DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR ||
+    replayReleaseInvalidNonceNonStringError !==
+      DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: ReplayCache release gave first check ` +
+        `${replayReleaseFirstCheck}, has before ${replayReleaseHasBefore}, stats before ` +
+        `${JSON.stringify(replayReleaseStatsBefore)}, released ${replayReleaseReleased}, has after ` +
+        `${replayReleaseHasAfter}, stats after release ` +
+        `${JSON.stringify(replayReleaseStatsAfterRelease)}, recheck ${replayReleaseRecheck}, stats after recheck ` +
+        `${JSON.stringify(replayReleaseStatsAfterRecheck)}, unseen release ${replayReleaseUnseenReleased}, stats after unseen ` +
+        `${JSON.stringify(replayReleaseStatsAfterUnseen)}, illegal-nonce errors ` +
+        `${replayReleaseInvalidNonceError} / ${replayReleaseInvalidNonceNonStringError}, instead of the pinned checks ` +
+        `${JSON.stringify(DEMO_REPLAY_RELEASE_CHECKS)}, has before ${DEMO_REPLAY_RELEASE_HAS_BEFORE}, stats before ` +
+        `${JSON.stringify(DEMO_REPLAY_RELEASE_STATS_BEFORE)}, released ${DEMO_REPLAY_RELEASE_RELEASED}, has after ` +
+        `${DEMO_REPLAY_RELEASE_HAS_AFTER}, stats after release ` +
+        `${JSON.stringify(DEMO_REPLAY_RELEASE_STATS_AFTER_RELEASE)}, stats after recheck ` +
+        `${JSON.stringify(DEMO_REPLAY_RELEASE_STATS_AFTER_RECHECK)}, unseen release ${DEMO_REPLAY_RELEASE_UNSEEN_RELEASED}, stats after unseen ` +
+        `${JSON.stringify(DEMO_REPLAY_RELEASE_STATS_AFTER_UNSEEN)} and illegal-nonce error ${DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR}`,
+    );
+  }
+
   // Maximum signature age segment: the freshness segments
   // above bound a signature by its own `expires`, but a
   // signature carrying `created` and no `expires` would
@@ -15479,6 +15759,13 @@ export async function runDemo(): Promise<DemoResult> {
     `ReplayCache clear after clear(): size = ${replayClearSizeAfterClear}, stats() = ${formatReplayStats(replayClearStatsAfterClear)} (every tracked nonce dropped, every counter back at zero)`,
     `ReplayCache clear check("${DEMO_REPLAY_CLEAR_NONCE}") after clear(): returned ${replayClearRecheck} (the same nonce is fresh again — recorded anew), stats() = ${formatReplayStats(replayClearStatsAfterRecheck)} (the counters re-accumulate from zero)`,
     "",
+    "ReplayCache release: ReplayCache.release(nonce) forgets exactly one tracked nonce — the explicit undo a gateway uses when a verified request's downstream write failed, so the client can retry the same request verbatim instead of minting a fresh nonce; only release a nonce whose request was never executed, because releasing one that already ran reopens its replay window",
+    `ReplayCache release first check("${DEMO_REPLAY_RELEASE_NONCE}") on a fresh cache (injected clock pinned at ${DEMO_CREATED}): returned ${replayReleaseFirstCheck} (a fresh nonce, recorded — a miss), has("${DEMO_REPLAY_RELEASE_NONCE}") = ${replayReleaseHasBefore} (the nonce is tracked), stats() = ${formatReplayStats(replayReleaseStatsBefore)}`,
+    `ReplayCache release release("${DEMO_REPLAY_RELEASE_NONCE}"): returned ${replayReleaseReleased} (the nonce is forgotten), has("${DEMO_REPLAY_RELEASE_NONCE}") = ${replayReleaseHasAfter} (no longer tracked), stats() = ${formatReplayStats(replayReleaseStatsAfterRelease)} (size dropped by one, the counters are untouched)`,
+    `ReplayCache release check("${DEMO_REPLAY_RELEASE_NONCE}") after release: returned ${replayReleaseRecheck} (the same nonce is first-seen again — recorded anew), stats() = ${formatReplayStats(replayReleaseStatsAfterRecheck)} (a second miss recorded)`,
+    `ReplayCache release release("${DEMO_REPLAY_RELEASE_UNSEEN_NONCE}") of a nonce never seen: returned ${replayReleaseUnseenReleased} (nothing to forget), stats() = ${formatReplayStats(replayReleaseStatsAfterUnseen)} (unchanged)`,
+    `ReplayCache release release("") of an illegal nonce: rejected (${replayReleaseInvalidNonceError}) — an empty or non-string nonce is a configuration error, never a silent no-op`,
+    "",
     "Maximum signature age: verifyRequest's opt-in maxSignatureAgeSec caps how old a signature's created may be — a signature with created but no expires would otherwise verify forever, so the receiver bounds its age itself",
     maxAgeWithinVerification.ok
       ? `Maximum signature age within the cap: signature created at ${DEMO_CREATED} verified at ${DEMO_MAX_AGE_WITHIN_AT_SEC} (age ${DEMO_MAX_AGE_WITHIN_AT_SEC - DEMO_CREATED}s, maxSignatureAgeSec=${DEMO_MAX_AGE_SEC}): OK (label ${maxAgeWithinVerification.label}, keyid="${maxAgeWithinVerification.keyId}", alg="${maxAgeWithinVerification.alg}")`
@@ -16128,6 +16415,18 @@ export async function runDemo(): Promise<DemoResult> {
     replayClearStatsAfterClear,
     replayClearRecheck,
     replayClearStatsAfterRecheck,
+    replayReleaseFirstCheck,
+    replayReleaseHasBefore,
+    replayReleaseStatsBefore,
+    replayReleaseReleased,
+    replayReleaseHasAfter,
+    replayReleaseStatsAfterRelease,
+    replayReleaseRecheck,
+    replayReleaseStatsAfterRecheck,
+    replayReleaseUnseenReleased,
+    replayReleaseStatsAfterUnseen,
+    replayReleaseInvalidNonceError,
+    replayReleaseInvalidNonceNonStringError,
     maxAgeSigned,
     maxAgeWithinVerification,
     maxAgeBoundaryVerification,

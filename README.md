@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2204 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2206 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -187,6 +187,14 @@ recorded only there; outside the printed lines the demo
 asserts the restored rejection code and the exported
 snapshot against hand-pinned expectations and that the
 original cache still holds only the exported entry. The
+demo then shows a ReplayCache release segment: a fresh
+cache records one pinned nonce, `has()` reports it
+tracked, `release()` forgets exactly that nonce, `has()`
+reports it gone, and the same nonce checks in as
+first-seen again with the counters untouched by the
+release itself; releasing a never-seen nonce returns
+`false` with the stats unchanged, and an illegal nonce is
+printed rejected with a configuration error. The
 demo then shows the per-label signed form of the same
 snapshot: `exportSignedSnapshotsByLabel` wraps the
 merchant and gateway caches in one HMAC envelope each,
@@ -4739,7 +4747,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2204 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2206 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

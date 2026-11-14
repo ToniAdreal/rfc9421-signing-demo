@@ -31,6 +31,21 @@ change type; no entry describes a feature that is not in the history.
   empty binary body, illegal mode fail-fast with zero fetch calls,
   multi-label mode returning the raw `Buffer`); test count moves
   2195 → 2204.
+- CLI demo gains a `ReplayCache.release` segment (backlog #1143):
+  the demo now shows the single-nonce release #1138 added — a fresh
+  cache records one pinned nonce, `has()` reports it tracked,
+  `release()` forgets exactly that nonce, `has()` reports it gone,
+  and the same nonce checks in as first-seen again, with `stats()`
+  showing the size drop by one and the counters untouched; releasing
+  a never-seen nonce returns `false` with the stats unchanged, and
+  an illegal nonce (empty string, or a non-string) is rejected with
+  a configuration error. Every outcome is asserted outside the
+  printed lines against hand-pinned `DEMO_REPLAY_RELEASE_*`
+  expectations, `DemoResult` gains the release fields, and the
+  README demo narrative describes the segment. `test/demo.test.ts`
+  gains 2 tests (segment outcomes + cross-check against a directly
+  driven cache and through `verifyRequest`, printed-lines slice +
+  determinism); test count moves 2204 → 2206.
 - `ReplayCache.release(nonce, now?)` (backlog #1138): a single-nonce
   release for the replay cache — the missing half of the "verified
   but never executed" retry story. When a verified request's

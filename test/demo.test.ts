@@ -561,6 +561,18 @@ import {
   DEMO_REPLAY_CLEAR_STATS_AFTER_CLEAR,
   DEMO_REPLAY_CLEAR_STATS_AFTER_RECHECK,
   DEMO_REPLAY_CLEAR_STATS_BEFORE,
+  DEMO_REPLAY_RELEASE_CHECKS,
+  DEMO_REPLAY_RELEASE_HAS_AFTER,
+  DEMO_REPLAY_RELEASE_HAS_BEFORE,
+  DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR,
+  DEMO_REPLAY_RELEASE_NONCE,
+  DEMO_REPLAY_RELEASE_RELEASED,
+  DEMO_REPLAY_RELEASE_STATS_AFTER_RECHECK,
+  DEMO_REPLAY_RELEASE_STATS_AFTER_RELEASE,
+  DEMO_REPLAY_RELEASE_STATS_AFTER_UNSEEN,
+  DEMO_REPLAY_RELEASE_STATS_BEFORE,
+  DEMO_REPLAY_RELEASE_UNSEEN_NONCE,
+  DEMO_REPLAY_RELEASE_UNSEEN_RELEASED,
   DEMO_REPLAY_SNAPSHOT_CODE,
   DEMO_REPLAY_SNAPSHOT_ENTRIES,
   DEMO_REPLAY_SNAPSHOT_FRESH_NONCE,
@@ -5542,6 +5554,141 @@ test("demo ReplayCache clear segment records, replays, clears to zero, and re-re
   assert.equal(verifyRequest(directSigned, directOpts).ok, true);
 });
 
+test("demo ReplayCache release segment records, probes, releases, and re-records the same nonce", async () => {
+  const {
+    replayReleaseFirstCheck,
+    replayReleaseHasBefore,
+    replayReleaseStatsBefore,
+    replayReleaseReleased,
+    replayReleaseHasAfter,
+    replayReleaseStatsAfterRelease,
+    replayReleaseRecheck,
+    replayReleaseStatsAfterRecheck,
+    replayReleaseUnseenReleased,
+    replayReleaseStatsAfterUnseen,
+    replayReleaseInvalidNonceError,
+    replayReleaseInvalidNonceNonStringError,
+  } = await runDemo();
+  assert.equal(DEMO_REPLAY_RELEASE_NONCE, "demo-nonce-replay-release-001");
+  assert.equal(
+    DEMO_REPLAY_RELEASE_UNSEEN_NONCE,
+    "demo-nonce-replay-release-unseen-001",
+  );
+  assert.deepEqual(DEMO_REPLAY_RELEASE_CHECKS, [false, false]);
+  assert.equal(DEMO_REPLAY_RELEASE_HAS_BEFORE, true);
+  assert.equal(DEMO_REPLAY_RELEASE_RELEASED, true);
+  assert.equal(DEMO_REPLAY_RELEASE_HAS_AFTER, false);
+  assert.deepEqual(DEMO_REPLAY_RELEASE_STATS_BEFORE, {
+    size: 1,
+    hits: 0,
+    misses: 1,
+    evictions: 0,
+  });
+  assert.deepEqual(DEMO_REPLAY_RELEASE_STATS_AFTER_RELEASE, {
+    size: 0,
+    hits: 0,
+    misses: 1,
+    evictions: 0,
+  });
+  assert.deepEqual(DEMO_REPLAY_RELEASE_STATS_AFTER_RECHECK, {
+    size: 1,
+    hits: 0,
+    misses: 2,
+    evictions: 0,
+  });
+  assert.equal(DEMO_REPLAY_RELEASE_UNSEEN_RELEASED, false);
+  assert.deepEqual(DEMO_REPLAY_RELEASE_STATS_AFTER_UNSEEN, {
+    size: 1,
+    hits: 0,
+    misses: 2,
+    evictions: 0,
+  });
+  assert.equal(
+    DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR,
+    "ReplayCache: nonce must be a non-empty string",
+  );
+  assert.equal(replayReleaseFirstCheck, DEMO_REPLAY_RELEASE_CHECKS[0]);
+  assert.equal(replayReleaseHasBefore, DEMO_REPLAY_RELEASE_HAS_BEFORE);
+  assert.deepEqual(replayReleaseStatsBefore, DEMO_REPLAY_RELEASE_STATS_BEFORE);
+  assert.equal(replayReleaseReleased, DEMO_REPLAY_RELEASE_RELEASED);
+  assert.equal(replayReleaseHasAfter, DEMO_REPLAY_RELEASE_HAS_AFTER);
+  assert.deepEqual(
+    replayReleaseStatsAfterRelease,
+    DEMO_REPLAY_RELEASE_STATS_AFTER_RELEASE,
+  );
+  assert.equal(replayReleaseRecheck, DEMO_REPLAY_RELEASE_CHECKS[1]);
+  assert.deepEqual(
+    replayReleaseStatsAfterRecheck,
+    DEMO_REPLAY_RELEASE_STATS_AFTER_RECHECK,
+  );
+  assert.equal(replayReleaseUnseenReleased, DEMO_REPLAY_RELEASE_UNSEEN_RELEASED);
+  assert.deepEqual(
+    replayReleaseStatsAfterUnseen,
+    DEMO_REPLAY_RELEASE_STATS_AFTER_UNSEEN,
+  );
+  assert.equal(
+    replayReleaseInvalidNonceError,
+    DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR,
+  );
+  assert.equal(
+    replayReleaseInvalidNonceNonStringError,
+    DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR,
+  );
+  // Cross-check against a directly driven cache (the same
+  // release semantics test/replayCacheRelease.test.ts pins).
+  const direct = new ReplayCache({ now: () => DEMO_CREATED });
+  assert.equal(direct.check(DEMO_REPLAY_RELEASE_NONCE), replayReleaseFirstCheck);
+  assert.equal(direct.has(DEMO_REPLAY_RELEASE_NONCE), replayReleaseHasBefore);
+  assert.deepEqual(direct.stats(), replayReleaseStatsBefore);
+  assert.equal(direct.release(DEMO_REPLAY_RELEASE_NONCE), replayReleaseReleased);
+  assert.equal(direct.has(DEMO_REPLAY_RELEASE_NONCE), replayReleaseHasAfter);
+  assert.deepEqual(direct.stats(), replayReleaseStatsAfterRelease);
+  assert.equal(direct.check(DEMO_REPLAY_RELEASE_NONCE), replayReleaseRecheck);
+  assert.deepEqual(direct.stats(), replayReleaseStatsAfterRecheck);
+  assert.equal(
+    direct.release(DEMO_REPLAY_RELEASE_UNSEEN_NONCE),
+    replayReleaseUnseenReleased,
+  );
+  assert.deepEqual(direct.stats(), replayReleaseStatsAfterUnseen);
+  assert.throws(
+    () => direct.release(""),
+    (e: unknown) =>
+      e instanceof Error && e.message === replayReleaseInvalidNonceError,
+  );
+  assert.throws(
+    () => direct.release(123 as unknown as string),
+    (e: unknown) =>
+      e instanceof Error &&
+      e.message === replayReleaseInvalidNonceNonStringError,
+  );
+  // The same release semantics end-to-end through verifyRequest
+  // (the shape test/replayCacheRelease.test.ts pins for its
+  // release case): a verified nonce replays, release() forgets
+  // it, and the same request verifies again.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const directCache = new ReplayCache({ now: () => DEMO_CREATED + 60 });
+  const directSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_REPLAY_RELEASE_NONCE,
+    },
+  );
+  const directOpts = { key: publicKey, now: DEMO_CREATED + 60, replayCache: directCache };
+  assert.equal(verifyRequest(directSigned, directOpts).ok, true);
+  assert.equal(verifyRequest(directSigned, directOpts).code, "NONCE_REPLAY");
+  assert.equal(directCache.release(DEMO_REPLAY_RELEASE_NONCE), true);
+  assert.equal(verifyRequest(directSigned, directOpts).ok, true);
+});
+
 test("demo lines contain the ReplayCache clear segment (record, replay, cleared zero state, fresh re-record)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
@@ -5563,6 +5710,33 @@ test("demo lines contain the ReplayCache clear segment (record, replay, cleared 
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("ReplayCache clear:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 5), lines.slice(headerIdx, headerIdx + 5));
+});
+
+test("demo lines contain the ReplayCache release segment (record, probe, release, re-record, unseen, illegal nonce, followed by the max-age segment)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /ReplayCache release: ReplayCache\.release\(nonce\) forgets exactly one tracked nonce/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("ReplayCache release:"));
+  const clearIdx = lines.findIndex((l) => l.startsWith("ReplayCache clear:"));
+  assert.ok(clearIdx !== -1 && headerIdx !== -1 && clearIdx < headerIdx);
+  const fmt = (st: { size: number; hits: number; misses: number; evictions: number }) =>
+    `{ size: ${st.size}, hits: ${st.hits}, misses: ${st.misses}, evictions: ${st.evictions} }`;
+  const [c0, c1] = DEMO_REPLAY_RELEASE_CHECKS;
+  const expectedLines = [
+    "ReplayCache release: ReplayCache.release(nonce) forgets exactly one tracked nonce — the explicit undo a gateway uses when a verified request's downstream write failed, so the client can retry the same request verbatim instead of minting a fresh nonce; only release a nonce whose request was never executed, because releasing one that already ran reopens its replay window",
+    `ReplayCache release first check("${DEMO_REPLAY_RELEASE_NONCE}") on a fresh cache (injected clock pinned at ${DEMO_CREATED}): returned ${c0} (a fresh nonce, recorded — a miss), has("${DEMO_REPLAY_RELEASE_NONCE}") = ${DEMO_REPLAY_RELEASE_HAS_BEFORE} (the nonce is tracked), stats() = ${fmt(DEMO_REPLAY_RELEASE_STATS_BEFORE)}`,
+    `ReplayCache release release("${DEMO_REPLAY_RELEASE_NONCE}"): returned ${DEMO_REPLAY_RELEASE_RELEASED} (the nonce is forgotten), has("${DEMO_REPLAY_RELEASE_NONCE}") = ${DEMO_REPLAY_RELEASE_HAS_AFTER} (no longer tracked), stats() = ${fmt(DEMO_REPLAY_RELEASE_STATS_AFTER_RELEASE)} (size dropped by one, the counters are untouched)`,
+    `ReplayCache release check("${DEMO_REPLAY_RELEASE_NONCE}") after release: returned ${c1} (the same nonce is first-seen again — recorded anew), stats() = ${fmt(DEMO_REPLAY_RELEASE_STATS_AFTER_RECHECK)} (a second miss recorded)`,
+    `ReplayCache release release("${DEMO_REPLAY_RELEASE_UNSEEN_NONCE}") of a nonce never seen: returned ${DEMO_REPLAY_RELEASE_UNSEEN_RELEASED} (nothing to forget), stats() = ${fmt(DEMO_REPLAY_RELEASE_STATS_AFTER_UNSEEN)} (unchanged)`,
+    `ReplayCache release release("") of an illegal nonce: rejected (${DEMO_REPLAY_RELEASE_INVALID_NONCE_ERROR}) — an empty or non-string nonce is a configuration error, never a silent no-op`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), expectedLines);
+  // The max-age segment follows the release segment.
+  const maxAgeIdx = lines.findIndex((l) => l.startsWith("Maximum signature age:"));
+  assert.ok(headerIdx !== -1 && maxAgeIdx !== -1 && headerIdx < maxAgeIdx);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("ReplayCache release:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 6), lines.slice(headerIdx, headerIdx + 6));
 });
 
 test("demo max-age segment caps a dated signature at maxSignatureAgeSec (within/boundary ok, past-cap SIGNATURE_TOO_OLD, undated bypass)", async () => {
