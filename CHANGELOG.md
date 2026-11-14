@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark gains a multi-label `verifiedFetch` end-to-end row
+  (backlog #1122): the same loopback settlement response, now
+  dual-signed (merchant ed25519 via `signResponse`, gateway
+  hmac-sha256 via `addResponseSignature`), is verified in a single
+  `verifiedFetch` call with `verify.verifyAllLabels`
+  (`requiredLabels: ["merchant", "gateway"]`, per-label keys) — one
+  full sign → fetch → dual-verify round trip per measured op, with
+  both labels' identities (label / keyid / alg / nonce /
+  `@status content-digest`) self-checked on every pass, and a
+  tampered-body delivery pinned outside timing to fail with
+  `BODY_DIGEST_MISMATCH`. In the 2026-11-14 run it measured ~648.9
+  ops/sec (1541.12 µs/op) against ~766.9 ops/sec (1303.87 µs/op)
+  for the single-label row. The Benchmarks table is refreshed with
+  the same run (123 rows, Node v24.22.1 on linux/x64, AMD EPYC
+  9D25); the test count is unchanged at 2139 (bench-only change).
 - `CreateVerifiedHandlerOptions.signResponses` (backlog #1121):
   multi-label response signing — the signing twin of the
   `verifyAllLabels` verify mode. One entry per label, in wire

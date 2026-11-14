@@ -843,7 +843,14 @@
  * 200 status, the exact settlement body, and the pinned label /
  * keyid / alg / nonce self-checked — and a tampered-body delivery
  * pinned outside timing to fail with `BODY_DIGEST_MISMATCH`, so
- * the row cannot be measuring a path that skips verification.
+ * the row cannot be measuring a path that skips verification,
+ * plus the multi-label twin of that row: the same loopback
+ * settlement response dual-signed (merchant ed25519, gateway
+ * hmac-sha256) and verified in one `verifiedFetch` call with
+ * `verify.verifyAllLabels` — one full sign → fetch → dual-verify
+ * round trip per measured op, both labels' identities self-checked
+ * on every pass, so the two rows price the one-call multi-label
+ * wrapper against the single-label round trip.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -13228,6 +13235,223 @@ async function benchmarkVerifiedFetch(): Promise<number> {
 }
 
 /**
+ * Fixed fixture for the multi-label `verifiedFetch` end-to-end row
+ * (backlog #1122): the client twin of the `verifyAllResponseLabels`
+ * row — the same loopback settlement response, but dual-signed
+ * (merchant ed25519 via `signResponse`, gateway hmac-sha256 appended
+ * via `addResponseSignature`) and verified in one `verifiedFetch`
+ * call with `verify.verifyAllLabels`, so the row prices the whole
+ * client round trip a settlement caller pays for a dual-signed
+ * response (request signing + TCP loopback + both label
+ * verifications). Labels / keyids / nonces are pinned per label;
+ * `created` / `now` (+60s) and the fixed client ed25519 POST reuse
+ * the single-label row's pins, so the two rows differ only in the
+ * response's second signature and the one-call multi-label verify —
+ * the wrapper cost of the second label is what the rows compare.
+ * Both key pairs are fresh per bench run, generated once before
+ * timing; nothing measured depends on their values and no replay
+ * cache is configured, so the pinned nonces can be reused across
+ * passes without a replay rejection.
+ */
+const VERIFIED_FETCH_MULTI_MERCHANT_LABEL = "merchant";
+const VERIFIED_FETCH_MULTI_GATEWAY_LABEL = "gateway";
+const VERIFIED_FETCH_MULTI_MERCHANT_KEY_ID =
+  "bench-verified-fetch-multi-merchant-1";
+const VERIFIED_FETCH_MULTI_GATEWAY_KEY_ID =
+  "bench-verified-fetch-multi-gateway-1";
+const VERIFIED_FETCH_MULTI_MERCHANT_NONCE =
+  "bench-verified-fetch-multi-merchant-nonce-1";
+const VERIFIED_FETCH_MULTI_GATEWAY_NONCE =
+  "bench-verified-fetch-multi-gateway-nonce-1";
+/** Gateway hmac secret for the multi-label row (33 bytes, above the `secretKey` 32-byte floor). */
+const VERIFIED_FETCH_MULTI_GATEWAY_SECRET =
+  "gateway-shared-secret-32-bytes-0!";
+
+/**
+ * Pinned shape of one multi-label `verifiedFetch` round trip: the
+ * 200 status, the exact settlement body, the aggregate result
+ * (`ok`, empty `label`, two per-label results), and each label's own
+ * identity in wire order — merchant ed25519 first, gateway
+ * hmac-sha256 second — each with its pinned keyid / nonce /
+ * `created` and `@status content-digest` covered.
+ */
+function assertVerifiedFetchMultiLabelRoundTrip(
+  result: Awaited<ReturnType<typeof verifiedFetch>>,
+  where: string,
+): void {
+  const v = result.verifyResult;
+  const per = result.verifyResults ?? [];
+  if (
+    result.response.status !== 200 ||
+    result.body !== VERIFIED_FETCH_RESPONSE_BODY ||
+    !v.ok ||
+    v.label !== "" ||
+    per.length !== 2 ||
+    v.perLabelResults?.length !== 2 ||
+    per[0]?.label !== VERIFIED_FETCH_MULTI_MERCHANT_LABEL ||
+    per[0]?.keyId !== VERIFIED_FETCH_MULTI_MERCHANT_KEY_ID ||
+    per[0]?.alg !== "ed25519" ||
+    per[0]?.nonce !== VERIFIED_FETCH_MULTI_MERCHANT_NONCE ||
+    per[0]?.created !== VERIFIED_FETCH_CREATED ||
+    per[0]?.coveredComponents?.join(" ") !== "@status content-digest" ||
+    per[1]?.label !== VERIFIED_FETCH_MULTI_GATEWAY_LABEL ||
+    per[1]?.keyId !== VERIFIED_FETCH_MULTI_GATEWAY_KEY_ID ||
+    per[1]?.alg !== "hmac-sha256" ||
+    per[1]?.nonce !== VERIFIED_FETCH_MULTI_GATEWAY_NONCE ||
+    per[1]?.created !== VERIFIED_FETCH_CREATED ||
+    per[1]?.coveredComponents?.join(" ") !== "@status content-digest"
+  )
+    throw new Error(
+      `benchmark self-check failed: verifiedFetch multi-label ${where} round trip gave ` +
+        `${result.response.status} ${JSON.stringify(result.body)} ${JSON.stringify(v)} ${JSON.stringify(per)}`,
+    );
+}
+
+/**
+ * Shared harness for the multi-label `verifiedFetch` row: one
+ * loopback server, one merchant ed25519 key pair, one gateway hmac
+ * secret. `/settled` dual-signs the fixed settlement response and
+ * sends it verbatim; `/tampered` signs the same response but sends
+ * the body with one digit flipped, so the `content-digest` header
+ * no longer matches the bytes on the wire. The server never verifies
+ * the request itself — that direction is the
+ * `createVerifiedHandler` rows' job. Returns the port, the merchant
+ * public key and gateway secret the client verifies against, and a
+ * close that drains connections first so `server.close` cannot hang
+ * on a keep-alive socket.
+ */
+async function startVerifiedFetchMultiLabelServer(): Promise<{
+  port: number;
+  merchantPublicKey: KeyObject;
+  gatewaySecret: KeyObject;
+  close: () => Promise<void>;
+}> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const gatewaySecret = secretKey(VERIFIED_FETCH_MULTI_GATEWAY_SECRET);
+  const server = createServer((req, res) => {
+    const tampered = req.url === "/tampered";
+    const merchantSigned = signResponse(
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: VERIFIED_FETCH_RESPONSE_BODY,
+      },
+      {
+        keyId: VERIFIED_FETCH_MULTI_MERCHANT_KEY_ID,
+        alg: "ed25519",
+        key: privateKey,
+        created: VERIFIED_FETCH_CREATED,
+        nonce: VERIFIED_FETCH_MULTI_MERCHANT_NONCE,
+        label: VERIFIED_FETCH_MULTI_MERCHANT_LABEL,
+      },
+    );
+    const dual = addResponseSignature(merchantSigned, {
+      keyId: VERIFIED_FETCH_MULTI_GATEWAY_KEY_ID,
+      alg: "hmac-sha256",
+      key: gatewaySecret,
+      created: VERIFIED_FETCH_CREATED,
+      nonce: VERIFIED_FETCH_MULTI_GATEWAY_NONCE,
+      label: VERIFIED_FETCH_MULTI_GATEWAY_LABEL,
+    });
+    res.writeHead(200, {
+      "content-type": "application/json",
+      "content-digest": dual.headers["content-digest"] as string,
+      "signature-input": dual.headers["signature-input"] as string,
+      signature: dual.headers["signature"] as string,
+    });
+    res.end(
+      tampered ? VERIFIED_FETCH_TAMPERED_BODY : VERIFIED_FETCH_RESPONSE_BODY,
+    );
+  });
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", resolve),
+  );
+  const port = (server.address() as AddressInfo).port;
+  return {
+    port,
+    merchantPublicKey: publicKey,
+    gatewaySecret,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+/**
+ * Multi-label `verifiedFetch` signed round-trip steady state: the
+ * whole client path — request signing, the global `fetch` over
+ * loopback, body buffering under the default cap, and dual-label
+ * response verification in one `verifiedFetch` call with
+ * `verify.verifyAllLabels` — priced as one HTTP round trip per op.
+ * Self-checks on every measured pass pin the 200 status, the exact
+ * settlement body, and both labels' verification identities (see
+ * {@link assertVerifiedFetchMultiLabelRoundTrip}); asserted outside
+ * timing: one probe round trip returns the same pinned fields, and
+ * a delivery whose body was flipped after signing throws a
+ * `VerifyError` with the pinned `BODY_DIGEST_MISMATCH` code — the
+ * row cannot be measuring a path that skips verification.
+ */
+async function benchmarkVerifiedFetchMultiLabel(): Promise<number> {
+  const s = await startVerifiedFetchMultiLabelServer();
+  try {
+    const clientPair = generateEd25519KeyPair();
+    const sign = {
+      keyId: VERIFIED_FETCH_CLIENT_KEY_ID,
+      alg: "ed25519" as const,
+      key: clientPair.privateKey,
+      created: VERIFIED_FETCH_CREATED,
+      nonce: VERIFIED_FETCH_CLIENT_NONCE,
+    };
+    const verify = {
+      verifyAllLabels: {
+        keys: {
+          [VERIFIED_FETCH_MULTI_MERCHANT_LABEL]: s.merchantPublicKey,
+          [VERIFIED_FETCH_MULTI_GATEWAY_LABEL]: s.gatewaySecret,
+        },
+        requiredLabels: [
+          VERIFIED_FETCH_MULTI_MERCHANT_LABEL,
+          VERIFIED_FETCH_MULTI_GATEWAY_LABEL,
+        ],
+        now: VERIFIED_FETCH_NOW,
+      },
+    };
+    const base = `http://127.0.0.1:${s.port}`;
+    const init = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: VERIFIED_FETCH_REQUEST_BODY,
+    };
+    assertVerifiedFetchMultiLabelRoundTrip(
+      await verifiedFetch(`${base}/settled`, init, { sign, verify }),
+      "probe",
+    );
+    let tampered: unknown;
+    try {
+      await verifiedFetch(`${base}/tampered`, init, { sign, verify });
+    } catch (e) {
+      tampered = e;
+    }
+    if (!isVerifyError(tampered) || tampered.code !== "BODY_DIGEST_MISMATCH")
+      throw new Error(
+        `benchmark self-check failed: tampered verifiedFetch multi-label delivery gave ` +
+          `${tampered instanceof Error ? `${tampered.name}: ${tampered.message}` : "no throw"} ` +
+          `(expected VerifyError BODY_DIGEST_MISMATCH)`,
+      );
+    const ops = await measureAsync(async () => {
+      assertVerifiedFetchMultiLabelRoundTrip(
+        await verifiedFetch(`${base}/settled`, init, { sign, verify }),
+        "timed",
+      );
+    }, ITERATIONS);
+    return ops;
+  } finally {
+    await s.close();
+  }
+}
+
+/**
  * Per-curve JWK round-trip steady state: for one key shape, a measured
  * call runs `exportPublicKeyJwk*` on a fixed public key, pushes the
  * JWK through a JSON stringify/parse round trip (the wire form a JWKS
@@ -16272,6 +16496,11 @@ results.push({
   alg: "verifiedFetch (signed POST, loopback)",
   op: "sign+fetch+verify",
   ops: await benchmarkVerifiedFetch(),
+});
+results.push({
+  alg: "verifiedFetch multi-label (signed POST, loopback, 2 labels)",
+  op: "sign+fetch+verify",
+  ops: await benchmarkVerifiedFetchMultiLabel(),
 });
 results.push({
   alg: "JWK round-trip P-256",
