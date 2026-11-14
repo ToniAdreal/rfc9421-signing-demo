@@ -31,7 +31,13 @@
  * the loop: it buffers the body, adapts it with `fromNodeRequest`,
  * verifies it, and only then calls the business handler — so a
  * webhook receiver cannot forget a step and let an unverified request
- * into its logic. The `node:http` import below is type-only (erased at
+ * into its logic. `fromFetchRequest` is the inbound twin of
+ * `fromFetchResponse` for fetch-style servers (undici / WinterCG /
+ * edge runtimes, where the handler receives a standard `Request`
+ * instead of an `IncomingMessage`): same normalization, only the
+ * input shape differs (`Request.method` / `Request.url` /
+ * `Request.headers`, an absolute URL passed through verbatim).
+ * The `node:http` import below is type-only (erased at
  * compile time): the runtime dependency count stays zero.
  */
 
@@ -172,6 +178,41 @@ export interface FromFetchResponseOptions {
    * paired with `method`.
    */
   url?: string;
+}
+
+/**
+ * The `Request` fields the inbound fetch adapter actually reads. A
+ * real fetch `Request` (Node ≥ 20, undici / WinterCG / edge runtimes)
+ * satisfies this shape — `Request.method` and `Request.url` are
+ * always set, and `Request.headers` is a `Headers` instance, which is
+ * an iterable of `[name, value]` pairs. Plain test doubles do too:
+ * any iterable of pairs works (a real `Headers` instance, or a
+ * literal array of pairs), with no dependency on the DOM `Headers`
+ * type. `method` / `url` are optional only so a missing value fails
+ * fast with a descriptive error instead of silently defaulting: a
+ * real `Request` always carries both.
+ */
+export interface FetchRequestLike {
+  /** The request method (e.g. `"POST"`), as `Request.method` gives it. */
+  method?: string | undefined;
+  /**
+   * The request URL. A real `Request` always carries an absolute URL
+   * (e.g. `"https://api.example.com/v1/charge"`), which the adapter
+   * passes through verbatim — including any port. An origin-form
+   * path (`"/v1/charge"`, as a test double or a proxy-style message
+   * might carry) is rebuilt as `http://<host><path>` from the `host`
+   * header, the `fromNodeRequest` convention.
+   */
+  url?: string | undefined;
+  /**
+   * Header fields, as `[name, value]` pairs in iteration order. A real
+   * `Headers` instance already combines repeated fields (other than
+   * `set-cookie`, which it yields as separate entries) with `", "`; the
+   * adapter groups entries by lowercased name and joins each group with
+   * `joinHeaderValues`, the same convention `fromNodeRequest` applies
+   * to Node's array-valued headers.
+   */
+  headers: Iterable<[string, string]>;
 }
 
 /**
@@ -340,6 +381,116 @@ export function fromFetchResponse(
     ...(boundRequest !== undefined ? { request: boundRequest } : {}),
   };
   return requestLike;
+}
+
+/**
+ * Build a `RequestLike` from a received fetch `Request` plus its
+ * already-read body.
+ *
+ * This is the inbound fetch-API twin of `fromNodeRequest`: same
+ * header normalization (lowercased names, multi-value fields joined
+ * with `joinHeaderValues`), same fail-fast errors, only the input
+ * shape differs (`Request.method` / `Request.url` / `Request.headers`
+ * instead of `IncomingMessage.method` / `url` / a record of headers).
+ * It is the adapter for fetch-style servers — undici, WinterCG, edge
+ * runtimes — where the handler receives a standard `Request` and
+ * there is no `IncomingMessage` to hand to `fromNodeRequest`.
+ *
+ * The body is NOT read here and `req.body` is never consumed: a
+ * fetch body is a one-shot stream, and verification needs the exact
+ * raw bytes (the `Content-Digest` check recomputes over them), so
+ * the caller reads it first — typically
+ * `Buffer.from(await req.arrayBuffer())` — and passes the bytes in.
+ * A `Uint8Array` body is copied into a `Buffer` (the `RequestLike`
+ * body type is `string | Buffer`); a `Buffer` or string passes
+ * through untouched.
+ *
+ * A real `Request` always carries an absolute URL, which is passed
+ * through verbatim — the port in `https://api.example.com:8443/…`
+ * survives, so a covered `@authority` binds exactly what the signer
+ * signed. An absolute URL with no host (`https:///path`) or one that
+ * does not parse at all throws a descriptive `Error`: a signature
+ * over `@authority` cannot verify against an empty host. An
+ * origin-form path (`/v1/charge`, as a test double or a proxy-style
+ * message might carry) is rebuilt as `http://<host><path>` from the
+ * `host` header, the `fromNodeRequest` convention — and without a
+ * `host` header that throws too.
+ *
+ * A fetch `Request` carries no trailers, so the resulting
+ * `RequestLike` never gains a `trailers` field: a covered `;tr`
+ * component cannot verify through this adapter (it resolves against
+ * `RequestLike.trailers`, which is absent), exactly as if the peer
+ * sent no trailers. Use `fromNodeRequest` when trailers matter.
+ *
+ * Throws a descriptive `Error` on a missing `req.method` or
+ * `req.url` — those are caller configuration mistakes, never
+ * silently defaulted.
+ *
+ * Multi-value headers are combined with `joinHeaderValues` — see its
+ * warning before covering `set-cookie`: two cookies join into one
+ * string that cannot be split back into the original cookies.
+ */
+export function fromFetchRequest(
+  req: FetchRequestLike,
+  body?: string | Buffer | Uint8Array,
+): RequestLike {
+  const method = req.method;
+  if (method === undefined || method === "")
+    throw new Error("fromFetchRequest: req.method is missing");
+  const rawUrl = req.url;
+  if (rawUrl === undefined || rawUrl === "")
+    throw new Error("fromFetchRequest: req.url is missing");
+
+  const headers = normalizeFetchHeaders(req.headers);
+
+  let url: string;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(rawUrl)) {
+    // Absolute-form URL, as a real fetch Request always carries:
+    // pass through verbatim, but fail fast when it has no host — a
+    // signature over @authority cannot verify against an empty host.
+    // The raw string must carry a non-empty authority: WHATWG URL
+    // parsing would silently promote the first path segment to the
+    // host for `https:///v1/charge` (host "v1"), so a parsed hostname
+    // alone cannot prove the caller supplied one.
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#]+/.test(rawUrl))
+      throw new Error(
+        "fromFetchRequest: req.url has no host — @authority verification needs a host",
+      );
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      throw new Error(
+        `fromFetchRequest: req.url is not a valid absolute URL, got ${JSON.stringify(rawUrl)}`,
+      );
+    }
+    if (parsed.hostname === "")
+      throw new Error(
+        "fromFetchRequest: req.url has no host — @authority verification needs a host",
+      );
+    url = rawUrl;
+  } else {
+    // Origin-form path (a test double, or a proxy-style message):
+    // rebuild from the host header, the fromNodeRequest convention.
+    const host = headers["host"];
+    if (host === undefined || host === "")
+      throw new Error(
+        "fromFetchRequest: cannot rebuild the request URL without a host header",
+      );
+    url = `http://${host}${rawUrl}`;
+  }
+
+  return {
+    method,
+    url,
+    headers,
+    body:
+      body === undefined
+        ? undefined
+        : typeof body === "string" || Buffer.isBuffer(body)
+          ? body
+          : Buffer.from(body),
+  };
 }
 
 /**

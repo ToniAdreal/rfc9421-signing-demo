@@ -11,6 +11,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `fromFetchRequest(req, body)` (backlog #1125): the inbound fetch-API
+  twin of `fromNodeRequest` — normalizes a fetch-style server's
+  `Request` (undici / WinterCG / edge runtime) into a `RequestLike`
+  (`FetchRequestLike`: method/url/headers, headers as a `Headers`
+  instance or an entries iterable), so `verifyRequest` plugs straight
+  into verifying signed requests where there is no
+  `IncomingMessage`. The absolute `Request.url` passes through
+  verbatim (port included, so a covered `@authority` binds exactly
+  what the signer signed); an origin-form path is rebuilt as
+  `http://<host><path>` from the `host` header, the `fromNodeRequest`
+  convention. Fail-fast on a missing method/url, on an absolute URL
+  with no host (checked against the raw string, because WHATWG URL
+  parsing would silently promote the first path segment of
+  `https:///v1/charge` to host `v1`), on an unparseable absolute URL,
+  and on an origin-form path with no `host` header. Headers normalize
+  with the same conventions as `fromNodeRequest` (lowercased names,
+  multi-value fields joined with `", "`); the body is read by the
+  caller and passed in as `string | Buffer | Uint8Array` (a
+  `Uint8Array` is copied into a `Buffer`, `req.body` is never
+  consumed), and the result never gains a `trailers` field.
+  `test/nodeHttpFetchRequest.test.ts` gains 13 tests (real `Request`
+  sign → adapt → verify round-trip, minimal-double round-trip,
+  multi-value normalization parity with a covered header, host:port
+  preservation, missing method/url/host and unparseable-URL throws,
+  origin-form rebuild + verify, string/Buffer passthrough and
+  `Uint8Array` copy, `Headers`-instance vs entries-array parity,
+  `req.body` never consumed), and the test count moves 2139 → 2152.
 - Benchmark gains a multi-label `verifiedFetch` end-to-end row
   (backlog #1122): the same loopback settlement response, now
   dual-signed (merchant ed25519 via `signResponse`, gateway

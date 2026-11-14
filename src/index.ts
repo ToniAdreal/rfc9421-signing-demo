@@ -133,6 +133,7 @@ export type { StructuredFieldType } from "./structuredFields.js";
 export {
   createVerifiedHandler,
   DEFAULT_MAX_BODY_BYTES,
+  fromFetchRequest,
   fromFetchResponse,
   fromNodeRequest,
   fromNodeResponse,
@@ -157,6 +158,7 @@ export type {
 } from "./response.js";
 export type {
   CreateVerifiedHandlerOptions,
+  FetchRequestLike,
   FetchResponseLike,
   FromFetchResponseOptions,
   FromNodeRequestOptions,

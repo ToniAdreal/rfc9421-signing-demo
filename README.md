@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2139 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2152 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1160,6 +1160,45 @@ chunked messages and are complete only after the request's `end`
 event, which is when the example above calls the adapter. A message
 with no trailers produces no `trailers` field at all.
 
+Receiving signed requests in a fetch-style server — the same chain via
+`fromFetchRequest`:
+
+```ts
+import { fromFetchRequest, verifyRequest } from "./dist/src/index.js";
+
+// A fetch-style handler (undici / WinterCG / edge runtime) receives a
+// standard Request instead of an http.IncomingMessage:
+async function handler(req: Request): Promise<Response> {
+  // A fetch body is a one-shot stream: read it first and pass the
+  // bytes in — the adapter never consumes req.body itself.
+  const body = Buffer.from(await req.arrayBuffer());
+  const result = verifyRequest(fromFetchRequest(req, body), {
+    key: gatewayPublicKey,
+  });
+  if (!result.ok) {
+    return new Response(`bad signature: ${result.code}`, { status: 401 });
+  }
+  return new Response("ok"); // result.nonce / result.keyId available here
+}
+```
+
+What `fromFetchRequest` does: takes the absolute `Request.url`
+verbatim (the port in `https://api.example.com:8443/…` survives, so a
+covered `@authority` binds exactly what the signer signed), lowercases
+header names and joins multi-value headers with `", "` (the same
+convention as `fromNodeRequest`), and passes the already-read body
+through untouched (a `Uint8Array` body is copied into a `Buffer`; a
+string or `Buffer` passes through as-is). A `Request` always carries an
+absolute URL, so there is no scheme inference — an absolute URL with
+no host, or one that does not parse, throws a configuration `Error`
+instead of silently defaulting. An origin-form path (`/v1/charge`, as a
+test double might carry) is rebuilt as `http://<host><path>` from the
+`host` header, the `fromNodeRequest` convention; without a `host`
+header that throws too. A fetch `Request` carries no trailers, so the
+resulting `RequestLike` never gains a `trailers` field and a covered
+`;tr` component cannot verify through this adapter — use
+`fromNodeRequest` when trailers matter.
+
 The same receive→verify chain as a ready-made handler — use
 `createVerifiedHandler` instead of hand-rolling the buffer→adapt→verify→401
 steps, so a missed step cannot let an unverified request into the business
@@ -1935,6 +1974,17 @@ values. Without a request to bind to, keep using the request-side API
   rebuilt from the `host` header, lowercased header names, multi-value
   headers joined with `", "`), so `verifyRequest` plugs straight into a
   webhook receiver — see the Quickstart receive→verify example.
+- **Fetch server adapter**: `fromFetchRequest(req, body)` normalizes a
+  fetch-style server's `Request` (undici / WinterCG / edge runtime)
+  into a `RequestLike` (absolute URL passed through verbatim, port
+  included; same header conventions as `fromNodeRequest`; body read by
+  the caller and passed in as `string | Buffer | Uint8Array`), so
+  `verifyRequest` plugs straight into verifying signed requests where
+  there is no `IncomingMessage`. An origin-form path is rebuilt as
+  `http://<host><path>` from the `host` header, and a missing
+  method/url/host throws a configuration `Error`. A fetch `Request`
+  carries no trailers, so `;tr` components cannot verify through this
+  adapter. See the Quickstart fetch receive→verify example.
 - **Node http verified handler**: `createVerifiedHandler(verifyOpts,
   handler, opts?)` returns a standard `http.RequestListener` that
   buffers the body (default cap 1 MiB, `DEFAULT_MAX_BODY_BYTES`),
@@ -4590,7 +4640,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2139 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2152 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
