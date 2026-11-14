@@ -50,6 +50,7 @@ import {
   ReplayCache,
   buildSignatureBase,
   contentDigest,
+  createVerifiedFetchHandler,
   createVerifiedHandler,
   resolveComponent,
   secretKey,
@@ -618,6 +619,14 @@ import {
   DEMO_VERIFIED_HANDLER_PATH,
   DEMO_VERIFIED_HANDLER_TAMPER_CODE,
   DEMO_VERIFIED_HANDLER_UNSIGNED_CODE,
+  DEMO_VERIFIED_FETCH_HANDLER_BODY,
+  DEMO_VERIFIED_FETCH_HANDLER_KEY_ID,
+  DEMO_VERIFIED_FETCH_HANDLER_MAX_BODY_BYTES,
+  DEMO_VERIFIED_FETCH_HANDLER_NONCE,
+  DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_BODY,
+  DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_CODE,
+  DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE,
+  DEMO_VERIFIED_FETCH_HANDLER_URL,
   runDemo,
 } from "../src/demo.js";
 
@@ -7865,8 +7874,9 @@ test("demo verified-handler segment runs a signed, a tampered-signature, and an 
   ]);
 
   // Ordering: the segment follows the private-key JWK segment and
-  // is followed by the signing-side guard segment that closes the
-  // demo — a blank separator, then the guard header.
+  // is followed by the verified-fetch-handler segment (backlog
+  // #1144) — a blank separator, then the fetch-handler header; the
+  // signing-side guard segment still closes the demo after it.
   const jwkIdx = lines.findIndex((l) =>
     l.startsWith("Private-key JWK import:"),
   );
@@ -7874,7 +7884,7 @@ test("demo verified-handler segment runs a signed, a tampered-signature, and an 
   assert.equal(lines[headerIdx - 1], "");
   assert.equal(lines[headerIdx + 4], "");
   assert.ok(
-    lines[headerIdx + 5]!.startsWith("Signing-side guard rejections:"),
+    lines[headerIdx + 5]!.startsWith("Verified fetch handler:"),
   );
 });
 
@@ -7889,6 +7899,218 @@ test("demo verified-handler segment prints byte-identical lines across runs", as
   // Only statuses and failure codes are printed — the key pair,
   // the signature bytes and the port never appear — so the tail
   // of the demo (verified-handler segment plus the deterministic
+  // signing-side guard segment after it) is identical.
+  assert.deepEqual(second.lines.slice(b), first.lines.slice(a));
+});
+
+test("demo verified-fetch-handler segment runs a signed, a tampered-signature, and an oversized request through createVerifiedFetchHandler", async () => {
+  const {
+    lines,
+    verifiedFetchHandlerSignedStatus,
+    verifiedFetchHandlerResponseSigned,
+    verifiedFetchHandlerCalls,
+    verifiedFetchHandlerTamperedStatus,
+    verifiedFetchHandlerTamperedCode,
+    verifiedFetchHandlerOversizedStatus,
+    verifiedFetchHandlerOversizedCode,
+  } = await runDemo();
+
+  // Pinned segment constants.
+  assert.equal(
+    DEMO_VERIFIED_FETCH_HANDLER_URL,
+    "http://127.0.0.1/webhook",
+  );
+  assert.equal(
+    DEMO_VERIFIED_FETCH_HANDLER_KEY_ID,
+    "demo-verified-fetch-handler-1",
+  );
+  assert.equal(
+    DEMO_VERIFIED_FETCH_HANDLER_NONCE,
+    "demo-nonce-verified-fetch-handler-001",
+  );
+  assert.equal(
+    DEMO_VERIFIED_FETCH_HANDLER_BODY,
+    JSON.stringify({ settled: true, amount: 100 }),
+  );
+  assert.equal(DEMO_VERIFIED_FETCH_HANDLER_MAX_BODY_BYTES, 64);
+  assert.equal(
+    Buffer.byteLength(DEMO_VERIFIED_FETCH_HANDLER_BODY),
+    29,
+  );
+  assert.equal(
+    Buffer.byteLength(DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_BODY),
+    108,
+  );
+  assert.equal(
+    DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE,
+    "SIGNATURE_MISMATCH",
+  );
+  assert.equal(
+    DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_CODE,
+    "BODY_TOO_LARGE",
+  );
+
+  // The verdicts: signed reaches the business handler (200) and the
+  // response comes back signed, the flipped signature is answered
+  // 401 before the handler runs, and the oversized body is refused
+  // 413 before any verification runs.
+  assert.equal(verifiedFetchHandlerSignedStatus, 200);
+  assert.equal(verifiedFetchHandlerResponseSigned, true);
+  assert.equal(verifiedFetchHandlerCalls, 1);
+  assert.equal(verifiedFetchHandlerTamperedStatus, 401);
+  assert.equal(
+    verifiedFetchHandlerTamperedCode,
+    DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE,
+  );
+  assert.equal(verifiedFetchHandlerOversizedStatus, 413);
+  assert.equal(
+    verifiedFetchHandlerOversizedCode,
+    DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_CODE,
+  );
+
+  // Independent re-derivation: a fresh key pair and a fresh handler
+  // give the same verdicts — the demo's numbers come from the
+  // handler, not from a fixture echo.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  let calls = 0;
+  const fetchHandler = createVerifiedFetchHandler(
+    { key: publicKey, now: DEMO_CREATED + 60 },
+    () => {
+      calls += 1;
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    {
+      maxBodyBytes: DEMO_VERIFIED_FETCH_HANDLER_MAX_BODY_BYTES,
+      signResponses: [
+        {
+          key: privateKey,
+          alg: "ed25519",
+          keyId: DEMO_VERIFIED_FETCH_HANDLER_KEY_ID,
+          created: DEMO_CREATED,
+        },
+      ],
+    },
+  );
+  const signed = signRequest(
+    {
+      method: "POST",
+      url: DEMO_VERIFIED_FETCH_HANDLER_URL,
+      headers: { "content-type": "application/json" },
+      body: DEMO_VERIFIED_FETCH_HANDLER_BODY,
+    },
+    {
+      keyId: DEMO_VERIFIED_FETCH_HANDLER_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_VERIFIED_FETCH_HANDLER_NONCE,
+    },
+  );
+  const tamperedSignature = (
+    signed.headers["signature"] as string
+  ).replace(/=:([A-Za-z0-9+/])/, (_match, c: string) =>
+    `=:${c === "A" ? "B" : "A"}`,
+  );
+  const toFetchRequest = (
+    headers: Record<string, string>,
+    body: string,
+  ): Request =>
+    new Request(DEMO_VERIFIED_FETCH_HANDLER_URL, {
+      method: "POST",
+      headers,
+      body,
+    });
+  const wireHeaders = {
+    "Content-Type": "application/json",
+    "Signature-Input": signed.headers["signature-input"] as string,
+    Signature: signed.headers["signature"] as string,
+    "Content-Digest": signed.headers["content-digest"] as string,
+  };
+  const reSigned = await fetchHandler(
+    toFetchRequest(wireHeaders, DEMO_VERIFIED_FETCH_HANDLER_BODY),
+  );
+  assert.equal(reSigned.status, 200);
+  assert.equal(calls, 1);
+  const reSignedBody = await reSigned.text();
+  const reSignedHeaders: Record<string, string> = {};
+  reSigned.headers.forEach((value, name) => {
+    reSignedHeaders[name] = value;
+  });
+  const reVerified = verifyResponse(
+    {
+      status: reSigned.status,
+      headers: reSignedHeaders,
+      body: reSignedBody,
+    },
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+  assert.equal(reVerified.ok, true);
+  assert.deepEqual(JSON.parse(reSignedBody), { ok: true });
+  const reTampered = await fetchHandler(
+    toFetchRequest(
+      { ...wireHeaders, Signature: tamperedSignature },
+      DEMO_VERIFIED_FETCH_HANDLER_BODY,
+    ),
+  );
+  assert.equal(reTampered.status, 401);
+  assert.equal(
+    (JSON.parse(await reTampered.text()) as { code: string }).code,
+    DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE,
+  );
+  assert.equal(calls, 1);
+  const reOversized = await fetchHandler(
+    toFetchRequest(
+      { "Content-Type": "application/json" },
+      DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_BODY,
+    ),
+  );
+  assert.equal(reOversized.status, 413);
+  assert.equal(
+    (JSON.parse(await reOversized.text()) as { code: string }).code,
+    DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_CODE,
+  );
+  assert.equal(calls, 1);
+
+  // Printed lines: header + three verdicts, byte-exact.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Verified fetch handler:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "Verified fetch handler: createVerifiedFetchHandler is the fetch twin of createVerifiedHandler — the same verify-before-handler loop over a standard Request/Response pair, with no server and no network; a signed request reaches the business handler and the response comes back signed, a bad signature never reaches it, and an over-large body is refused before any verification",
+    "Signed request to the verified fetch handler: 200 (verified, business handler ran, response signature verifies)",
+    "Tampered signature to the verified fetch handler: 401 (code SIGNATURE_MISMATCH, business handler did not run)",
+    "Oversized request to the verified fetch handler: 413 (code BODY_TOO_LARGE, refused before verification)",
+  ]);
+
+  // Ordering: the segment follows the verified-handler segment and
+  // is followed by the signing-side guard segment that closes the
+  // demo — a blank separator on each side.
+  const handlerIdx = lines.findIndex((l) =>
+    l.startsWith("Verified handler:"),
+  );
+  assert.ok(handlerIdx !== -1 && handlerIdx < headerIdx);
+  assert.equal(lines[headerIdx - 1], "");
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(
+    lines[headerIdx + 5]!.startsWith("Signing-side guard rejections:"),
+  );
+});
+
+test("demo verified-fetch-handler segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Verified fetch handler:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  assert.ok(a !== -1 && b !== -1);
+  // Only statuses and failure codes are printed — the key pair and
+  // the signature bytes never appear — so the tail of the demo
+  // (verified-fetch-handler segment plus the deterministic
   // signing-side guard segment after it) is identical.
   assert.deepEqual(second.lines.slice(b), first.lines.slice(a));
 });

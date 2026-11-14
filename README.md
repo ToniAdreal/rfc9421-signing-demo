@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2206 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2208 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -272,7 +272,18 @@ flipped is answered 401 with `SIGNATURE_MISMATCH`, and an
 unsigned request is answered 401 with `MISSING_SIGNATURE_INPUT`
 — both 401s before the business handler ever runs; only the
 statuses and failure codes are printed, never the signature bytes
-or the port. The demo closes with a signing-side guard rejection
+or the port. The demo then runs a verified-fetch-handler segment:
+`createVerifiedFetchHandler` is the fetch twin of
+`createVerifiedHandler` — the same verify-before-handler loop over
+a standard `Request`/`Response` pair, with no server and no
+network; a signed request reaches the business handler (200) and
+the response comes back signed under `signResponses`, a request
+with one base64 character of its signature flipped is answered 401
+with `SIGNATURE_MISMATCH` before the business handler runs, and
+an unsigned request whose body exceeds `maxBodyBytes` is answered
+413 with `BODY_TOO_LARGE` before any verification runs; only the
+statuses and failure codes are printed, never the signature bytes.
+The demo closes with a signing-side guard rejection
 segment: the same fixed payment request is signed three ways that
 must all be refused — with `alg: "none"` (the classic downgrade
 value), with a 257-character tag (one past the 256-character cap),
@@ -4747,7 +4758,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2206 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2208 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

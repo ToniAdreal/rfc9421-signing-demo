@@ -1310,6 +1310,7 @@ import {
   canonicalizeStructuredFieldValue,
   contentDigest,
   contentDigestAlgOf,
+  createVerifiedFetchHandler,
   createVerifiedHandler,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
@@ -1365,6 +1366,7 @@ import {
   verifyResponse,
   type ContentDigestAlg,
   type Ed25519PublicJwk,
+  type HttpResponseLike,
   type P256PublicJwk,
   type P384PublicJwk,
   type P521PublicJwk,
@@ -4519,6 +4521,54 @@ export const DEMO_VERIFIED_HANDLER_TAMPER_CODE: VerifyFailureCode =
  */
 export const DEMO_VERIFIED_HANDLER_UNSIGNED_CODE: VerifyFailureCode =
   "MISSING_SIGNATURE_INPUT";
+/** URL the verified-fetch-handler segment's requests carry (never fetched — the handler is called in-process). */
+export const DEMO_VERIFIED_FETCH_HANDLER_URL = "http://127.0.0.1/webhook";
+/** Key id the verified-fetch-handler segment's signed request carries. */
+export const DEMO_VERIFIED_FETCH_HANDLER_KEY_ID =
+  "demo-verified-fetch-handler-1";
+/** Nonce the verified-fetch-handler segment's signed request carries. */
+export const DEMO_VERIFIED_FETCH_HANDLER_NONCE =
+  "demo-nonce-verified-fetch-handler-001";
+/** Body the verified-fetch-handler segment's signed request carries. */
+export const DEMO_VERIFIED_FETCH_HANDLER_BODY = JSON.stringify({
+  settled: true,
+  amount: 100,
+});
+/**
+ * Body cap the verified-fetch-handler segment's handler enforces
+ * (`maxBodyBytes`): the signed body is 29 bytes, so it fits; the
+ * oversized body is 108 bytes, so it is refused with 413 before
+ * any verification runs. Both sizes are pinned by the fixture
+ * assertion, not by the constant alone.
+ */
+export const DEMO_VERIFIED_FETCH_HANDLER_MAX_BODY_BYTES = 64;
+/**
+ * Body the verified-fetch-handler segment's oversized request
+ * carries: the signed body plus a 70-byte pad, 108 bytes total —
+ * past `DEMO_VERIFIED_FETCH_HANDLER_MAX_BODY_BYTES`, so the
+ * handler answers 413 `BODY_TOO_LARGE` without verifying.
+ */
+export const DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_BODY = JSON.stringify({
+  settled: true,
+  amount: 100,
+  pad: "x".repeat(70),
+});
+/**
+ * Hand-pinned failure code for the verified-fetch-handler
+ * segment's tampered-signature request (`SIGNATURE_MISMATCH`):
+ * flipping one base64 character of the signature breaks the
+ * cryptographic check, so the handler answers 401 and the
+ * business handler never runs.
+ */
+export const DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
+/**
+ * Hand-pinned failure code for the verified-fetch-handler
+ * segment's oversized request (`BODY_TOO_LARGE`): the body cap is
+ * checked before any verification, so the handler answers 413
+ * without ever calling the key resolver.
+ */
+export const DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_CODE = "BODY_TOO_LARGE";
 
 export interface DemoResult {
   signed: SignedHttpRequest;
@@ -6617,6 +6667,44 @@ export interface DemoResult {
    */
   verifiedHandlerUnsignedCode: string;
   /**
+   * Status the verified-fetch-handler answered for the signed
+   * request (200 — the business handler ran and the response
+   * came back signed).
+   */
+  verifiedFetchHandlerSignedStatus: number;
+  /**
+   * Whether the signed request's 200 response carried a
+   * signature that verifies against the segment key
+   * (`DEMO_VERIFIED_FETCH_HANDLER_KEY_ID`).
+   */
+  verifiedFetchHandlerResponseSigned: boolean;
+  /**
+   * Business-handler invocations across the segment's three
+   * requests (1 — only the signed request reaches it).
+   */
+  verifiedFetchHandlerCalls: number;
+  /**
+   * Status the verified-fetch-handler answered for the
+   * tampered-signature request (401 — the business handler
+   * never ran).
+   */
+  verifiedFetchHandlerTamperedStatus: number;
+  /**
+   * `code` from the 401 body for the tampered-signature request
+   * (`DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE`).
+   */
+  verifiedFetchHandlerTamperedCode: string;
+  /**
+   * Status the verified-fetch-handler answered for the
+   * oversized request (413 — refused before any verification).
+   */
+  verifiedFetchHandlerOversizedStatus: number;
+  /**
+   * `code` from the 413 body for the oversized request
+   * (`DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_CODE`).
+   */
+  verifiedFetchHandlerOversizedCode: string;
+  /**
    * The closing signing-side guard segment's rejections: the exact
    * error messages `signRequest` threw for the unknown alg, the
    * over-long tag, and the 65-component list, in attempt order
@@ -8284,6 +8372,173 @@ async function fetchVerifiedHandlerVerdicts(): Promise<VerifiedHandlerFixture> {
     server.closeAllConnections();
     server.close();
   }
+}
+
+/**
+ * The fetch twin of `fetchVerifiedHandlerVerdicts`: no server, no
+ * network — a `createVerifiedFetchHandler` is called in-process
+ * with standard fetch `Request` objects (the same build-a-`Request`
+ * -from-a-signed-request shape the `verifiedFetch` tests use).
+ * Three requests hit it: a `signRequest`-signed request, the same
+ * request with one base64 character of its signature flipped, and
+ * an unsigned request whose body exceeds `maxBodyBytes`. The signed
+ * request reaches the business handler (200) and the response comes
+ * back signed under `signResponses`; the other two are answered by
+ * the handler itself — 401 with the pinned failure code for the
+ * tampered signature, 413 with `BODY_TOO_LARGE` for the oversized
+ * body, the latter before any verification runs — and the business
+ * handler never runs for either.
+ *
+ * Only statuses, failure codes, and the business-handler call count
+ * are returned — no signature bytes — so the printed segment is
+ * byte-identical between runs.
+ */
+interface VerifiedFetchHandlerFixture {
+  /** Status the handler answered for the signed request (200). */
+  signedStatus: number;
+  /** Whether the signed request's 200 response signature verifies. */
+  responseSigned: boolean;
+  /** Business-handler invocations across the three requests (1). */
+  calls: number;
+  /** Status the handler answered for the tampered-signature request (401). */
+  tamperedStatus: number;
+  /** `code` from the 401 body for the tampered-signature request. */
+  tamperedCode: string;
+  /** Status the handler answered for the oversized request (413). */
+  oversizedStatus: number;
+  /** `code` from the 413 body for the oversized request. */
+  oversizedCode: string;
+}
+
+async function fetchVerifiedFetchHandlerVerdicts(): Promise<VerifiedFetchHandlerFixture> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  let calls = 0;
+  const fetchHandler = createVerifiedFetchHandler(
+    { key: publicKey, now: DEMO_CREATED + 60 },
+    () => {
+      calls += 1;
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    {
+      maxBodyBytes: DEMO_VERIFIED_FETCH_HANDLER_MAX_BODY_BYTES,
+      signResponses: [
+        {
+          key: privateKey,
+          alg: "ed25519",
+          keyId: DEMO_VERIFIED_FETCH_HANDLER_KEY_ID,
+          created: DEMO_CREATED,
+        },
+      ],
+    },
+  );
+  const signed = signRequest(
+    {
+      method: "POST",
+      url: DEMO_VERIFIED_FETCH_HANDLER_URL,
+      headers: { "content-type": "application/json" },
+      body: DEMO_VERIFIED_FETCH_HANDLER_BODY,
+    },
+    {
+      keyId: DEMO_VERIFIED_FETCH_HANDLER_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_VERIFIED_FETCH_HANDLER_NONCE,
+    },
+  );
+  // Same flip as the verified-handler segment: the first base64
+  // character of the signature value (after `=:`), so the value
+  // stays well-formed and the failure is the cryptographic check.
+  const tamperedSignature = (
+    signed.headers["signature"] as string
+  ).replace(/=:([A-Za-z0-9+/])/, (_match, c: string) =>
+    `=:${c === "A" ? "B" : "A"}`,
+  );
+  const toFetchRequest = (
+    headers: Record<string, string>,
+    body: string,
+  ): Request =>
+    new Request(DEMO_VERIFIED_FETCH_HANDLER_URL, {
+      method: "POST",
+      headers,
+      body,
+    });
+  const wireHeaders = (
+    s: SignedHttpRequest,
+  ): Record<string, string> => ({
+    "Content-Type": "application/json",
+    "Signature-Input": s.headers["signature-input"] as string,
+    Signature: s.headers["signature"] as string,
+    "Content-Digest": s.headers["content-digest"] as string,
+  });
+  const codeOf = async (res: Response): Promise<string> => {
+    try {
+      const parsed = JSON.parse(await res.text()) as { code?: unknown };
+      return typeof parsed.code === "string" ? parsed.code : "";
+    } catch {
+      return "";
+    }
+  };
+  const signedRes = await fetchHandler(
+    toFetchRequest(wireHeaders(signed), DEMO_VERIFIED_FETCH_HANDLER_BODY),
+  );
+  // The 200 response carries the `signResponses` signature: read
+  // its body and verify it in-process (default covered components
+  // `@status` + `content-digest` need no attached request).
+  const signedBody = await signedRes.text();
+  const signedHeaders: Record<string, string> = {};
+  signedRes.headers.forEach((value, name) => {
+    signedHeaders[name] = value;
+  });
+  const signedResponseLike: HttpResponseLike = {
+    status: signedRes.status,
+    headers: signedHeaders,
+    body: signedBody,
+  };
+  const responseVerification = verifyResponse(signedResponseLike, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  const tamperedRes = await fetchHandler(
+    toFetchRequest(
+      { ...wireHeaders(signed), Signature: tamperedSignature },
+      DEMO_VERIFIED_FETCH_HANDLER_BODY,
+    ),
+  );
+  const oversizedRes = await fetchHandler(
+    toFetchRequest(
+      { "Content-Type": "application/json" },
+      DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_BODY,
+    ),
+  );
+  const fixture: VerifiedFetchHandlerFixture = {
+    signedStatus: signedRes.status,
+    responseSigned: responseVerification.ok,
+    calls,
+    tamperedStatus: tamperedRes.status,
+    tamperedCode: await codeOf(tamperedRes),
+    oversizedStatus: oversizedRes.status,
+    oversizedCode: await codeOf(oversizedRes),
+  };
+  if (
+    fixture.signedStatus !== 200 ||
+    fixture.responseSigned !== true ||
+    fixture.calls !== 1 ||
+    fixture.tamperedStatus !== 401 ||
+    fixture.tamperedCode !== DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE ||
+    fixture.oversizedStatus !== 413 ||
+    fixture.oversizedCode !== DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: verified-fetch-handler segment gave signed ${fixture.signedStatus} (response signature verifies: ${fixture.responseSigned}, handler calls: ${fixture.calls}) / tampered ` +
+        `${fixture.tamperedStatus} (${fixture.tamperedCode}) / oversized ${fixture.oversizedStatus} ` +
+        `(${fixture.oversizedCode}) instead of 200 (verifies, 1 call) / 401 (${DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE}) / 413 (${DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_CODE})`,
+    );
+  }
+  return fixture;
 }
 
 export async function runDemo(): Promise<DemoResult> {
@@ -15283,6 +15538,22 @@ export async function runDemo(): Promise<DemoResult> {
   // so the segment is byte-identical between runs.
   const verifiedHandler = await fetchVerifiedHandlerVerdicts();
 
+  // Verified-fetch-handler segment (backlog #1144): the fetch twin
+  // of the verified-handler segment above, and the server-side twin
+  // of the verifiedFetch client segment. No server and no network —
+  // `createVerifiedFetchHandler` is called in-process with standard
+  // fetch `Request` objects: a signed request reaches the business
+  // handler (200) and the response comes back signed under
+  // `signResponses`, a request whose signature bytes were flipped
+  // is answered 401 with `DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE`
+  // before the business handler ever runs, and an unsigned request
+  // whose body exceeds `maxBodyBytes` is answered 413 with
+  // `BODY_TOO_LARGE` before any verification runs. Only statuses,
+  // failure codes, and the business-handler call count are printed,
+  // never signature bytes, so the segment is byte-identical between
+  // runs.
+  const verifiedFetchHandler = await fetchVerifiedFetchHandlerVerdicts();
+
   // Signing-side guard rejection segment (backlog #1070): the
   // closing segment, and the sign-side twin of the verify-side
   // rejections the demo already prints (tampered body, wrong
@@ -16209,6 +16480,11 @@ export async function runDemo(): Promise<DemoResult> {
     `Tampered signature to the verified handler: ${verifiedHandler.tamperedStatus} (code ${verifiedHandler.tamperedCode})`,
     `Unsigned request to the verified handler: ${verifiedHandler.unsignedStatus} (code ${verifiedHandler.unsignedCode})`,
     "",
+    `Verified fetch handler: createVerifiedFetchHandler is the fetch twin of createVerifiedHandler — the same verify-before-handler loop over a standard Request/Response pair, with no server and no network; a signed request reaches the business handler and the response comes back signed, a bad signature never reaches it, and an over-large body is refused before any verification`,
+    `Signed request to the verified fetch handler: ${verifiedFetchHandler.signedStatus} (verified, business handler ran, response signature verifies)`,
+    `Tampered signature to the verified fetch handler: ${verifiedFetchHandler.tamperedStatus} (code ${verifiedFetchHandler.tamperedCode}, business handler did not run)`,
+    `Oversized request to the verified fetch handler: ${verifiedFetchHandler.oversizedStatus} (code ${verifiedFetchHandler.oversizedCode}, refused before verification)`,
+    "",
     "Signing-side guard rejections: signRequest fails fast before the signature base is built or any crypto runs — an unknown alg (including the \"none\" downgrade), an over-long tag, and more than 64 covered components are all refused with an explicit error, and the input request is left untouched; the same request signed with ed25519 verifies",
     signGuardRequestHeadersUnchanged
       ? `Unknown alg rejected at signing: ${signGuardRejections[0]} (the input request headers are unchanged)`
@@ -16610,6 +16886,13 @@ export async function runDemo(): Promise<DemoResult> {
     verifiedHandlerTamperedCode: verifiedHandler.tamperedCode,
     verifiedHandlerUnsignedStatus: verifiedHandler.unsignedStatus,
     verifiedHandlerUnsignedCode: verifiedHandler.unsignedCode,
+    verifiedFetchHandlerSignedStatus: verifiedFetchHandler.signedStatus,
+    verifiedFetchHandlerResponseSigned: verifiedFetchHandler.responseSigned,
+    verifiedFetchHandlerCalls: verifiedFetchHandler.calls,
+    verifiedFetchHandlerTamperedStatus: verifiedFetchHandler.tamperedStatus,
+    verifiedFetchHandlerTamperedCode: verifiedFetchHandler.tamperedCode,
+    verifiedFetchHandlerOversizedStatus: verifiedFetchHandler.oversizedStatus,
+    verifiedFetchHandlerOversizedCode: verifiedFetchHandler.oversizedCode,
     signGuardRejections,
     signGuardRequestHeadersUnchanged,
     signGuardControlSigned,

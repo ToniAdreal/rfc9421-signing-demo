@@ -46,6 +46,27 @@ change type; no entry describes a feature that is not in the history.
   gains 2 tests (segment outcomes + cross-check against a directly
   driven cache and through `verifyRequest`, printed-lines slice +
   determinism); test count moves 2204 → 2206.
+- CLI demo gains a `createVerifiedFetchHandler` segment (backlog
+  #1144): the demo now shows the fetch twin of the
+  `createVerifiedHandler` segment #1047 added — no server and no
+  network, the handler is called in-process with standard fetch
+  `Request` objects (the same build-a-`Request`-from-a-signed-request
+  shape the `verifiedFetch` tests use). A signed request reaches
+  the business handler (200) and the response comes back signed
+  under `signResponses` (verified in-process with `verifyResponse`
+  against the segment key); a request with one base64 character of
+  its signature flipped is answered 401 with
+  `SIGNATURE_MISMATCH` before the business handler runs; and an
+  unsigned request whose 108-byte body exceeds the segment's
+  64-byte `maxBodyBytes` is answered 413 with `BODY_TOO_LARGE`
+  before any verification runs. Every outcome is asserted outside
+  the printed lines against hand-pinned
+  `DEMO_VERIFIED_FETCH_HANDLER_*` expectations (body sizes 29 and
+  108 bytes measured, not guessed), `DemoResult` gains the segment
+  fields, and the README demo narrative describes the segment.
+  `test/demo.test.ts` gains 2 tests (segment outcomes + cross-check
+  against a directly driven handler, printed-lines slice +
+  determinism); test count moves 2206 → 2208.
 - `ReplayCache.release(nonce, now?)` (backlog #1138): a single-nonce
   release for the replay cache — the missing half of the "verified
   but never executed" retry story. When a verified request's
