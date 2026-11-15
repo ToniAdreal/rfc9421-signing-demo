@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `fromNodeRequest` now accepts HTTP/2 requests from Node's `http2`
+  compatibility API (backlog #1168): a request there carries no `host`
+  header — only the `:authority` pseudo-header — so the host falls back
+  to `:authority` and the scheme to the `:scheme` pseudo-header (an h2c
+  socket is never TLS, so without it the scheme would misread as
+  `http`); an explicit `{ scheme }` option still wins over `:scheme`,
+  and both host sources missing still fails fast with the original
+  `cannot rebuild the request URL without a host header` error.
+  Pseudo-headers are transport framing, not HTTP fields, so they are
+  stripped from the normalized headers map (a covered component never
+  resolves against `:method` / `:path` / `:authority` / `:scheme` as a
+  header). The README Node http section documents the fallback. Eight
+  new tests in `test/nodeHttpHttp2.test.ts`, including a real loopback
+  h2c server whose signed `@method` / `@scheme` / `@authority` /
+  `@path` request verifies end-to-end.
 - The benchmark (`npm run bench`) now also measures
   `exportSignedSnapshotsByLabel` (backlog #1161) — the sealed
   multi-label snapshot path a multi-signature deployment runs to

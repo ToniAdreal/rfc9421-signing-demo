@@ -90,7 +90,11 @@ export interface IncomingTrailersLike {
 /**
  * The `IncomingMessage` fields the request adapter actually reads. A real
  * `http.IncomingMessage` satisfies this interface; plain test doubles do
- * too, without importing `node:http`.
+ * too, without importing `node:http`. A Node `http2` compatibility-API
+ * request satisfies it as well: `method`/`url` are already derived from
+ * the `:method`/`:path` pseudo-headers, and `headers` carries the
+ * pseudo-headers (`:authority`, `:scheme`, …) the adapter falls back to
+ * for host and scheme.
  */
 export interface IncomingRequestLike extends IncomingTrailersLike {
   method?: string | undefined;
@@ -525,7 +529,8 @@ function normalizeFetchHeaders(
 export interface FromNodeRequestOptions {
   /**
    * Scheme used when rebuilding the absolute request URL. Defaults to
-   * "https" when `req.socket` is a TLS socket, otherwise "http".
+   * the `:scheme` pseudo-header when present (HTTP/2), else "https"
+   * when `req.socket` is a TLS socket, otherwise "http".
    *
    * Set this explicitly behind a TLS-terminating proxy, where the socket
    * seen by Node is plain HTTP but the public URL the signer signed is
@@ -609,6 +614,16 @@ function normalizeTrailers(
  * descriptive `Error` on missing `method`, `url`, or `host` header —
  * those are caller configuration mistakes, never silently defaulted.
  *
+ * HTTP/2 (Node's `http2` compatibility API) carries no `host` header:
+ * the request only has the `:authority` pseudo-header, and the
+ * cleartext socket would misread the scheme as `http` — so the host
+ * falls back to `:authority` and the scheme to the `:scheme`
+ * pseudo-header. Pseudo-headers are transport framing, not HTTP
+ * fields, so they are stripped from the normalized headers map (a
+ * covered component never resolves against `:method` / `:path` /
+ * `:authority` / `:scheme` as a header; derived components read them
+ * from `method` / `url` instead).
+ *
  * Multi-value headers are combined with `joinHeaderValues` — see its
  * warning before covering `set-cookie`: two cookies join into one
  * string that cannot be split back into the original cookies.
@@ -626,7 +641,10 @@ export function fromNodeRequest(
     throw new Error("fromNodeRequest: req.url is missing");
 
   const headers = normalizeHeaders(req.headers);
-  const host = headers["host"];
+  // HTTP/2 (Node's http2 compatibility API) carries no `host` header:
+  // the request only has the `:authority` pseudo-header, so fall back
+  // to it; both missing still fails fast with the original message.
+  const host = headers["host"] ?? headers[":authority"];
   if (host === undefined || host === "")
     throw new Error(
       "fromNodeRequest: cannot rebuild the request URL without a host header",
@@ -635,7 +653,19 @@ export function fromNodeRequest(
   const encrypted =
     (req.socket as { encrypted?: boolean } | null | undefined)?.encrypted ===
     true;
-  const scheme = opts?.scheme ?? (encrypted ? "https" : "http");
+  // An explicit option wins; then the `:scheme` pseudo-header (an h2c
+  // socket is never `encrypted`, so without it the scheme would
+  // misread as http); then the socket inference as before.
+  const scheme =
+    opts?.scheme ?? headers[":scheme"] ?? (encrypted ? "https" : "http");
+
+  // Pseudo-headers are transport framing, not HTTP fields: strip them
+  // from the normalized map so a covered component never resolves
+  // against `:method` / `:path` / `:authority` / `:scheme` as a header
+  // (derived components read them from `method` / `url` instead).
+  for (const name of Object.keys(headers)) {
+    if (name.startsWith(":")) delete headers[name];
+  }
   // Servers see the origin-form path; accept an already-absolute URL
   // unchanged (e.g. from a forward proxy in absolute-form).
   const url = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(path)

@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2208 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2216 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1176,7 +1176,15 @@ verbatim), lowercases header names, and joins multi-value headers with
 defaults to `https` on a TLS socket, `http` otherwise; behind a
 TLS-terminating proxy pass `{ scheme: "https" }` explicitly, because signer
 and verifier must agree on the exact URL (`@scheme`/`@authority`/`@path`
-are covered components). Missing `method`/`url`/`host` throws a
+are covered components). HTTP/2 (Node's `http2` compatibility API)
+carries no `host` header: the host falls back to the `:authority`
+pseudo-header and the scheme to `:scheme` (an h2c socket is never TLS,
+so without it the scheme would misread as `http`); an explicit
+`{ scheme }` option still wins over `:scheme`. Pseudo-headers are
+transport framing, not HTTP fields, so they are stripped from the
+normalized headers map — a covered component never resolves against
+`:method` / `:path` / `:authority` / `:scheme` as a header. Missing
+`method`/`url`/`host` (and `:authority` as the HTTP/2 fallback) throws a
 configuration `Error` instead of silently defaulting. The adapter also
 carries the message's trailers into `RequestLike.trailers` (from
 `req.rawTrailers` when present, else `req.trailers`; names lowercased,
@@ -2075,7 +2083,10 @@ values. Without a request to bind to, keep using the request-side API
   normalizes an `http.IncomingMessage` into a `RequestLike` (absolute URL
   rebuilt from the `host` header, lowercased header names, multi-value
   headers joined with `", "`), so `verifyRequest` plugs straight into a
-  webhook receiver — see the Quickstart receive→verify example.
+  webhook receiver — see the Quickstart receive→verify example. An
+  `http2` compatibility-API request works too: the host falls back to
+  the `:authority` pseudo-header, the scheme to `:scheme`, and
+  pseudo-headers are stripped from the normalized headers map.
 - **Fetch server adapter**: `fromFetchRequest(req, body)` normalizes a
   fetch-style server's `Request` (undici / WinterCG / edge runtime)
   into a `RequestLike` (absolute URL passed through verbatim, port
@@ -4855,7 +4866,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2208 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2216 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
