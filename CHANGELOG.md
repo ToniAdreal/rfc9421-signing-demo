@@ -12,6 +12,27 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `createVerifiedFetchHandler` (backlog #1150) — the in-process
+  fetch receive path an edge / WinterCG webhook receiver runs:
+  a fresh `Request` per op from one pre-signed settlement
+  POST, body buffering under the default cap, `fromFetchRequest`
+  adaptation, ed25519 verification, the 200 branch into the
+  business handler, and the `signResponses` response signing the
+  demo #1144 shows. No TCP and no loopback: the row prices the
+  handler itself, unlike the loopback `createVerifiedHandler`
+  rows. Every measured pass self-checks the 200 status, the exact
+  settlement body, and the response signature headers present;
+  a probe round trip verifies the response signature in-process
+  (`verifyResponse`: label `sig1`, the pinned server keyid /
+  `ed25519` / nonce / `created`, covered `@status
+  content-digest`), a tampered-signature request is answered 401
+  with the pinned `SIGNATURE_MISMATCH` code and never reaches
+  the business handler, and the handler-call count after the
+  timed loop equals 1 + WARMUP + ITERATIONS. The README
+  Benchmarks table was refreshed from the same run and gains
+  the new row (~3,432 ops/sec, Node v24.22.1 / AMD EPYC 9D25
+  shared host).
+- The benchmark (`npm run bench`) now also measures
   `ReplayCache.release` (backlog #1149) — the single-nonce
   release path a gateway runs when a verified request's
   downstream write failed and the client retries the same

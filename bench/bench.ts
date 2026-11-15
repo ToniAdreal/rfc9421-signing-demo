@@ -850,7 +850,20 @@
  * `verify.verifyAllLabels` — one full sign → fetch → dual-verify
  * round trip per measured op, both labels' identities self-checked
  * on every pass, so the two rows price the one-call multi-label
- * wrapper against the single-label round trip.
+ * wrapper against the single-label round trip, plus the fetch
+ * twin of the `createVerifiedHandler` receive path:
+ * `createVerifiedFetchHandler` called in-process with a standard
+ * fetch `Request` (one client ed25519 key signing the request,
+ * one server ed25519 key signing the response under
+ * `signResponses`, `now` pinned to the request signature's
+ * `created` + 60s), one handler call per measured op with the 200
+ * status, the exact settlement body, and the response signature
+ * headers self-checked — and a tampered-signature request pinned
+ * outside timing to be answered 401 `SIGNATURE_MISMATCH` without
+ * ever reaching the business handler, so the row cannot be
+ * measuring a path that skips verification. No TCP and no loopback
+ * here: the row prices the in-process handler, unlike the
+ * loopback `createVerifiedHandler` rows above.
  * Numbers
  * vary with hardware — do not treat them as guaranteed throughput.
  *
@@ -878,6 +891,7 @@ import {
   canonicalizeStructuredFieldValueAs,
   contentDigest,
   contentDigestAlgOf,
+  createVerifiedFetchHandler,
   createVerifiedHandler,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
@@ -929,6 +943,7 @@ import {
   verifyRequestOrThrow,
   verifyResponse,
   type ContentDigestAlg,
+  type HttpResponseLike,
   type IncomingRequestLike,
   type JwksFetchImpl,
   type RequestLike,
@@ -13617,6 +13632,242 @@ async function benchmarkVerifiedFetchMultiLabel(): Promise<number> {
 }
 
 /**
+ * Fixed fixture for the `createVerifiedFetchHandler` end-to-end row
+ * (backlog #1150): the fetch twin of the `createVerifiedHandler`
+ * rows — no TCP server, no loopback: the handler is called
+ * in-process with a standard fetch `Request`, so the row prices the
+ * receive path an edge / WinterCG webhook receiver runs (body
+ * buffering under the default cap, `fromFetchRequest` adaptation,
+ * ed25519 verification, the 200 branch into the business handler,
+ * and the `signResponses` response signing the demo #1144 shows).
+ * The request is signed once, outside timing — the row prices the
+ * receive path, not the sender's sign cost — and reusing the same
+ * signed request across passes is sound: no `replayCache` is
+ * configured, so verification succeeds every time. Each measured
+ * pass builds a fresh `Request` from the same signed wire headers
+ * and body (a `Request` body stream is consumed by the first call,
+ * so the object cannot be reused). The client signs the
+ * settlement-instruction POST with its own ed25519 key; the server
+ * signs the settlement response with its own ed25519 key under
+ * `signResponses` (one label, `sig1`, the default covered
+ * `@status` + `content-digest`). Both key pairs are fresh per bench
+ * run, generated once before timing; nothing measured depends on
+ * their values.
+ */
+const FETCH_HANDLER_CREATED = 1_700_000_000;
+const FETCH_HANDLER_NOW = FETCH_HANDLER_CREATED + 60;
+const FETCH_HANDLER_URL = "http://127.0.0.1/webhook";
+const FETCH_HANDLER_CLIENT_KEY_ID = "bench-fetch-handler-client-1";
+const FETCH_HANDLER_SERVER_KEY_ID = "bench-fetch-handler-server-1";
+const FETCH_HANDLER_CLIENT_NONCE = "bench-fetch-handler-client-nonce-1";
+const FETCH_HANDLER_SERVER_NONCE = "bench-fetch-handler-server-nonce-1";
+const FETCH_HANDLER_REQUEST_BODY = JSON.stringify({
+  amount: 10000,
+  currency: "USD",
+});
+/** Pinned 200 body: the business handler echoes the verified keyid. */
+const FETCH_HANDLER_RESPONSE_BODY = JSON.stringify({
+  ok: true,
+  keyId: FETCH_HANDLER_CLIENT_KEY_ID,
+});
+
+/** Pinned shape of one fetch-handler round trip: the 200 status, the exact settlement body, and the response signature headers present. */
+function assertFetchHandlerRoundTrip(
+  res: Response,
+  body: string,
+  where: string,
+): void {
+  if (
+    res.status !== 200 ||
+    body !== FETCH_HANDLER_RESPONSE_BODY ||
+    res.headers.get("signature-input") === null ||
+    res.headers.get("signature") === null
+  )
+    throw new Error(
+      `benchmark self-check failed: createVerifiedFetchHandler ${where} round trip gave ` +
+        `${res.status} ${JSON.stringify(body)} ` +
+        `signature-input=${res.headers.get("signature-input") ?? "missing"} ` +
+        `signature=${res.headers.get("signature") === null ? "missing" : "present"}`,
+    );
+}
+
+/**
+ * Shared harness for the `createVerifiedFetchHandler` row: one
+ * handler, one client ed25519 key pair signing the request, one
+ * server ed25519 key pair signing the response. Returns the
+ * handler, the signed wire headers, the same headers with one
+ * base64 character of the signature flipped (the demo's flip, so
+ * the value stays well-formed and the failure is the cryptographic
+ * check), a live count of business-handler calls, and the server
+ * public key the probe verifies the response signature against.
+ */
+function buildFetchHandlerFixture(): {
+  handler: (req: Request) => Promise<Response>;
+  signedHeaders: Record<string, string>;
+  tamperedHeaders: Record<string, string>;
+  calls: () => number;
+  serverPublicKey: KeyObject;
+} {
+  const clientPair = generateEd25519KeyPair();
+  const serverPair = generateEd25519KeyPair();
+  let calls = 0;
+  const handler = createVerifiedFetchHandler(
+    { key: clientPair.publicKey, now: FETCH_HANDLER_NOW },
+    (_req, result) => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({ ok: true, keyId: result.keyId ?? null }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    },
+    {
+      signResponses: [
+        {
+          key: serverPair.privateKey,
+          alg: "ed25519",
+          keyId: FETCH_HANDLER_SERVER_KEY_ID,
+          created: FETCH_HANDLER_CREATED,
+          nonce: FETCH_HANDLER_SERVER_NONCE,
+        },
+      ],
+    },
+  );
+  const signed = signRequest(
+    {
+      method: "POST",
+      url: FETCH_HANDLER_URL,
+      headers: { "content-type": "application/json" },
+      body: FETCH_HANDLER_REQUEST_BODY,
+    },
+    {
+      keyId: FETCH_HANDLER_CLIENT_KEY_ID,
+      alg: "ed25519",
+      key: clientPair.privateKey,
+      created: FETCH_HANDLER_CREATED,
+      nonce: FETCH_HANDLER_CLIENT_NONCE,
+    },
+  );
+  const signedHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Signature-Input": signed.headers["signature-input"] as string,
+    Signature: signed.headers["signature"] as string,
+    "Content-Digest": signed.headers["content-digest"] as string,
+  };
+  const tamperedSignature = (
+    signed.headers["signature"] as string
+  ).replace(/=:([A-Za-z0-9+/])/, (_match, c: string) =>
+    `=:${c === "A" ? "B" : "A"}`,
+  );
+  return {
+    handler,
+    signedHeaders,
+    tamperedHeaders: { ...signedHeaders, Signature: tamperedSignature },
+    calls: () => calls,
+    serverPublicKey: serverPair.publicKey,
+  };
+}
+
+/**
+ * `createVerifiedFetchHandler` signed-delivery steady state: the
+ * whole in-process receive path — a fresh `Request` per op from the
+ * pre-signed wire headers, body buffering, `fromFetchRequest`
+ * adaptation, ed25519 verification, the 200 branch into the
+ * business handler, and the `signResponses` response signing —
+ * priced as one handler call per op, with no TCP and no loopback.
+ * Self-checks on every measured pass pin the 200 status, the exact
+ * settlement body, and the response signature headers present;
+ * asserted outside timing: one probe round trip returns the same
+ * pinned fields and its response signature verifies in-process
+ * (`verifyResponse`: label `sig1`, the pinned server keyid /
+ * `ed25519` / nonce / `created`, covered `@status content-digest`),
+ * a tampered-signature request is answered 401 with the pinned
+ * `SIGNATURE_MISMATCH` code and never reaches the business
+ * handler, and after the timed loop the handler-call count equals
+ * 1 + WARMUP + ITERATIONS (every warmup and timed delivery
+ * reached the business handler exactly once).
+ */
+async function benchmarkCreateVerifiedFetchHandler(): Promise<number> {
+  const f = buildFetchHandlerFixture();
+  const toFetchRequest = (
+    headers: Record<string, string>,
+    body: string,
+  ): Request =>
+    new Request(FETCH_HANDLER_URL, {
+      method: "POST",
+      headers,
+      body,
+    });
+  const probe = await f.handler(
+    toFetchRequest(f.signedHeaders, FETCH_HANDLER_REQUEST_BODY),
+  );
+  const probeBody = await probe.text();
+  assertFetchHandlerRoundTrip(probe, probeBody, "probe");
+  if (f.calls() !== 1)
+    throw new Error(
+      `benchmark self-check failed: probe called the handler ${f.calls()} times (expected 1)`,
+    );
+  const probeHeaders: Record<string, string> = {};
+  probe.headers.forEach((value, name) => {
+    probeHeaders[name] = value;
+  });
+  const probeResponseLike: HttpResponseLike = {
+    status: probe.status,
+    headers: probeHeaders,
+    body: probeBody,
+  };
+  const verified = verifyResponse(probeResponseLike, {
+    key: f.serverPublicKey,
+    now: FETCH_HANDLER_NOW,
+  });
+  if (
+    !verified.ok ||
+    verified.label !== "sig1" ||
+    verified.keyId !== FETCH_HANDLER_SERVER_KEY_ID ||
+    verified.alg !== "ed25519" ||
+    verified.nonce !== FETCH_HANDLER_SERVER_NONCE ||
+    verified.created !== FETCH_HANDLER_CREATED ||
+    verified.coveredComponents?.join(" ") !== "@status content-digest"
+  )
+    throw new Error(
+      `benchmark self-check failed: probe response signature gave ${JSON.stringify(verified)} ` +
+        `(expected ok sig1 ${FETCH_HANDLER_SERVER_KEY_ID} ed25519 ${FETCH_HANDLER_SERVER_NONCE} ${FETCH_HANDLER_CREATED} @status content-digest)`,
+    );
+  const tampered = await f.handler(
+    toFetchRequest(f.tamperedHeaders, FETCH_HANDLER_REQUEST_BODY),
+  );
+  const tamperedBody = await tampered.text();
+  let tamperedCode = "";
+  try {
+    const parsed = JSON.parse(tamperedBody) as { code?: unknown };
+    tamperedCode = typeof parsed.code === "string" ? parsed.code : "";
+  } catch {
+    tamperedCode = "";
+  }
+  if (tampered.status !== 401 || tamperedCode !== "SIGNATURE_MISMATCH")
+    throw new Error(
+      `benchmark self-check failed: tampered probe gave ${tampered.status} ${JSON.stringify(tamperedBody)} (expected 401 SIGNATURE_MISMATCH)`,
+    );
+  if (f.calls() !== 1)
+    throw new Error(
+      `benchmark self-check failed: tampered probe called the handler ${f.calls()} times (expected 1)`,
+    );
+  const ops = await measureAsync(async () => {
+    const res = await f.handler(
+      toFetchRequest(f.signedHeaders, FETCH_HANDLER_REQUEST_BODY),
+    );
+    assertFetchHandlerRoundTrip(res, await res.text(), "timed");
+  }, ITERATIONS);
+  if (f.calls() !== 1 + WARMUP + ITERATIONS)
+    throw new Error(
+      `benchmark self-check failed: handler called ${f.calls()} times (expected ${1 + WARMUP + ITERATIONS})`,
+    );
+  return ops;
+}
+
+/**
  * Per-curve JWK round-trip steady state: for one key shape, a measured
  * call runs `exportPublicKeyJwk*` on a fixed public key, pushes the
  * JWK through a JSON stringify/parse round trip (the wire form a JWKS
@@ -16671,6 +16922,11 @@ results.push({
   alg: "verifiedFetch multi-label (signed POST, loopback, 2 labels)",
   op: "sign+fetch+verify",
   ops: await benchmarkVerifiedFetchMultiLabel(),
+});
+results.push({
+  alg: "createVerifiedFetchHandler (signed POST, in-process)",
+  op: "verify+sign",
+  ops: await benchmarkCreateVerifiedFetchHandler(),
 });
 results.push({
   alg: "JWK round-trip P-256",
