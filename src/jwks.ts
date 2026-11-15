@@ -66,11 +66,32 @@ export interface JwksFetchResponse {
 }
 
 /**
- * Fetch implementation used by {@link JwksKeyStore.refresh}. Receives
- * the JWKS endpoint URL and resolves with the response. Defaults to the
- * global `fetch`.
+ * Optional second argument of a {@link JwksFetchImpl}: request init the
+ * store passes when it has something to send beyond the URL. Today the
+ * only member is `headers` — the store sends
+ * `If-None-Match: <etag>` here when it holds a remembered `ETag` from
+ * the last successful refresh (see the conditional-refresh note on
+ * {@link JwksKeyStore}), so a publisher that supports conditional
+ * requests can answer `304 Not Modified` instead of re-serving an
+ * unchanged key set. The argument is omitted entirely when there is
+ * no remembered `ETag`, so a legacy single-argument implementation
+ * keeps working untouched.
  */
-export type JwksFetchImpl = (url: string) => Promise<JwksFetchResponse>;
+export interface JwksFetchInit {
+  /** Request headers to send with the fetch, when any. */
+  headers?: Record<string, string>;
+}
+
+/**
+ * Fetch implementation used by {@link JwksKeyStore.refresh}. Receives
+ * the JWKS endpoint URL and, when the store holds a remembered `ETag`,
+ * an init object carrying `If-None-Match` (see {@link JwksFetchInit}).
+ * Resolves with the response. Defaults to the global `fetch`.
+ */
+export type JwksFetchImpl = (
+  url: string,
+  init?: JwksFetchInit,
+) => Promise<JwksFetchResponse>;
 
 /**
  * Sleep implementation used between JWKS fetch retries (see
@@ -307,6 +328,18 @@ export interface JwksKeyStoreOptions {
  *   keyid, any keyid before the first successful refresh, or an
  *   invalid (non-string / empty) keyid. `hits + misses` therefore
  *   equals the total number of `resolve()` calls.
+ * - `conditionalRefreshes`: successful refreshes whose fetch carried
+ *   an `If-None-Match` header (the store held a remembered `ETag`).
+ *   A 304 counts here too — the conditional request was sent and
+ *   answered — under the same once-per-`refresh()`-call counting, so
+ *   a refresh that sent the header but failed before any response
+ *   does not count.
+ * - `notModified`: successful refreshes answered `304 Not Modified`:
+ *   the previous snapshot was kept and only `lastRefreshedAt`
+ *   advanced. Every `notModified` is also a `conditionalRefreshes`
+ *   (a 304 can only arrive on a conditional request), so
+ *   `conditionalRefreshes - notModified` is the count of conditional
+ *   fetches that actually re-downloaded the key set.
  *
  * Counters start at zero, run for the lifetime of the store, and are
  * deliberately NOT part of a snapshot: `exportSnapshot()` does not
@@ -316,7 +349,7 @@ export interface JwksKeyStoreOptions {
  * `JwksKeyStore.restore()` is a new store and starts at zero, like
  * any freshly constructed store.) The one exception is
  * {@link JwksKeyStore.clear}: discarding the cached snapshot also
- * resets all four counters to zero, so a post-clear `stats()` reads
+ * resets all six counters to zero, so a post-clear `stats()` reads
  * as a fresh store until new activity accrues.
  */
 export interface JwksKeyStoreStats {
@@ -324,6 +357,8 @@ export interface JwksKeyStoreStats {
   refreshFailures: number;
   hits: number;
   misses: number;
+  conditionalRefreshes: number;
+  notModified: number;
 }
 
 /**
@@ -489,6 +524,23 @@ function parseCacheControlMaxAge(header: unknown): number | null {
     if (Number.isFinite(value) && value >= 0) return value;
   }
   return null;
+}
+
+/**
+ * Read the `ETag` validator off a fetched response, or `null` when
+ * the response carries none (or an empty one). The value is opaque
+ * — strong or weak, quoted or not — and is remembered verbatim
+ * (trimmed) for the next refresh's `If-None-Match` (see
+ * `fetchAndSwap`). A missing or empty header yields `null`, so a
+ * 200 without an `ETag` clears the remembered validator instead of
+ * keeping a stale one.
+ */
+function readEtag(res: JwksFetchResponse): string | null {
+  if (typeof res.headers?.get !== "function") return null;
+  const raw = res.headers.get("etag");
+  if (typeof raw !== "string") return null;
+  const etag = raw.trim();
+  return etag.length === 0 ? null : etag;
 }
 
 /**
@@ -1023,6 +1075,23 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   is this store's own), so they always use `ttlSec`. `Expires`
  *   is not consulted — only `max-age` — and the README says so
  *   plainly.
+ * - **Conditional refresh (ETag / If-None-Match).** After a
+ *   successful `refresh()` whose response carried an `ETag`, the
+ *   store remembers that validator and sends it as `If-None-Match`
+ *   on the next fetch (RFC 9110 §13.1.2). A publisher that supports
+ *   conditional requests answers `304 Not Modified` when the key
+ *   set is unchanged: the 304 is a success, not an error and never
+ *   a retry — the body is not read, the snapshot is kept exactly as
+ *   it was, and only `lastRefreshedAt` advances to the fetch time,
+ *   so the unchanged keys stay fresh without a re-download. A 200
+ *   replaces the snapshot as usual and updates the remembered
+ *   `ETag` from its own response; a 200 without an `ETag` clears
+ *   the remembered one, so the next fetch is unconditional again.
+ *   `clear()` and both snapshot restores also clear the remembered
+ *   `ETag` — a restored snapshot was never fetched with a
+ *   validator, so the next fetch after a restore is unconditional.
+ *   `stats()` counts the conditional path (`conditionalRefreshes`,
+ *   `notModified`).
  * - **Observable via `stats()`.** Successful/failed refreshes and
  *   `resolve()` hits/misses are counted for the store's lifetime (see
  *   {@link JwksKeyStoreStats} for the exact counting rules, including
@@ -1139,6 +1208,30 @@ export class JwksKeyStore {
   private hitCount = 0;
   /** `resolve()` calls that returned `undefined`. */
   private missCount = 0;
+  /**
+   * The `ETag` validator remembered from the last successful
+   * `refresh()` whose response carried one, or `null` when no
+   * validator is held (never fetched, the last 200 carried no
+   * `ETag`, or after `clear()` / a snapshot restore). The next
+   * `refresh()` sends it as `If-None-Match` (see `fetchOnce`).
+   * Only ever set at the same atomic swap point as `keysByKid`,
+   * so a failed refresh can never move it.
+   */
+  private rememberedEtag: string | null = null;
+  /** Successful refreshes whose fetch carried `If-None-Match`. */
+  private conditionalRefreshCount = 0;
+  /** Successful refreshes answered `304 Not Modified`. */
+  private notModifiedCount = 0;
+  /**
+   * Whether the fetch of the refresh currently running in
+   * `fetchAndSwap` carried an `If-None-Match` header. Reset at the
+   * start of each `fetchAndSwap` and read at its two success points
+   * (304, swap) to count `conditionalRefreshes` once per
+   * `refresh()` call, however many retry attempts it made.
+   * Single-flight (`refresh()`) guarantees at most one
+   * `fetchAndSwap` runs at a time, so an instance field is safe.
+   */
+  private sentConditionalRequest = false;
 
   constructor(url: string, opts: JwksKeyStoreOptions = {}) {
     if (typeof url !== "string" || url.length === 0)
@@ -1284,9 +1377,10 @@ export class JwksKeyStore {
 
   /**
    * Point-in-time observability snapshot `{ refreshes, refreshFailures,
-   * hits, misses }` (see {@link JwksKeyStoreStats} for the exact
-   * counting rules). The returned object is a fresh copy — mutating
-   * it does not affect the store's counters.
+   * hits, misses, conditionalRefreshes, notModified }` (see
+   * {@link JwksKeyStoreStats} for the exact counting rules). The
+   * returned object is a fresh copy — mutating it does not affect
+   * the store's counters.
    */
   stats(): JwksKeyStoreStats {
     return {
@@ -1294,6 +1388,8 @@ export class JwksKeyStore {
       refreshFailures: this.refreshFailureCount,
       hits: this.hitCount,
       misses: this.missCount,
+      conditionalRefreshes: this.conditionalRefreshCount,
+      notModified: this.notModifiedCount,
     };
   }
 
@@ -1354,10 +1450,15 @@ export class JwksKeyStore {
     this.keysByKid = new Map<string, KeyObject>();
     this.lastRefreshAtSec = null;
     this.snapshotTtlSec = null;
+    // A cleared store holds no snapshot, so the validator for it
+    // goes too: the next refresh after a clear() is unconditional.
+    this.rememberedEtag = null;
     this.refreshCount = 0;
     this.refreshFailureCount = 0;
     this.hitCount = 0;
     this.missCount = 0;
+    this.conditionalRefreshCount = 0;
+    this.notModifiedCount = 0;
   }
 
   /**
@@ -1561,13 +1662,31 @@ export class JwksKeyStore {
     );
   }
 
-  /** A single fetch attempt: no retry, no status handling. */
+  /**
+   * A single fetch attempt: no retry, no status handling. When the
+   * store holds a remembered `ETag` (see `rememberedEtag`) the
+   * attempt carries `If-None-Match: <etag>` — as the second argument
+   * of a custom `fetchImpl`, or as request headers of the default
+   * fetch — so the endpoint can answer `304 Not Modified` instead
+   * of re-serving an unchanged key set. With no remembered `ETag`
+   * the call is exactly the old unconditional one: a custom
+   * `fetchImpl` receives no second argument, so a legacy
+   * single-argument implementation keeps working untouched.
+   */
   private async fetchOnce(): Promise<JwksFetchResponse> {
+    const headers =
+      this.rememberedEtag !== null
+        ? { "If-None-Match": this.rememberedEtag }
+        : undefined;
+    if (headers !== undefined) this.sentConditionalRequest = true;
     if (this.usingDefaultFetch && this.fetchTimeoutMs !== undefined) {
-      return this.fetchWithTimeout();
+      return this.fetchWithTimeout(headers);
     }
     try {
-      return await this.fetchImpl(this.url);
+      return await this.fetchImpl(
+        this.url,
+        headers !== undefined ? { headers } : undefined,
+      );
     } catch (err) {
       throw new Error(
         `JwksKeyStore: failed to fetch JWKS from ${this.url}: ${
@@ -1583,10 +1702,13 @@ export class JwksKeyStore {
    * attempts. Only network errors and HTTP 5xx responses are
    * retried; a 4xx response, a malformed response shape, and a
    * `fetchTimeoutMs` abort are terminal on the first attempt that
-   * sees them. A response that is not `ok` but carries no `json()`
-   * method is passed through untouched — `fetchAndSwap`'s shape
-   * check, not this loop, owns that contract violation, so the
-   * error ordering for malformed responses is unchanged.
+   * sees them. A `304 Not Modified` is a success, not an error: it
+   * is returned untouched (never retried, never thrown), and
+   * `fetchAndSwap` keeps the previous snapshot on it. A response
+   * that is not `ok` but carries no `json()` method is passed
+   * through untouched — `fetchAndSwap`'s shape check, not this loop,
+   * owns that contract violation, so the error ordering for
+   * malformed responses is unchanged.
    *
    * On exhaustion the last attempt's error is thrown unchanged, so
    * a caller that distinguishes "HTTP 500" from "network down" from
@@ -1613,6 +1735,11 @@ export class JwksKeyStore {
         typeof res.json === "function" &&
         !res.ok
       ) {
+        // 304 Not Modified: the endpoint confirms the snapshot the
+        // store already holds is current. A success, not an error —
+        // returned to fetchAndSwap, never retried, never thrown.
+        if (typeof res.status === "number" && res.status === 304)
+          return res;
         if (
           typeof res.status === "number" &&
           res.status >= 500 &&
@@ -1632,25 +1759,20 @@ export class JwksKeyStore {
     throw new Error("JwksKeyStore: unreachable fetch retry state");
   }
 
-  /** Fetch the JWKS document and build/swap the next snapshot. */
-  private async fetchAndSwap(): Promise<void> {
-    const res = await this.fetchWithRetries();
-    if (
-      typeof res !== "object" ||
-      res === null ||
-      typeof res.json !== "function"
-    )
-      throw new Error(
-        `JwksKeyStore: fetch for ${this.url} did not return a response with a json() method`,
-      );
-    // Redirect interception (requireHttps only): the default fetch
-    // follows redirects automatically, so an https endpoint that
-    // redirects to http would otherwise downgrade the whole key set
-    // to plaintext. Reject before parsing anything from the
-    // downgraded response, so the old snapshot stays untouched.
-    // A response with no final `url` (a custom fetchImpl that does
-    // not report one) cannot be checked and is passed through —
-    // see the requireHttps option documentation.
+  /**
+   * Redirect interception (requireHttps only): the default fetch
+   * follows redirects automatically, so an https endpoint that
+   * redirects to http would otherwise downgrade the whole key set
+   * to plaintext. Reject before parsing anything from the
+   * downgraded response, so the old snapshot stays untouched. A
+   * response with no final `url` (a custom fetchImpl that does not
+   * report one) cannot be checked and is passed through — see the
+   * requireHttps option documentation. Called for 200s and 304s
+   * alike: a 304 installs no keys, but it advances freshness, and a
+   * plaintext landing must not extend a requireHttps store's
+   * freshness either.
+   */
+  private assertFinalUrlSecure(res: JwksFetchResponse): void {
     if (this.requireHttps && typeof res.url === "string" && res.url !== "") {
       let finalProtocol: string | null = null;
       try {
@@ -1663,6 +1785,37 @@ export class JwksKeyStore {
           `JwksKeyStore: JWKS fetch redirected to insecure http: ${res.url}`,
         );
     }
+  }
+
+  /** Fetch the JWKS document and build/swap the next snapshot. */
+  private async fetchAndSwap(): Promise<void> {
+    this.sentConditionalRequest = false;
+    const res = await this.fetchWithRetries();
+    // 304 Not Modified: the endpoint confirms the held snapshot is
+    // current. No body is read and `json()` is never called — a 304
+    // carries no representation, so a response without `json()` is a
+    // valid 304 here — the snapshot is kept exactly as it was and
+    // only the freshness timestamp advances to this fetch time.
+    // The remembered `ETag` stays: the 304 just re-validated it.
+    // The redirect check still applies (see
+    // `assertFinalUrlSecure`): a 304 that landed over plaintext
+    // http must not extend a requireHttps store's freshness.
+    if (typeof res === "object" && res !== null && res.status === 304) {
+      this.assertFinalUrlSecure(res);
+      if (this.sentConditionalRequest) this.conditionalRefreshCount++;
+      this.notModifiedCount++;
+      this.lastRefreshAtSec = this.clock();
+      return;
+    }
+    if (
+      typeof res !== "object" ||
+      res === null ||
+      typeof res.json !== "function"
+    )
+      throw new Error(
+        `JwksKeyStore: fetch for ${this.url} did not return a response with a json() method`,
+      );
+    this.assertFinalUrlSecure(res);
     // Body-size limit (maxBodyBytes), enforced before any parse so a
     // hostile endpoint cannot make `refresh()` swallow an unbounded
     // body into memory: (1) a Content-Length precheck rejects an
@@ -1778,6 +1931,14 @@ export class JwksKeyStore {
     this.keysByKid = next;
     this.lastRefreshAtSec = this.clock();
     this.snapshotTtlSec = effectiveTtlSec;
+    // Remember the validator for this snapshot (see the class
+    // documentation): the next refresh sends it as `If-None-Match`.
+    // A 200 without an `ETag` clears the remembered one — the new
+    // snapshot has no validator, so the next fetch is unconditional.
+    // Only set here, at the swap point, so a failed refresh never
+    // moves it.
+    this.rememberedEtag = readEtag(res);
+    if (this.sentConditionalRequest) this.conditionalRefreshCount++;
   }
 
   /**
@@ -1797,13 +1958,22 @@ export class JwksKeyStore {
    * the timeout only applies to the default fetch, as documented on
    * {@link JwksKeyStoreOptions.fetchTimeoutMs}.
    */
-  private async fetchWithTimeout(): Promise<JwksFetchResponse> {
+  private async fetchWithTimeout(
+    headers?: Record<string, string>,
+  ): Promise<JwksFetchResponse> {
     const timeoutMs = this.fetchTimeoutMs as number;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await globalThis.fetch(this.url, {
         signal: controller.signal,
+        // Forwarded verbatim when present: a remembered `ETag`
+        // becomes `If-None-Match` on the default fetch exactly as
+        // on a custom `fetchImpl` (see `fetchOnce`). Spread, not
+        // `headers: undefined`: this project compiles with
+        // `exactOptionalPropertyTypes`, and `RequestInit.headers`
+        // does not accept an explicit `undefined`.
+        ...(headers !== undefined ? { headers } : {}),
       });
       return res as unknown as JwksFetchResponse;
     } catch (err) {
@@ -1917,6 +2087,10 @@ export class JwksKeyStore {
     // back to the configured ttlSec — restoring never inherits a
     // max-age from an earlier fetch.
     this.snapshotTtlSec = null;
+    // A restored snapshot was never fetched with a validator, so
+    // it carries no conditional-request context: the next refresh
+    // after a restore is unconditional.
+    this.rememberedEtag = null;
   }
 
   /**
@@ -2071,6 +2245,9 @@ export class JwksKeyStore {
     // no Cache-Control header, so the effective TTL falls back to
     // the configured ttlSec.
     this.snapshotTtlSec = null;
+    // Like restoreSnapshot(): the envelope carries no validator,
+    // so the next refresh after a signed restore is unconditional.
+    this.rememberedEtag = null;
   }
 
   /**

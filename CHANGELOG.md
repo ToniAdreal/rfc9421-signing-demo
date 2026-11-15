@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore` now sends conditional refreshes (backlog #1169):
+  after a successful `refresh()` whose response carried an `ETag`,
+  the store remembers the validator and sends it as `If-None-Match`
+  on the next fetch, so a publisher that supports conditional
+  requests can answer `304 Not Modified` instead of re-serving an
+  unchanged key set. A 304 is a success, never an error and never
+  retried: the body is never read (`json()` is not called), the
+  snapshot is kept exactly as it was, and only `lastRefreshedAt`
+  advances to the fetch time. A 200 replaces the snapshot as usual
+  and updates the remembered `ETag` from its own response; a 200
+  without an `ETag` (or with an empty one) clears the remembered
+  validator, and `clear()` and both snapshot restores clear it too.
+  `JwksFetchImpl` gains an optional second argument
+  `{ headers?: Record<string, string> }` carrying the header; with
+  no remembered `ETag` no second argument is passed, so legacy
+  single-argument implementations keep working untouched. `stats()`
+  gains `conditionalRefreshes` and `notModified` (the demo's pinned
+  observability and clear-segment stats, and its printed `stats()`
+  lines, now show all six counters). A 304 that lands over
+  plaintext http is still rejected under `requireHttps`. Fifteen new
+  tests in `test/jwksConditionalRefresh.test.ts`, including a 304
+  that must not call `json()`, the effective-TTL freeze across a
+  304, and the ETag reset on both restore paths. The README JWKS
+  section documents the conditional refresh.
 - `fromNodeRequest` now accepts HTTP/2 requests from Node's `http2`
   compatibility API (backlog #1168): a request there carries no `host`
   header — only the `:authority` pseudo-header — so the host falls back

@@ -5072,7 +5072,7 @@ test("demo JWKS observability segment shows lastRefreshedAt, isStale() at the TT
   assert.equal(DEMO_JWKS_OBSERVABILITY_TTL_SEC, 120);
   assert.equal(DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC, DEMO_CREATED + DEMO_JWKS_OBSERVABILITY_TTL_SEC);
   assert.equal(DEMO_JWKS_OBSERVABILITY_FETCH_CALLS, 1);
-  assert.deepEqual(DEMO_JWKS_OBSERVABILITY_STATS, { refreshes: 1, refreshFailures: 0, hits: 2, misses: 1 });
+  assert.deepEqual(DEMO_JWKS_OBSERVABILITY_STATS, { refreshes: 1, refreshFailures: 0, hits: 2, misses: 1, conditionalRefreshes: 0, notModified: 0 });
   assert.equal(jwksObservabilityLastRefreshedBefore, null);
   assert.equal(jwksObservabilityStaleBefore, true);
   assert.equal(jwksObservabilityFetchCalls, DEMO_JWKS_OBSERVABILITY_FETCH_CALLS);
@@ -5130,7 +5130,7 @@ test("demo lines contain the JWKS observability segment (before/after reads, TTL
     `JWKS observability at the TTL boundary (${DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC} — exactly ${DEMO_JWKS_OBSERVABILITY_TTL_SEC}s after the refresh, the >= boundary): isStale()=true (staleness is advisory only — the stale snapshot still serves)`,
     `JWKS verification at the TTL boundary through the stale snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_OBSERVABILITY_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_OBSERVABILITY_NONCE}")`,
     `JWKS observability resolves at the boundary: resolve("${DEMO_JWKS_OBSERVABILITY_KEY_ID}") returned a key (hit), resolve("${DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID}") returned undefined (miss)`,
-    `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshFailures}, hits: ${DEMO_JWKS_OBSERVABILITY_STATS.hits}, misses: ${DEMO_JWKS_OBSERVABILITY_STATS.misses} } (hits + misses equals the total resolve() calls)`,
+    `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshFailures}, hits: ${DEMO_JWKS_OBSERVABILITY_STATS.hits}, misses: ${DEMO_JWKS_OBSERVABILITY_STATS.misses}, conditionalRefreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.conditionalRefreshes}, notModified: ${DEMO_JWKS_OBSERVABILITY_STATS.notModified} } (hits + misses equals the total resolve() calls)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 7), expectedLines);
   // The JWKS clear segment follows the JWKS observability segment,
@@ -5175,18 +5175,24 @@ test("demo JWKS clear segment verifies, clears to zero, rejects the retired key,
     refreshFailures: 0,
     hits: 1,
     misses: 0,
+    conditionalRefreshes: 0,
+    notModified: 0,
   });
   assert.deepEqual(DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR, {
     refreshes: 0,
     refreshFailures: 0,
     hits: 0,
     misses: 0,
+    conditionalRefreshes: 0,
+    notModified: 0,
   });
   assert.deepEqual(DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH, {
     refreshes: 1,
     refreshFailures: 0,
     hits: 1,
     misses: 1,
+    conditionalRefreshes: 0,
+    notModified: 0,
   });
   assert.equal(jwksClearVerificationBefore.ok, true);
   assert.deepEqual(jwksClearStatsBefore, DEMO_JWKS_CLEAR_STATS_BEFORE);
@@ -5273,8 +5279,10 @@ test("demo lines contain the JWKS clear segment (verify, cleared zero state, rej
     refreshFailures: number;
     hits: number;
     misses: number;
+    conditionalRefreshes: number;
+    notModified: number;
   }) =>
-    `{ refreshes: ${st.refreshes}, refreshFailures: ${st.refreshFailures}, hits: ${st.hits}, misses: ${st.misses} }`;
+    `{ refreshes: ${st.refreshes}, refreshFailures: ${st.refreshFailures}, hits: ${st.hits}, misses: ${st.misses}, conditionalRefreshes: ${st.conditionalRefreshes}, notModified: ${st.notModified} }`;
   const expectedLines = [
     "JWKS clear: JwksKeyStore.clear() drops the cached keys and zeroes the stats() counters at once — the explicit reset a gateway runs when an endpoint stops being trusted or a key is known compromised, instead of waiting for the TTL to expire or for a refresh to succeed",
     `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" verifies through the fetched snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_CLEAR_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_CLEAR_NONCE}"), stats() = ${fmt(DEMO_JWKS_CLEAR_STATS_BEFORE)}`,

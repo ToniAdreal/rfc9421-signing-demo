@@ -29,6 +29,7 @@ export type {
   JwksAutoRefreshOptions,
   JwksAutoRefreshTimer,
   JwksFetchImpl,
+  JwksFetchInit,
   JwksFetchResponse,
   JwksKeyStoreOptions,
   JwksKeyStoreSnapshot,

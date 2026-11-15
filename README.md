@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2216 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2231 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -949,7 +949,8 @@ a store that later grows a second key silently stops falling back.
 `verifyAllLabels` applies the same rule per label.
 
 Observability: `store.stats()` returns a detached `{ refreshes,
-refreshFailures, hits, misses }` snapshot (mirroring `ReplayCache.stats()`).
+refreshFailures, hits, misses, conditionalRefreshes, notModified }`
+snapshot (mirroring `ReplayCache.stats()`).
 Refresh counts are once per `refresh()` call — a single-flight refresh shared by
 many waiters counts once, as a success or as a failure, and retry attempts
 inside one `refresh()` do not multiply the count — and every `resolve()`
@@ -1029,6 +1030,30 @@ re-derives it from that response's own header. Restored snapshots
 carry no cache headers (the snapshot format is this store's own), so
 they always use `ttlSec`. One honest limit: `Expires` is not
 consulted — only `max-age`.
+
+Conditional refresh (ETag / If-None-Match): after a successful
+`refresh()` whose response carried an `ETag`, the store remembers
+that validator and sends it as `If-None-Match` on the next fetch, so
+a publisher that supports conditional requests can answer `304 Not
+Modified` instead of re-serving an unchanged key set. A 304 is a
+success, never an error and never retried: the body is not read, the
+snapshot is kept exactly as it was, and only `lastRefreshedAt`
+advances to the fetch time. A 200 replaces the snapshot as usual and
+updates the remembered `ETag` from its own response; a 200 without
+an `ETag` (or with an empty one) clears the remembered validator, so
+the next fetch is unconditional again. `clear()` and both snapshot
+restores also clear it — a restored snapshot was never fetched with
+a validator. The fetch is injectable (`fetchImpl`), so a custom
+implementation receives the header as its second argument
+(`{ headers: { "If-None-Match": "<etag>" } }`); with no remembered
+`ETag` no second argument is passed at all, so a legacy
+single-argument implementation keeps working untouched. `stats()`
+counts the conditional path: `conditionalRefreshes` (successful
+refreshes whose fetch carried `If-None-Match`, a 304 included) and
+`notModified` (refreshes answered 304). One honest limit: a 304 that
+lands over plaintext http is still rejected under `requireHttps` —
+it carries no keys, but it must not extend a requireHttps store's
+freshness.
 
 Fetch retries (opt-in): `new JwksKeyStore(url, { fetchRetries: 2,
 fetchBackoffMs: 1000 })` re-attempts a failed `refresh()` up to the
@@ -4866,7 +4891,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2216 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2231 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

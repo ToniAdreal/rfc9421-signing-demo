@@ -2845,6 +2845,8 @@ export const DEMO_JWKS_OBSERVABILITY_STATS: JwksKeyStoreStats = {
   refreshFailures: 0,
   hits: 2,
   misses: 1,
+  conditionalRefreshes: 0,
+  notModified: 0,
 };
 
 /** Key id of the JWKS clear segment's pinned key. */
@@ -2872,6 +2874,8 @@ export const DEMO_JWKS_CLEAR_STATS_BEFORE: JwksKeyStoreStats = {
   refreshFailures: 0,
   hits: 1,
   misses: 0,
+  conditionalRefreshes: 0,
+  notModified: 0,
 };
 /** Hand-pinned `size` of the JWKS clear segment after `clear()`: every key dropped. */
 export const DEMO_JWKS_CLEAR_SIZE_AFTER_CLEAR = 0;
@@ -2884,6 +2888,8 @@ export const DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR: JwksKeyStoreStats = {
   refreshFailures: 0,
   hits: 0,
   misses: 0,
+  conditionalRefreshes: 0,
+  notModified: 0,
 };
 /** Rejection code of the JWKS clear segment's verification after `clear()`. */
 export const DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR = "KEY_RESOLUTION_FAILED";
@@ -2901,6 +2907,8 @@ export const DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH: JwksKeyStoreStats = {
   refreshFailures: 0,
   hits: 1,
   misses: 1,
+  conditionalRefreshes: 0,
+  notModified: 0,
 };
 
 /** Key id of the closing JWKS fetch retries segment's scripted key. */
@@ -11400,7 +11408,11 @@ export async function runDemo(): Promise<DemoResult> {
       DEMO_JWKS_OBSERVABILITY_STATS.refreshFailures ||
     jwksObservabilityStats.hits !== DEMO_JWKS_OBSERVABILITY_STATS.hits ||
     jwksObservabilityStats.misses !==
-      DEMO_JWKS_OBSERVABILITY_STATS.misses
+      DEMO_JWKS_OBSERVABILITY_STATS.misses ||
+    jwksObservabilityStats.conditionalRefreshes !==
+      DEMO_JWKS_OBSERVABILITY_STATS.conditionalRefreshes ||
+    jwksObservabilityStats.notModified !==
+      DEMO_JWKS_OBSERVABILITY_STATS.notModified
   ) {
     throw new Error(
       `demo fixture broken: JWKS observability gave before ` +
@@ -15996,18 +16008,18 @@ export async function runDemo(): Promise<DemoResult> {
       ? `JWKS verification at the TTL boundary through the stale snapshot: OK (label ${jwksObservabilityVerification.label}, keyid="${jwksObservabilityVerification.keyId}", alg="${jwksObservabilityVerification.alg}", nonce="${jwksObservabilityVerification.nonce}")`
       : `JWKS verification at the TTL boundary through the stale snapshot: FAILED (code ${jwksObservabilityVerification.code}: ${jwksObservabilityVerification.reason})`,
     `JWKS observability resolves at the boundary: resolve("${DEMO_JWKS_OBSERVABILITY_KEY_ID}") returned a key (hit), resolve("${DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID}") returned undefined (miss)`,
-    `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${jwksObservabilityStats.refreshes}, refreshFailures: ${jwksObservabilityStats.refreshFailures}, hits: ${jwksObservabilityStats.hits}, misses: ${jwksObservabilityStats.misses} } (hits + misses equals the total resolve() calls)`,
+    `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${jwksObservabilityStats.refreshes}, refreshFailures: ${jwksObservabilityStats.refreshFailures}, hits: ${jwksObservabilityStats.hits}, misses: ${jwksObservabilityStats.misses}, conditionalRefreshes: ${jwksObservabilityStats.conditionalRefreshes}, notModified: ${jwksObservabilityStats.notModified} } (hits + misses equals the total resolve() calls)`,
     "",
     "JWKS clear: JwksKeyStore.clear() drops the cached keys and zeroes the stats() counters at once — the explicit reset a gateway runs when an endpoint stops being trusted or a key is known compromised, instead of waiting for the TTL to expire or for a refresh to succeed",
     jwksClearVerificationBefore.ok
-      ? `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" verifies through the fetched snapshot: OK (label ${jwksClearVerificationBefore.label}, keyid="${jwksClearVerificationBefore.keyId}", alg="${jwksClearVerificationBefore.alg}", nonce="${jwksClearVerificationBefore.nonce}"), stats() = { refreshes: ${jwksClearStatsBefore.refreshes}, refreshFailures: ${jwksClearStatsBefore.refreshFailures}, hits: ${jwksClearStatsBefore.hits}, misses: ${jwksClearStatsBefore.misses} }`
+      ? `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" verifies through the fetched snapshot: OK (label ${jwksClearVerificationBefore.label}, keyid="${jwksClearVerificationBefore.keyId}", alg="${jwksClearVerificationBefore.alg}", nonce="${jwksClearVerificationBefore.nonce}"), stats() = { refreshes: ${jwksClearStatsBefore.refreshes}, refreshFailures: ${jwksClearStatsBefore.refreshFailures}, hits: ${jwksClearStatsBefore.hits}, misses: ${jwksClearStatsBefore.misses}, conditionalRefreshes: ${jwksClearStatsBefore.conditionalRefreshes}, notModified: ${jwksClearStatsBefore.notModified} }`
       : `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" through the fetched snapshot: FAILED (code ${jwksClearVerificationBefore.code}: ${jwksClearVerificationBefore.reason})`,
-    `JWKS clear after clear(): size = ${jwksClearSizeAfterClear}, lastRefreshedAt=${jwksClearLastRefreshedAfterClear}, isStale()=${jwksClearStaleAfterClear}, stats() = { refreshes: ${jwksClearStatsAfterClear.refreshes}, refreshFailures: ${jwksClearStatsAfterClear.refreshFailures}, hits: ${jwksClearStatsAfterClear.hits}, misses: ${jwksClearStatsAfterClear.misses} } (every cached key dropped, every counter back at zero)`,
+    `JWKS clear after clear(): size = ${jwksClearSizeAfterClear}, lastRefreshedAt=${jwksClearLastRefreshedAfterClear}, isStale()=${jwksClearStaleAfterClear}, stats() = { refreshes: ${jwksClearStatsAfterClear.refreshes}, refreshFailures: ${jwksClearStatsAfterClear.refreshFailures}, hits: ${jwksClearStatsAfterClear.hits}, misses: ${jwksClearStatsAfterClear.misses}, conditionalRefreshes: ${jwksClearStatsAfterClear.conditionalRefreshes}, notModified: ${jwksClearStatsAfterClear.notModified} } (every cached key dropped, every counter back at zero)`,
     jwksClearVerificationAfterClear.ok
       ? `JWKS clear verification after clear(): the same signed request: OK (unexpected — the cleared store still resolved the retired key)`
       : `JWKS clear verification after clear(): the same signed request: FAILED (code ${jwksClearVerificationAfterClear.code}: ${jwksClearVerificationAfterClear.reason}) — the retired key no longer resolves`,
     jwksClearVerificationAfterRefetch.ok
-      ? `JWKS clear after a fresh refresh() (fetch count ${jwksClearFetchCallsAfterRefetch}): the same signed request verifies again: OK (label ${jwksClearVerificationAfterRefetch.label}, keyid="${jwksClearVerificationAfterRefetch.keyId}", alg="${jwksClearVerificationAfterRefetch.alg}", nonce="${jwksClearVerificationAfterRefetch.nonce}"), stats() = { refreshes: ${jwksClearStatsAfterRefetch.refreshes}, refreshFailures: ${jwksClearStatsAfterRefetch.refreshFailures}, hits: ${jwksClearStatsAfterRefetch.hits}, misses: ${jwksClearStatsAfterRefetch.misses} } (the post-clear miss from the rejected verification stays visible in the counters)`
+      ? `JWKS clear after a fresh refresh() (fetch count ${jwksClearFetchCallsAfterRefetch}): the same signed request verifies again: OK (label ${jwksClearVerificationAfterRefetch.label}, keyid="${jwksClearVerificationAfterRefetch.keyId}", alg="${jwksClearVerificationAfterRefetch.alg}", nonce="${jwksClearVerificationAfterRefetch.nonce}"), stats() = { refreshes: ${jwksClearStatsAfterRefetch.refreshes}, refreshFailures: ${jwksClearStatsAfterRefetch.refreshFailures}, hits: ${jwksClearStatsAfterRefetch.hits}, misses: ${jwksClearStatsAfterRefetch.misses}, conditionalRefreshes: ${jwksClearStatsAfterRefetch.conditionalRefreshes}, notModified: ${jwksClearStatsAfterRefetch.notModified} } (the post-clear miss from the rejected verification stays visible in the counters)`
       : `JWKS clear after a fresh refresh() (fetch count ${jwksClearFetchCallsAfterRefetch}): the same signed request: FAILED (code ${jwksClearVerificationAfterRefetch.code}: ${jwksClearVerificationAfterRefetch.reason})`,
     "",
     "JWKS fetch retries: JwksKeyStore fetchRetries retries only transient JWKS failures — a briefly sick endpoint heals on retry, a wrong request never does",
