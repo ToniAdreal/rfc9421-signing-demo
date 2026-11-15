@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The benchmark (`npm run bench`) now also measures
+  `ReplayCache.release` (backlog #1149) — the single-nonce
+  release path a gateway runs when a verified request's
+  downstream write failed and the client retries the same
+  request verbatim, which the existing `check` row never
+  timed (it measures only the record-and-lookup direction).
+  The fixture is a fixed batch of eight nonces under a
+  fixed injected clock and a 3,600-second TTL. Every
+  measured pass runs the check → release → has combination
+  and self-checks the flip — the recording check reports
+  first-seen, `release()` reports `true`, and the trailing
+  `has()` reports `false` — and the bench pins the end
+  state (`size` 0, zero hits, one miss per measured op
+  including warmup, zero evictions). The unseen-nonce
+  release returning `false`, the sibling untouched with
+  `size` down by exactly one, the released nonce
+  re-recording as first-seen, and the TTL-boundary expiry
+  refusal are asserted outside timing. The README
+  Benchmarks table was refreshed from the same run and
+  gains the new row.
 - `verifiedFetch` binary response bodies (backlog #1141):
   `VerifiedFetchOptions.responseBody?: "text" | "bytes"` (default
   `"text"`, backward compatible). In `"bytes"` mode the verified

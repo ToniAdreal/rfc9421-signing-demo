@@ -11330,6 +11330,171 @@ function benchmarkReplayCacheFromSnapshot(): number {
   }, ITERATIONS);
 }
 
+/** Fixed instant for the ReplayCache release fixture (no wall clock). */
+const REPLAY_RELEASE_NOW = 1_700_000_000;
+/** TTL of the ReplayCache release fixture, in seconds. */
+const REPLAY_RELEASE_TTL_SEC = 3600;
+/**
+ * Fixed nonce batch the release benchmark rotates over — eight
+ * distinct nonces, so no measured op reuses the nonce the previous
+ * op just released and no single-entry cache-line artifact is timed.
+ */
+const REPLAY_RELEASE_NONCES = [
+  "bench-release-0",
+  "bench-release-1",
+  "bench-release-2",
+  "bench-release-3",
+  "bench-release-4",
+  "bench-release-5",
+  "bench-release-6",
+  "bench-release-7",
+] as const;
+
+/**
+ * `ReplayCache.release` steady state: one measured op is the
+ * check → release → has combination a gateway runs when a verified
+ * request's downstream write failed and the client retries the same
+ * request verbatim — record the nonce, forget exactly that nonce,
+ * and probe that it is gone. Every measured pass self-checks the
+ * flip: the recording `check()` must report first-seen, `release()`
+ * must report `true`, and the trailing `has()` must report `false`.
+ * The cache is empty again at every op boundary, so the batch
+ * rotates forever without growth. Outside timing, the bench asserts
+ * that releasing an unseen nonce returns `false` (a release that
+ * never succeeds would time an empty path), that a release drops
+ * `stats().size` by exactly one while a sibling nonce stays
+ * tracked and the hit/miss counters stay untouched, that the
+ * released nonce checks in as first-seen again, and that a nonce
+ * exactly at its TTL boundary is expired and is not released.
+ */
+function benchmarkReplayCacheRelease(): number {
+  const unseen = new ReplayCache({
+    maxEntries: 10_000,
+    ttlSec: REPLAY_RELEASE_TTL_SEC,
+    now: () => REPLAY_RELEASE_NOW,
+  });
+  if (unseen.release("bench-release-unseen") !== false)
+    throw new Error(
+      "benchmark self-check failed: unseen nonce release reported success",
+    );
+  const unseenStats = unseen.stats();
+  if (
+    unseenStats.size !== 0 ||
+    unseenStats.hits !== 0 ||
+    unseenStats.misses !== 0 ||
+    unseenStats.evictions !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: unseen release changed stats ${JSON.stringify(unseenStats)} ` +
+        `(expected all zero)`,
+    );
+  const siblings = new ReplayCache({
+    maxEntries: 10_000,
+    ttlSec: REPLAY_RELEASE_TTL_SEC,
+    now: () => REPLAY_RELEASE_NOW,
+  });
+  if (
+    siblings.check("bench-release-sibling-a") !== false ||
+    siblings.check("bench-release-sibling-b") !== false
+  )
+    throw new Error(
+      "benchmark self-check failed: sibling-fixture nonce reported as replay",
+    );
+  if (siblings.stats().size !== 2)
+    throw new Error(
+      `benchmark self-check failed: sibling-fixture size ${siblings.stats().size} (expected 2)`,
+    );
+  if (siblings.release("bench-release-sibling-a") !== true)
+    throw new Error(
+      "benchmark self-check failed: sibling release reported failure",
+    );
+  if (siblings.has("bench-release-sibling-a") !== false)
+    throw new Error(
+      "benchmark self-check failed: released sibling still tracked",
+    );
+  if (siblings.has("bench-release-sibling-b") !== true)
+    throw new Error(
+      "benchmark self-check failed: unreleased sibling lost by release",
+    );
+  const siblingStats = siblings.stats();
+  if (
+    siblingStats.size !== 1 ||
+    siblingStats.hits !== 0 ||
+    siblingStats.misses !== 2 ||
+    siblingStats.evictions !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: sibling stats ${JSON.stringify(siblingStats)} ` +
+        `(expected { size: 1, hits: 0, misses: 2, evictions: 0 })`,
+    );
+  if (siblings.check("bench-release-sibling-a") !== false)
+    throw new Error(
+      "benchmark self-check failed: released nonce did not re-record as first-seen",
+    );
+  const expired = new ReplayCache({
+    maxEntries: 10_000,
+    ttlSec: REPLAY_RELEASE_TTL_SEC,
+    now: () => REPLAY_RELEASE_NOW,
+  });
+  if (expired.check("bench-release-expired", REPLAY_RELEASE_NOW) !== false)
+    throw new Error(
+      "benchmark self-check failed: expired-fixture nonce reported as replay",
+    );
+  if (
+    expired.release(
+      "bench-release-expired",
+      REPLAY_RELEASE_NOW + REPLAY_RELEASE_TTL_SEC,
+    ) !== false
+  )
+    throw new Error(
+      "benchmark self-check failed: nonce at its TTL boundary was released",
+    );
+  if (
+    expired.has(
+      "bench-release-expired",
+      REPLAY_RELEASE_NOW + REPLAY_RELEASE_TTL_SEC,
+    ) !== false
+  )
+    throw new Error(
+      "benchmark self-check failed: nonce at its TTL boundary still tracked",
+    );
+  const cache = new ReplayCache({
+    maxEntries: 10_000,
+    ttlSec: REPLAY_RELEASE_TTL_SEC,
+    now: () => REPLAY_RELEASE_NOW,
+  });
+  let idx = 0;
+  const ops = measure(() => {
+    const nonce = REPLAY_RELEASE_NONCES[idx % REPLAY_RELEASE_NONCES.length]!;
+    idx++;
+    if (cache.check(nonce) !== false)
+      throw new Error(
+        `benchmark self-check failed: release-fixture nonce ${nonce} reported as replay`,
+      );
+    if (cache.release(nonce) !== true)
+      throw new Error(
+        `benchmark self-check failed: release of ${nonce} reported failure`,
+      );
+    if (cache.has(nonce) !== false)
+      throw new Error(
+        `benchmark self-check failed: released nonce ${nonce} still tracked`,
+      );
+  }, ITERATIONS);
+  const stats = cache.stats();
+  const expectedMisses = WARMUP + ITERATIONS;
+  if (
+    stats.size !== 0 ||
+    stats.hits !== 0 ||
+    stats.misses !== expectedMisses ||
+    stats.evictions !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: release stats ${JSON.stringify(stats)} ` +
+        `(expected { size: 0, hits: 0, misses: ${expectedMisses}, evictions: 0 })`,
+    );
+  return ops;
+}
+
 /** Fixed seed for the malformed corpus (same seed as test/parserFuzz). */
 const MALFORMED_SEED = 20261005;
 /** `created` of the malformed corpus's base signature (fixed, no wall clock). */
@@ -16430,6 +16595,11 @@ results.push({
   alg: "ReplayCache.fromSnapshot (4 live)",
   op: "restore",
   ops: benchmarkReplayCacheFromSnapshot(),
+});
+results.push({
+  alg: "ReplayCache.release (check+release+has, 8 nonces)",
+  op: "release",
+  ops: benchmarkReplayCacheRelease(),
 });
 const malformed = benchmarkMalformedReject();
 results.push({
