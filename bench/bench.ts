@@ -530,7 +530,15 @@
  * `size` and zeroed `stats()` counters, and every restored nonce
  * still reporting a replay on `check`), with the expired-at-
  * restore drop and the corrupt-envelope rejections (wrong
- * version, malformed entry) asserted outside timing, plus the malformed-input rejection path:
+ * version, malformed entry) asserted outside timing, plus the
+ * sealed multi-label snapshot path a multi-signature deployment
+ * runs to persist every label's replay cache at once:
+ * `exportSignedSnapshotsByLabel` over two fixed-clock caches
+ * holding eight live nonces each (see REPLAY_SIGNED_BY_LABEL_*
+ * below), each measured op sealing both envelopes under one
+ * secret, JSON round-tripping them, restoring both labels and
+ * re-checking every nonce, with the tampered-label and
+ * wrong-secret rejections asserted outside timing, plus the malformed-input rejection path:
  * `verifyRequest` over a fixed-seed corpus of malformed
  * signature-input / signature values (the parser rejection traffic a
  * verification gateway faces), self-checked to always return
@@ -909,6 +917,7 @@ import {
   exportPublicKeyJwkP521,
   exportPublicKeyJwkRsa,
   exportPublicKeyPem,
+  exportSignedSnapshotsByLabel,
   exportSymmetricKeyJwk,
   fromNodeRequest,
   fromNodeResponse,
@@ -956,6 +965,7 @@ import {
   type IncomingRequestLike,
   type JwksFetchImpl,
   type RequestLike,
+  type ReplayCacheSignedSnapshotEnvelope,
   type SignatureParams,
   type SignAlg,
   type SignedHttpRequest,
@@ -11536,6 +11546,264 @@ function benchmarkReplayCacheFromSnapshot(): number {
   }, ITERATIONS);
 }
 
+/** Fixed secret sealing the by-label signed snapshot envelopes (bench-only; never a production secret). */
+const REPLAY_SIGNED_BY_LABEL_SECRET = "bench-signed-snapshots-by-label-secret";
+/** Fixed instant for the by-label signed snapshot fixture (no wall clock). */
+const REPLAY_SIGNED_BY_LABEL_NOW = 1_700_000_000;
+/** TTL of the by-label signed snapshot fixture, in seconds. */
+const REPLAY_SIGNED_BY_LABEL_TTL_SEC = 3600;
+/** Labels of the by-label signed snapshot fixture — the merchant/gateway pair the verifyAllLabels rows use. */
+const REPLAY_SIGNED_BY_LABEL_LABELS = ["merchant", "gateway"] as const;
+/** Nonces per label in the by-label signed snapshot fixture. */
+const REPLAY_SIGNED_BY_LABEL_NONCE_COUNT = 8;
+/**
+ * Pinned MAC-mismatch refusal for a tampered by-label signed
+ * snapshot envelope (the same message the single-label restore
+ * throws — restore cannot tell tampering from a wrong secret).
+ */
+const REPLAY_SIGNED_BY_LABEL_MAC_MISMATCH =
+  "ReplayCache: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong";
+/**
+ * Hand-pinned live entries of each label's snapshot at
+ * REPLAY_SIGNED_BY_LABEL_NOW, in LRU (insertion) order — written
+ * literally, never derived from `exportSignedSnapshotsByLabel`
+ * itself: nonce i (1-based) was recorded (9 - i) * 10 seconds
+ * before the export instant, so the entries run from NOW - 80s
+ * to NOW - 10s and every entry is live under the 3,600-second
+ * TTL at restore time.
+ */
+const REPLAY_SIGNED_BY_LABEL_EXPECTED: Record<
+  (typeof REPLAY_SIGNED_BY_LABEL_LABELS)[number],
+  Array<[string, number]>
+> = {
+  merchant: [
+    ["bench-signed-by-label-merchant-1", REPLAY_SIGNED_BY_LABEL_NOW - 80],
+    ["bench-signed-by-label-merchant-2", REPLAY_SIGNED_BY_LABEL_NOW - 70],
+    ["bench-signed-by-label-merchant-3", REPLAY_SIGNED_BY_LABEL_NOW - 60],
+    ["bench-signed-by-label-merchant-4", REPLAY_SIGNED_BY_LABEL_NOW - 50],
+    ["bench-signed-by-label-merchant-5", REPLAY_SIGNED_BY_LABEL_NOW - 40],
+    ["bench-signed-by-label-merchant-6", REPLAY_SIGNED_BY_LABEL_NOW - 30],
+    ["bench-signed-by-label-merchant-7", REPLAY_SIGNED_BY_LABEL_NOW - 20],
+    ["bench-signed-by-label-merchant-8", REPLAY_SIGNED_BY_LABEL_NOW - 10],
+  ],
+  gateway: [
+    ["bench-signed-by-label-gateway-1", REPLAY_SIGNED_BY_LABEL_NOW - 80],
+    ["bench-signed-by-label-gateway-2", REPLAY_SIGNED_BY_LABEL_NOW - 70],
+    ["bench-signed-by-label-gateway-3", REPLAY_SIGNED_BY_LABEL_NOW - 60],
+    ["bench-signed-by-label-gateway-4", REPLAY_SIGNED_BY_LABEL_NOW - 50],
+    ["bench-signed-by-label-gateway-5", REPLAY_SIGNED_BY_LABEL_NOW - 40],
+    ["bench-signed-by-label-gateway-6", REPLAY_SIGNED_BY_LABEL_NOW - 30],
+    ["bench-signed-by-label-gateway-7", REPLAY_SIGNED_BY_LABEL_NOW - 20],
+    ["bench-signed-by-label-gateway-8", REPLAY_SIGNED_BY_LABEL_NOW - 10],
+  ],
+};
+
+/**
+ * Build the fixed by-label signed snapshot fixture: one
+ * `ReplayCache` per label, each holding eight nonces recorded at
+ * the pinned instants above under an injectable clock walked
+ * through them and frozen at REPLAY_SIGNED_BY_LABEL_NOW. Every
+ * recording must report not-a-replay.
+ */
+function replaySignedSnapshotsByLabelFixture(): Record<string, ReplayCache> {
+  const caches: Record<string, ReplayCache> = {};
+  for (const label of REPLAY_SIGNED_BY_LABEL_LABELS) {
+    let clock = REPLAY_SIGNED_BY_LABEL_NOW - 90;
+    const cache = new ReplayCache({
+      maxEntries: 100,
+      ttlSec: REPLAY_SIGNED_BY_LABEL_TTL_SEC,
+      now: () => clock,
+    });
+    for (let i = 1; i <= REPLAY_SIGNED_BY_LABEL_NONCE_COUNT; i++) {
+      clock =
+        REPLAY_SIGNED_BY_LABEL_NOW -
+        (REPLAY_SIGNED_BY_LABEL_NONCE_COUNT + 1 - i) * 10;
+      const nonce = `bench-signed-by-label-${label}-${i}`;
+      if (cache.check(nonce) !== false)
+        throw new Error(
+          `benchmark self-check failed: fixture nonce ${nonce} reported as replay`,
+        );
+    }
+    clock = REPLAY_SIGNED_BY_LABEL_NOW;
+    caches[label] = cache;
+  }
+  return caches;
+}
+
+/**
+ * Pin one export-plus-restore pass against the hand-written
+ * expectations: every envelope is version 1 with a 64-hex MAC
+ * and its snapshot entries exactly the pinned list for that
+ * label, every restored cache holds exactly eight live entries,
+ * and every restored nonce still reports a replay — so the
+ * restart does not reopen either label's replay window — with
+ * the hit counter advancing by exactly the entry count per label
+ * and zero misses.
+ */
+function assertReplaySignedSnapshotsByLabel(
+  envelopes: Record<string, ReplayCacheSignedSnapshotEnvelope>,
+  restored: Record<string, ReplayCache>,
+): void {
+  for (const label of REPLAY_SIGNED_BY_LABEL_LABELS) {
+    const envelope = envelopes[label]!;
+    if (envelope.v !== 1)
+      throw new Error(
+        `benchmark self-check failed: signed snapshot envelope v ${String(envelope.v)} (expected 1)`,
+      );
+    if (!/^[0-9a-f]{64}$/.test(envelope.mac))
+      throw new Error(
+        `benchmark self-check failed: signed snapshot envelope mac ${JSON.stringify(envelope.mac)} ` +
+          `(expected a 64-character lowercase hex HMAC-SHA256 digest)`,
+      );
+    const expected = REPLAY_SIGNED_BY_LABEL_EXPECTED[label];
+    if (
+      JSON.stringify(envelope.snapshot.entries) !== JSON.stringify(expected)
+    )
+      throw new Error(
+        `benchmark self-check failed: signed snapshot entries for ${label} ` +
+          `${JSON.stringify(envelope.snapshot.entries)} (expected ${JSON.stringify(expected)})`,
+      );
+    const cache = restored[label]!;
+    if (cache.size !== REPLAY_SIGNED_BY_LABEL_NONCE_COUNT)
+      throw new Error(
+        `benchmark self-check failed: restored ${label} size ${cache.size} ` +
+          `(expected ${REPLAY_SIGNED_BY_LABEL_NONCE_COUNT})`,
+      );
+    for (const [nonce] of expected) {
+      if (cache.check(nonce) !== true)
+        throw new Error(
+          `benchmark self-check failed: restored nonce ${nonce} under ${label} not a replay`,
+        );
+    }
+    const stats = cache.stats();
+    if (
+      stats.hits !== REPLAY_SIGNED_BY_LABEL_NONCE_COUNT ||
+      stats.misses !== 0
+    )
+      throw new Error(
+        `benchmark self-check failed: restored ${label} counters ${JSON.stringify(stats)} ` +
+          `(expected hits=${REPLAY_SIGNED_BY_LABEL_NONCE_COUNT}, misses=0)`,
+      );
+  }
+}
+
+/**
+ * `exportSignedSnapshotsByLabel` steady state: every measured
+ * call seals both labels' replay caches into HMAC-signed
+ * snapshot envelopes under one fixed secret, JSON round-trips
+ * the envelopes (the persisted form a multi-signature
+ * deployment writes to disk and reads back), restores both
+ * labels, and re-pins the whole pass (see
+ * {@link assertReplaySignedSnapshotsByLabel}) — the per-label
+ * MAC computation plus the strict envelope validation a
+ * cold start pays to carry every label's replay window across
+ * a restart, isolated from the single-label `exportSnapshot`
+ * row above (unsigned, one cache) and the `fromSnapshot` row
+ * (unsigned restore, one cache). Outside timing, the
+ * fail-closed half is pinned once: rewriting one label's entry
+ * nonce and rewriting one label's `seenAt` each reject the whole
+ * batch with the pinned MAC-mismatch message (no partial map
+ * escapes), a wrong secret rejects the same way, the input
+ * envelopes are untouched by the failed restores, the label
+ * namespaces stay partitioned after a good restore (a nonce
+ * seen under one label is fresh under the other), and an empty
+ * map exports and restores to an empty map.
+ */
+function benchmarkReplayCacheExportSignedSnapshotsByLabel(): number {
+  const caches = replaySignedSnapshotsByLabelFixture();
+  const restoreOpts = {
+    ttlSec: REPLAY_SIGNED_BY_LABEL_TTL_SEC,
+    now: () => REPLAY_SIGNED_BY_LABEL_NOW,
+  };
+  const envelopes = exportSignedSnapshotsByLabel(
+    caches,
+    REPLAY_SIGNED_BY_LABEL_SECRET,
+  );
+  const restoredOnce = ReplayCache.restoreSignedSnapshotsByLabel(
+    JSON.parse(JSON.stringify(envelopes)),
+    REPLAY_SIGNED_BY_LABEL_SECRET,
+    restoreOpts,
+  );
+  assertReplaySignedSnapshotsByLabel(envelopes, restoredOnce);
+  if (restoredOnce.merchant!.check("bench-signed-by-label-gateway-1") !== false)
+    throw new Error(
+      "benchmark self-check failed: gateway nonce reported as replay under merchant",
+    );
+  if (restoredOnce.gateway!.check("bench-signed-by-label-merchant-1") !== false)
+    throw new Error(
+      "benchmark self-check failed: merchant nonce reported as replay under gateway",
+    );
+
+  // Outside timing: tamper and wrong secret are rejected, input untouched.
+  const before = JSON.stringify(envelopes);
+  const tamperedEntry = JSON.parse(JSON.stringify(envelopes)) as Record<
+    string,
+    ReplayCacheSignedSnapshotEnvelope
+  >;
+  tamperedEntry.gateway!.snapshot.entries[0]![0] = "bench-signed-by-label-evil";
+  const tamperedSeenAt = JSON.parse(JSON.stringify(envelopes)) as Record<
+    string,
+    ReplayCacheSignedSnapshotEnvelope
+  >;
+  tamperedSeenAt.merchant!.snapshot.entries[0]![1] = 1;
+  for (const attempt of [
+    { envelopes: tamperedEntry, secret: REPLAY_SIGNED_BY_LABEL_SECRET },
+    { envelopes: tamperedSeenAt, secret: REPLAY_SIGNED_BY_LABEL_SECRET },
+    { envelopes, secret: "a-different-secret" },
+  ]) {
+    let refusal: string | undefined;
+    try {
+      ReplayCache.restoreSignedSnapshotsByLabel(
+        attempt.envelopes,
+        attempt.secret,
+        restoreOpts,
+      );
+    } catch (err) {
+      refusal = err instanceof Error ? err.message : String(err);
+    }
+    if (refusal !== REPLAY_SIGNED_BY_LABEL_MAC_MISMATCH)
+      throw new Error(
+        `benchmark self-check failed: signed snapshot tamper refusal ${JSON.stringify(refusal)} ` +
+          `(expected ${JSON.stringify(REPLAY_SIGNED_BY_LABEL_MAC_MISMATCH)})`,
+      );
+  }
+  if (JSON.stringify(envelopes) !== before)
+    throw new Error(
+      "benchmark self-check failed: a rejected signed restore changed the input envelopes",
+    );
+  const emptyExported = exportSignedSnapshotsByLabel({}, REPLAY_SIGNED_BY_LABEL_SECRET);
+  if (JSON.stringify(emptyExported) !== "{}")
+    throw new Error(
+      `benchmark self-check failed: empty signed snapshot export ${JSON.stringify(emptyExported)} (expected {})`,
+    );
+  const emptyRestored = ReplayCache.restoreSignedSnapshotsByLabel(
+    {},
+    REPLAY_SIGNED_BY_LABEL_SECRET,
+    restoreOpts,
+  );
+  if (JSON.stringify(emptyRestored) !== "{}")
+    throw new Error(
+      `benchmark self-check failed: empty signed snapshot restore ${JSON.stringify(emptyRestored)} (expected {})`,
+    );
+
+  return measure(() => {
+    const fresh = exportSignedSnapshotsByLabel(
+      caches,
+      REPLAY_SIGNED_BY_LABEL_SECRET,
+    );
+    const wire = JSON.parse(JSON.stringify(fresh)) as Record<
+      string,
+      ReplayCacheSignedSnapshotEnvelope
+    >;
+    const restored = ReplayCache.restoreSignedSnapshotsByLabel(
+      wire,
+      REPLAY_SIGNED_BY_LABEL_SECRET,
+      restoreOpts,
+    );
+    assertReplaySignedSnapshotsByLabel(fresh, restored);
+  }, ITERATIONS);
+}
+
 /** Fixed instant for the ReplayCache release fixture (no wall clock). */
 const REPLAY_RELEASE_NOW = 1_700_000_000;
 /** TTL of the ReplayCache release fixture, in seconds. */
@@ -17042,6 +17310,11 @@ results.push({
   alg: "ReplayCache.fromSnapshot (4 live)",
   op: "restore",
   ops: benchmarkReplayCacheFromSnapshot(),
+});
+results.push({
+  alg: "ReplayCache.exportSignedSnapshotsByLabel (2 labels, 8 nonces each)",
+  op: "export+restore",
+  ops: benchmarkReplayCacheExportSignedSnapshotsByLabel(),
 });
 results.push({
   alg: "ReplayCache.release (check+release+has, 8 nonces)",

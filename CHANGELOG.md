@@ -12,6 +12,26 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `exportSignedSnapshotsByLabel` (backlog #1161) — the sealed
+  multi-label snapshot path a multi-signature deployment runs to
+  persist every label's replay cache at once: one measured op
+  seals two fixed-clock caches (merchant and gateway, eight live
+  nonces each at pinned `seenAt` values 80 to 10 seconds before
+  the export instant, all live under the 3,600-second TTL) into
+  HMAC-signed envelopes under one fixed secret, JSON round-trips
+  the envelopes, restores both labels, and re-pins the whole pass
+  (envelope version 1, 64-hex MAC, snapshot entries exactly the
+  hand-pinned lists, eight entries per restored cache, every
+  restored nonce still a replay, eight hits and zero misses per
+  label). Outside timing the bench pins the fail-closed half
+  (a tampered entry nonce or `seenAt` in one label rejects the
+  whole batch with the pinned MAC-mismatch message, a wrong
+  secret rejects the same way, input envelopes untouched),
+  the partitioned namespaces after a good restore, and the
+  empty-map round-trip. The README Benchmarks table was
+  refreshed from the same run and gains the new row (~13,287
+  ops/sec, Node v24.22.1 / AMD EPYC 9D25 shared host).
+- The benchmark (`npm run bench`) now also measures
   `JwksKeyStore.clear` + `keyIds` (backlog #1158) — the
   key-retirement path a gateway runs when a key is distrusted or
   rotated out: one measured op lists the three cached kids, clears
