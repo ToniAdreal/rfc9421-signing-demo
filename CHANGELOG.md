@@ -12,6 +12,26 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - The benchmark (`npm run bench`) now also measures
+  `JwksKeyStore.clear` + `keyIds` (backlog #1158) — the
+  key-retirement path a gateway runs when a key is distrusted or
+  rotated out: one measured op lists the three cached kids, clears
+  the store, and lists again, over a store holding a fixed
+  three-key set (ed25519, P-256 and RSA) fetched from a real
+  loopback `http` server. The bench primes one store per op from a
+  pool of WARMUP + ITERATIONS stores, since `clear()` is
+  destructive and a reused store would time an empty path. Every
+  measured pass self-checks the 3-to-0 flip (pre-clear list exactly
+  the three pinned kids in document order at size 3, post-clear
+  list empty at size 0). Outside timing the bench pins the served
+  document's kid set, the pre-clear kid list / size / counters, the
+  post-clear emptiness (`size` 0, `keyIds()` empty,
+  `lastRefreshedAt` null, `isStale()` true, `resolve` undefined
+  for every kid, all four counters zero), and that a `refresh()`
+  afterwards re-fetches the same kids from the same endpoint. The
+  README Benchmarks table was refreshed from the same run and gains
+  the new row (~651,814 ops/sec, Node v24.22.1 / AMD EPYC 9D25
+  shared host).
+- The benchmark (`npm run bench`) now also measures
   `createVerifiedFetchHandler` (backlog #1150) — the in-process
   fetch receive path an edge / WinterCG webhook receiver runs:
   a fresh `Request` per op from one pre-signed settlement

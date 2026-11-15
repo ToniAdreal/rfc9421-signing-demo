@@ -480,7 +480,16 @@
  * / RSA) through the store's default fetch — a fresh store is built
  * on every measured pass and must fetch once and resolve all three
  * kids afterwards — with the served document's kid set pinned
- * outside timing, plus the fresh-check path a gateway pays on every
+ * outside timing, plus the key-retirement path a gateway runs when a
+ * key is distrusted or rotated out: `JwksKeyStore.clear` + `keyIds`
+ * over a store holding three cached kids fetched from a real
+ * loopback `http` server — every measured op lists the kids, clears
+ * the store, and lists again, self-checking the 3-to-0 flip on every
+ * pass (a fresh primed store per op, since `clear()` is destructive
+ * and a cleared store would time an empty path), with the served
+ * document's kid set, the pre-clear kid list / size / counters, and
+ * the post-clear re-fetch of the same kids asserted outside timing,
+ * plus the fresh-check path a gateway pays on every
  * request while its snapshot is still valid: `JwksKeyStore.refreshIfStale` on a fresh store (a counting fake fetch
  * serves one pinned JWKS document — zero network), self-checked on
  * every measured pass (the call must report no refresh, the fetch
@@ -10540,6 +10549,188 @@ async function benchmarkJwksRefreshLoopback(): Promise<number> {
 }
 
 /**
+ * Pinned shape of the `JwksKeyStore.clear` + `keyIds` benchmark
+ * document: the three key shapes the store supports (ed25519 /
+ * P-256 / RSA), one freshly generated key pair per shape
+ * (generated once, outside timing), published under these kids by
+ * a real loopback `http` server.
+ */
+const JWKS_CLEAR_KIDS = [
+  "bench-clear-ed25519",
+  "bench-clear-p256",
+  "bench-clear-rsa",
+] as const;
+
+/**
+ * The expected kid count as a plain `number`: comparing `size`
+ * against the `as const` tuple's literal `3` length would narrow
+ * `size` to `3` after the throwing check, and a later `size !== 0`
+ * would then fail to compile (TS2367, no overlap between `3`
+ * and `0`).
+ */
+const JWKS_CLEAR_COUNT: number = JWKS_CLEAR_KIDS.length;
+
+/**
+ * Pin a store's cached kid list against the hand-pinned kids, in
+ * document order — the pre-clear half of the retirement self-check.
+ */
+function assertJwksClearKids(ids: string[]): void {
+  if (
+    ids.length !== JWKS_CLEAR_KIDS.length ||
+    JWKS_CLEAR_KIDS.some((kid, i) => ids[i] !== kid)
+  )
+    throw new Error(
+      `benchmark self-check failed: keyIds ${JSON.stringify(ids)} (expected ${JSON.stringify([...JWKS_CLEAR_KIDS])})`,
+    );
+}
+
+/**
+ * `JwksKeyStore.clear` + `keyIds` steady state: the key-retirement
+ * path a gateway runs when a key is distrusted or rotated out — list
+ * the cached kids, drop the whole snapshot, list again. The store is
+ * primed once per measured op from a pool of WARMUP + ITERATIONS
+ * stores, each refreshed once against a real loopback `http` server
+ * serving a fixed three-shape JWKS document (ed25519 / P-256 / RSA)
+ * through the store's default fetch: `clear()` is destructive, so a
+ * single store would time an empty path after the first op, and
+ * re-priming inside the measured op would price the refresh instead
+ * of the retirement itself. Every measured pass self-checks the
+ * flip — the pre-clear list is exactly the three pinned kids in
+ * document order at size 3, the post-clear list is empty at size 0 —
+ * and the run pins that the whole pool was consumed. Outside timing,
+ * the served document's kid set is pinned by fetching the endpoint
+ * directly, and one probe store pins the full contract: refresh
+ * resolves all three kids with exactly one `stats().refreshes`, the
+ * pre-clear kid list / size / counters match, `clear()` drops the
+ * snapshot and the freshness timestamp (`size` 0, `keyIds()` empty,
+ * `lastRefreshedAt` null, `isStale()` true, `resolve` undefined for
+ * every kid, all four counters zero), and a `refresh()` afterwards
+ * re-fetches the same kids from the same endpoint.
+ */
+async function benchmarkJwksClearKeyIds(): Promise<number> {
+  const ed25519 = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const rsa = generateRsaPssKeyPair();
+  const doc = {
+    keys: [
+      {
+        ...exportPublicKeyJwk(ed25519.publicKey),
+        kid: JWKS_CLEAR_KIDS[0],
+      },
+      {
+        ...exportPublicKeyJwkP256(p256.publicKey),
+        kid: JWKS_CLEAR_KIDS[1],
+      },
+      {
+        ...exportPublicKeyJwkRsa(rsa.publicKey),
+        kid: JWKS_CLEAR_KIDS[2],
+      },
+    ],
+  };
+  const body = JSON.stringify(doc);
+  const server = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(body);
+  });
+  try {
+    const url = await new Promise<string>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => {
+        const port = (server.address() as AddressInfo).port;
+        resolve(`http://127.0.0.1:${port}/.well-known/jwks.json`);
+      });
+      server.on("error", reject);
+    });
+    // Outside timing: the endpoint serves exactly the pinned kids.
+    const served = (await (await fetch(url)).json()) as {
+      keys?: { kid?: unknown }[];
+    };
+    const servedKids = (served.keys ?? []).map((k) => k.kid);
+    if (
+      servedKids.length !== JWKS_CLEAR_KIDS.length ||
+      JWKS_CLEAR_KIDS.some((kid, i) => servedKids[i] !== kid)
+    )
+      throw new Error(
+        `benchmark self-check failed: loopback JWKS served kids ${JSON.stringify(servedKids)} (expected ${JSON.stringify([...JWKS_CLEAR_KIDS])})`,
+      );
+    // Outside timing: one probe store pins the full clear contract.
+    const probe = new JwksKeyStore(url);
+    await probe.refresh();
+    assertJwksClearKids(probe.keyIds());
+    if (
+      probe.size !== JWKS_CLEAR_COUNT ||
+      probe.isStale() !== false ||
+      probe.lastRefreshedAt === null ||
+      JWKS_CLEAR_KIDS.some((kid) => probe.resolve(kid) === undefined) ||
+      probe.stats().refreshes !== 1 ||
+      probe.stats().refreshFailures !== 0
+    )
+      throw new Error(
+        `benchmark self-check failed: priming clear probe gave size ${probe.size}, stats ${JSON.stringify(probe.stats())} (expected size 3, refreshes 1, refreshFailures 0, all three kids resolving)`,
+      );
+    probe.clear();
+    const clearedStats = probe.stats();
+    if (
+      clearedStats.refreshes !== 0 ||
+      clearedStats.refreshFailures !== 0 ||
+      clearedStats.hits !== 0 ||
+      clearedStats.misses !== 0
+    )
+      throw new Error(
+        `benchmark self-check failed: cleared probe stats ${JSON.stringify(clearedStats)} (expected all zero)`,
+      );
+    if (
+      probe.size !== 0 ||
+      probe.keyIds().length !== 0 ||
+      probe.lastRefreshedAt !== null ||
+      probe.isStale() !== true ||
+      JWKS_CLEAR_KIDS.some((kid) => probe.resolve(kid) !== undefined)
+    )
+      throw new Error(
+        "benchmark self-check failed: cleared probe still serves keys",
+      );
+    // Outside timing: a refresh after the clear re-fetches the same kids.
+    await probe.refresh();
+    assertJwksClearKids(probe.keyIds());
+    if (
+      probe.size !== JWKS_CLEAR_COUNT ||
+      JWKS_CLEAR_KIDS.some((kid) => probe.resolve(kid) === undefined)
+    )
+      throw new Error(
+        "benchmark self-check failed: refresh after clear did not restore the three pinned kids",
+      );
+    // The measured pool: one primed store per op, since `clear()` is
+    // destructive — a reused store would time an empty path.
+    const pool: JwksKeyStore[] = [];
+    for (let i = 0; i < WARMUP + ITERATIONS; i++) {
+      const store = new JwksKeyStore(url);
+      await store.refresh();
+      pool.push(store);
+    }
+    let idx = 0;
+    const ops = measure(() => {
+      const store = pool[idx++]!;
+      assertJwksClearKids(store.keyIds());
+      if (store.size !== JWKS_CLEAR_COUNT)
+        throw new Error(
+          `benchmark self-check failed: pre-clear size ${store.size} (expected ${JWKS_CLEAR_COUNT})`,
+        );
+      store.clear();
+      if (store.keyIds().length !== 0 || store.size !== 0)
+        throw new Error(
+          "benchmark self-check failed: clear did not empty the store",
+        );
+    }, ITERATIONS);
+    if (idx !== pool.length)
+      throw new Error(
+        `benchmark self-check failed: clear pool consumed ${idx} stores (expected ${pool.length})`,
+      );
+    return ops;
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/**
  * `JwksKeyStore.refreshIfStale` on a fresh snapshot: the no-op
  * direction the stale row never pays — a gateway calls this on
  * every request, and while the snapshot is fresh it must cost only
@@ -16566,6 +16757,11 @@ results.push({
   alg: "JwksKeyStore.restoreSignedSnapshot (3 keys)",
   op: "restore",
   ops: await benchmarkJwksRestoreSignedSnapshot(),
+});
+results.push({
+  alg: "JwksKeyStore.clear + keyIds (3 keys)",
+  op: "clear",
+  ops: await benchmarkJwksClearKeyIds(),
 });
 results.push({
   alg: "verifyRequest keyResolver (2 keyids)",
