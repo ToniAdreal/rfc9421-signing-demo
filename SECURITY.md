@@ -121,6 +121,7 @@ Read this before using it anywhere that matters.
   without silently breaking every existing custom store. Callers signing
   multiple labels must generate one fresh nonce per label
   (`generateNonce()` per label, not per request).
+- **A fixed nonce defeats replay detection — generate one per signature.** A nonce only proves freshness if no other signature carries it: signing every request with the same hand-written nonce (a demo constant copied into production, a config value) means the cache has already seen that nonce, so the first legitimate request records it and every later one — legitimate or replayed — is rejected as a replay, while a deployment with no cache configured gets no protection at all and believes it does. Generate a fresh value per signature: `generateNonce()` per call, or `autoNonce: true` to have `signRequest` mint a fresh UUID v4 (`crypto.randomUUID()`) for each signature — mutually exclusive with an explicit `nonce`, and inherited by `signResponse` / `addSignature`, so each appended label gets its own fresh nonce (which also keeps the one-nonce-per-label contract above satisfied without the caller tracking a nonce per label).
 - **Multi-signature is not key distribution, and two labels are not
   proof of two signers.** `createVerifiedHandler`'s opt-in
   `verifyAllLabels` mode checks that every required label verifies

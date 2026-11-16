@@ -2,6 +2,7 @@ import {
   constants,
   createHmac,
   createSign,
+  randomUUID,
   sign as edSign,
   type KeyObject,
 } from "node:crypto";
@@ -153,9 +154,38 @@ export interface SignOptions {
    * a configuration error (it would silently bypass replay detection).
    * Longer than `MAX_NONCE_LENGTH` (256) characters is rejected the
    * same way; the verifier applies no such cap (see the constants
-   * above for the reasoning).
+   * above for the reasoning). Pass `autoNonce: true` instead of this
+   * field to have the signer generate a fresh nonce per signature
+   * (see below); the two are mutually exclusive.
    */
   nonce?: string;
+  /**
+   * Opt-in automatic nonce (default `false`, fully backwards
+   * compatible): when `true` and no `nonce` is passed, the signer
+   * generates a fresh UUID v4 (`crypto.randomUUID()`) for this
+   * signature and writes it into `signature-input` exactly as an
+   * explicit `nonce` would be — covered by the signature, echoed on
+   * `VerifyResult.nonce`, and recorded by the verifier's replay
+   * cache like any caller-supplied nonce. A caller that signs every
+   * request with the same hand-written nonce (e.g. a demo constant)
+   * makes the replay cache useless — every signature carries a nonce
+   * the cache has already seen, so a replayed request is rejected
+   * but so is every legitimate repeat; worse, a caller that reuses
+   * one fixed nonce and never configures a cache gets no replay
+   * protection at all while believing it does. `autoNonce` removes
+   * that footgun: each signature gets a nonce no other signature
+   * carries. Passing both `autoNonce: true` and an explicit `nonce`
+   * is a configuration error (the two would name the same wire
+   * parameter). Only the literal value `true` activates generation;
+   * `false` (or omission) leaves the wire exactly as before. The
+   * generated value is 36 characters, far inside `MAX_NONCE_LENGTH`.
+   * `signResponse`, `addSignature`, and `addResponseSignature`
+   * inherit it through `signRequest` delegation, so each appended
+   * label gets its own fresh nonce too — which also keeps the
+   * one-nonce-per-label contract (see the README Nonce section)
+   * satisfied without the caller tracking a nonce per label.
+   */
+  autoNonce?: boolean;
   /**
    * Optional application tag (RFC 9421 §2.3): emitted as a `tag`
    * signature-input parameter and therefore covered by the signature.
@@ -467,6 +497,10 @@ function isSupportedAlg(alg: string): alg is SignAlg {
  *   error, because the two would name the same wire parameter;
  * - `nonce: ""` would be emitted yet bypass the replay cache, so it is
  *   rejected;
+ * - `autoNonce: true` together with an explicit `nonce` is rejected:
+ *   the two would name the same wire parameter, so the signer refuses
+ *   to guess which one wins (the same mutual-exclusion shape as
+ *   `expires` / `expiresInSec` above);
  * - `tag: ""` would bind the signature to no application protocol, so
  *   it is rejected;
  * - `tag` / `nonce` / `keyid` longer than 256 characters
@@ -548,6 +582,23 @@ export function signRequest(
         `signRequest: "expires" (${expires}) must not be earlier than "created" (${created}); the signature would be expired at birth`,
       );
   }
+  // `autoNonce` and an explicit `nonce` name the same wire parameter
+  // two ways — generated vs caller-supplied — so accepting both would
+  // leave the signer guessing which one wins. Refuse the combination
+  // outright (checked before either value is used, so the input
+  // request is left untouched). Only the literal `true` counts: a
+  // non-boolean value never silently activates generation.
+  if (opts.autoNonce === true && opts.nonce !== undefined)
+    throw new Error(
+      'signRequest: "nonce" and "autoNonce" are mutually exclusive; pass an explicit nonce or autoNonce: true, not both',
+    );
+  // The nonce that actually goes on the wire: a fresh UUID v4 when the
+  // caller opted into automatic generation, the caller's own value
+  // otherwise. The generated value is 36 characters, far inside
+  // MAX_NONCE_LENGTH, and is covered by the signature exactly like an
+  // explicit nonce — the verifier echoes it on VerifyResult.nonce and
+  // the replay cache records it.
+  const nonce = opts.autoNonce === true ? randomUUID() : opts.nonce;
   // An empty-string nonce would be emitted into signature-input yet
   // silently bypass the verify-side replay cache (which skips empty
   // nonces) — fail fast rather than minting a signature that looks
@@ -571,8 +622,8 @@ export function signRequest(
   // (see MAX_TAG_LENGTH).
   if (opts.keyId !== undefined)
     assertSignParamLength("keyId", opts.keyId, MAX_KEY_ID_LENGTH);
-  if (opts.nonce !== undefined)
-    assertSignParamLength("nonce", opts.nonce, MAX_NONCE_LENGTH);
+  if (nonce !== undefined)
+    assertSignParamLength("nonce", nonce, MAX_NONCE_LENGTH);
   if (opts.tag !== undefined)
     assertSignParamLength("tag", opts.tag, MAX_TAG_LENGTH);
   const covered =
@@ -657,7 +708,7 @@ export function signRequest(
   const params: SignatureParams = { created, alg };
   if (opts.keyId !== undefined) params.keyid = opts.keyId;
   if (expires !== undefined) params.expires = expires;
-  if (opts.nonce !== undefined) params.nonce = opts.nonce;
+  if (nonce !== undefined) params.nonce = nonce;
   if (opts.tag !== undefined) params.tag = opts.tag;
 
   const signingInput: RequestLike = {
