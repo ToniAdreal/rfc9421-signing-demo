@@ -618,6 +618,29 @@
  * a fresh ed25519 pair (generation is not printed) and
  * every clock is injected, so the segment's printed
  * lines are identical between runs.
+ * The demo then shows a JWKS conditional refresh segment:
+ * the observability segment above refreshes exactly once
+ * over a fake endpoint, so its two conditional-path
+ * counters stay zero in front of the reader. A
+ * `JwksKeyStore` over a real loopback `http` server and
+ * an injected clock pinned at the demo's fixed instant
+ * refreshes once — the server stamps the one-key
+ * document with a pinned ETag — and a direct resolve of
+ * the pinned keyid proves the key landed. The second
+ * refresh sends that ETag back as `If-None-Match` and
+ * the server answers 304 Not Modified with the same
+ * ETag: the snapshot's kid set is unchanged,
+ * `lastRefreshedAt` stays at the pinned instant, and a
+ * request signed under the pinned keyid still verifies
+ * through the kept snapshot, with `stats()` counting
+ * the conditional path once on each side
+ * (`conditionalRefreshes` 1, `notModified` 1). Outside
+ * the printed lines the demo asserts every value equals
+ * the hand-pinned expectations below (the same
+ * conditional rules `test/jwksConditionalRefresh.test.ts`
+ * pins). Only the loopback port (never printed) and the
+ * key pair are fresh per run, so the segment's printed
+ * lines are identical between runs.
  * The demo then shows a JWKS clear segment: the
  * observability segment above shows the snapshot
  * serving stale keys, but never the explicit reset a
@@ -2847,6 +2870,44 @@ export const DEMO_JWKS_OBSERVABILITY_STATS: JwksKeyStoreStats = {
   misses: 1,
   conditionalRefreshes: 0,
   notModified: 0,
+};
+
+/** Key id of the JWKS conditional refresh segment's pinned key. */
+export const DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID =
+  "demo-jwks-conditional-refresh-1";
+/** Nonce of the JWKS conditional refresh segment's signed request. */
+export const DEMO_JWKS_CONDITIONAL_REFRESH_NONCE =
+  "demo-nonce-jwks-conditional-refresh-001";
+/**
+ * ETag the JWKS conditional refresh segment's loopback endpoint
+ * stamps on its first 200 response and re-validates on the
+ * second request: the store remembers it and sends it back as
+ * `If-None-Match`, so the endpoint answers 304 instead of
+ * re-serving the document.
+ */
+export const DEMO_JWKS_CONDITIONAL_REFRESH_ETAG =
+  '"demo-jwks-conditional-refresh-v1"';
+/** TTL of the JWKS conditional refresh segment's store (the clock never moves). */
+export const DEMO_JWKS_CONDITIONAL_REFRESH_TTL_SEC = 120;
+/** Fetch count of the JWKS conditional refresh segment: one 200, one 304. */
+export const DEMO_JWKS_CONDITIONAL_REFRESH_FETCH_CALLS = 2;
+/**
+ * Hand-pinned `stats()` of the JWKS conditional refresh segment
+ * after its whole sequence: two successful refreshes (the 200
+ * and the 304 both count — see `test/jwksStats.test.ts`),
+ * the direct resolve after the first refresh and the
+ * verification after the 304 (hits 2, misses 0), and the
+ * conditional path counted once on each side
+ * (`conditionalRefreshes` 1, `notModified` 1). Written out
+ * here, never derived from the store the demo is checking.
+ */
+export const DEMO_JWKS_CONDITIONAL_REFRESH_STATS: JwksKeyStoreStats = {
+  refreshes: 2,
+  refreshFailures: 0,
+  hits: 2,
+  misses: 0,
+  conditionalRefreshes: 1,
+  notModified: 1,
 };
 
 /** Key id of the JWKS clear segment's pinned key. */
@@ -5566,6 +5627,48 @@ export interface DemoResult {
    * hand-pinned `DEMO_JWKS_OBSERVABILITY_STATS`).
    */
   jwksObservabilityStats: JwksKeyStoreStats;
+  /**
+   * Loopback request count of the closing JWKS
+   * conditional refresh segment (equals the hand-pinned
+   * `DEMO_JWKS_CONDITIONAL_REFRESH_FETCH_CALLS`): one
+   * 200, one 304.
+   */
+  jwksConditionalRefreshFetchCalls: number;
+  /**
+   * The `If-None-Match` value the segment's loopback
+   * endpoint saw on the second request (equals the
+   * hand-pinned `DEMO_JWKS_CONDITIONAL_REFRESH_ETAG`
+   * — `null` when no conditional request arrived).
+   */
+  jwksConditionalRefreshIfNoneMatch: string | null;
+  /**
+   * The segment's `keyIds()` after the first refresh:
+   * exactly the pinned keyid.
+   */
+  jwksConditionalRefreshKeyIdsAfterFirst: string[];
+  /**
+   * The segment's `keyIds()` after the 304 refresh:
+   * unchanged — the 304 kept the snapshot exactly.
+   */
+  jwksConditionalRefreshKeyIdsAfterNotModified: string[];
+  /**
+   * The segment's `lastRefreshedAt` after the 304
+   * refresh: the pinned fetch instant `DEMO_CREATED`
+   * (the injected clock never moves, so the 304
+   * re-validates at the same instant).
+   */
+  jwksConditionalRefreshLastRefreshedAfterNotModified: number | null;
+  /**
+   * Whether the segment's verification of a request
+   * signed under the pinned keyid, through the kept
+   * snapshot after the 304, succeeded (`true`).
+   */
+  jwksConditionalRefreshVerificationOk: boolean;
+  /**
+   * The segment's final `stats()` (equals the
+   * hand-pinned `DEMO_JWKS_CONDITIONAL_REFRESH_STATS`).
+   */
+  jwksConditionalRefreshStats: JwksKeyStoreStats;
   /**
    * Verification of the JWKS clear segment's signed
    * request through the fetched snapshot, before
@@ -11433,6 +11536,204 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // JWKS conditional refresh segment: the observability
+  // segment above refreshes exactly once over a fake
+  // endpoint, so both of its stats counters for the
+  // conditional path stay zero in front of the reader.
+  // This segment drives a JwksKeyStore over a real
+  // loopback `http` server (zero external network) and an
+  // injected clock pinned at DEMO_CREATED: the first
+  // refresh fetches the one-key document the server stamps
+  // with the pinned ETag, a direct resolve of the pinned
+  // keyid proves the key landed, and the second refresh
+  // sends that ETag back as `If-None-Match` — the server
+  // answers 304 Not Modified with the same ETag, so the
+  // snapshot's kid set is unchanged, `lastRefreshedAt`
+  // stays at the pinned instant, and a request signed
+  // under the pinned keyid still verifies through the kept
+  // snapshot. Outside the printed lines the demo asserts
+  // every value equals the hand-pinned
+  // DEMO_JWKS_CONDITIONAL_REFRESH_* expectations (the
+  // same conditional rules
+  // `test/jwksConditionalRefresh.test.ts` pins). Only the
+  // loopback port (never printed) and the key pair are
+  // fresh per run, so the segment's printed lines are
+  // identical between runs.
+  const jwksConditionalRefreshPair = generateEd25519KeyPair();
+  let jwksConditionalRefreshFetchCalls = 0;
+  let jwksConditionalRefreshFetchCallsAfterFirst = 0;
+  let jwksConditionalRefreshIfNoneMatch: string | null = null;
+  let jwksConditionalRefreshKeyIdsAfterFirst: string[] = [];
+  let jwksConditionalRefreshKeyIdsAfterNotModified: string[] = [];
+  let jwksConditionalRefreshLastRefreshedAfterNotModified: number | null =
+    null;
+  let jwksConditionalRefreshVerificationOk = false;
+  let jwksConditionalRefreshVerificationCode = "";
+  let jwksConditionalRefreshVerificationReason = "";
+  let jwksConditionalRefreshStats: JwksKeyStoreStats = {
+    refreshes: 0,
+    refreshFailures: 0,
+    hits: 0,
+    misses: 0,
+    conditionalRefreshes: 0,
+    notModified: 0,
+  };
+  const jwksConditionalRefreshSockets = new Set<Socket>();
+  const jwksConditionalRefreshServer = createServer((req, res) => {
+    jwksConditionalRefreshFetchCalls++;
+    const ifNoneMatch = req.headers["if-none-match"];
+    if (
+      typeof ifNoneMatch === "string" &&
+      ifNoneMatch === DEMO_JWKS_CONDITIONAL_REFRESH_ETAG
+    ) {
+      jwksConditionalRefreshIfNoneMatch = ifNoneMatch;
+      res.writeHead(304, {
+        etag: DEMO_JWKS_CONDITIONAL_REFRESH_ETAG,
+      });
+      res.end();
+      return;
+    }
+    res.setHeader("content-type", "application/json");
+    res.setHeader("etag", DEMO_JWKS_CONDITIONAL_REFRESH_ETAG);
+    res.end(
+      JSON.stringify({
+        keys: [
+          {
+            ...exportPublicKeyJwk(jwksConditionalRefreshPair.publicKey),
+            kid: DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID,
+          },
+        ],
+      }),
+    );
+  });
+  jwksConditionalRefreshServer.on("connection", (socket) => {
+    jwksConditionalRefreshSockets.add(socket);
+    socket.on("close", () => {
+      jwksConditionalRefreshSockets.delete(socket);
+    });
+  });
+  try {
+    const jwksConditionalRefreshPort = await new Promise<AddressInfo>(
+      (resolve, reject) => {
+        jwksConditionalRefreshServer.on("error", reject);
+        jwksConditionalRefreshServer.listen(0, "127.0.0.1", () => {
+          resolve(jwksConditionalRefreshServer.address() as AddressInfo);
+        });
+      },
+    ).then((info) => info.port);
+    const jwksConditionalRefreshUrl = `http://127.0.0.1:${jwksConditionalRefreshPort}/.well-known/jwks.json`;
+    const jwksConditionalRefreshStore = new JwksKeyStore(
+      jwksConditionalRefreshUrl,
+      {
+        ttlSec: DEMO_JWKS_CONDITIONAL_REFRESH_TTL_SEC,
+        now: () => DEMO_CREATED,
+      },
+    );
+    await jwksConditionalRefreshStore.refresh();
+    jwksConditionalRefreshFetchCallsAfterFirst =
+      jwksConditionalRefreshFetchCalls;
+    jwksConditionalRefreshKeyIdsAfterFirst =
+      jwksConditionalRefreshStore.keyIds();
+    const jwksConditionalRefreshHitResolved =
+      jwksConditionalRefreshStore.resolve(
+        DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID,
+      ) !== undefined;
+    await jwksConditionalRefreshStore.refresh();
+    jwksConditionalRefreshKeyIdsAfterNotModified =
+      jwksConditionalRefreshStore.keyIds();
+    jwksConditionalRefreshLastRefreshedAfterNotModified =
+      jwksConditionalRefreshStore.lastRefreshedAt;
+    const jwksConditionalRefreshSigned = signRequest(
+      {
+        method: "POST",
+        url: "https://api.example.com/v1/payments",
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        keyId: DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID,
+        alg: "ed25519",
+        key: jwksConditionalRefreshPair.privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_JWKS_CONDITIONAL_REFRESH_NONCE,
+      },
+    );
+    const jwksConditionalRefreshVerification = verifyRequest(
+      jwksConditionalRefreshSigned,
+      {
+        keyResolver: jwksConditionalRefreshStore.resolve,
+        now: DEMO_CREATED + 60,
+      },
+    );
+    jwksConditionalRefreshVerificationOk =
+      jwksConditionalRefreshVerification.ok;
+    if (!jwksConditionalRefreshVerification.ok) {
+      jwksConditionalRefreshVerificationCode =
+        jwksConditionalRefreshVerification.code ?? "";
+      jwksConditionalRefreshVerificationReason =
+        jwksConditionalRefreshVerification.reason ?? "";
+    }
+    jwksConditionalRefreshStats = jwksConditionalRefreshStore.stats();
+    if (
+      jwksConditionalRefreshFetchCalls !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_FETCH_CALLS ||
+      jwksConditionalRefreshFetchCallsAfterFirst !== 1 ||
+      jwksConditionalRefreshIfNoneMatch !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_ETAG ||
+      jwksConditionalRefreshHitResolved !== true ||
+      JSON.stringify(jwksConditionalRefreshKeyIdsAfterFirst) !==
+        JSON.stringify([DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID]) ||
+      JSON.stringify(jwksConditionalRefreshKeyIdsAfterNotModified) !==
+        JSON.stringify([DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID]) ||
+      jwksConditionalRefreshLastRefreshedAfterNotModified !== DEMO_CREATED ||
+      !jwksConditionalRefreshVerification.ok ||
+      jwksConditionalRefreshVerification.label !==
+        DEMO_JWKS_OBSERVABILITY_LABEL ||
+      jwksConditionalRefreshVerification.keyId !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID ||
+      jwksConditionalRefreshVerification.alg !==
+        DEMO_JWKS_OBSERVABILITY_ALG ||
+      jwksConditionalRefreshVerification.nonce !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_NONCE ||
+      jwksConditionalRefreshStats.refreshes !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_STATS.refreshes ||
+      jwksConditionalRefreshStats.refreshFailures !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_STATS.refreshFailures ||
+      jwksConditionalRefreshStats.hits !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_STATS.hits ||
+      jwksConditionalRefreshStats.misses !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_STATS.misses ||
+      jwksConditionalRefreshStats.conditionalRefreshes !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_STATS.conditionalRefreshes ||
+      jwksConditionalRefreshStats.notModified !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_STATS.notModified
+    ) {
+      throw new Error(
+        `demo fixture broken: JWKS conditional refresh gave fetch count ` +
+          `${jwksConditionalRefreshFetchCalls} (${jwksConditionalRefreshFetchCallsAfterFirst} after the first refresh), ` +
+          `If-None-Match ${jwksConditionalRefreshIfNoneMatch}, first-refresh hit ` +
+          `${jwksConditionalRefreshHitResolved}, keyids after first ` +
+          `${JSON.stringify(jwksConditionalRefreshKeyIdsAfterFirst)} and after the 304 ` +
+          `${JSON.stringify(jwksConditionalRefreshKeyIdsAfterNotModified)}, lastRefreshedAt ` +
+          `${jwksConditionalRefreshLastRefreshedAfterNotModified}, verification ` +
+          `${jwksConditionalRefreshVerification.ok}/${jwksConditionalRefreshVerification.ok ? jwksConditionalRefreshVerification.label : jwksConditionalRefreshVerification.code}/` +
+          `${jwksConditionalRefreshVerification.ok ? jwksConditionalRefreshVerification.keyId : "-"}/` +
+          `${jwksConditionalRefreshVerification.ok ? jwksConditionalRefreshVerification.nonce : "-"} and stats ` +
+          `${JSON.stringify(jwksConditionalRefreshStats)}, instead of the pinned fetch count ` +
+          `${DEMO_JWKS_CONDITIONAL_REFRESH_FETCH_CALLS} (1 after the first refresh), ` +
+          `If-None-Match ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG}, first-refresh hit true, keyids ` +
+          `${JSON.stringify([DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID])} after both refreshes, lastRefreshedAt ` +
+          `${DEMO_CREATED}, verification ` +
+          `true/${DEMO_JWKS_OBSERVABILITY_LABEL}/${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}/` +
+          `${DEMO_JWKS_CONDITIONAL_REFRESH_NONCE} and stats ` +
+          `${JSON.stringify(DEMO_JWKS_CONDITIONAL_REFRESH_STATS)}`,
+      );
+    }
+  } finally {
+    for (const socket of jwksConditionalRefreshSockets) socket.destroy();
+    jwksConditionalRefreshServer.close();
+  }
+
   // JWKS clear segment: the observability segment above
   // shows a stale snapshot still serving, but never the
   // explicit reset a gateway runs when an endpoint stops
@@ -16010,6 +16311,13 @@ export async function runDemo(): Promise<DemoResult> {
     `JWKS observability resolves at the boundary: resolve("${DEMO_JWKS_OBSERVABILITY_KEY_ID}") returned a key (hit), resolve("${DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID}") returned undefined (miss)`,
     `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${jwksObservabilityStats.refreshes}, refreshFailures: ${jwksObservabilityStats.refreshFailures}, hits: ${jwksObservabilityStats.hits}, misses: ${jwksObservabilityStats.misses}, conditionalRefreshes: ${jwksObservabilityStats.conditionalRefreshes}, notModified: ${jwksObservabilityStats.notModified} } (hits + misses equals the total resolve() calls)`,
     "",
+    "JWKS conditional refresh: a JWKS endpoint that answers 304 Not Modified lets the store skip re-downloading an unchanged key set — the second refresh revalidates the remembered ETag instead of swapping in a new snapshot",
+    `JWKS conditional refresh first refresh over the loopback endpoint: refresh() fetched the JWKS document (ETag ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG}), the snapshot holds ${jwksConditionalRefreshKeyIdsAfterFirst.length} key and resolve("${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}") returned a key (fetch count ${jwksConditionalRefreshFetchCallsAfterFirst})`,
+    `JWKS conditional refresh second refresh sent If-None-Match: ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG} and the endpoint answered 304 Not Modified: the snapshot still holds ${jwksConditionalRefreshKeyIdsAfterNotModified.length} key ("${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}"), lastRefreshedAt stayed ${jwksConditionalRefreshLastRefreshedAfterNotModified}, stats() = { refreshes: ${jwksConditionalRefreshStats.refreshes}, refreshFailures: ${jwksConditionalRefreshStats.refreshFailures}, hits: ${jwksConditionalRefreshStats.hits}, misses: ${jwksConditionalRefreshStats.misses}, conditionalRefreshes: ${jwksConditionalRefreshStats.conditionalRefreshes}, notModified: ${jwksConditionalRefreshStats.notModified} } (the 304 revalidated the remembered ETag — no key was re-downloaded)`,
+    jwksConditionalRefreshVerificationOk
+      ? `JWKS conditional refresh verification after the 304 through the kept snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_CONDITIONAL_REFRESH_NONCE}")`
+      : `JWKS conditional refresh verification after the 304 through the kept snapshot: FAILED (code ${jwksConditionalRefreshVerificationCode}: ${jwksConditionalRefreshVerificationReason})`,
+    "",
     "JWKS clear: JwksKeyStore.clear() drops the cached keys and zeroes the stats() counters at once — the explicit reset a gateway runs when an endpoint stops being trusted or a key is known compromised, instead of waiting for the TTL to expire or for a refresh to succeed",
     jwksClearVerificationBefore.ok
       ? `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" verifies through the fetched snapshot: OK (label ${jwksClearVerificationBefore.label}, keyid="${jwksClearVerificationBefore.keyId}", alg="${jwksClearVerificationBefore.alg}", nonce="${jwksClearVerificationBefore.nonce}"), stats() = { refreshes: ${jwksClearStatsBefore.refreshes}, refreshFailures: ${jwksClearStatsBefore.refreshFailures}, hits: ${jwksClearStatsBefore.hits}, misses: ${jwksClearStatsBefore.misses}, conditionalRefreshes: ${jwksClearStatsBefore.conditionalRefreshes}, notModified: ${jwksClearStatsBefore.notModified} }`
@@ -16676,6 +16984,13 @@ export async function runDemo(): Promise<DemoResult> {
     jwksObservabilityHitResolved,
     jwksObservabilityUnknownResolved,
     jwksObservabilityStats,
+    jwksConditionalRefreshFetchCalls,
+    jwksConditionalRefreshIfNoneMatch,
+    jwksConditionalRefreshKeyIdsAfterFirst,
+    jwksConditionalRefreshKeyIdsAfterNotModified,
+    jwksConditionalRefreshLastRefreshedAfterNotModified,
+    jwksConditionalRefreshVerificationOk,
+    jwksConditionalRefreshStats,
     jwksClearVerificationBefore,
     jwksClearStatsBefore,
     jwksClearSizeAfterClear,

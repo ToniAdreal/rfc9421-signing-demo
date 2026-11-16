@@ -1359,7 +1359,9 @@ export class JwksKeyStore {
     this.url = url;
     this.requireHttps = requireHttps === true;
     this.usingDefaultFetch = fetchImpl === undefined;
-    this.fetchImpl = fetchImpl ?? ((u: string) => globalThis.fetch(u));
+    this.fetchImpl =
+      fetchImpl ??
+      ((u: string, init?: JwksFetchInit) => globalThis.fetch(u, init));
     this.fetchTimeoutMs = fetchTimeoutMs;
     this.maxBodyBytes = maxBodyBytes;
     this.fetchRetries = fetchRetries;

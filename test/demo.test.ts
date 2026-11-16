@@ -247,6 +247,12 @@ import {
   DEMO_JWKS_OBSERVABILITY_STATS,
   DEMO_JWKS_OBSERVABILITY_TTL_SEC,
   DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID,
+  DEMO_JWKS_CONDITIONAL_REFRESH_ETAG,
+  DEMO_JWKS_CONDITIONAL_REFRESH_FETCH_CALLS,
+  DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID,
+  DEMO_JWKS_CONDITIONAL_REFRESH_NONCE,
+  DEMO_JWKS_CONDITIONAL_REFRESH_STATS,
+  DEMO_JWKS_CONDITIONAL_REFRESH_TTL_SEC,
   DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR,
   DEMO_JWKS_CLEAR_FETCH_CALLS,
   DEMO_JWKS_CLEAR_KEY_ID,
@@ -5149,6 +5155,55 @@ test("demo lines contain the JWKS observability segment (before/after reads, TTL
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS observability:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 7), lines.slice(headerIdx, headerIdx + 7));
+});
+
+test("demo JWKS conditional refresh segment revalidates the remembered ETag with a 304 and keeps the snapshot", async () => {
+  const {
+    jwksConditionalRefreshFetchCalls,
+    jwksConditionalRefreshIfNoneMatch,
+    jwksConditionalRefreshKeyIdsAfterFirst,
+    jwksConditionalRefreshKeyIdsAfterNotModified,
+    jwksConditionalRefreshLastRefreshedAfterNotModified,
+    jwksConditionalRefreshVerificationOk,
+    jwksConditionalRefreshStats,
+  } = await runDemo();
+  assert.equal(DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID, "demo-jwks-conditional-refresh-1");
+  assert.equal(DEMO_JWKS_CONDITIONAL_REFRESH_NONCE, "demo-nonce-jwks-conditional-refresh-001");
+  assert.equal(DEMO_JWKS_CONDITIONAL_REFRESH_ETAG, '"demo-jwks-conditional-refresh-v1"');
+  assert.equal(DEMO_JWKS_CONDITIONAL_REFRESH_TTL_SEC, 120);
+  assert.equal(DEMO_JWKS_CONDITIONAL_REFRESH_FETCH_CALLS, 2);
+  assert.deepEqual(DEMO_JWKS_CONDITIONAL_REFRESH_STATS, { refreshes: 2, refreshFailures: 0, hits: 2, misses: 0, conditionalRefreshes: 1, notModified: 1 });
+  assert.equal(jwksConditionalRefreshFetchCalls, DEMO_JWKS_CONDITIONAL_REFRESH_FETCH_CALLS);
+  assert.equal(jwksConditionalRefreshIfNoneMatch, DEMO_JWKS_CONDITIONAL_REFRESH_ETAG);
+  assert.deepEqual(jwksConditionalRefreshKeyIdsAfterFirst, [DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID]);
+  assert.deepEqual(jwksConditionalRefreshKeyIdsAfterNotModified, [DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID]);
+  assert.equal(jwksConditionalRefreshLastRefreshedAfterNotModified, DEMO_CREATED);
+  assert.equal(jwksConditionalRefreshVerificationOk, true);
+  assert.deepEqual(jwksConditionalRefreshStats, DEMO_JWKS_CONDITIONAL_REFRESH_STATS);
+});
+
+test("demo lines contain the JWKS conditional refresh segment (first 200 with ETag, second 304, kept snapshot still verifies, followed by the JWKS clear segment)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(out, /JWKS conditional refresh: a JWKS endpoint that answers 304/);
+  const headerIdx = lines.findIndex((l) => l.startsWith("JWKS conditional refresh:"));
+  const observabilityIdx = lines.findIndex((l) => l.startsWith("JWKS observability:"));
+  assert.ok(observabilityIdx !== -1 && headerIdx !== -1 && observabilityIdx < headerIdx);
+  const expectedLines = [
+    "JWKS conditional refresh: a JWKS endpoint that answers 304 Not Modified lets the store skip re-downloading an unchanged key set — the second refresh revalidates the remembered ETag instead of swapping in a new snapshot",
+    `JWKS conditional refresh first refresh over the loopback endpoint: refresh() fetched the JWKS document (ETag ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG}), the snapshot holds 1 key and resolve("${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}") returned a key (fetch count 1)`,
+    `JWKS conditional refresh second refresh sent If-None-Match: ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG} and the endpoint answered 304 Not Modified: the snapshot still holds 1 key ("${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}"), lastRefreshedAt stayed ${DEMO_CREATED}, stats() = { refreshes: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.refreshFailures}, hits: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.hits}, misses: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.misses}, conditionalRefreshes: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.conditionalRefreshes}, notModified: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.notModified} } (the 304 revalidated the remembered ETag — no key was re-downloaded)`,
+    `JWKS conditional refresh verification after the 304 through the kept snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_CONDITIONAL_REFRESH_NONCE}")`,
+  ];
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), expectedLines);
+  // The JWKS clear segment follows the JWKS conditional refresh segment,
+  // with a blank separator between them.
+  const clearIdx = lines.findIndex((l) => l.startsWith("JWKS clear:"));
+  assert.ok(headerIdx !== -1 && clearIdx !== -1 && headerIdx < clearIdx);
+  assert.equal(lines[clearIdx - 1], "");
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS conditional refresh:"));
+  assert.deepEqual(again.lines.slice(againIdx, againIdx + 4), lines.slice(headerIdx, headerIdx + 4));
 });
 
 test("demo JWKS clear segment verifies, clears to zero, rejects the retired key, and re-verifies after a re-fetch", async () => {

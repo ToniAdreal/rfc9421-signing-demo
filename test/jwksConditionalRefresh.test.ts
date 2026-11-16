@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { type KeyObject } from "node:crypto";
+import { createServer } from "node:http";
+import type { AddressInfo, Socket } from "node:net";
 import {
   exportPublicKeyJwk,
   generateEd25519KeyPair,
@@ -391,4 +393,82 @@ test("JwksKeyStore: a 304 that landed over plaintext http is rejected under requ
   assert.equal(store.lastRefreshedAt, CREATED);
   assert.notEqual(store.resolve("ed-key-1"), undefined);
   assert.equal(store.stats().notModified, 0);
+});
+
+test("JwksKeyStore: the default fetch sends If-None-Match and a loopback 304 keeps the snapshot", async () => {
+  // Regression test (backlog #1184): the default fetch used to be
+  // `(u) => globalThis.fetch(u)`, which dropped the init carrying
+  // `If-None-Match` — so no conditional request ever went out on the
+  // default path (only `fetchTimeoutMs` forwarded the header), the
+  // endpoint always re-served the document, and `notModified` stayed
+  // 0 while `conditionalRefreshes` still counted 1. The store now
+  // forwards the init, so a real loopback endpoint sees the header
+  // and answers 304.
+  const { pair, doc } = edDoc("loopback-key-1");
+  const etag = '"loopback-v1"';
+  let requests = 0;
+  const ifNoneMatchSeen: Array<string | string[] | undefined> = [];
+  const sockets = new Set<Socket>();
+  const server = createServer((req, res) => {
+    requests++;
+    ifNoneMatchSeen.push(req.headers["if-none-match"]);
+    const inm = req.headers["if-none-match"];
+    if (typeof inm === "string" && inm === etag) {
+      res.writeHead(304, { etag });
+      res.end();
+      return;
+    }
+    res.setHeader("content-type", "application/json");
+    res.setHeader("etag", etag);
+    res.end(JSON.stringify(doc));
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => {
+      sockets.delete(socket);
+    });
+  });
+  try {
+    const port = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    }).then((info) => info.port);
+    let now = CREATED;
+    const store = new JwksKeyStore(
+      `http://127.0.0.1:${port}/.well-known/jwks.json`,
+      { ttlSec: 300, now: () => now },
+    );
+    await store.refresh();
+    assert.equal(requests, 1);
+    assert.deepEqual(ifNoneMatchSeen, [undefined]);
+    assert.deepEqual(store.keyIds(), ["loopback-key-1"]);
+    assert.notEqual(store.resolve("loopback-key-1"), undefined);
+    now = CREATED + 100;
+    await store.refresh();
+    assert.equal(requests, 2);
+    assert.deepEqual(ifNoneMatchSeen, [undefined, etag]);
+    // Same snapshot, only the freshness timestamp moved — and the
+    // kept key is the same key material.
+    assert.deepEqual(store.keyIds(), ["loopback-key-1"]);
+    assert.equal(store.lastRefreshedAt, CREATED + 100);
+    const resolved = store.resolve("loopback-key-1");
+    assert.notEqual(resolved, undefined);
+    assert.deepEqual(
+      exportPublicKeyJwk(resolved as KeyObject),
+      exportPublicKeyJwk(pair.publicKey),
+    );
+    assert.deepEqual(store.stats(), {
+      refreshes: 2,
+      refreshFailures: 0,
+      hits: 2,
+      misses: 0,
+      conditionalRefreshes: 1,
+      notModified: 1,
+    });
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    server.close();
+  }
 });
