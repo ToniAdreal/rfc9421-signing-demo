@@ -11,6 +11,7 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `signRequest` and `signResponse` now accept `alg: "infer"` (backlog #1172): the signing algorithm is derived from the key's shape at signing time — secret → `hmac-sha256`, ed25519 → `ed25519`, P-256/P-384/P-521 → the matching `ecdsa-p*-*` algorithm, RSA → `rsa-pss-sha512` — through the new shared `inferAlgFromKeyShape` helper in `src/keys.ts`, the same mapping the verify side already applied under `algFallback: "infer"` (the verify side now delegates to it, with its pinned error message unchanged). The inferred value is written into `signature-input` exactly as an explicit alg would be, so the wire shape and `VerifyResult.alg` are identical to naming the algorithm outright; a secret key never infers `hmac-sha512`, and an unmappable key shape (e.g. secp256k1) is a configuration error thrown before the signature base is built. `addSignature` and `addResponseSignature` inherit it through delegation. Thirteen new tests in `test/signAlgInfer.test.ts`, including all six key shapes, byte-identical headers for explicit-vs-inferred hmac-sha256, the secp256k1 refusal, the `signResponse` path, verification under `algFallback: "infer"`, and a two-label `addSignature` round-trip. The README signing section documents the option.
 - Response-side RFC 3230 `Digest` body binding is now covered by
   tests (backlog #1171): `verifyResponse` and
   `verifyAllResponseLabels` enforce the same Digest rules as the

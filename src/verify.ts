@@ -17,7 +17,7 @@ import {
   type RequestLike,
 } from "./components.js";
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
-import { assertHmacSecretLength, assertRsaModulusLength, algMatchesKeyShape, describeKey } from "./keys.js";
+import { assertHmacSecretLength, assertRsaModulusLength, algMatchesKeyShape, describeKey, inferAlgFromKeyShape as inferAlgFromKey } from "./keys.js";
 import type { JwksKeyStore } from "./jwks.js";
 import type { SignAlg } from "./sign.js";
 import type { NonceStore } from "./replay.js";
@@ -786,29 +786,19 @@ type SupportedAlg =
  * under the explicit `algFallback: "infer"` opt-in, when the
  * signature-input carries no `alg` parameter. An unmappable key shape is
  * a caller configuration error (throw), not a verification failure.
+ * Delegates to the shared `keys.inferAlgFromKeyShape` mapping (the same
+ * one the sign side uses for `SignOptions.alg: "infer"`) and rethrows an
+ * unmappable shape with this entry point's own wording, so the pinned
+ * error message is unchanged.
  */
 function inferAlgFromKeyShape(key: KeyObject): SupportedAlg {
-  if (key.type === "secret") return "hmac-sha256";
-  if (key.asymmetricKeyType === "ed25519") return "ed25519";
-  if (
-    key.asymmetricKeyType === "ec" &&
-    key.asymmetricKeyDetails?.namedCurve === "prime256v1"
-  )
-    return "ecdsa-p256-sha256";
-  if (
-    key.asymmetricKeyType === "ec" &&
-    key.asymmetricKeyDetails?.namedCurve === "secp384r1"
-  )
-    return "ecdsa-p384-sha384";
-  if (
-    key.asymmetricKeyType === "ec" &&
-    key.asymmetricKeyDetails?.namedCurve === "secp521r1"
-  )
-    return "ecdsa-p521-sha512";
-  if (key.asymmetricKeyType === "rsa") return "rsa-pss-sha512";
-  throw new Error(
-    `verifyRequest: algFallback "infer" cannot infer an algorithm for ${describeKey(key)} — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, P-384 (secp384r1) EC keys, P-521 (secp521r1) EC keys, and RSA keys (rsa-pss-sha512)`,
-  );
+  try {
+    return inferAlgFromKey(key);
+  } catch {
+    throw new Error(
+      `verifyRequest: algFallback "infer" cannot infer an algorithm for ${describeKey(key)} — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, P-384 (secp384r1) EC keys, P-521 (secp521r1) EC keys, and RSA keys (rsa-pss-sha512)`,
+    );
+  }
 }
 
 /**

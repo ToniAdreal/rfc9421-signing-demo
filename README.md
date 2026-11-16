@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2254 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2267 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -378,6 +378,13 @@ import { secretKey } from "./dist/src/index.js";
 const secret = secretKey("a-shared-hmac-secret-of-32-bytes!!");
 const signed = signRequest(req, { keyId: "k", alg: "hmac-sha256", key: secret });
 const result = verifyRequest(signed, { key: secret });
+```
+
+Derive the algorithm from the key instead of naming it — `alg: "infer"` resolves the algorithm from the key's shape at signing time (secret → `hmac-sha256`, ed25519 → `ed25519`, P-256/P-384/P-521 → the matching `ecdsa-p*-*`, RSA → `rsa-pss-sha512`), using the same mapping the verify side applies under `algFallback: "infer"`. The inferred value is written into `signature-input` exactly as an explicit alg would be, so the wire shape — and `VerifyResult.alg` on the other end — is identical to naming it outright; a secret key never infers `hmac-sha512` (name it explicitly when sha-512 is wanted), and an unmappable key shape (e.g. secp256k1) is a configuration error. `signResponse`, `addSignature`, and `addResponseSignature` inherit it through `signRequest` delegation.
+
+```ts
+const signed = signRequest(req, { keyId: "k", alg: "infer", key: privateKey });
+// signature-input carries alg="ed25519", exactly as if it had been named
 ```
 
 Mint a fresh secret instead of hand-rolling one — `generateHmacSecret()`
@@ -4913,7 +4920,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2254 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2267 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

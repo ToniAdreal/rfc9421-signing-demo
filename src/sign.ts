@@ -16,7 +16,7 @@ import {
 } from "./components.js";
 import { contentDigest, assertContentDigestAlg, contentDigestAlgOf } from "./digest.js";
 import type { ContentDigestAlg } from "./digest.js";
-import { algMatchesKeyShape, assertHmacSecretLength, assertRsaModulusLength, describeKey } from "./keys.js";
+import { algMatchesKeyShape, assertHmacSecretLength, assertRsaModulusLength, describeKey, inferAlgFromKeyShape } from "./keys.js";
 import {
   assertStructuredFieldTypes,
   type StructuredFieldType,
@@ -76,7 +76,23 @@ export interface SignOptions {
    * above for the reasoning).
    */
   keyId?: string;
-  alg: SignAlg;
+  /**
+   * The signature algorithm, or `"infer"` to derive it from the key's
+   * shape at signing time: secret → `hmac-sha256`, ed25519 → `ed25519`,
+   * P-256/P-384/P-521 → the matching `ecdsa-p*-*` algorithm, RSA →
+   * `rsa-pss-sha512` — the same mapping the verify side applies under
+   * `algFallback: "infer"` (shared via `keys.inferAlgFromKeyShape`).
+   * The inferred value is written into `signature-input` exactly as
+   * an explicit alg would be, so the wire shape — and
+   * `VerifyResult.alg` on the other end — is identical to naming the
+   * algorithm outright. A secret key never infers `hmac-sha512` (a
+   * secret carries no signal that names the hash); name it explicitly
+   * when sha-512 is wanted. An unmappable key shape is a configuration
+   * error, thrown before the signature base is built. `signResponse`,
+   * `addSignature`, and `addResponseSignature` inherit it through
+   * `signRequest` delegation.
+   */
+  alg: SignAlg | "infer";
   /**
    * ed25519: a private KeyObject (see keys.generateEd25519KeyPair).
    * ecdsa-p256-sha256: a P-256 private KeyObject (see
@@ -481,6 +497,11 @@ function isSupportedAlg(alg: string): alg is SignAlg {
  *   An unknown `alg` (including the classic downgrade value `"none"`)
  *   is rejected first, as `unsupported alg`, so it is never misreported
  *   as a key mismatch — no key of any shape can sign `"none"`.
+ *   `alg: "infer"` instead derives the algorithm from the key's shape
+ *   (secret → `hmac-sha256`, ed25519 → `ed25519`, P-256/P-384/P-521 →
+ *   the matching `ecdsa-p*-*`, RSA → `rsa-pss-sha512`) and writes the
+ *   inferred value into `signature-input`; an unmappable key shape is
+ *   a configuration error in its own words.
  *   `signResponse`, `addSignature`, and `addResponseSignature` inherit
  *   these checks through `signRequest`.
  */
@@ -581,6 +602,15 @@ export function signRequest(
   // side (`keys.algMatchesKeyShape`), so the two sides can never
   // disagree about which alg goes with which key.
   //
+  // `alg: "infer"` resolves the algorithm from the key's shape first,
+  // through the shared `keys.inferAlgFromKeyShape` mapping — the same
+  // mapping the verify side applies under `algFallback: "infer"`.
+  // The inferred value is what goes into `signature-input` and the
+  // crypto dispatch below, so the wire shape is identical to naming
+  // the algorithm outright. An unmappable key shape is a configuration
+  // error in this entry point's own words, thrown here, before the
+  // base is built.
+  //
   // An unknown `alg` is rejected before the shape check, in its own
   // words: the predicate returns false for every unknown value, so
   // without this guard `alg: "none"` would be misreported as
@@ -591,11 +621,23 @@ export function signRequest(
   // added to `SignAlg` without a dispatch branch fails loudly instead
   // of proceeding with an unassigned signature — and so TypeScript's
   // definite-assignment analysis holds.
-  if (!isSupportedAlg(opts.alg))
+  let alg: SignAlg;
+  if (opts.alg === "infer") {
+    try {
+      alg = inferAlgFromKeyShape(opts.key);
+    } catch {
+      throw new Error(
+        `signRequest: alg "infer" cannot infer an algorithm for ${describeKey(opts.key)} — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, P-384 (secp384r1) EC keys, P-521 (secp521r1) EC keys, and RSA keys (rsa-pss-sha512)`,
+      );
+    }
+  } else {
+    alg = opts.alg;
+  }
+  if (!isSupportedAlg(alg))
     throw new Error(`signRequest: unsupported alg "${opts.alg}"`);
-  if (!algMatchesKeyShape(opts.alg, opts.key))
+  if (!algMatchesKeyShape(alg, opts.key))
     throw new Error(
-      `signRequest: alg "${opts.alg}" is incompatible with the key (${describeKey(opts.key)}) — pass a key of the matching type for the algorithm`,
+      `signRequest: alg "${alg}" is incompatible with the key (${describeKey(opts.key)}) — pass a key of the matching type for the algorithm`,
     );
 
   const headers: Record<string, string> = {};
@@ -612,7 +654,7 @@ export function signRequest(
   // `keyid` is an optional RFC 9421 parameter: only emit it when the caller
   // supplies one, so the wire shape is identical to what a keyid-less
   // signer would produce.
-  const params: SignatureParams = { created, alg: opts.alg };
+  const params: SignatureParams = { created, alg };
   if (opts.keyId !== undefined) params.keyid = opts.keyId;
   if (expires !== undefined) params.expires = expires;
   if (opts.nonce !== undefined) params.nonce = opts.nonce;
@@ -639,9 +681,9 @@ export function signRequest(
   });
 
   let sig: Buffer;
-  if (opts.alg === "ed25519") {
+  if (alg === "ed25519") {
     sig = edSign(null, Buffer.from(base, "utf8"), opts.key);
-  } else if (opts.alg === "ecdsa-p256-sha256") {
+  } else if (alg === "ecdsa-p256-sha256") {
     // RFC 9421 §3.3.4: the signature value is the raw concatenation of
     // the ECDSA integers r and s, each padded to 32 octets (64 octets
     // total) — NOT the DER encoding node:crypto emits by default.
@@ -652,7 +694,7 @@ export function signRequest(
     sig = createSign("sha256")
       .update(base, "utf8")
       .sign({ key: opts.key, dsaEncoding: "ieee-p1363" });
-  } else if (opts.alg === "ecdsa-p384-sha384") {
+  } else if (alg === "ecdsa-p384-sha384") {
     // RFC 9421 §3.3.5: the signature value is the raw concatenation of
     // the ECDSA integers r and s, each padded to 48 octets (96 octets
     // total) — NOT the DER encoding node:crypto emits by default.
@@ -664,7 +706,7 @@ export function signRequest(
     sig = createSign("sha384")
       .update(base, "utf8")
       .sign({ key: opts.key, dsaEncoding: "ieee-p1363" });
-  } else if (opts.alg === "ecdsa-p521-sha512") {
+  } else if (alg === "ecdsa-p521-sha512") {
     // RFC 9421 §3.3.6: the signature value is the raw concatenation of
     // the ECDSA integers r and s, each padded to 66 octets (132 octets
     // total) — NOT the DER encoding node:crypto emits by default.
@@ -676,7 +718,7 @@ export function signRequest(
     sig = createSign("sha512")
       .update(base, "utf8")
       .sign({ key: opts.key, dsaEncoding: "ieee-p1363" });
-  } else if (opts.alg === "rsa-v1_5-sha256") {
+  } else if (alg === "rsa-v1_5-sha256") {
     // RFC 9421 §3.3.2: RSASSA-PKCS1-v1_5 with SHA-256. v1.5 padding is
     // deterministic — the same base and key always produce the same
     // signature bytes (unlike PSS). The key-shape/modulus check runs
@@ -686,7 +728,7 @@ export function signRequest(
     sig = createSign("sha256")
       .update(base, "utf8")
       .sign({ key: opts.key, padding: constants.RSA_PKCS1_PADDING });
-  } else if (opts.alg === "rsa-pss-sha512") {
+  } else if (alg === "rsa-pss-sha512") {
     // RFC 9421 §3.3.1: RSASSA-PSS-SIGN with SHA-512, MGF1 with SHA-512,
     // and a fixed 64-byte salt. PSS is probabilistic — the same base
     // signs to a different byte string every time, so verifiers must
@@ -698,12 +740,12 @@ export function signRequest(
         padding: constants.RSA_PKCS1_PSS_PADDING,
         saltLength: 64,
       });
-  } else if (opts.alg === "hmac-sha256") {
+  } else if (alg === "hmac-sha256") {
     // Fail fast on weak secrets: a short key must never silently mint
     // signatures the verifier would also (correctly) refuse to check.
     assertHmacSecretLength(opts.key);
     sig = createHmac("sha256", opts.key).update(base, "utf8").digest();
-  } else if (opts.alg === "hmac-sha512") {
+  } else if (alg === "hmac-sha512") {
     // SHA-512 twin of the hmac-sha256 branch above. The floor is paired
     // with the algorithm (RFC 2104 §3: the key SHOULD be at least as long
     // as the hash output; sha-512 → 64 bytes), so a secret that is only
@@ -718,7 +760,7 @@ export function signRequest(
     // without a branch here fails loudly instead of proceeding with an
     // unassigned signature — and so TypeScript accepts `sig` as
     // definitely assigned.
-    throw new Error(`unsupported alg "${opts.alg}"`);
+    throw new Error(`unsupported alg "${alg}"`);
   }
 
   headers["signature-input"] = signatureInputValue(label, covered, params);

@@ -7,6 +7,7 @@ import {
   randomBytes,
   type KeyObject,
 } from "node:crypto";
+import type { SignAlg } from "./sign.js";
 
 /** Generate a fresh ed25519 key pair for signing / verification. */
 export function generateEd25519KeyPair(): {
@@ -296,6 +297,48 @@ export function algMatchesKeyShape(alg: string, key: KeyObject): boolean {
       key.asymmetricKeyDetails?.namedCurve === "secp521r1") ||
     (alg === "rsa-pss-sha512" && key.asymmetricKeyType === "rsa") ||
     (alg === "rsa-v1_5-sha256" && key.asymmetricKeyType === "rsa")
+  );
+}
+
+/**
+ * Infer the signature algorithm from a key's shape — the single
+ * key-shape→alg mapping both sides share, so they can never disagree
+ * about which alg goes with which key. A secret key maps to
+ * `hmac-sha256` (never `hmac-sha512`: a secret carries no length
+ * signal that names the hash, so the mapping picks the lower floor —
+ * a caller that wants sha-512 names it explicitly), ed25519 to
+ * `ed25519`, each NIST curve to its matching `ecdsa-p*-*` algorithm,
+ * and any RSA key to `rsa-pss-sha512` (the RSA default; `rsa-v1_5-sha256`
+ * is only ever chosen explicitly). The sign side uses it for
+ * `SignOptions.alg: "infer"`; the verify side for
+ * `VerifyOptions.algFallback: "infer"` when `signature-input` carries
+ * no `alg`. An unmappable key shape (e.g. a secp256k1 EC key) throws
+ * a configuration error naming this helper — both callers catch it and
+ * rethrow with their own entry-point prefix (`signRequest: ...` /
+ * `verifyRequest: ...`), so the message a caller sees always names
+ * the function it called.
+ */
+export function inferAlgFromKeyShape(key: KeyObject): SignAlg {
+  if (key.type === "secret") return "hmac-sha256";
+  if (key.asymmetricKeyType === "ed25519") return "ed25519";
+  if (
+    key.asymmetricKeyType === "ec" &&
+    key.asymmetricKeyDetails?.namedCurve === "prime256v1"
+  )
+    return "ecdsa-p256-sha256";
+  if (
+    key.asymmetricKeyType === "ec" &&
+    key.asymmetricKeyDetails?.namedCurve === "secp384r1"
+  )
+    return "ecdsa-p384-sha384";
+  if (
+    key.asymmetricKeyType === "ec" &&
+    key.asymmetricKeyDetails?.namedCurve === "secp521r1"
+  )
+    return "ecdsa-p521-sha512";
+  if (key.asymmetricKeyType === "rsa") return "rsa-pss-sha512";
+  throw new Error(
+    `inferAlgFromKeyShape: cannot infer an algorithm for ${describeKey(key)} — supported key shapes are secret keys (hmac-sha256), ed25519 keys, P-256 (prime256v1) EC keys, P-384 (secp384r1) EC keys, P-521 (secp521r1) EC keys, and RSA keys (rsa-pss-sha512)`,
   );
 }
 

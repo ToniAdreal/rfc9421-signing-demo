@@ -79,6 +79,7 @@ export {
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
   importSymmetricKeyJwk,
+  inferAlgFromKeyShape,
   jwkThumbprint,
   memoizeKeyResolver,
   MIN_HMAC_SECRET_BYTES,
