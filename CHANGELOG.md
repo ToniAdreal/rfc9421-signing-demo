@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Response-side RFC 3230 `Digest` body binding is now covered by
+  tests (backlog #1171): `verifyResponse` and
+  `verifyAllResponseLabels` enforce the same Digest rules as the
+  request side — a covered `digest` whose value does not match the
+  body, is missing, is md5-only, or names an unknown algorithm fails
+  with `BODY_DIGEST_MISMATCH`, while an uncovered Digest header is
+  not checked. The binding itself already held through the shared
+  verify path (a live probe confirmed it before these tests were
+  written, so this entry adds regression coverage, not a new code
+  path): twelve new tests in `test/responseDigest.test.ts`,
+  including sha-256/sha-512 round-trips, dual `Digest` +
+  `Content-Digest` coverage, the `digest;bs` form, and per-label
+  isolation in `verifyAllResponseLabels`. The README response
+  signing section documents the legacy-gateway usage.
 - `JwksKeyStore.refresh()` now honours `Retry-After` on rate-limited
   JWKS endpoints (backlog #1170): HTTP 429 (Too Many Requests) is
   retryable — the one 4xx that says "try again later" rather than
