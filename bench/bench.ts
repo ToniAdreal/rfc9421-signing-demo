@@ -25,7 +25,15 @@
  * on every measured pass against the hand-pinned envelope (version,
  * fetch time, kid order, per-shape `kty`, public-only JWK fields with
  * no `"d"`), with a never-refreshed store's export refusal asserted
- * outside timing, plus the snapshot-restore path a gateway runs at
+ * outside timing, plus the JWKS-document-build path a signer runs on
+ * every key rotation: `buildJwksDocument` over a fixed three-shape
+ * entry list (ed25519 / P-256 / RSA, pinned kids — see
+ * JWKS_DOCUMENT_* below), self-checked on every measured pass
+ * against the hand-pinned document (kid order, per-shape `kty`,
+ * public-only JWK fields with no `"d"`), with the assembled
+ * document restored offline into a `JwksKeyStore` and all three kids
+ * resolving, and the duplicate-kid refusal, asserted outside timing,
+ * plus the snapshot-restore path a gateway runs at
  * cold start: `JwksKeyStore.restoreSnapshot` restoring a pinned
  * three-shape envelope (exported outside timing from a source store
  * refreshed once through a counting fake fetch) into an existing
@@ -903,6 +911,7 @@ import {
   assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
+  buildJwksDocument,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
   canonicalizeStructuredFieldValueAs,
@@ -963,6 +972,7 @@ import {
   type ContentDigestAlg,
   type HttpResponseLike,
   type IncomingRequestLike,
+  type JwksDocumentEntry,
   type JwksFetchImpl,
   type RequestLike,
   type ReplayCacheSignedSnapshotEnvelope,
@@ -1479,6 +1489,133 @@ function benchmarkJwksExportSnapshot(store: JwksKeyStore): number {
     );
   return measure(() => {
     assertJwksExportSnapshot(store.exportSnapshot());
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `buildJwksDocument` benchmark: the three key
+ * shapes the signer publishes (ed25519 / P-256 / RSA), one freshly
+ * generated key pair per shape (generated once, outside timing),
+ * published under these kids. The built document must reproduce
+ * these literals exactly on every pass — never values derived from
+ * `buildJwksDocument` itself.
+ */
+const JWKS_DOCUMENT_KIDS = [
+  "bench-publish-ed25519",
+  "bench-publish-p256",
+  "bench-publish-rsa",
+] as const;
+const JWKS_DOCUMENT_KTYS = ["OKP", "EC", "RSA"] as const;
+const JWKS_DOCUMENT_FETCHED_AT_SEC = 1_700_000_000;
+
+/**
+ * Build the fixed three-shape entry list for the `buildJwksDocument`
+ * benchmark: one freshly generated public key per shape, outside
+ * timing — key generation is the signer's one-off setup, not the
+ * per-rotation document build the row measures.
+ */
+function jwksDocumentEntries(): readonly JwksDocumentEntry[] {
+  const ed25519 = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const rsa = generateRsaPssKeyPair();
+  return [
+    { key: ed25519.publicKey, kid: JWKS_DOCUMENT_KIDS[0] },
+    { key: p256.publicKey, kid: JWKS_DOCUMENT_KIDS[1] },
+    { key: rsa.publicKey, kid: JWKS_DOCUMENT_KIDS[2] },
+  ];
+}
+
+/**
+ * Pin one built document against the hand-written expectation:
+ * exactly the three pinned kids in entry order, the per-shape `kty`
+ * dispatch (OKP / EC / RSA, the EC entry naming P-256), and
+ * public-only JWK material — no entry may carry a private `"d"`
+ * member.
+ */
+function assertJwksDocument(doc: ReturnType<typeof buildJwksDocument>): void {
+  if (doc.keys.length !== JWKS_DOCUMENT_KIDS.length)
+    throw new Error(
+      `benchmark self-check failed: buildJwksDocument built ${doc.keys.length} keys ` +
+        `(expected ${JWKS_DOCUMENT_KIDS.length})`,
+    );
+  for (let i = 0; i < JWKS_DOCUMENT_KIDS.length; i++) {
+    const key = doc.keys[i]!;
+    if (key.kid !== JWKS_DOCUMENT_KIDS[i])
+      throw new Error(
+        `benchmark self-check failed: buildJwksDocument keys[${i}].kid ${JSON.stringify(key.kid)} ` +
+          `(expected ${JSON.stringify(JWKS_DOCUMENT_KIDS[i])})`,
+      );
+    if (key.kty !== JWKS_DOCUMENT_KTYS[i])
+      throw new Error(
+        `benchmark self-check failed: buildJwksDocument keys[${i}].kty ${JSON.stringify(key.kty)} ` +
+          `(expected ${JSON.stringify(JWKS_DOCUMENT_KTYS[i])})`,
+      );
+    if ("d" in key)
+      throw new Error(
+        `benchmark self-check failed: buildJwksDocument keys[${i}] carries private "d" material`,
+      );
+  }
+  const ecCrv = (doc.keys[1] as { crv?: unknown }).crv;
+  if (ecCrv !== "P-256")
+    throw new Error(
+      `benchmark self-check failed: buildJwksDocument EC crv ${JSON.stringify(ecCrv)} (expected "P-256")`,
+    );
+}
+
+/**
+ * `buildJwksDocument` steady state: every measured call rebuilds the
+ * three-shape document from the fixed entries and re-pins the whole
+ * document (see {@link assertJwksDocument}) — the per-key JWK export
+ * dispatch plus envelope assembly a signer pays on every key
+ * rotation. Outside timing, the assembled document is restored
+ * offline into a `JwksKeyStore` and all three kids resolve (the row
+ * measures a document a verifier can actually consume, not an empty
+ * path), and a duplicate-kid entry list is refused with the pinned
+ * message.
+ */
+function benchmarkBuildJwksDocument(
+  entries: readonly JwksDocumentEntry[],
+): number {
+  assertJwksDocument(buildJwksDocument(entries));
+  const store = JwksKeyStore.restore(
+    {
+      v: 1,
+      fetchedAtSec: JWKS_DOCUMENT_FETCHED_AT_SEC,
+      keys: buildJwksDocument(entries).keys,
+    },
+    "https://signer.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: async () => {
+        throw new Error("benchmark must not fetch (offline store)");
+      },
+      now: () => JWKS_DOCUMENT_FETCHED_AT_SEC,
+    },
+  );
+  for (const kid of JWKS_DOCUMENT_KIDS) {
+    if (store.resolve(kid) === undefined)
+      throw new Error(
+        `benchmark self-check failed: built JWKS document's kid ${JSON.stringify(kid)} does not resolve`,
+      );
+  }
+  let refusal: string | undefined;
+  try {
+    buildJwksDocument([
+      { key: entries[0]!.key, kid: JWKS_DOCUMENT_KIDS[0] },
+      { key: entries[1]!.key, kid: JWKS_DOCUMENT_KIDS[0] },
+    ]);
+  } catch (err) {
+    refusal = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    refusal !==
+    `buildJwksDocument: duplicate kid ${JSON.stringify(JWKS_DOCUMENT_KIDS[0])} at entries[1] ` +
+      `(kids must be unique across the document — a verifier resolves by kid alone)`
+  )
+    throw new Error(
+      `benchmark self-check failed: duplicate-kid refusal ${JSON.stringify(refusal)}`,
+    );
+  return measure(() => {
+    assertJwksDocument(buildJwksDocument(entries));
   }, ITERATIONS);
 }
 
@@ -17010,6 +17147,11 @@ results.push({
   alg: "JwksKeyStore.exportSnapshot (3 keys)",
   op: "export",
   ops: benchmarkJwksExportSnapshot(offlineJwksExportStore()),
+});
+results.push({
+  alg: "buildJwksDocument (3 keys)",
+  op: "build",
+  ops: benchmarkBuildJwksDocument(jwksDocumentEntries()),
 });
 results.push({
   alg: "JwksKeyStore.restoreSnapshot (3 keys)",
