@@ -74,6 +74,17 @@
  * outside the printed extractions and its rejection is printed as
  * one line. Every input and expectation is a fixed constant, so
  * the segment is byte-identical between runs.
+ * The demo closes with a structured-field registry segment: the
+ * same Dictionary field is judged three ways against the
+ * caller-supplied `structuredFieldTypes` registry — unregistered
+ * the `;key` component round-trips, registered as a List the sign
+ * side throws and the verify side converges on
+ * `SIGNATURE_BASE_BUILD_FAILED`, and registered as a Dictionary
+ * it behaves exactly as before — showing that `;sf` and `;key`
+ * agree on a field's type instead of silently parsing a
+ * List-registered field as a Dictionary. Every input and
+ * expectation is a fixed constant, so the segment is
+ * byte-identical between runs.
  * The demo closes with a signature-params serialization segment:
  * five fixed (covered components, parameters) cases — the same
  * corpus the benchmark measures for this function — are run
@@ -1670,6 +1681,25 @@ export const DEMO_DICT_MEMBER_EXTRACTION: ReadonlyArray<{
  * empty or whole-field value.
  */
 export const DEMO_DICT_MEMBER_MISSING_KEY = "zzz";
+/**
+ * Covered component of the registry segment: the same `;key`
+ * component id, judged three ways against the caller-supplied
+ * `structuredFieldTypes` registry — unregistered, registered as a
+ * List, registered as a Dictionary — over the same
+ * `DEMO_DICT_MEMBER_VALUE` field value.
+ */
+export const DEMO_KEY_REGISTRY_COMPONENT = 'x-dict;key="b"';
+/**
+ * Exact sign-side refusal when the registry segment signs
+ * `DEMO_KEY_REGISTRY_COMPONENT` with `x-dict` registered as a
+ * List: `;key` only selects a member of a Dictionary, so the
+ * signer fails fast instead of minting a signature over a
+ * List-parsed value — hand-pinned from the `;key` registry rule
+ * in `src/components.ts`, matching
+ * `test/structuredFieldTypes.test.ts`.
+ */
+export const DEMO_KEY_REGISTRY_LIST_SIGN_ERROR =
+  'covered header field "x-dict" cannot be serialized with ";key="b"": field "x-dict" is registered as a "list" Structured Field, and ";key" only selects a member of a Dictionary';
 /**
  * Fixed corpus of the closing signature-params serialization
  * segment: the same five (componentIds, params) cases the bench
@@ -4792,6 +4822,30 @@ export interface DemoResult {
    * which the demo tests reject).
    */
   dictMemberMissingKeyError: string;
+  /**
+   * The registry segment's unregistered round-trip: the `;key`
+   * component signed and verified with no registry.
+   */
+  keyRegistryUnregisteredVerification: VerifyResult;
+  /**
+   * Error message thrown when the registry segment signs the
+   * `;key` component with `x-dict` registered as a List (empty
+   * only if the sign unexpectedly did not throw, which the demo
+   * tests reject).
+   */
+  keyRegistryListSignError: string;
+  /**
+   * The registry segment's List-registered verification: the
+   * unregistered-signed request verified against a List registry,
+   * which must fail with `SIGNATURE_BASE_BUILD_FAILED`.
+   */
+  keyRegistryListVerification: VerifyResult;
+  /**
+   * The registry segment's Dictionary-registered round-trip: the
+   * `;key` component signed and verified with `x-dict` registered
+   * as a Dictionary.
+   */
+  keyRegistryDictionaryVerification: VerifyResult;
   /**
    * The closing serialization segment's results: each fixed case
    * name paired with its `serializeSignatureParams` output over
@@ -9122,6 +9176,88 @@ export async function runDemo(): Promise<DemoResult> {
   } catch (err) {
     dictMemberMissingKeyError =
       err instanceof Error ? err.message : String(err);
+  }
+
+  // Registry segment: `;key` and `;sf` consult the same
+  // caller-supplied `structuredFieldTypes` registry, so the two
+  // parameters agree on what type a field is. The same Dictionary
+  // field is judged three ways: unregistered it round-trips, with
+  // the field registered as a List the sign side throws and the
+  // verify side converges on SIGNATURE_BASE_BUILD_FAILED, and with
+  // the field registered as a Dictionary it behaves exactly as
+  // before. The sign-side refusal is asserted here against the
+  // hand-pinned `DEMO_KEY_REGISTRY_LIST_SIGN_ERROR`, and the
+  // List-registered verification against its hand-pinned code and
+  // reason — a mismatch throws instead of printing a misleading
+  // segment.
+  const keyRegistryRequest = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: { "x-dict": DEMO_DICT_MEMBER_VALUE },
+  };
+  const keyRegistryUnregisteredSigned = signRequest(keyRegistryRequest, {
+    keyId: DEMO_KEY_ID,
+    alg: "ed25519",
+    key: privateKey,
+    created: DEMO_CREATED,
+    coveredComponents: [DEMO_KEY_REGISTRY_COMPONENT],
+  });
+  const keyRegistryUnregisteredVerification = verifyRequest(
+    keyRegistryUnregisteredSigned,
+    { key: publicKey, now: DEMO_CREATED + 60 },
+  );
+  let keyRegistryListSignError = "";
+  try {
+    signRequest(keyRegistryRequest, {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      coveredComponents: [DEMO_KEY_REGISTRY_COMPONENT],
+      structuredFieldTypes: { "x-dict": "list" },
+    });
+  } catch (err) {
+    keyRegistryListSignError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const keyRegistryListVerification = verifyRequest(
+    keyRegistryUnregisteredSigned,
+    {
+      key: publicKey,
+      now: DEMO_CREATED + 60,
+      structuredFieldTypes: { "x-dict": "list" },
+    },
+  );
+  const keyRegistryDictionarySigned = signRequest(keyRegistryRequest, {
+    keyId: DEMO_KEY_ID,
+    alg: "ed25519",
+    key: privateKey,
+    created: DEMO_CREATED,
+    coveredComponents: [DEMO_KEY_REGISTRY_COMPONENT],
+    structuredFieldTypes: { "x-dict": "dictionary" },
+  });
+  const keyRegistryDictionaryVerification = verifyRequest(
+    keyRegistryDictionarySigned,
+    {
+      key: publicKey,
+      now: DEMO_CREATED + 60,
+      structuredFieldTypes: { "x-dict": "dictionary" },
+    },
+  );
+  const keyRegistryListFailedClosed =
+    !keyRegistryListVerification.ok &&
+    keyRegistryListVerification.code === "SIGNATURE_BASE_BUILD_FAILED" &&
+    keyRegistryListVerification.reason ===
+      `cannot rebuild signature base: ${DEMO_KEY_REGISTRY_LIST_SIGN_ERROR}`;
+  if (
+    !keyRegistryUnregisteredVerification.ok ||
+    keyRegistryListSignError !== DEMO_KEY_REGISTRY_LIST_SIGN_ERROR ||
+    !keyRegistryListFailedClosed ||
+    !keyRegistryDictionaryVerification.ok
+  ) {
+    throw new Error(
+      `demo fixture broken: ;key registry segment mismatch (unregistered ok=${keyRegistryUnregisteredVerification.ok}, list sign error=${JSON.stringify(keyRegistryListSignError)}, list verify ok=${keyRegistryListVerification.ok}, dictionary ok=${keyRegistryDictionaryVerification.ok})`,
+    );
   }
 
   // Serialization segment: the `@signature-params` line is not a
@@ -16072,6 +16208,18 @@ export async function runDemo(): Promise<DemoResult> {
     ),
     `Extract member ${DEMO_DICT_MEMBER_MISSING_KEY}: FAILED (${dictMemberMissingKeyError})`,
     "",
+    "Structured-field registry and ;key: the same ;key covered component is judged against the caller-supplied structuredFieldTypes registry, so ;sf and ;key agree on the field's type — unregistered it round-trips, registered as a List it fails closed on both sides, registered as a Dictionary it behaves as before",
+    keyRegistryUnregisteredVerification.ok
+      ? `Registry: unregistered "x-dict" — ;key="b" round-trip: OK (label ${keyRegistryUnregisteredVerification.label}, keyid="${keyRegistryUnregisteredVerification.keyId}", alg="${keyRegistryUnregisteredVerification.alg}")`
+      : `Registry: unregistered "x-dict" — ;key="b" round-trip: FAILED (code ${keyRegistryUnregisteredVerification.code}: ${keyRegistryUnregisteredVerification.reason})`,
+    `Registry: "x-dict" registered as "list" — sign: FAILED (${keyRegistryListSignError})`,
+    keyRegistryListVerification.ok
+      ? `Registry: "x-dict" registered as "list" — verify: OK (unexpected — a List-registered field was verified as a Dictionary)`
+      : `Registry: "x-dict" registered as "list" — verify: FAILED (code ${keyRegistryListVerification.code}: ${keyRegistryListVerification.reason})`,
+    keyRegistryDictionaryVerification.ok
+      ? `Registry: "x-dict" registered as "dictionary" — ;key="b" round-trip: OK (label ${keyRegistryDictionaryVerification.label}, keyid="${keyRegistryDictionaryVerification.keyId}", alg="${keyRegistryDictionaryVerification.alg}")`
+      : `Registry: "x-dict" registered as "dictionary" — ;key="b" round-trip: FAILED (code ${keyRegistryDictionaryVerification.code}: ${keyRegistryDictionaryVerification.reason})`,
+    "",
     "Signature-params serialization: the covered-component inner list plus its parameters in fixed order (created, expires, keyid, alg, nonce, tag), strings quoted and escaped — the \"@signature-params\" value a verifier rebuilds byte-for-byte",
     ...sigParamsSerialization.map(
       (c) => `Serialize ${c.name}: ${c.serialized}`,
@@ -16856,6 +17004,10 @@ export async function runDemo(): Promise<DemoResult> {
     sfCanonicalization,
     dictMemberExtraction,
     dictMemberMissingKeyError,
+    keyRegistryUnregisteredVerification,
+    keyRegistryListSignError,
+    keyRegistryListVerification,
+    keyRegistryDictionaryVerification,
     sigParamsSerialization,
     pemPublicHeader,
     pemPrivateHeader,

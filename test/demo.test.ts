@@ -170,6 +170,8 @@ import {
   DEMO_DICT_MEMBER_EXTRACTION,
   DEMO_DICT_MEMBER_MISSING_KEY,
   DEMO_DICT_MEMBER_VALUE,
+  DEMO_KEY_REGISTRY_COMPONENT,
+  DEMO_KEY_REGISTRY_LIST_SIGN_ERROR,
   DEMO_SF_CANONICALIZATION,
   DEMO_SIG_PARAMS_SERIALIZATION,
   DEMO_SIGN_GUARD_ERRORS,
@@ -1515,6 +1517,145 @@ test("demo lines contain the member-extraction segment (key -> value pairs, miss
     "Extract member c: (a b c)",
     "Extract member d: ?1",
   ]);
+});
+
+test("demo registry segment judges the same ;key component three ways against structuredFieldTypes", async () => {
+  const {
+    keyRegistryUnregisteredVerification,
+    keyRegistryListSignError,
+    keyRegistryListVerification,
+    keyRegistryDictionaryVerification,
+    lines,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // The covered component and the sign-side refusal are the
+  // literals pinned in src/demo.ts — the test pins them again here
+  // so a drift in either place fails loudly.
+  assert.equal(DEMO_KEY_REGISTRY_COMPONENT, 'x-dict;key="b"');
+  assert.equal(
+    DEMO_KEY_REGISTRY_LIST_SIGN_ERROR,
+    'covered header field "x-dict" cannot be serialized with ";key="b"": field "x-dict" is registered as a "list" Structured Field, and ";key" only selects a member of a Dictionary',
+  );
+
+  // Unregistered: the ;key component round-trips.
+  assert.equal(keyRegistryUnregisteredVerification.ok, true);
+  assert.equal(keyRegistryUnregisteredVerification.label, "sig1");
+  assert.equal(keyRegistryUnregisteredVerification.keyId, DEMO_KEY_ID);
+  assert.equal(keyRegistryUnregisteredVerification.alg, "ed25519");
+
+  // Registered as a List: the sign side throws the pinned message,
+  // and the verify side converges on SIGNATURE_BASE_BUILD_FAILED
+  // with the same message as its reason.
+  assert.equal(keyRegistryListSignError, DEMO_KEY_REGISTRY_LIST_SIGN_ERROR);
+  assert.equal(keyRegistryListVerification.ok, false);
+  assert.equal(
+    keyRegistryListVerification.code,
+    "SIGNATURE_BASE_BUILD_FAILED",
+  );
+  assert.equal(
+    keyRegistryListVerification.reason,
+    `cannot rebuild signature base: ${DEMO_KEY_REGISTRY_LIST_SIGN_ERROR}`,
+  );
+
+  // Registered as a Dictionary: behaviour is unchanged.
+  assert.equal(keyRegistryDictionaryVerification.ok, true);
+  assert.equal(keyRegistryDictionaryVerification.label, "sig1");
+  assert.equal(keyRegistryDictionaryVerification.keyId, DEMO_KEY_ID);
+  assert.equal(keyRegistryDictionaryVerification.alg, "ed25519");
+
+  // Independent re-derivation with a fresh key pair (not the
+  // demo's): the same three outcomes hold outside the demo.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const req = {
+    method: "POST",
+    url: "https://api.example.com/v1/payments",
+    headers: { "x-dict": DEMO_DICT_MEMBER_VALUE },
+  };
+  const signOpts = {
+    keyId: DEMO_KEY_ID,
+    alg: "ed25519" as const,
+    key: privateKey,
+    created: DEMO_CREATED,
+    coveredComponents: [DEMO_KEY_REGISTRY_COMPONENT],
+  };
+  const plain = signRequest(req, signOpts);
+  assert.equal(
+    verifyRequest(plain, { key: publicKey, now: DEMO_CREATED + 60 }).ok,
+    true,
+  );
+  assert.throws(
+    () =>
+      signRequest(req, {
+        ...signOpts,
+        structuredFieldTypes: { "x-dict": "list" },
+      }),
+    (e: unknown) =>
+      e instanceof Error &&
+      e.message === DEMO_KEY_REGISTRY_LIST_SIGN_ERROR,
+  );
+  const listVerified = verifyRequest(plain, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+    structuredFieldTypes: { "x-dict": "list" },
+  });
+  assert.equal(listVerified.ok, false);
+  assert.equal(listVerified.code, "SIGNATURE_BASE_BUILD_FAILED");
+  const dictSigned = signRequest(req, {
+    ...signOpts,
+    structuredFieldTypes: { "x-dict": "dictionary" },
+  });
+  assert.equal(
+    verifyRequest(dictSigned, {
+      key: publicKey,
+      now: DEMO_CREATED + 60,
+      structuredFieldTypes: { "x-dict": "dictionary" },
+    }).ok,
+    true,
+  );
+
+  // Printed lines: the registry header, one line per state, in
+  // order, sitting between the member-extraction block and the
+  // signature-params serialization segment.
+  assert.match(
+    out,
+    /Structured-field registry and ;key: the same ;key covered component is judged against the caller-supplied structuredFieldTypes registry/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Structured-field registry and ;key:"),
+  );
+  const extractIdx = lines.findIndex((l) =>
+    l.startsWith("Dictionary-member extraction (;key):"),
+  );
+  const serializeIdx = lines.findIndex((l) =>
+    l.startsWith("Signature-params serialization:"),
+  );
+  assert.ok(
+    extractIdx !== -1 &&
+      headerIdx !== -1 &&
+      serializeIdx !== -1 &&
+      extractIdx < headerIdx &&
+      headerIdx < serializeIdx,
+  );
+  assert.equal(lines[headerIdx - 1], "");
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 5), [
+    `Registry: unregistered "x-dict" — ;key="b" round-trip: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+    `Registry: "x-dict" registered as "list" — sign: FAILED (${DEMO_KEY_REGISTRY_LIST_SIGN_ERROR})`,
+    `Registry: "x-dict" registered as "list" — verify: FAILED (code SIGNATURE_BASE_BUILD_FAILED: cannot rebuild signature base: ${DEMO_KEY_REGISTRY_LIST_SIGN_ERROR})`,
+    `Registry: "x-dict" registered as "dictionary" — ;key="b" round-trip: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+  ]);
+  assert.equal(lines[headerIdx + 5], "");
+
+  // Deterministic double run: the registry segment's lines are
+  // pinned constants, identical between runs.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Structured-field registry and ;key:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 6),
+    lines.slice(headerIdx, headerIdx + 6),
+  );
 });
 
 test("demo signature-params segment serializes the fixed corpus to the hand-pinned strings", async () => {
