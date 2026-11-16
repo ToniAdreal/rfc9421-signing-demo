@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `JwksKeyStore.refresh()` now honours `Retry-After` on rate-limited
+  JWKS endpoints (backlog #1170): HTTP 429 (Too Many Requests) is
+  retryable — the one 4xx that says "try again later" rather than
+  "the request is wrong" — and a 429 or 503 response carrying a
+  `Retry-After` header is waited out for the header's delay, in
+  either of its RFC 9110 §13.1.2 forms (delay-seconds, or an
+  HTTP-date measured against the store's injected `now` clock),
+  capped at the new `fetchMaxRetryDelayMs` option (default 60,000
+  ms, one minute; a finite number >= 0, rejected at construction
+  otherwise). A missing, unparseable, or negative `Retry-After`
+  falls back to the fixed `fetchBackoffMs` instead of throwing, so
+  a broken header never turns a recoverable retry into a hard
+  failure. Every other 4xx stays terminal on the first attempt, the
+  wait still goes through the injectable `sleepImpl`, `fetchRetries`
+  is still the total-attempt cap, and `resolve()` keeps serving the
+  old snapshot while a retry is waiting. Eleven new tests in
+  `test/jwksRetryAfter.test.ts`, including the 2000 ms sleep on
+  `Retry-After: 2`, the HTTP-date delay under an injected clock,
+  the cap, the fixed-backoff fallback, the terminal 404, and the
+  exhausted-retry snapshot preservation. The README JWKS section
+  documents the behaviour.
 - `JwksKeyStore` now sends conditional refreshes (backlog #1169):
   after a successful `refresh()` whose response carried an `ETag`,
   the store remembers the validator and sends it as `If-None-Match`

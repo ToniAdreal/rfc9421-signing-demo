@@ -43,14 +43,18 @@ export interface JwksFetchResponse {
   text?: () => Promise<string>;
   /**
    * Response headers, for the `Content-Length` precheck of the
-   * `maxBodyBytes` body limit and the `Cache-Control: max-age`
+   * `maxBodyBytes` body limit, the `Cache-Control: max-age`
    * freshness read (see {@link JwksKeyStoreOptions.maxBodyBytes}
-   * and {@link JwksKeyStore.effectiveTtlSec}). The native `Headers`
-   * satisfies this shape; a custom `fetchImpl` may provide any
-   * object with a `get(name)` accessor. When absent (or when a
-   * header itself is absent or unparseable) the precheck is skipped
-   * and only the post-read byte check applies, and a missing or
-   * malformed `max-age` leaves `ttlSec` in force.
+   * and {@link JwksKeyStore.effectiveTtlSec}), and the
+   * `Retry-After` wait on a retried 429/503 (see
+   * {@link JwksKeyStoreOptions.fetchMaxRetryDelayMs}). The native
+   * `Headers` satisfies this shape; a custom `fetchImpl` may
+   * provide any object with a `get(name)` accessor. When absent
+   * (or when a header itself is absent or unparseable) the precheck
+   * is skipped and only the post-read byte check applies, a missing
+   * or malformed `max-age` leaves `ttlSec` in force, and a missing
+   * or unparseable `Retry-After` falls back to the fixed retry
+   * backoff.
    */
   headers?: { get(name: string): string | null };
   /**
@@ -282,13 +286,19 @@ export interface JwksKeyStoreOptions {
    * behavior change. Must be a non-negative integer.
    *
    * Only transient failures are retried: network errors from the
-   * fetch itself, and HTTP 5xx responses. A 4xx response, a malformed
-   * JWKS document, and a `fetchTimeoutMs` abort are terminal — a
-   * bad document will not heal by re-fetching, a 4xx says the
-   * request itself is wrong, and re-hanging a hung endpoint per
-   * attempt gains nothing (the caller re-calls `refresh()` when
-   * ready). Retries never multiply the `stats()` counters: one
-   * `refresh()` call counts once, however many attempts it made.
+   * fetch itself, HTTP 5xx responses, and HTTP 429 (Too Many
+   * Requests) — the one 4xx that says "try again later" rather
+   * than "the request is wrong". Every other 4xx response, a
+   * malformed JWKS document, and a `fetchTimeoutMs` abort are
+   * terminal — a bad document will not heal by re-fetching, a
+   * non-429 4xx says the request itself is wrong, and re-hanging
+   * a hung endpoint per attempt gains nothing (the caller
+   * re-calls `refresh()` when ready). Retries never multiply the
+   * `stats()` counters: one `refresh()` call counts once, however
+   * many attempts it made. A 429 or 503 response that carries a
+   * `Retry-After` header is honoured (see
+   * {@link JwksKeyStoreOptions.fetchMaxRetryDelayMs}) instead of
+   * sleeping the fixed backoff.
    */
   fetchRetries?: number;
   /**
@@ -298,9 +308,27 @@ export interface JwksKeyStoreOptions {
    * delay is fixed, not exponential — a JWKS refresh is
    * caller-driven and infrequent, so one predictable pause per
    * retry is enough, and it keeps the worst-case refresh latency
-   * bounded and easy to reason about.
+   * bounded and easy to reason about. Used whenever a retryable
+   * failure carries no usable `Retry-After` header (see
+   * {@link JwksKeyStoreOptions.fetchMaxRetryDelayMs}).
    */
   fetchBackoffMs?: number;
+  /**
+   * Cap in milliseconds on the delay honoured from a `Retry-After`
+   * header on a 429 or 503 response (RFC 9110 §13.1.2). Defaults to
+   * `60_000` — one minute. Must be a finite number >= 0. When the
+   * response asks to wait longer than this, the store waits exactly
+   * this long, never longer: an endpoint that asks for an hour of
+   * silence must not stall a key rotation past the caller's
+   * allowance. The delay itself is parsed from the header's two
+   * forms — delay-seconds (`Retry-After: 2`) or an HTTP-date
+   * (`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`, measured
+   * against the injected `now` clock) — and a missing, unparseable,
+   * or negative value falls back to the fixed `fetchBackoffMs`
+   * instead of throwing: a broken header must not turn a
+   * recoverable retry into a hard failure.
+   */
+  fetchMaxRetryDelayMs?: number;
   /**
    * Sleep implementation used between fetch retries. Defaults to a
    * `setTimeout`-based sleep. Inject a stub in tests to record the
@@ -1111,12 +1139,15 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   does not cancel a refresh already in flight — that fetch still
  *   installs its snapshot when it settles (see `clear()` itself).
  * - **Opt-in fetch retries.** With `fetchRetries` set, a `refresh()`
- *   re-attempts transient failures (network errors, HTTP 5xx) after
- *   a fixed `fetchBackoffMs` pause, up to the configured retry
- *   count; 4xx responses, malformed documents, and fetch timeouts
- *   are terminal. The previous snapshot is untouched until an
- *   attempt fully succeeds, so retries can never install a partial
- *   key set.
+ *   re-attempts transient failures (network errors, HTTP 5xx, and
+ *   HTTP 429) after a pause, up to the configured retry count; a
+ *   429 or 503 that carries a `Retry-After` header is waited out
+ *   for the header's delay (capped at `fetchMaxRetryDelayMs`,
+ *   default 60 seconds), otherwise the fixed `fetchBackoffMs`
+ *   pause applies. Other 4xx responses, malformed documents, and
+ *   fetch timeouts are terminal. The previous snapshot is
+ *   untouched until an attempt fully succeeds, so retries can
+ *   never install a partial key set.
  *
  * Honest limits: trusting the endpoint is the caller's responsibility —
  * this store performs no TLS pinning, no response-signature check, and
@@ -1167,6 +1198,8 @@ export class JwksKeyStore {
   private readonly fetchRetries: number;
   /** Fixed delay in milliseconds between fetch retry attempts. */
   private readonly fetchBackoffMs: number;
+  /** Cap in milliseconds on the delay honoured from `Retry-After`. */
+  private readonly fetchMaxRetryDelayMs: number;
   /** Sleep implementation used between fetch retry attempts. */
   private readonly sleepImpl: JwksSleepImpl;
   /** kid -> imported public key, from the last successful refresh. */
@@ -1259,6 +1292,7 @@ export class JwksKeyStore {
       requireHttps,
       fetchRetries = 0,
       fetchBackoffMs = 1000,
+      fetchMaxRetryDelayMs = 60_000,
       sleepImpl,
     } = opts;
     if (requireHttps !== undefined && typeof requireHttps !== "boolean")
@@ -1312,6 +1346,14 @@ export class JwksKeyStore {
       throw new Error(
         `JwksKeyStore: \`fetchBackoffMs\` must be a finite number >= 0 (milliseconds), got ${String(fetchBackoffMs)}`,
       );
+    if (
+      typeof fetchMaxRetryDelayMs !== "number" ||
+      !Number.isFinite(fetchMaxRetryDelayMs) ||
+      fetchMaxRetryDelayMs < 0
+    )
+      throw new Error(
+        `JwksKeyStore: \`fetchMaxRetryDelayMs\` must be a finite number >= 0 (milliseconds), got ${String(fetchMaxRetryDelayMs)}`,
+      );
     if (sleepImpl !== undefined && typeof sleepImpl !== "function")
       throw new Error("JwksKeyStore: `sleepImpl` must be a function");
     this.url = url;
@@ -1322,6 +1364,7 @@ export class JwksKeyStore {
     this.maxBodyBytes = maxBodyBytes;
     this.fetchRetries = fetchRetries;
     this.fetchBackoffMs = fetchBackoffMs;
+    this.fetchMaxRetryDelayMs = fetchMaxRetryDelayMs;
     this.sleepImpl =
       sleepImpl ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     this.ttlSec = ttlSec;
@@ -1698,17 +1741,20 @@ export class JwksKeyStore {
 
   /**
    * Fetch with the opt-in retry policy: up to `fetchRetries + 1`
-   * attempts in total, sleeping a fixed `fetchBackoffMs` between
-   * attempts. Only network errors and HTTP 5xx responses are
-   * retried; a 4xx response, a malformed response shape, and a
+   * attempts in total, sleeping between attempts. Only network
+   * errors, HTTP 5xx responses, and HTTP 429 are retried; every
+   * other 4xx response, a malformed response shape, and a
    * `fetchTimeoutMs` abort are terminal on the first attempt that
-   * sees them. A `304 Not Modified` is a success, not an error: it
-   * is returned untouched (never retried, never thrown), and
-   * `fetchAndSwap` keeps the previous snapshot on it. A response
-   * that is not `ok` but carries no `json()` method is passed
-   * through untouched — `fetchAndSwap`'s shape check, not this loop,
-   * owns that contract violation, so the error ordering for
-   * malformed responses is unchanged.
+   * sees them. The pause before a retry is the `Retry-After`
+   * delay when a 429 or 503 response carries a usable one (see
+   * {@link JwksKeyStore.retryAfterDelayMs}), otherwise the fixed
+   * `fetchBackoffMs`. A `304 Not Modified` is a success, not an
+   * error: it is returned untouched (never retried, never thrown),
+   * and `fetchAndSwap` keeps the previous snapshot on it. A
+   * response that is not `ok` but carries no `json()` method is
+   * passed through untouched — `fetchAndSwap`'s shape check, not
+   * this loop, owns that contract violation, so the error ordering
+   * for malformed responses is unchanged.
    *
    * On exhaustion the last attempt's error is thrown unchanged, so
    * a caller that distinguishes "HTTP 500" from "network down" from
@@ -1716,6 +1762,9 @@ export class JwksKeyStore {
    * produced. The old snapshot and freshness timestamp are
    * untouched throughout — this method only ever returns a
    * response (or throws); swapping happens in `fetchAndSwap`.
+   * `resolve()` keeps serving the old snapshot while a retry is
+   * waiting: the sleep happens between attempts, never under a
+   * lock, and no state changes until `fetchAndSwap` swaps.
    */
   private async fetchWithRetries(): Promise<JwksFetchResponse> {
     const maxAttempts = this.fetchRetries + 1;
@@ -1742,10 +1791,18 @@ export class JwksKeyStore {
           return res;
         if (
           typeof res.status === "number" &&
-          res.status >= 500 &&
-          attempt < maxAttempts - 1
+          attempt < maxAttempts - 1 &&
+          (res.status === 429 || res.status >= 500)
         ) {
-          await this.sleepImpl(this.fetchBackoffMs);
+          // 429 Too Many Requests is retryable — the only 4xx that
+          // is: a rate-limited endpoint says "try again later", and
+          // when it names the wait in `Retry-After` the store
+          // honours it (capped at `fetchMaxRetryDelayMs`); a 503
+          // honours the same header. Every other 4xx falls through
+          // to the throw below: the request itself is wrong and
+          // will not heal by re-fetching.
+          const delayMs = this.retryAfterDelayMs(res) ?? this.fetchBackoffMs;
+          await this.sleepImpl(delayMs);
           continue;
         }
         throw new Error(
@@ -1757,6 +1814,41 @@ export class JwksKeyStore {
     // Unreachable: every iteration returns, throws, or continues to
     // the next attempt, and the last attempt always returns or throws.
     throw new Error("JwksKeyStore: unreachable fetch retry state");
+  }
+
+
+  /**
+   * Delay in milliseconds the endpoint asks `refresh()` to wait
+   * before retrying, read from a `Retry-After` header (RFC 9110
+   * §13.1.2) on a 429 or 503 response — or `null` when the
+   * response carries no usable one. Two forms are accepted:
+   * delay-seconds (`Retry-After: 2`) and an HTTP-date
+   * (`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`), the latter
+   * measured against the injected clock (`now`, unix seconds).
+   * The value is capped at `fetchMaxRetryDelayMs` — an endpoint
+   * that asks for an hour of silence never stalls a refresh
+   * longer than the caller allows. Unparseable values (a
+   * non-numeric, non-date string, a past date, a negative delay)
+   * return `null` so the caller falls back to the fixed
+   * `fetchBackoffMs` instead of throwing: a broken header must
+   * not turn a recoverable retry into a hard failure.
+   */
+  private retryAfterDelayMs(res: JwksFetchResponse): number | null {
+    if (typeof res.headers?.get !== "function") return null;
+    const raw = res.headers.get("retry-after");
+    if (typeof raw !== "string") return null;
+    const trimmed = raw.trim();
+    if (trimmed === "") return null;
+    if (/^\d+$/.test(trimmed)) {
+      const seconds = Number.parseInt(trimmed, 10);
+      if (!Number.isFinite(seconds) || seconds < 0) return null;
+      return Math.min(seconds * 1000, this.fetchMaxRetryDelayMs);
+    }
+    const dateMs = Date.parse(trimmed);
+    if (!Number.isFinite(dateMs)) return null;
+    const delayMs = dateMs - this.clock() * 1000;
+    if (delayMs < 0) return null;
+    return Math.min(delayMs, this.fetchMaxRetryDelayMs);
   }
 
   /**

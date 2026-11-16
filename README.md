@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2231 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2242 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1057,16 +1057,26 @@ freshness.
 
 Fetch retries (opt-in): `new JwksKeyStore(url, { fetchRetries: 2,
 fetchBackoffMs: 1000 })` re-attempts a failed `refresh()` up to the
-configured retry count, sleeping a fixed `fetchBackoffMs` between
-attempts. Only transient failures are retried — network errors and
-HTTP 5xx responses. A 4xx response, a malformed JWKS document, and a
-`fetchTimeoutMs` abort are terminal on the first attempt that sees
-them, and on exhaustion `refresh()` throws the last attempt's error
-unchanged. The previous snapshot and `lastRefreshedAt` are untouched
-until an attempt fully succeeds, and the `stats()` counters count one
-`refresh()` call once however many attempts it made. `fetchRetries`
-defaults to `0` (single attempt, the previous behavior); the sleep is
-injectable (`sleepImpl`, default `setTimeout`) so tests can record the
+configured retry count, sleeping between attempts. Only transient
+failures are retried — network errors, HTTP 5xx responses, and HTTP
+429 (Too Many Requests), the one 4xx that says "try again later"
+rather than "the request is wrong". A 429 or 503 that carries a
+`Retry-After` header is waited out for the header's delay — either
+delay-seconds (`Retry-After: 2`) or an HTTP-date measured against
+the store's clock — capped at `fetchMaxRetryDelayMs` (default
+60,000 ms, one minute), so an endpoint that asks for an hour of
+silence never stalls a rotation past the caller's allowance. A
+missing, unparseable, or negative `Retry-After` falls back to the
+fixed `fetchBackoffMs` instead of throwing. Every other 4xx
+response, a malformed JWKS document, and a `fetchTimeoutMs` abort
+are terminal on the first attempt that sees them, and on exhaustion
+`refresh()` throws the last attempt's error unchanged. The previous
+snapshot and `lastRefreshedAt` are untouched until an attempt fully
+succeeds, `resolve()` keeps serving the old snapshot while a retry
+is waiting, and the `stats()` counters count one `refresh()` call
+once however many attempts it made. `fetchRetries` defaults to `0`
+(single attempt, the previous behavior); the sleep is injectable
+(`sleepImpl`, default `setTimeout`) so tests can record the
 requested delays without waiting for them.
 
 HTTPS-only endpoints (opt-in): `new JwksKeyStore(url, { requireHttps: true })`
@@ -4891,7 +4901,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2231 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2242 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
