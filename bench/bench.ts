@@ -482,7 +482,19 @@
  * kid resolves afterwards), with the terminal-4xx case (one fetch,
  * zero sleeps, pinned HTTP 404 error) and the exhausted-retries
  * case (three fetches, two sleeps, pinned HTTP 500 error, exactly
- * one `stats().refreshFailures`) asserted outside timing, plus the serial refresh path a gateway runs at cold start /
+ * one `stats().refreshFailures`) asserted outside timing, plus the
+ * rate-limited refresh path a gateway runs when its JWKS endpoint
+ * answers 429 with `Retry-After: 2`: `JwksKeyStore.refresh` with
+ * `fetchRetries: 1` over a real loopback `http` server that
+ * rate-limits the first fetch of every refresh cycle and serves the
+ * pinned JWKS document on the retry (a stub sleep records the
+ * honoured 2000 ms wait without waiting — zero wall clock),
+ * self-checked on every measured pass (each refresh makes exactly
+ * two fetches, records exactly one sleep of 2000 ms, counts exactly
+ * one `stats().refreshes`, and the pinned kid resolves afterwards),
+ * with the `Retry-After: 3600` cap (the recorded wait is exactly the
+ * default `fetchMaxRetryDelayMs` of 60,000 ms) asserted outside
+ * timing, plus the serial refresh path a gateway runs at cold start /
  * rotation time: `JwksKeyStore.refresh` over a real loopback `http`
  * server serving a fixed three-shape JWKS document (ed25519 / P-256
  * / RSA) through the store's default fetch — a fresh store is built
@@ -10589,6 +10601,215 @@ async function benchmarkJwksFetchRetries(): Promise<number> {
   return ops;
 }
 
+const JWKS_REFRESH_RETRY_AFTER_KID = "bench-refresh-retry-after-key";
+const JWKS_REFRESH_RETRY_AFTER_RETRIES = 1;
+const JWKS_REFRESH_RETRY_AFTER_SECONDS = 2;
+const JWKS_REFRESH_RETRY_AFTER_DELAY_MS = 2000;
+const JWKS_REFRESH_RETRY_AFTER_CAP_SECONDS = 3600;
+const JWKS_REFRESH_RETRY_AFTER_CAP_MS = 60_000;
+
+/**
+ * A loopback JWKS endpoint that rate-limits the first fetch of every
+ * refresh cycle: odd-numbered requests answer 429 with the pinned
+ * `Retry-After` delay-seconds value and no body, even-numbered
+ * requests answer 200 with the pinned JWKS document. The returned
+ * request count is the server-side fetch count, so the bench can pin
+ * exactly two fetches per refresh without wrapping the store's
+ * default fetch. The caller closes the server when done.
+ */
+async function startRetryAfterLoopback(
+  retryAfter: string,
+  body: string,
+): Promise<{
+  url: string;
+  requests: () => number;
+  close: () => Promise<void>;
+}> {
+  let requests = 0;
+  const server = createServer((req, res) => {
+    requests++;
+    if (requests % 2 === 1) {
+      res.writeHead(429, { "retry-after": retryAfter });
+      res.end();
+    } else {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(body);
+    }
+  });
+  const url = await new Promise<string>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => {
+      const port = (server.address() as AddressInfo).port;
+      resolve(`http://127.0.0.1:${port}/.well-known/jwks.json`);
+    });
+    server.on("error", reject);
+  });
+  return {
+    url,
+    requests: () => requests,
+    close: () =>
+      new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+/**
+ * Pinned shape of the `JwksKeyStore.refresh` Retry-After benchmark:
+ * one ed25519 key (generated once, outside timing) published under
+ * this kid, a retry budget of one (`fetchRetries: 1`) — one 429
+ * then one 200 is the whole cycle — and a stub sleep that records
+ * each requested delay without waiting, so the measured cost is the
+ * retry loop itself (two loopback fetches, one JWK import, one
+ * snapshot swap), never a real wall-clock wait, and the endpoint is
+ * loopback-only.
+ *
+ * Outside timing, two halves of the Retry-After contract are pinned
+ * once: the scripted 429 + `Retry-After: 2` refresh succeeds on the
+ * retry with exactly one sleep of 2000 ms and the pinned kid
+ * resolving afterwards, and the `Retry-After: 3600` refresh waits
+ * exactly the default `fetchMaxRetryDelayMs` of 60,000 ms (the cap,
+ * not the hour the endpoint asked for) and still succeeds. Every
+ * measured refresh then re-pays the full cycle — the loopback server
+ * rate-limits the first fetch of each cycle, keyed off the running
+ * request count — and self-checks that it made exactly two fetches,
+ * recorded exactly one sleep of 2000 ms, counted exactly one
+ * `stats().refreshes`, and resolves the pinned kid; after the
+ * measured run the totals must equal the cycle times warmup plus
+ * timed calls exactly.
+ */
+async function benchmarkJwksRefreshRetryAfter(): Promise<number> {
+  const { publicKey } = generateEd25519KeyPair();
+  const doc = {
+    keys: [
+      {
+        ...exportPublicKeyJwk(publicKey),
+        kid: JWKS_REFRESH_RETRY_AFTER_KID,
+      },
+    ],
+  };
+  const body = JSON.stringify(doc);
+
+  // Outside timing: the scripted 429 + `Retry-After: 2` refresh
+  // honours the header — one sleep of exactly 2000 ms, then the
+  // retry succeeds and the pinned kid resolves.
+  const scripted = await startRetryAfterLoopback(
+    String(JWKS_REFRESH_RETRY_AFTER_SECONDS),
+    body,
+  );
+  try {
+    const scriptedSleeps: number[] = [];
+    const scriptedStore = new JwksKeyStore(scripted.url, {
+      fetchRetries: JWKS_REFRESH_RETRY_AFTER_RETRIES,
+      sleepImpl: async (ms: number) => {
+        scriptedSleeps.push(ms);
+      },
+    });
+    await scriptedStore.refresh();
+    if (
+      scripted.requests() !== 2 ||
+      scriptedSleeps.length !== 1 ||
+      scriptedSleeps[0] !== JWKS_REFRESH_RETRY_AFTER_DELAY_MS ||
+      scriptedStore.resolve(JWKS_REFRESH_RETRY_AFTER_KID) === undefined ||
+      scriptedStore.stats().refreshes !== 1 ||
+      scriptedStore.stats().refreshFailures !== 0
+    )
+      throw new Error(
+        `benchmark self-check failed: scripted Retry-After refresh gave ${scripted.requests()} fetches with sleeps ${JSON.stringify(scriptedSleeps)} and stats ${JSON.stringify(scriptedStore.stats())} (expected 2 fetches, 1 sleep of ${JWKS_REFRESH_RETRY_AFTER_DELAY_MS}ms, refreshes 1, refreshFailures 0)`,
+      );
+  } finally {
+    await scripted.close();
+  }
+
+  // Outside timing: a `Retry-After: 3600` is capped at the default
+  // `fetchMaxRetryDelayMs` — the store waits 60,000 ms, never the
+  // hour the endpoint asked for — and the retry still succeeds.
+  const capped = await startRetryAfterLoopback(
+    String(JWKS_REFRESH_RETRY_AFTER_CAP_SECONDS),
+    body,
+  );
+  try {
+    const cappedSleeps: number[] = [];
+    const cappedStore = new JwksKeyStore(capped.url, {
+      fetchRetries: JWKS_REFRESH_RETRY_AFTER_RETRIES,
+      sleepImpl: async (ms: number) => {
+        cappedSleeps.push(ms);
+      },
+    });
+    await cappedStore.refresh();
+    if (
+      capped.requests() !== 2 ||
+      cappedSleeps.length !== 1 ||
+      cappedSleeps[0] !== JWKS_REFRESH_RETRY_AFTER_CAP_MS ||
+      cappedStore.resolve(JWKS_REFRESH_RETRY_AFTER_KID) === undefined ||
+      cappedStore.stats().refreshes !== 1 ||
+      cappedStore.stats().refreshFailures !== 0
+    )
+      throw new Error(
+        `benchmark self-check failed: capped Retry-After refresh gave ${capped.requests()} fetches with sleeps ${JSON.stringify(cappedSleeps)} and stats ${JSON.stringify(cappedStore.stats())} (expected 2 fetches, 1 sleep of ${JWKS_REFRESH_RETRY_AFTER_CAP_MS}ms, refreshes 1, refreshFailures 0)`,
+      );
+  } finally {
+    await capped.close();
+  }
+
+  // Measured store: the loopback server rate-limits the first fetch
+  // of every refresh cycle, so every measured refresh pays the full
+  // 429 + Retry-After + 200 cycle and re-proves the snapshot swap.
+  const measured = await startRetryAfterLoopback(
+    String(JWKS_REFRESH_RETRY_AFTER_SECONDS),
+    body,
+  );
+  try {
+    const sleeps: number[] = [];
+    const store = new JwksKeyStore(measured.url, {
+      fetchRetries: JWKS_REFRESH_RETRY_AFTER_RETRIES,
+      sleepImpl: async (ms: number) => {
+        sleeps.push(ms);
+      },
+    });
+    const ops = await measureAsync(async () => {
+      const beforeRequests = measured.requests();
+      const beforeSleeps = sleeps.length;
+      const beforeRefreshes = store.stats().refreshes;
+      await store.refresh();
+      if (measured.requests() !== beforeRequests + 2)
+        throw new Error(
+          `benchmark self-check failed: Retry-After refresh made ${measured.requests() - beforeRequests} fetches (expected 2)`,
+        );
+      if (
+        sleeps.length !== beforeSleeps + 1 ||
+        sleeps[beforeSleeps] !== JWKS_REFRESH_RETRY_AFTER_DELAY_MS
+      )
+        throw new Error(
+          `benchmark self-check failed: Retry-After refresh recorded sleeps ${JSON.stringify(sleeps.slice(beforeSleeps))} (expected 1 sleep of ${JWKS_REFRESH_RETRY_AFTER_DELAY_MS}ms)`,
+        );
+      if (store.stats().refreshes !== beforeRefreshes + 1)
+        throw new Error(
+          `benchmark self-check failed: Retry-After refresh counted ${store.stats().refreshes - beforeRefreshes} refreshes (expected 1)`,
+        );
+      if (store.resolve(JWKS_REFRESH_RETRY_AFTER_KID) === undefined)
+        throw new Error(
+          "benchmark self-check failed: Retry-After refresh does not resolve the pinned kid",
+        );
+    }, ITERATIONS);
+    if (measured.requests() !== 2 * (WARMUP + ITERATIONS))
+      throw new Error(
+        `benchmark self-check failed: Retry-After path made ${measured.requests()} fetches (expected ${2 * (WARMUP + ITERATIONS)})`,
+      );
+    if (sleeps.length !== WARMUP + ITERATIONS)
+      throw new Error(
+        `benchmark self-check failed: Retry-After path recorded ${sleeps.length} sleeps (expected ${WARMUP + ITERATIONS})`,
+      );
+    if (
+      store.stats().refreshes !== WARMUP + ITERATIONS ||
+      store.stats().refreshFailures !== 0
+    )
+      throw new Error(
+        `benchmark self-check failed: stats() ${JSON.stringify(store.stats())} (expected refreshes ${WARMUP + ITERATIONS}, refreshFailures 0)`,
+      );
+    return ops;
+  } finally {
+    await measured.close();
+  }
+}
+
 /**
  * Pinned shape of the `JwksKeyStore.refresh` loopback benchmark
  * document: the three key shapes the store supports (ed25519 /
@@ -17417,6 +17638,11 @@ results.push({
   alg: "JwksKeyStore.refresh (fetchRetries 2, 500/500/200)",
   op: "refresh",
   ops: await benchmarkJwksFetchRetries(),
+});
+results.push({
+  alg: "JwksKeyStore.refresh (Retry-After 2s, 429/200)",
+  op: "refresh",
+  ops: await benchmarkJwksRefreshRetryAfter(),
 });
 results.push({
   alg: "JwksKeyStore.refresh (loopback, 3 keys)",

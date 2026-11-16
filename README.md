@@ -2743,7 +2743,7 @@ see [SECURITY.md](SECURITY.md).
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
-algorithm plus the key-resolution, JWKS snapshot-export, JWKS document-build, JWKS snapshot-restore, JWKS signed snapshot-export, JWKS signed snapshot-restore, JWKS key retirement, resolver-based verification, maximum-signature-age verification, expiry-presence verification, created-presence verification, clock-skew verification, expiry-grace verification, key-id binding verification, per-label key-id binding verification, per-label key-resolution verification, per-label nonce-presence verification, per-label candidate-keys verification, per-label candidate-keys plus key-id-pinning verification, per-label tag-presence verification, key-id-binding plus global tag-presence verification, per-label required-freshness verification, per-label dual-required freshness-existence verification, per-label tag-pinning verification, per-label freshness-window verification, per-label nonce-presence plus freshness-window verification, per-label candidate-keys plus tag-presence verification, per-label clock-skew verification, per-label expiry-grace verification, per-label component-coverage verification, per-label algorithm-inference verification, per-label replay-cache verification, per-label key-id binding plus nonce-presence verification, per-label candidate-keys plus freshness-window verification, per-label JWKS key-resolution verification, per-label JWKS key-resolution plus dictionary-member verification, per-label JWKS key-resolution plus replay-cache verification, per-label content-digest verification, per-label structured-field-types verification, algorithm-inference verification, application-tag-pinning verification, component-coverage verification, replay-cache verification, nonce-presence verification, tag-presence verification, JWKS refresh, JWKS concurrent single-flight refresh, JWKS fetch-retry refresh, JWKS loopback refresh, JWKS refresh-if-stale fresh check, JWKS https-only endpoint enforcement, thumbprint-derivation, replay-check, replay snapshot-export, replay stats, replay snapshot-restore, replay signed snapshot sealing by label, replay release,
+algorithm plus the key-resolution, JWKS snapshot-export, JWKS document-build, JWKS snapshot-restore, JWKS signed snapshot-export, JWKS signed snapshot-restore, JWKS key retirement, resolver-based verification, maximum-signature-age verification, expiry-presence verification, created-presence verification, clock-skew verification, expiry-grace verification, key-id binding verification, per-label key-id binding verification, per-label key-resolution verification, per-label nonce-presence verification, per-label candidate-keys verification, per-label candidate-keys plus key-id-pinning verification, per-label tag-presence verification, key-id-binding plus global tag-presence verification, per-label required-freshness verification, per-label dual-required freshness-existence verification, per-label tag-pinning verification, per-label freshness-window verification, per-label nonce-presence plus freshness-window verification, per-label candidate-keys plus tag-presence verification, per-label clock-skew verification, per-label expiry-grace verification, per-label component-coverage verification, per-label algorithm-inference verification, per-label replay-cache verification, per-label key-id binding plus nonce-presence verification, per-label candidate-keys plus freshness-window verification, per-label JWKS key-resolution verification, per-label JWKS key-resolution plus dictionary-member verification, per-label JWKS key-resolution plus replay-cache verification, per-label content-digest verification, per-label structured-field-types verification, algorithm-inference verification, application-tag-pinning verification, component-coverage verification, replay-cache verification, nonce-presence verification, tag-presence verification, JWKS refresh, JWKS concurrent single-flight refresh, JWKS fetch-retry refresh, JWKS Retry-After refresh, JWKS loopback refresh, JWKS refresh-if-stale fresh check, JWKS https-only endpoint enforcement, thumbprint-derivation, replay-check, replay snapshot-export, replay stats, replay snapshot-restore, replay signed snapshot sealing by label, replay release,
 malformed-input rejection, standalone content-digest,
 inbound-normalization, inbound trailer-bound verification,
 response-normalization, dual-label response verification, single-call
@@ -2832,6 +2832,7 @@ All rows below are from one real run on 2026-11-16:
 | JwksKeyStore.refreshIfStale (stale) | refresh | 113,310 ops/sec (8.83 µs/op) |
 | JwksKeyStore.refresh (8-way single-flight) | refresh | 114,846 ops/sec (8.71 µs/op) |
 | JwksKeyStore.refresh (fetchRetries 2, 500/500/200) | refresh | 112,287 ops/sec (8.91 µs/op) |
+| JwksKeyStore.refresh (Retry-After 2s, 429/200) | refresh | 1,956 ops/sec (511.37 µs/op) |
 | JwksKeyStore.refresh (loopback, 3 keys) | refresh | 2,220 ops/sec (450.39 µs/op) |
 | JwksKeyStore.refreshIfStale (fresh) | refresh | 3,398,605 ops/sec (0.29 µs/op) |
 | jwkThumbprint (3 JWK shapes) | derive | 58,031 ops/sec (17.23 µs/op) |
@@ -4734,6 +4735,31 @@ bookkeeping rather than a new cost class; treat the small lead over the other
 refresh rows as shared-host noise, not a speedup claim. The bench performs
 zero network I/O and makes no wall-clock assertions (the sleep is stubbed and
 the fetch is fake).
+
+The `JwksKeyStore.refresh (Retry-After 2s, 429/200)` row is new: it measures
+the rate-limited refresh a gateway pays when its JWKS endpoint answers 429
+with `Retry-After: 2` — the store's default fetch (global `fetch`, zero
+configuration) against a loopback `http` server that rate-limits the first
+fetch of every refresh cycle and serves the pinned JWKS document on the
+retry. One measured op is one refresh that pays the full cycle: a 429, one
+recorded sleep of the honoured 2000 ms (a stub sleep records the delay
+without waiting, so no wall-clock wait is measured), then the 200 JWKS
+document, a JWK import and a snapshot swap. Every measured pass self-checks
+that the refresh made exactly two fetches, recorded exactly one sleep of
+2000 ms, counted exactly one `stats().refreshes` (retries never multiply
+the counters), and resolves the pinned kid afterwards; after the run the
+totals must equal the cycle times warmup plus timed calls exactly. Outside
+timing the bench also pins the cap half of the contract: a `Retry-After:
+3600` endpoint is waited out for exactly the default `fetchMaxRetryDelayMs`
+of 60,000 ms, never the hour it asked for. In this run it measured ~1,956
+ops/sec (~511.37 µs/op) — close to the same run's loopback row (~1,827
+ops/sec) and about 70x slower than the same run's fake-fetch fetch-retries
+row (~135,755 ops/sec), which is the expected shape: both loopback rows pay
+real TCP round-trips, while the fake-fetch row pays in-memory responses, so
+the gap is the endpoint cost, not a regression; treat the small lead over
+the loopback row as shared-host noise, not a speedup claim. The bench
+performs no external network I/O (loopback only) and makes no wall-clock
+assertions (the sleep is stubbed).
 
 The `JwksKeyStore.refresh (loopback, 3 keys)` row is new: it measures
 the serial refresh a gateway pays at cold start and rotation time over
