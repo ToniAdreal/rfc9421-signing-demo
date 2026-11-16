@@ -500,7 +500,15 @@
  * / RSA) through the store's default fetch — a fresh store is built
  * on every measured pass and must fetch once and resolve all three
  * kids afterwards — with the served document's kid set pinned
- * outside timing, plus the key-retirement path a gateway runs when a
+ * outside timing, plus the Cache-Control path a gateway runs when
+ * its JWKS publisher declares a short `max-age`:
+ * `JwksKeyStore.refresh` over a real loopback `http` server
+ * stamping its 200 with `Cache-Control: max-age=60`, against a
+ * store configured with `ttlSec: 300` and an injected clock — a
+ * fresh store is built on every measured pass and must refresh once
+ * with an effective TTL of 60, fresh at +59s and stale at +61s —
+ * with the `max-age=3600` never-lengthens half (effective TTL stays
+ * 300) asserted outside timing, plus the key-retirement path a gateway runs when a
  * key is distrusted or rotated out: `JwksKeyStore.clear` + `keyIds`
  * over a store holding three cached kids fetched from a real
  * loopback `http` server — every measured op lists the kids, clears
@@ -10916,6 +10924,198 @@ async function benchmarkJwksRefreshLoopback(): Promise<number> {
   }
 }
 
+const JWKS_REFRESH_MAX_AGE_KID = "bench-refresh-max-age-key";
+const JWKS_REFRESH_MAX_AGE_SECONDS = 60;
+const JWKS_REFRESH_MAX_AGE_TTL_SEC = 300;
+const JWKS_REFRESH_MAX_AGE_NO_EXTEND_SECONDS = 3600;
+const JWKS_REFRESH_MAX_AGE_BASE_SEC = 1_800_000_000;
+
+/**
+ * A loopback JWKS endpoint that stamps every 200 with a pinned
+ * `Cache-Control: max-age=<n>` header and serves the pinned JWKS
+ * document. The caller closes the server when done.
+ */
+async function startMaxAgeLoopback(
+  maxAgeSeconds: number,
+  body: string,
+): Promise<{
+  url: string;
+  close: () => Promise<void>;
+}> {
+  const server = createServer((req, res) => {
+    res.writeHead(200, {
+      "content-type": "application/json",
+      "cache-control": `max-age=${maxAgeSeconds}`,
+    });
+    res.end(body);
+  });
+  const url = await new Promise<string>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => {
+      const port = (server.address() as AddressInfo).port;
+      resolve(`http://127.0.0.1:${port}/.well-known/jwks.json`);
+    });
+    server.on("error", reject);
+  });
+  return {
+    url,
+    close: () =>
+      new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+/**
+ * Pinned shape of the `JwksKeyStore.refresh` Cache-Control max-age
+ * benchmark: one ed25519 key (generated once, outside timing)
+ * published under this kid by a real loopback `http` server that
+ * stamps its 200 with `Cache-Control: max-age=60`, against a store
+ * configured with `ttlSec: 300` and an injected clock — so the
+ * effective TTL is `min(300, 60) = 60`, not the configured 300.
+ *
+ * Outside timing, both halves of the max-age contract are pinned
+ * once: the `max-age=60` refresh shortens the effective TTL to 60
+ * (fresh at +59s, stale at +61s, the pinned kid resolving, exactly
+ * one `stats().refreshes` and zero failures), and a `max-age=3600`
+ * refresh never lengthens the TTL (the effective TTL stays at the
+ * configured 300). Every measured pass builds a fresh store against
+ * the `max-age=60` endpoint, refreshes once, and re-proves the
+ * shortened TTL — fresh at the refresh instant, still fresh at
+ * +59s, stale at +61s — so the number prices one cold refresh that
+ * honours the publisher's `max-age`, plus the staleness flip the
+ * shortened TTL buys; after the run the pass count must equal
+ * warmup plus timed calls exactly. The clock advances 1000 seconds
+ * per pass so each pass refreshes at a distinct instant and no two
+ * passes share a `lastRefreshedAt`.
+ */
+async function benchmarkJwksRefreshCacheControlMaxAge(): Promise<number> {
+  const { publicKey } = generateEd25519KeyPair();
+  const doc = {
+    keys: [
+      {
+        ...exportPublicKeyJwk(publicKey),
+        kid: JWKS_REFRESH_MAX_AGE_KID,
+      },
+    ],
+  };
+  const body = JSON.stringify(doc);
+
+  // Outside timing: a `max-age=60` refresh shortens the effective
+  // TTL to 60 — fresh at +59s, stale at +61s — and the pinned kid
+  // resolves with exactly one refresh and zero failures.
+  const shortened = await startMaxAgeLoopback(
+    JWKS_REFRESH_MAX_AGE_SECONDS,
+    body,
+  );
+  try {
+    let clockSec = JWKS_REFRESH_MAX_AGE_BASE_SEC;
+    const store = new JwksKeyStore(shortened.url, {
+      ttlSec: JWKS_REFRESH_MAX_AGE_TTL_SEC,
+      now: () => clockSec,
+    });
+    await store.refresh();
+    if (
+      store.effectiveTtlSec !== JWKS_REFRESH_MAX_AGE_SECONDS ||
+      store.lastRefreshedAt !== JWKS_REFRESH_MAX_AGE_BASE_SEC ||
+      store.isStale() !== false ||
+      store.resolve(JWKS_REFRESH_MAX_AGE_KID) === undefined ||
+      store.stats().refreshes !== 1 ||
+      store.stats().refreshFailures !== 0
+    )
+      throw new Error(
+        `benchmark self-check failed: max-age=60 refresh gave effectiveTtlSec ${store.effectiveTtlSec}, lastRefreshedAt ${store.lastRefreshedAt}, stats ${JSON.stringify(store.stats())} (expected effectiveTtlSec ${JWKS_REFRESH_MAX_AGE_SECONDS}, lastRefreshedAt ${JWKS_REFRESH_MAX_AGE_BASE_SEC}, refreshes 1, refreshFailures 0, pinned kid resolving)`,
+      );
+    clockSec =
+      JWKS_REFRESH_MAX_AGE_BASE_SEC + JWKS_REFRESH_MAX_AGE_SECONDS - 1;
+    if (store.isStale() !== false)
+      throw new Error(
+        "benchmark self-check failed: max-age=60 snapshot stale at +59s (expected fresh)",
+      );
+    clockSec =
+      JWKS_REFRESH_MAX_AGE_BASE_SEC + JWKS_REFRESH_MAX_AGE_SECONDS + 1;
+    if (store.isStale() !== true)
+      throw new Error(
+        "benchmark self-check failed: max-age=60 snapshot fresh at +61s (expected stale)",
+      );
+  } finally {
+    await shortened.close();
+  }
+
+  // Outside timing: a `max-age=3600` never lengthens the TTL — the
+  // effective TTL stays at the configured 300.
+  const notExtended = await startMaxAgeLoopback(
+    JWKS_REFRESH_MAX_AGE_NO_EXTEND_SECONDS,
+    body,
+  );
+  try {
+    const store = new JwksKeyStore(notExtended.url, {
+      ttlSec: JWKS_REFRESH_MAX_AGE_TTL_SEC,
+      now: () => JWKS_REFRESH_MAX_AGE_BASE_SEC,
+    });
+    await store.refresh();
+    if (
+      store.effectiveTtlSec !== JWKS_REFRESH_MAX_AGE_TTL_SEC ||
+      store.isStale() !== false ||
+      store.resolve(JWKS_REFRESH_MAX_AGE_KID) === undefined ||
+      store.stats().refreshes !== 1 ||
+      store.stats().refreshFailures !== 0
+    )
+      throw new Error(
+        `benchmark self-check failed: max-age=3600 refresh gave effectiveTtlSec ${store.effectiveTtlSec}, stats ${JSON.stringify(store.stats())} (expected effectiveTtlSec ${JWKS_REFRESH_MAX_AGE_TTL_SEC}, refreshes 1, refreshFailures 0, pinned kid resolving)`,
+      );
+  } finally {
+    await notExtended.close();
+  }
+
+  // Measured: every pass builds a fresh store against the
+  // `max-age=60` endpoint, refreshes once, and re-proves the
+  // shortened TTL and its staleness flip.
+  const measured = await startMaxAgeLoopback(
+    JWKS_REFRESH_MAX_AGE_SECONDS,
+    body,
+  );
+  try {
+    let clockSec = JWKS_REFRESH_MAX_AGE_BASE_SEC;
+    let passes = 0;
+    const ops = await measureAsync(async () => {
+      const base = JWKS_REFRESH_MAX_AGE_BASE_SEC + passes * 1000;
+      passes++;
+      clockSec = base;
+      const store = new JwksKeyStore(measured.url, {
+        ttlSec: JWKS_REFRESH_MAX_AGE_TTL_SEC,
+        now: () => clockSec,
+      });
+      await store.refresh();
+      if (
+        store.effectiveTtlSec !== JWKS_REFRESH_MAX_AGE_SECONDS ||
+        store.lastRefreshedAt !== base ||
+        store.isStale() !== false ||
+        store.resolve(JWKS_REFRESH_MAX_AGE_KID) === undefined ||
+        store.stats().refreshes !== 1 ||
+        store.stats().refreshFailures !== 0
+      )
+        throw new Error(
+          `benchmark self-check failed: max-age=60 refresh gave effectiveTtlSec ${store.effectiveTtlSec}, lastRefreshedAt ${store.lastRefreshedAt}, stats ${JSON.stringify(store.stats())} (expected effectiveTtlSec ${JWKS_REFRESH_MAX_AGE_SECONDS}, lastRefreshedAt ${base}, refreshes 1, refreshFailures 0, pinned kid resolving)`,
+        );
+      clockSec = base + JWKS_REFRESH_MAX_AGE_SECONDS - 1;
+      if (store.isStale() !== false)
+        throw new Error(
+          "benchmark self-check failed: max-age=60 snapshot stale at +59s (expected fresh)",
+        );
+      clockSec = base + JWKS_REFRESH_MAX_AGE_SECONDS + 1;
+      if (store.isStale() !== true)
+        throw new Error(
+          "benchmark self-check failed: max-age=60 snapshot fresh at +61s (expected stale)",
+        );
+    }, ITERATIONS);
+    if (passes !== WARMUP + ITERATIONS)
+      throw new Error(
+        `benchmark self-check failed: max-age path ran ${passes} passes (expected ${WARMUP + ITERATIONS})`,
+      );
+    return ops;
+  } finally {
+    await measured.close();
+  }
+}
+
 /**
  * Pinned shape of the `JwksKeyStore.clear` + `keyIds` benchmark
  * document: the three key shapes the store supports (ed25519 /
@@ -17648,6 +17848,11 @@ results.push({
   alg: "JwksKeyStore.refresh (loopback, 3 keys)",
   op: "refresh",
   ops: await benchmarkJwksRefreshLoopback(),
+});
+results.push({
+  alg: "JwksKeyStore.refresh (Cache-Control max-age=60)",
+  op: "refresh",
+  ops: await benchmarkJwksRefreshCacheControlMaxAge(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (fresh)",
