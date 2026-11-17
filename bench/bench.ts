@@ -596,7 +596,15 @@
  * `verifyRequest` over a fixed-seed corpus of malformed
  * signature-input / signature values (the parser rejection traffic a
  * verification gateway faces), self-checked to always return
- * `{ ok: false, code }` and never throw, plus the standalone body-hash
+ * `{ ok: false, code }` and never throw, plus the oversized
+ * signature-input rejection path: `verifyRequest` over the same
+ * signed fixture with its `signature-input` header bloated past the
+ * default 65,536-byte gate (rejected before any parsing runs),
+ * self-checked on every measured pass to return exactly
+ * `SIGNATURE_INPUT_TOO_LARGE` with the pinned reason, with the
+ * same request at legal length verified whole as the side-by-side
+ * control row and the per-label limit map pinned outside timing,
+ * plus the standalone body-hash
  * primitive every signed/verified request pays for: `contentDigest`
  * over the shared 31-byte fixture body, measured separately for
  * sha-512 and sha-256 and self-checked outside timing against
@@ -965,6 +973,7 @@ import {
   contentDigestAlgOf,
   createVerifiedFetchHandler,
   createVerifiedHandler,
+  DEFAULT_MAX_SIGNATURE_INPUT_LENGTH,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -3333,6 +3342,188 @@ function benchmarkVerifyRequireNonce(): number {
     throw new Error(
       `benchmark self-check failed: nonce-less default gave ${JSON.stringify(defaulted)}`,
     );
+
+  return measure(() => {
+    assertAccepted("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the oversized `signature-input` rejection
+ * benchmark: one ed25519 key pair (generated once, outside
+ * timing), the shared fixture signed over it with `created`
+ * pinned, and the same request with its `signature-input`
+ * header bloated past the default 65,536-byte gate by
+ * repeating the `"@path"` covered component inside the
+ * component list — a well-formed header a hostile peer
+ * could send, rejected before any parsing runs. Every
+ * measured call runs `verifyRequest` over the oversized
+ * request and re-pins the exact fail-closed result
+ * `{ ok: false, code: "SIGNATURE_INPUT_TOO_LARGE" }` with
+ * the pinned reason carrying the oversized byte count, so
+ * the measured path cannot be an empty one. Outside timing,
+ * the per-label half is pinned once: a dual-signed request
+ * under `verifyAllLabels` with
+ * `maxSignatureInputLengthByLabel: { sig1: 50 }` rejects
+ * only the over-limit label and still verifies the other.
+ * Zero network, zero randomness in the measured assertions,
+ * no wall clock (every verify instant is injected).
+ */
+const MAX_SIG_INPUT_NOW = 1_700_000_000;
+const MAX_SIG_INPUT_KID = "bench-max-sig-input-key-1";
+const MAX_SIG_INPUT_CODE = "SIGNATURE_INPUT_TOO_LARGE";
+const MAX_SIG_INPUT_PAD_COMPONENT = '"@path"';
+
+function benchmarkVerifyOversizedSignatureInput(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: MAX_SIG_INPUT_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: MAX_SIG_INPUT_NOW,
+  });
+  const legalInput = signed.headers["signature-input"];
+  if (typeof legalInput !== "string")
+    throw new Error(
+      "benchmark setup failed: signed fixture carries no string signature-input header",
+    );
+  // Bloat the component list past the gate: insert repeated
+  // "@path" components before the first parameter separator,
+  // keeping a well-formed signature-input value. The padded
+  // byte count is deterministic (fixed components, pinned
+  // keyid/created, and the 64-byte ed25519 signature never
+  // appears in this header), so the expected reason is
+  // pinned exactly.
+  const insertAt = legalInput.indexOf(";");
+  if (insertAt < 0)
+    throw new Error(
+      "benchmark setup failed: signed fixture signature-input has no parameter separator",
+    );
+  const padUnit = ` ${MAX_SIG_INPUT_PAD_COMPONENT}`;
+  const padCount = Math.ceil(
+    (DEFAULT_MAX_SIGNATURE_INPUT_LENGTH +
+      1 -
+      Buffer.byteLength(legalInput, "utf8")) /
+      Buffer.byteLength(padUnit, "utf8"),
+  );
+  const oversizedInput =
+    legalInput.slice(0, insertAt) +
+    padUnit.repeat(padCount) +
+    legalInput.slice(insertAt);
+  const oversizedBytes = Buffer.byteLength(oversizedInput, "utf8");
+  if (oversizedBytes <= DEFAULT_MAX_SIGNATURE_INPUT_LENGTH)
+    throw new Error(
+      `benchmark setup failed: oversized signature-input is ${oversizedBytes} bytes, not over the ${DEFAULT_MAX_SIGNATURE_INPUT_LENGTH} byte limit`,
+    );
+  const oversizedRequest: SignedHttpRequest = {
+    ...signed,
+    headers: { ...signed.headers, "signature-input": oversizedInput },
+  };
+  const verifyOpts = { key: publicKey, now: MAX_SIG_INPUT_NOW };
+  const expectedReason =
+    `signature-input header is ${oversizedBytes} bytes, ` +
+    `over the maxSignatureInputLength=${DEFAULT_MAX_SIGNATURE_INPUT_LENGTH} byte limit`;
+  const assertRejected = (where: string): void => {
+    const r = verifyRequest(oversizedRequest, verifyOpts);
+    if (
+      r.ok ||
+      r.code !== MAX_SIG_INPUT_CODE ||
+      r.reason !== expectedReason
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyRequest over oversized signature-input (${where}) gave ${JSON.stringify(r)} ` +
+          `(expected SIGNATURE_INPUT_TOO_LARGE)`,
+      );
+  };
+
+  // Outside timing: the oversized request is rejected with
+  // the pinned code and reason.
+  assertRejected("outside timing");
+
+  // Outside timing: the per-label map rejects only its own
+  // label — the shared signature-input header exceeds 50
+  // bytes for sig1 while sig2 falls back to the 64 KiB
+  // default and still verifies.
+  const { publicKey: dualPublic, privateKey: dualPrivate } =
+    generateEd25519KeyPair();
+  const dualBase = signRequest(fixture, {
+    keyId: "bench-max-sig-input-dual-1",
+    alg: "ed25519",
+    key: dualPrivate,
+    created: MAX_SIG_INPUT_NOW,
+  });
+  const dual = addSignature(dualBase, {
+    keyId: "bench-max-sig-input-dual-2",
+    alg: "ed25519",
+    key: dualPrivate,
+    created: MAX_SIG_INPUT_NOW,
+    label: "sig2",
+  });
+  const dualInput = dual.headers["signature-input"];
+  if (typeof dualInput !== "string")
+    throw new Error(
+      "benchmark setup failed: dual-signed fixture carries no string signature-input header",
+    );
+  const dualBytes = Buffer.byteLength(dualInput, "utf8");
+  const perLabel = verifyAllLabels(dual, {
+    key: dualPublic,
+    now: MAX_SIG_INPUT_NOW,
+    maxSignatureInputLengthByLabel: { sig1: 50 },
+  });
+  if (
+    perLabel.length !== 2 ||
+    perLabel[0]?.label !== "sig1" ||
+    perLabel[0]?.ok ||
+    perLabel[0]?.code !== MAX_SIG_INPUT_CODE ||
+    perLabel[0]?.reason !==
+      `signature-input header is ${dualBytes} bytes, over the maxSignatureInputLength=50 byte limit` ||
+    perLabel[1]?.label !== "sig2" ||
+    !perLabel[1]?.ok
+  )
+    throw new Error(
+      `benchmark self-check failed: per-label limit result ${JSON.stringify(perLabel)} ` +
+        `(expected SIGNATURE_INPUT_TOO_LARGE on sig1 only)`,
+    );
+
+  return measure(() => {
+    assertRejected("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the within-limit `signature-input`
+ * control row: the same signed fixture the oversized row
+ * rejects, verified whole — one ed25519 key pair
+ * (generated once, outside timing), the shared fixture
+ * signed over it with `created` pinned, and the verifier's
+ * injected `now` at the `created` instant. Every measured
+ * call verifies the legal-length request and re-pins that
+ * the result is ok, so the two rows sit side by side on
+ * the same request: the oversized row shows what the
+ * pre-parse short circuit saves against this full
+ * verification. Zero network, zero randomness in the
+ * measured assertions, no wall clock (every verify instant
+ * is injected).
+ */
+function benchmarkVerifySignatureInputWithinLimit(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signRequest(fixture, {
+    keyId: MAX_SIG_INPUT_KID,
+    alg: "ed25519",
+    key: privateKey,
+    created: MAX_SIG_INPUT_NOW,
+  });
+  const verifyOpts = { key: publicKey, now: MAX_SIG_INPUT_NOW };
+  const assertAccepted = (where: string): void => {
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest within-limit signature-input (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the legal-length fixture verifies.
+  assertAccepted("outside timing");
 
   return measure(() => {
     assertAccepted("measured pass");
@@ -18033,6 +18224,16 @@ results.push({
   alg: "verifyRequest requireNonce",
   op: "verify",
   ops: benchmarkVerifyRequireNonce(),
+});
+results.push({
+  alg: "verifyRequest oversized signature-input (rejected)",
+  op: "reject",
+  ops: benchmarkVerifyOversizedSignatureInput(),
+});
+results.push({
+  alg: "verifyRequest signature-input within limit",
+  op: "verify",
+  ops: benchmarkVerifySignatureInputWithinLimit(),
 });
 results.push({
   alg: "verifyRequest requireTag",
