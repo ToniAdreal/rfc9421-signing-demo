@@ -119,6 +119,18 @@
  * rejection the returning `verifyRequest` reports for the same
  * tamper). Every input is a fixed demo constant, so the segment
  * is byte-identical between runs.
+ * The demo closes with a throwing multi-label verification
+ * segment: the same dual-signed request is verified with
+ * `verifyAllLabelsOrThrow`, which returns the per-label
+ * `VerifyResult[]` on success and throws the first label's
+ * `VerifyError` on failure — the same request with the body
+ * tampered by one byte throws with code `BODY_DIGEST_MISMATCH`
+ * on label `sig1` (the first failing label in wire order), and
+ * a `verifyAllLabels` contrast pass then shows both labels
+ * failing with that code, because the body-digest check runs
+ * for every label whenever a `content-digest` header is
+ * present, covered or not. Every input is a fixed demo
+ * constant, so the segment is byte-identical between runs.
  * The demo closes with a nonce-generation segment: every earlier
  * segment signs with a hand-written nonce constant, but a real
  * signer must not hand-roll its replay-protection nonce — a
@@ -1427,6 +1439,7 @@ import {
   signatureInputValue,
   verifiedFetch,
   verifyAllLabels,
+  verifyAllLabelsOrThrow,
   verifyRequest,
   verifyRequestOrThrow,
   verifyResponse,
@@ -1847,6 +1860,20 @@ export const DEMO_PEM_PRIVATE_HEADER = "-----BEGIN PRIVATE KEY-----";
  * demo is checking.
  */
 export const DEMO_THROW_TAMPERED_CODE: VerifyFailureCode =
+  "BODY_DIGEST_MISMATCH";
+
+/**
+ * Hand-pinned code the throwing multi-label segment expects
+ * `verifyAllLabelsOrThrow` to throw for the body-tampered
+ * dual-signed request: the same `BODY_DIGEST_MISMATCH` the
+ * single-label throwing segment pins above, here surfacing on
+ * the first failing label in wire order (`sig1`) — the
+ * body-digest check runs for every label whenever a
+ * `content-digest` header is present, covered or not, so the
+ * contrast `verifyAllLabels` pass reports both labels failing
+ * with this code.
+ */
+export const DEMO_THROW_ALL_TAMPERED_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
 
 /**
@@ -4815,6 +4842,30 @@ export interface DemoResult {
    * failure appended after the wire-order results.
    */
   requiredLabelsStrippedVerification: VerifyResult[];
+  /**
+   * Per-label results returned by `verifyAllLabelsOrThrow` for the
+   * dual-signed request (both ok — the throwing variant returns
+   * the same `VerifyResult[]` the result-object variant returns).
+   */
+  throwAllVerification: VerifyResult[];
+  /**
+   * The `VerifyError` thrown by `verifyAllLabelsOrThrow` for the
+   * body-tampered dual-signed request (code
+   * `DEMO_THROW_ALL_TAMPERED_CODE`, label `sig1` — the first
+   * failing label in wire order).
+   */
+  throwAllTamperedError: VerifyError;
+  /** Whether the caught tamper error passed the `isVerifyError` guard. */
+  throwAllTamperedIsVerifyError: boolean;
+  /**
+   * Per-label results for the body-tampered dual-signed request
+   * under `verifyAllLabels` (both labels fail with
+   * `BODY_DIGEST_MISMATCH` — the body-digest check runs for
+   * every label whenever a `content-digest` header is present,
+   * covered or not — the contrast the throwing variant hides by
+   * surfacing only the first failure).
+   */
+  throwAllTamperedVerification: VerifyResult[];
   /** First verification of `signed` against the demo replay cache (ok). */
   replayFirstVerification: VerifyResult;
   /**
@@ -9067,6 +9118,100 @@ export async function runDemo(): Promise<DemoResult> {
       `demo fixture broken: gateway-stripped required-labels ` +
         `verification returned ${JSON.stringify(requiredLabelsStrippedVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
         `instead of merchant ok plus a synthetic MISSING_REQUIRED_LABEL gateway failure`,
+    );
+  }
+
+  // Throwing multi-label verification segment: callers that prefer
+  // exceptions over per-label result objects use
+  // `verifyAllLabelsOrThrow`, the throwing twin of
+  // `verifyAllLabels`. On the dual-signed request it returns the
+  // same per-label `VerifyResult[]`; on the same request with the
+  // body tampered by the main line's one byte it throws the first
+  // failing label's `VerifyError` — `sig1`, the first label in
+  // wire order, with `BODY_DIGEST_MISMATCH`. A `verifyAllLabels`
+  // contrast pass on the tampered request then shows both labels
+  // failing with that code: the body-digest check runs for every
+  // label whenever a `content-digest` header is present, covered
+  // or not, so the gateway label fails here too even though it
+  // does not cover `content-digest` — the throwing call hides
+  // that second failure by surfacing only the first. Outside the
+  // printed lines the demo asserts the returned results and the
+  // thrown code/label both equal the hand-pinned expectations
+  // (labels `sig1` then `gateway`, `DEMO_KEY_ID`/`ed25519` and
+  // `DEMO_GATEWAY_KEY_ID`/`hmac-sha256`, `DEMO_NONCE` on `sig1`,
+  // `DEMO_THROW_ALL_TAMPERED_CODE`) and that the caught error
+  // passes the `isVerifyError` guard — a mismatch throws instead
+  // of printing a misleading segment.
+  const throwAllVerification = verifyAllLabelsOrThrow(
+    dualSigned,
+    dualVerifyOptions,
+  );
+  if (
+    throwAllVerification.length !== DEMO_SIGNATURE_LABELS.length ||
+    throwAllVerification[0].label !== DEMO_SIGNATURE_LABELS[0] ||
+    !throwAllVerification[0].ok ||
+    throwAllVerification[0].keyId !== DEMO_KEY_ID ||
+    throwAllVerification[0].alg !== "ed25519" ||
+    throwAllVerification[0].nonce !== DEMO_NONCE ||
+    throwAllVerification[1].label !== DEMO_GATEWAY_LABEL ||
+    !throwAllVerification[1].ok ||
+    throwAllVerification[1].keyId !== DEMO_GATEWAY_KEY_ID ||
+    throwAllVerification[1].alg !== "hmac-sha256"
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllLabelsOrThrow on the dual-signed request ` +
+        `returned ${JSON.stringify(throwAllVerification.map((r) => ({ label: r.label, ok: r.ok, keyId: r.keyId, alg: r.alg, code: r.code })))} ` +
+        `instead of both labels ok with the pinned label/keyid/alg`,
+    );
+  }
+  let throwAllTamperedError: VerifyError | null = null;
+  let throwAllTamperedIsVerifyError = false;
+  try {
+    verifyAllLabelsOrThrow(
+      { ...dualSigned, body: DEMO_TAMPERED_BODY },
+      dualVerifyOptions,
+    );
+  } catch (err) {
+    throwAllTamperedIsVerifyError = isVerifyError(err);
+    if (throwAllTamperedIsVerifyError && isVerifyError(err)) {
+      throwAllTamperedError = err;
+    }
+  }
+  if (
+    !throwAllTamperedIsVerifyError ||
+    throwAllTamperedError === null ||
+    throwAllTamperedError.code !== DEMO_THROW_ALL_TAMPERED_CODE ||
+    throwAllTamperedError.label !== "sig1" ||
+    throwAllTamperedError.keyId !== DEMO_KEY_ID ||
+    throwAllTamperedError.alg !== "ed25519" ||
+    throwAllTamperedError.nonce !== DEMO_NONCE
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllLabelsOrThrow on the tampered-body dual-signed request ` +
+        `did not throw a VerifyError with the pinned code "${DEMO_THROW_ALL_TAMPERED_CODE}" ` +
+        `for label "sig1" (isVerifyError=${throwAllTamperedIsVerifyError}, code=${throwAllTamperedError?.code}, label=${throwAllTamperedError?.label})`,
+    );
+  }
+  const throwAllTamperedVerification = verifyAllLabels(
+    { ...dualSigned, body: DEMO_TAMPERED_BODY },
+    dualVerifyOptions,
+  );
+  if (
+    throwAllTamperedVerification.length !==
+      DEMO_SIGNATURE_LABELS.length ||
+    throwAllTamperedVerification[0].label !== DEMO_SIGNATURE_LABELS[0] ||
+    throwAllTamperedVerification[0].ok ||
+    throwAllTamperedVerification[0].code !==
+      DEMO_THROW_ALL_TAMPERED_CODE ||
+    throwAllTamperedVerification[1].label !== DEMO_GATEWAY_LABEL ||
+    throwAllTamperedVerification[1].ok ||
+    throwAllTamperedVerification[1].code !==
+      DEMO_THROW_ALL_TAMPERED_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllLabels contrast on the tampered-body dual-signed request ` +
+        `returned ${JSON.stringify(throwAllTamperedVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
+        `instead of both labels failing with ${DEMO_THROW_ALL_TAMPERED_CODE}`,
     );
   }
 
@@ -16721,6 +16866,16 @@ export async function runDemo(): Promise<DemoResult> {
       formatLabelResult("After gateway label stripped", r),
     ),
     "",
+    "Throwing multi-label verification: verifyAllLabelsOrThrow returns the per-label results on success and throws the first label's VerifyError on failure — a caller that wants exceptions instead of per-label result objects",
+    ...throwAllVerification.map((r) =>
+      formatLabelResult("verifyAllLabelsOrThrow", r),
+    ),
+    `verifyAllLabelsOrThrow on the tampered-body request: FAILED (threw VerifyError for label "${throwAllTamperedError.label}", code ${throwAllTamperedError.code}: ${throwAllTamperedError.message})`,
+    "The same tampered-body request under verifyAllLabels (contrast — the throwing call above surfaced only the first failure, both labels fail the body-digest check)",
+    ...throwAllTamperedVerification.map((r) =>
+      formatLabelResult("After body tampering", r),
+    ),
+    "",
     `Replay protection: same request verified twice against a ReplayCache (capacity ${DEMO_REPLAY_CACHE_MAX_ENTRIES}, TTL ${DEMO_REPLAY_CACHE_TTL_SEC}s)`,
     replayFirstVerification.ok
       ? `Replay check, first presentation of nonce "${DEMO_NONCE}": OK`
@@ -17573,6 +17728,10 @@ export async function runDemo(): Promise<DemoResult> {
     contentTypeTamperedVerification,
     requiredLabelsVerification,
     requiredLabelsStrippedVerification,
+    throwAllVerification,
+    throwAllTamperedError,
+    throwAllTamperedIsVerifyError,
+    throwAllTamperedVerification,
     replayFirstVerification,
     replaySecondVerification,
     replayOtherNonceVerification,

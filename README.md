@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2290 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2291 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -38,7 +38,14 @@ required co-signatures: `verifyAllLabels` with `requiredLabels`
 `["sig1", "gateway"]` verifies both labels, and after the gateway
 label is stripped from the dual-signed request the merchant label
 still verifies while the gateway label is reported as a synthetic
-`MISSING_REQUIRED_LABEL` failure. The demo then runs the
+`MISSING_REQUIRED_LABEL` failure. The demo then shows throwing
+multi-label verification: `verifyAllLabelsOrThrow` returns the
+per-label results on the dual-signed request, throws the first
+label's `VerifyError` (`BODY_DIGEST_MISMATCH` on `sig1`) when the
+body is tampered by one byte, and a `verifyAllLabels` contrast
+pass shows both labels failing that code — the body-digest check
+runs for every label whenever a `content-digest` header is
+present, covered or not. The demo then runs the
 replay segment: the same signed request is verified twice against an
 opt-in `ReplayCache` — the first presentation passes, the second is
 rejected with `NONCE_REPLAY` — and a request carrying a different
@@ -5028,7 +5035,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2290 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2291 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

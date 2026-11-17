@@ -644,6 +644,7 @@ import {
   DEMO_TAMPERED_BODY,
   DEMO_TAMPERED_CONTENT_TYPE,
   DEMO_THUMBPRINT_NONCE,
+  DEMO_THROW_ALL_TAMPERED_CODE,
   DEMO_THROW_TAMPERED_CODE,
   DEMO_UNKNOWN_KEY_ID,
   DEMO_UNRECOGNIZED_DIGEST_VALUE,
@@ -954,6 +955,136 @@ test("demo required-labels segment prints byte-identical lines across runs", asy
   // the synthetic failure are byte-identical between runs.
   assert.deepEqual(
     first.lines.slice(a, aEnd),
+    second.lines.slice(b, bEnd),
+  );
+});
+
+test("demo throwing multi-label segment returns both results on success and throws the first label's VerifyError on body tamper", async () => {
+  const {
+    lines,
+    throwAllVerification,
+    throwAllTamperedError,
+    throwAllTamperedIsVerifyError,
+    throwAllTamperedVerification,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // The hand-pinned tamper code is the same BODY_DIGEST_MISMATCH the
+  // single-label throwing segment pins — pinned again here so a
+  // drift in either place fails.
+  assert.equal(DEMO_THROW_ALL_TAMPERED_CODE, "BODY_DIGEST_MISMATCH");
+
+  // Success returns the same per-label results the result-object
+  // variant returns, in wire order, with the pinned identities.
+  assert.deepEqual(
+    throwAllVerification.map((r) => r.label),
+    ["sig1", DEMO_GATEWAY_LABEL],
+  );
+  assert.equal(throwAllVerification[0].ok, true);
+  assert.equal(throwAllVerification[0].keyId, DEMO_KEY_ID);
+  assert.equal(throwAllVerification[0].alg, "ed25519");
+  assert.equal(throwAllVerification[0].nonce, DEMO_NONCE);
+  assert.equal(throwAllVerification[1].ok, true);
+  assert.equal(throwAllVerification[1].keyId, DEMO_GATEWAY_KEY_ID);
+  assert.equal(throwAllVerification[1].alg, "hmac-sha256");
+
+  // The tampered-body call threw, the caught error passes the
+  // isVerifyError guard, and it carries the pinned code plus the
+  // first failing label's identity (sig1, in wire order — the
+  // throwing variant surfaces only the first failure).
+  assert.equal(throwAllTamperedIsVerifyError, true);
+  assert.equal(throwAllTamperedError.name, "VerifyError");
+  assert.equal(throwAllTamperedError.code, DEMO_THROW_ALL_TAMPERED_CODE);
+  assert.equal(
+    throwAllTamperedError.message,
+    "body does not match content-digest",
+  );
+  assert.equal(throwAllTamperedError.label, "sig1");
+  assert.equal(throwAllTamperedError.keyId, DEMO_KEY_ID);
+  assert.equal(throwAllTamperedError.alg, "ed25519");
+  assert.equal(throwAllTamperedError.nonce, DEMO_NONCE);
+  assert.equal(throwAllTamperedError.created, DEMO_CREATED);
+  assert.equal(throwAllTamperedError.expires, undefined);
+
+  // The verifyAllLabels contrast on the same tampered request shows
+  // BOTH labels failing with BODY_DIGEST_MISMATCH: the body-digest
+  // check runs for every label whenever a content-digest header is
+  // present, covered or not, so the gateway label fails here too
+  // even though it does not cover content-digest.
+  assert.deepEqual(
+    throwAllTamperedVerification.map((r) => r.label),
+    ["sig1", DEMO_GATEWAY_LABEL],
+  );
+  assert.equal(throwAllTamperedVerification[0].ok, false);
+  assert.equal(
+    throwAllTamperedVerification[0].code,
+    DEMO_THROW_ALL_TAMPERED_CODE,
+  );
+  assert.equal(throwAllTamperedVerification[1].ok, false);
+  assert.equal(
+    throwAllTamperedVerification[1].code,
+    DEMO_THROW_ALL_TAMPERED_CODE,
+  );
+
+  // Printed lines: header, both success results, the thrown error
+  // naming label sig1, the contrast header, and both contrast
+  // failures.
+  assert.match(
+    out,
+    /Throwing multi-label verification: verifyAllLabelsOrThrow returns the per-label results on success and throws the first label's VerifyError on failure/,
+  );
+  assert.match(out, /verifyAllLabelsOrThrow sig1: OK /);
+  assert.match(out, /verifyAllLabelsOrThrow gateway: OK /);
+  assert.ok(
+    out.includes(
+      'verifyAllLabelsOrThrow on the tampered-body request: FAILED (threw VerifyError for label "sig1", code BODY_DIGEST_MISMATCH: body does not match content-digest)',
+    ),
+  );
+  assert.match(
+    out,
+    /The same tampered-body request under verifyAllLabels \(contrast — the throwing call above surfaced only the first failure, both labels fail the body-digest check\)/,
+  );
+  assert.match(out, /After body tampering sig1: FAILED \(code BODY_DIGEST_MISMATCH:/);
+  assert.match(
+    out,
+    /After body tampering gateway: FAILED \(code BODY_DIGEST_MISMATCH:/,
+  );
+
+  // Ordering: the segment sits between the required-labels lines
+  // and the replay segment.
+  const stripIdx = lines.findIndex((l) =>
+    l.startsWith("After gateway label stripped gateway:"),
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Throwing multi-label verification:"),
+  );
+  const replayIdx = lines.findIndex((l) =>
+    l.startsWith("Replay protection:"),
+  );
+  assert.ok(stripIdx !== -1 && headerIdx !== -1 && replayIdx !== -1);
+  assert.ok(stripIdx < headerIdx && headerIdx < replayIdx);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 6), [
+    `verifyAllLabelsOrThrow sig1: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+    `verifyAllLabelsOrThrow gateway: OK (label gateway, keyid="${DEMO_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
+    'verifyAllLabelsOrThrow on the tampered-body request: FAILED (threw VerifyError for label "sig1", code BODY_DIGEST_MISMATCH: body does not match content-digest)',
+    "The same tampered-body request under verifyAllLabels (contrast — the throwing call above surfaced only the first failure, both labels fail the body-digest check)",
+    `After body tampering sig1: FAILED (code BODY_DIGEST_MISMATCH: body does not match content-digest)`,
+  ]);
+
+  // The new lines are byte-identical between runs: only
+  // label/keyid/alg/code/reason appear, never fresh key material.
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Throwing multi-label verification:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Replay protection:"));
+  const a = start(lines);
+  const b = start(second.lines);
+  const aEnd = end(lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  assert.deepEqual(
+    lines.slice(a, aEnd),
     second.lines.slice(b, bEnd),
   );
 });
