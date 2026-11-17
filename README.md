@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2289 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2290 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -312,7 +312,16 @@ gateway registry reads it as an Item, while a Dictionary-shaped
 for the merchant label only and fails the gateway label closed
 with `SIGNATURE_BASE_BUILD_FAILED` — showing that a field's type
 is a per-label agreement, and a mis-registered label is rejected
-alone without dragging the other label down.
+alone without dragging the other label down. The demo closes with a
+JWKS auto-refresh segment: `JwksKeyStore.startAutoRefresh(60_000)`
+drives `refreshIfStale()` on a recording fake timer (no real system
+timer is ever created) — the timer is created at 60_000 ms and
+`unref()`d once, a second start while it runs is rejected with the
+pinned error, one manual tick refreshes the stale snapshot from a
+real loopback endpoint, a tick after `stop()` fetches nothing even
+once the injected clock has advanced past the TTL, and a restart
+followed by `clear()` stops the second timer, resets the stats
+counters, and leaves the restart's `stop()` a safe no-op.
 
 ```bash
 npm run demo
@@ -954,6 +963,16 @@ degrades to staleness instead of crashing the process. The call returns
 `stop()` (idempotent; `clear()` stops the timer as well), and auto-refresh
 fetches count in `stats()` exactly like manual ones. The interval
 implementation is injectable (`setIntervalImpl`) for deterministic tests.
+The CLI demo (`npm run demo`) closes with a JWKS auto-refresh segment
+that drives the loop end to end on a recording fake timer — no real
+system timer is ever created: the timer is created at 60_000 ms and
+`unref()`d once, a second start while it runs is rejected, one manual
+tick refreshes the stale snapshot from a real loopback endpoint
+(`stats().refreshes` steps to 1 and the scripted key resolves), a tick
+after `stop()` fetches nothing even once the injected clock has advanced
+past the TTL, and a restart followed by `clear()` stops the second timer,
+resets the stats counters, and leaves the restart's `stop()` a safe
+no-op.
 
 Single-key fallback for keyid-less signatures (opt-in): `keyid` is
 optional in RFC 9421, and this library's own `signRequest` omits it
@@ -5009,7 +5028,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2289 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2290 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

@@ -198,6 +198,20 @@ import {
   DEMO_SIG_INPUT_EXPECTED,
   DEMO_SIG_INPUT_LABEL,
   DEMO_SIG_INPUT_PARAMS,
+  DEMO_JWKS_AUTO_REFRESH_CLEAR_CALLS,
+  DEMO_JWKS_AUTO_REFRESH_CLEARED_REFRESHES,
+  DEMO_JWKS_AUTO_REFRESH_CLEARED_SIZE,
+  DEMO_JWKS_AUTO_REFRESH_FETCH_CALLS,
+  DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS,
+  DEMO_JWKS_AUTO_REFRESH_KEY_ID,
+  DEMO_JWKS_AUTO_REFRESH_LAST_REFRESHED_AT,
+  DEMO_JWKS_AUTO_REFRESH_REFRESHES,
+  DEMO_JWKS_AUTO_REFRESH_SECOND_START_ERROR,
+  DEMO_JWKS_AUTO_REFRESH_SIZE,
+  DEMO_JWKS_AUTO_REFRESH_STALE_ADVANCE_SEC,
+  DEMO_JWKS_AUTO_REFRESH_STOP_CLEAR_CALLS,
+  DEMO_JWKS_AUTO_REFRESH_STOPPED_FETCH_CALLS,
+  DEMO_JWKS_AUTO_REFRESH_TTL_SEC,
   DEMO_JWKS_FETCHED_AT_SEC,
   DEMO_JWKS_URL,
   DEMO_HMAC_GUARD_ACCEPTED,
@@ -11404,8 +11418,12 @@ test("demo per-label structured-field types segment verifies the token field und
     `Dictionary field "x-quota: a=1" verified with structuredFieldTypesByLabel { sig1: dictionary, gateway: item }: sig1 OK (label ${DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_SF_TYPES_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway FAILED (label ${DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL}, code ${DEMO_SF_TYPES_BY_LABEL_REJECT_CODE}: ${DEMO_SF_TYPES_BY_LABEL_REJECT_REASON}) — only the mis-registered label is rejected`,
   ]);
 
-  // The segment is the last one: nothing follows it.
-  assert.equal(headerIdx + 3, lines.length);
+  // The segment is followed by the JWKS auto-refresh segment
+  // (backlog #1212), which closes the demo.
+  assert.equal(lines[headerIdx + 3], "");
+  assert.ok(
+    lines[headerIdx + 4].startsWith("JWKS auto-refresh:"),
+  );
 
   // Deterministic double run: the segment's lines are pinned
   // constants, identical between runs.
@@ -11416,5 +11434,289 @@ test("demo per-label structured-field types segment verifies the token field und
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 3),
     lines.slice(headerIdx, headerIdx + 3),
+  );
+});
+
+test("demo JWKS auto-refresh segment drives startAutoRefresh on a fake timer (tick refreshes, stop ends it, clear resets it)", async () => {
+  const {
+    jwksAutoRefreshIntervalMs,
+    jwksAutoRefreshUnrefCalls,
+    jwksAutoRefreshSecondStartError,
+    jwksAutoRefreshFetchCalls,
+    jwksAutoRefreshRefreshes,
+    jwksAutoRefreshSize,
+    jwksAutoRefreshResolved,
+    jwksAutoRefreshLastRefreshedAt,
+    jwksAutoRefreshStoppedFetchCalls,
+    jwksAutoRefreshStopClearCalls,
+    jwksAutoRefreshClearedRefreshes,
+    jwksAutoRefreshClearedSize,
+    jwksAutoRefreshClearCalls,
+    lines,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // The fixtures are the literals pinned in src/demo.ts — the
+  // test pins them again here so a drift in either place fails
+  // loudly.
+  assert.equal(
+    DEMO_JWKS_AUTO_REFRESH_KEY_ID,
+    "demo-jwks-auto-refresh-1",
+  );
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS, 60_000);
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_TTL_SEC, 300);
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_STALE_ADVANCE_SEC, 301);
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_FETCH_CALLS, 1);
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_REFRESHES, 1);
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_SIZE, 1);
+  assert.equal(
+    DEMO_JWKS_AUTO_REFRESH_LAST_REFRESHED_AT,
+    DEMO_CREATED,
+  );
+  assert.equal(
+    DEMO_JWKS_AUTO_REFRESH_SECOND_START_ERROR,
+    "JwksKeyStore: auto-refresh is already running (call the stop() returned by startAutoRefresh() or clear() first)",
+  );
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_STOPPED_FETCH_CALLS, 1);
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_STOP_CLEAR_CALLS, 1);
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_CLEARED_REFRESHES, 0);
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_CLEARED_SIZE, 0);
+  assert.equal(DEMO_JWKS_AUTO_REFRESH_CLEAR_CALLS, 2);
+
+  // DemoResult fields: timer created at the pinned interval and
+  // unref()d once, second start rejected, one tick refreshes the
+  // stale snapshot, a tick after stop() fetches nothing, and a
+  // restart plus clear() stops the second timer and resets the
+  // counters while the restart's stop() stays a no-op.
+  assert.equal(
+    jwksAutoRefreshIntervalMs,
+    DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS,
+  );
+  assert.equal(jwksAutoRefreshUnrefCalls, 1);
+  assert.equal(
+    jwksAutoRefreshSecondStartError,
+    DEMO_JWKS_AUTO_REFRESH_SECOND_START_ERROR,
+  );
+  assert.equal(
+    jwksAutoRefreshFetchCalls,
+    DEMO_JWKS_AUTO_REFRESH_FETCH_CALLS,
+  );
+  assert.equal(
+    jwksAutoRefreshRefreshes,
+    DEMO_JWKS_AUTO_REFRESH_REFRESHES,
+  );
+  assert.equal(jwksAutoRefreshSize, DEMO_JWKS_AUTO_REFRESH_SIZE);
+  assert.equal(jwksAutoRefreshResolved, true);
+  assert.equal(
+    jwksAutoRefreshLastRefreshedAt,
+    DEMO_JWKS_AUTO_REFRESH_LAST_REFRESHED_AT,
+  );
+  assert.equal(
+    jwksAutoRefreshStoppedFetchCalls,
+    DEMO_JWKS_AUTO_REFRESH_STOPPED_FETCH_CALLS,
+  );
+  assert.equal(
+    jwksAutoRefreshStopClearCalls,
+    DEMO_JWKS_AUTO_REFRESH_STOP_CLEAR_CALLS,
+  );
+  assert.equal(
+    jwksAutoRefreshClearedRefreshes,
+    DEMO_JWKS_AUTO_REFRESH_CLEARED_REFRESHES,
+  );
+  assert.equal(
+    jwksAutoRefreshClearedSize,
+    DEMO_JWKS_AUTO_REFRESH_CLEARED_SIZE,
+  );
+  assert.equal(
+    jwksAutoRefreshClearCalls,
+    DEMO_JWKS_AUTO_REFRESH_CLEAR_CALLS,
+  );
+
+  // Independent re-derivation with a fresh key pair and a
+  // loopback endpoint (not the demo's): the same lifecycle holds
+  // outside the demo — a tick refreshes a stale store, a tick
+  // after stop() fetches nothing even once stale again, and
+  // clear() stops the restarted timer and resets the counters.
+  const pair = generateEd25519KeyPair();
+  let fetchCalls = 0;
+  const sockets = new Set<Socket>();
+  const server = createServer((req, res) => {
+    fetchCalls++;
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        keys: [
+          {
+            ...exportPublicKeyJwk(pair.publicKey),
+            kid: DEMO_JWKS_AUTO_REFRESH_KEY_ID,
+          },
+        ],
+      }),
+    );
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => {
+      sockets.delete(socket);
+    });
+  });
+  try {
+    const port = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    }).then((info) => info.port);
+    let nowSec = DEMO_CREATED;
+    const timers: {
+      callback: () => void;
+      cleared: boolean;
+      unrefCalls: number;
+      clearCalls: number;
+    }[] = [];
+    const fire = (): void => {
+      const latest = timers[timers.length - 1];
+      if (latest === undefined || latest.cleared) return;
+      latest.callback();
+    };
+    const store = new JwksKeyStore(
+      `http://127.0.0.1:${port}/.well-known/jwks.json`,
+      {
+        ttlSec: DEMO_JWKS_AUTO_REFRESH_TTL_SEC,
+        now: () => nowSec,
+      },
+    );
+    const stop = store.startAutoRefresh(
+      DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS,
+      {
+        setIntervalImpl: (callback, ms) => {
+          assert.equal(ms, DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS);
+          const timer = {
+            callback,
+            cleared: false,
+            unrefCalls: 0,
+            clearCalls: 0,
+          };
+          timers.push(timer);
+          return {
+            unref: () => {
+              timer.unrefCalls++;
+            },
+            clear: () => {
+              timer.clearCalls++;
+              timer.cleared = true;
+            },
+          };
+        },
+      },
+    );
+    assert.equal(timers.length, 1);
+    assert.equal(timers[0].unrefCalls, 1);
+    assert.throws(
+      () =>
+        store.startAutoRefresh(DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS, {}),
+      new RegExp(
+        DEMO_JWKS_AUTO_REFRESH_SECOND_START_ERROR.replace(
+          /[.*+?^${}()|[\]\\]/g,
+          "\\$&",
+        ),
+      ),
+    );
+    fire();
+    for (
+      let i = 0;
+      i < 5000 && store.stats().refreshes !== 1;
+      i++
+    ) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+    }
+    assert.equal(fetchCalls, 1);
+    assert.equal(store.stats().refreshes, 1);
+    assert.equal(store.size, 1);
+    assert.equal(store.lastRefreshedAt, DEMO_CREATED);
+    assert.notEqual(
+      store.resolve(DEMO_JWKS_AUTO_REFRESH_KEY_ID),
+      undefined,
+    );
+    nowSec += DEMO_JWKS_AUTO_REFRESH_STALE_ADVANCE_SEC;
+    assert.equal(store.isStale(), true);
+    stop();
+    fire();
+    assert.equal(fetchCalls, 1);
+    assert.equal(store.stats().refreshes, 1);
+    stop();
+    assert.equal(timers[0].clearCalls, 1);
+    const stop2 = store.startAutoRefresh(
+      DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS,
+      {
+        setIntervalImpl: (callback) => {
+          const timer = {
+            callback,
+            cleared: false,
+            unrefCalls: 0,
+            clearCalls: 0,
+          };
+          timers.push(timer);
+          return {
+            unref: () => {
+              timer.unrefCalls++;
+            },
+            clear: () => {
+              timer.clearCalls++;
+              timer.cleared = true;
+            },
+          };
+        },
+      },
+    );
+    store.clear();
+    assert.equal(store.stats().refreshes, 0);
+    assert.equal(store.size, 0);
+    stop2();
+    assert.equal(
+      timers.reduce((sum, timer) => sum + timer.clearCalls, 0),
+      2,
+    );
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    server.close();
+  }
+
+  // Printed lines: the auto-refresh header plus five lines, in
+  // order, sitting after the per-label structured-field types
+  // segment — and the segment is the last one.
+  assert.match(
+    out,
+    /JWKS auto-refresh: startAutoRefresh\(60000\) drives refreshIfStale\(\) on a timer/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS auto-refresh:"),
+  );
+  const sfTypesIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label structured-field types:"),
+  );
+  assert.ok(
+    sfTypesIdx !== -1 && headerIdx !== -1 && sfTypesIdx < headerIdx,
+  );
+  assert.equal(lines[headerIdx - 1], "");
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), [
+    "JWKS auto-refresh: startAutoRefresh(60000) drives refreshIfStale() on a timer, so a long-lived gateway verifier picks up key rotation without a hand-written polling loop — the timer is unref()d and a failed tick never throws",
+    `Auto-refresh timer created with interval ${DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS} ms, unref() called 1 time (the timer never holds the process open on its own)`,
+    `Auto-refresh second start while running: FAILED (${DEMO_JWKS_AUTO_REFRESH_SECOND_START_ERROR})`,
+    `Auto-refresh tick 1 (stale snapshot): refreshed — 1 fetch, stats.refreshes 1, size 1, lastRefreshedAt ${DEMO_CREATED}, key "${DEMO_JWKS_AUTO_REFRESH_KEY_ID}" resolves`,
+    `Auto-refresh stop() then tick 2 (stale again after +${DEMO_JWKS_AUTO_REFRESH_STALE_ADVANCE_SEC}s): no fetch — 1 fetch total, stats.refreshes still 1, clear() calls 1 (stop() is idempotent: a second stop() clears nothing more)`,
+    `Auto-refresh restart then clear(): timer stopped (clear() calls 2 across both timers), stats reset (refreshes 0, size 0), stop() afterwards is a no-op`,
+  ]);
+  assert.equal(headerIdx + 6, lines.length);
+
+  // Deterministic double run: the segment's lines are pinned
+  // constants, identical between runs.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("JWKS auto-refresh:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 6),
+    lines.slice(headerIdx, headerIdx + 6),
   );
 });

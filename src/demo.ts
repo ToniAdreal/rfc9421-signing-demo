@@ -1315,6 +1315,25 @@
  * rejected alone without dragging the other label down. Every
  * input and expectation is a fixed constant, so the segment is
  * byte-identical between runs.
+ * The demo closes with a JWKS auto-refresh segment:
+ * `JwksKeyStore.startAutoRefresh(60_000)` drives
+ * `refreshIfStale()` on a timer — the opt-in loop a long-lived
+ * gateway verifier runs instead of hand-writing its own polling.
+ * The segment injects a recording fake interval implementation
+ * (no real system timer is ever created, no tick is ever waited
+ * on) and fetches from a real loopback endpoint serving a
+ * one-key JWKS document: the timer is created at 60_000 ms and
+ * `unref()`d once, a second start while it runs is rejected with
+ * the pinned error, one manual tick refreshes the stale snapshot
+ * (`stats().refreshes` steps to 1 and the scripted key resolves),
+ * a tick after `stop()` fetches nothing even once the injected
+ * clock has advanced past the TTL, and a restart followed by
+ * `clear()` stops the second timer, resets the stats counters,
+ * and leaves the restart's `stop()` a safe no-op — showing the
+ * timer never holds the process open, never throws on a failed
+ * tick, and never outlives its store. Only the loopback port
+ * (never printed) and the key pair are fresh per run, so the
+ * segment is byte-identical between runs.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the library
@@ -1421,6 +1440,7 @@ import {
   type IncomingRequestLike,
   type JwksDocument,
   type JwksKeyStoreSnapshot,
+  type JwksSetIntervalImpl,
   type JwksSignedSnapshotEnvelope,
   type JwksKeyStoreStats,
   type ParsedSignatureInput,
@@ -4026,6 +4046,37 @@ export const DEMO_SF_TYPES_BY_LABEL_REJECT_CODE: VerifyFailureCode =
  */
 export const DEMO_SF_TYPES_BY_LABEL_REJECT_REASON =
   `cannot rebuild signature base: covered header field "x-quota" cannot be serialized with ";sf": not a valid Item Structured Field value: trailing characters after item`;
+
+/** Key id the JWKS auto-refresh segment's scripted key carries. */
+export const DEMO_JWKS_AUTO_REFRESH_KEY_ID = "demo-jwks-auto-refresh-1";
+/** Auto-refresh interval the segment starts with, in milliseconds. */
+export const DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS = 60_000;
+/** Snapshot TTL of the segment's store, in seconds (the library default, pinned explicitly so the stale-again step is exact). */
+export const DEMO_JWKS_AUTO_REFRESH_TTL_SEC = 300;
+/** Seconds the injected clock advances past the refresh instant to make the snapshot stale again (TTL + 1). */
+export const DEMO_JWKS_AUTO_REFRESH_STALE_ADVANCE_SEC =
+  DEMO_JWKS_AUTO_REFRESH_TTL_SEC + 1;
+/** Fetch count after the segment's single tick refresh (one fetch). */
+export const DEMO_JWKS_AUTO_REFRESH_FETCH_CALLS = 1;
+/** `stats().refreshes` after the tick refresh. */
+export const DEMO_JWKS_AUTO_REFRESH_REFRESHES = 1;
+/** Snapshot size after the tick refresh (one scripted key). */
+export const DEMO_JWKS_AUTO_REFRESH_SIZE = 1;
+/** `lastRefreshedAt` after the tick refresh (the pinned `DEMO_CREATED` instant). */
+export const DEMO_JWKS_AUTO_REFRESH_LAST_REFRESHED_AT = DEMO_CREATED;
+/** Hand-pinned error of a second `startAutoRefresh` while one is already running. */
+export const DEMO_JWKS_AUTO_REFRESH_SECOND_START_ERROR =
+  "JwksKeyStore: auto-refresh is already running (call the stop() returned by startAutoRefresh() or clear() first)";
+/** Fetch count after `stop()` plus another tick (unchanged — the stopped timer fires nothing). */
+export const DEMO_JWKS_AUTO_REFRESH_STOPPED_FETCH_CALLS = 1;
+/** `clear()` calls on the first timer after `stop()` plus an idempotent second `stop()` (exactly one). */
+export const DEMO_JWKS_AUTO_REFRESH_STOP_CLEAR_CALLS = 1;
+/** `stats().refreshes` after `clear()` (counters reset). */
+export const DEMO_JWKS_AUTO_REFRESH_CLEARED_REFRESHES = 0;
+/** Snapshot size after `clear()`. */
+export const DEMO_JWKS_AUTO_REFRESH_CLEARED_SIZE = 0;
+/** Total `clear()` calls across both timers at the end (each timer cleared exactly once). */
+export const DEMO_JWKS_AUTO_REFRESH_CLEAR_CALLS = 2;
 
 /** Absolute URL the `@query-param` segment signs (`a` bound, `b` unbound). */
 export const DEMO_QUERY_PARAM_URL =
@@ -6972,6 +7023,77 @@ export interface DemoResult {
    * `SIGNATURE_BASE_BUILD_FAILED`, in wire order.
    */
   sfTypesByLabelMismatchVerification: VerifyResult[];
+  /**
+   * Interval the JWKS auto-refresh segment starts with, in
+   * milliseconds (equals the hand-pinned
+   * `DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS`).
+   */
+  jwksAutoRefreshIntervalMs: number;
+  /**
+   * `unref()` calls on the first auto-refresh timer (1: the
+   * timer never holds the process open on its own).
+   */
+  jwksAutoRefreshUnrefCalls: number;
+  /**
+   * Error of a second `startAutoRefresh` while one is running
+   * (equals the hand-pinned
+   * `DEMO_JWKS_AUTO_REFRESH_SECOND_START_ERROR`).
+   */
+  jwksAutoRefreshSecondStartError: string;
+  /**
+   * Fetch count after the segment's single tick refresh (equals
+   * the hand-pinned `DEMO_JWKS_AUTO_REFRESH_FETCH_CALLS`).
+   */
+  jwksAutoRefreshFetchCalls: number;
+  /**
+   * `stats().refreshes` after the tick refresh (equals the
+   * hand-pinned `DEMO_JWKS_AUTO_REFRESH_REFRESHES`).
+   */
+  jwksAutoRefreshRefreshes: number;
+  /**
+   * Snapshot size after the tick refresh (equals the hand-pinned
+   * `DEMO_JWKS_AUTO_REFRESH_SIZE`).
+   */
+  jwksAutoRefreshSize: number;
+  /**
+   * Whether the store resolves the scripted keyid after the tick
+   * refresh (`true`).
+   */
+  jwksAutoRefreshResolved: boolean;
+  /**
+   * `lastRefreshedAt` after the tick refresh (equals the
+   * hand-pinned `DEMO_JWKS_AUTO_REFRESH_LAST_REFRESHED_AT`).
+   */
+  jwksAutoRefreshLastRefreshedAt: number | null;
+  /**
+   * Fetch count after `stop()` plus another tick (equals the
+   * hand-pinned `DEMO_JWKS_AUTO_REFRESH_STOPPED_FETCH_CALLS`:
+   * the stopped timer fires nothing).
+   */
+  jwksAutoRefreshStoppedFetchCalls: number;
+  /**
+   * `clear()` calls on the first timer after `stop()` plus an
+   * idempotent second `stop()` (equals the hand-pinned
+   * `DEMO_JWKS_AUTO_REFRESH_STOP_CLEAR_CALLS`).
+   */
+  jwksAutoRefreshStopClearCalls: number;
+  /**
+   * `stats().refreshes` after `clear()` (equals the hand-pinned
+   * `DEMO_JWKS_AUTO_REFRESH_CLEARED_REFRESHES`: counters reset).
+   */
+  jwksAutoRefreshClearedRefreshes: number;
+  /**
+   * Snapshot size after `clear()` (equals the hand-pinned
+   * `DEMO_JWKS_AUTO_REFRESH_CLEARED_SIZE`).
+   */
+  jwksAutoRefreshClearedSize: number;
+  /**
+   * Total `clear()` calls across both timers at the end (equals
+   * the hand-pinned `DEMO_JWKS_AUTO_REFRESH_CLEAR_CALLS`: each
+   * timer cleared exactly once, and `stop()` after `clear()` is
+   * a no-op).
+   */
+  jwksAutoRefreshClearCalls: number;
   lines: string[];
 }
 
@@ -16323,6 +16445,240 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // JWKS auto-refresh segment (backlog #1212): the JWKS
+  // sections above only ever refresh by hand, so the opt-in
+  // automatic loop a long-lived gateway verifier would run is
+  // invisible in the demo. This segment drives it through a
+  // recording fake interval implementation — no real system
+  // timer is ever created and no tick is ever waited on: the
+  // fake records each timer (interval, unref() calls, clear()
+  // calls) and fires only when the demo says so, while the store
+  // fetches from a real loopback endpoint serving a one-key JWKS
+  // document (the same endpoint shape the requireHttps segment
+  // uses; only the port, never printed, is fresh per run). The
+  // store's clock is injected and pinned at DEMO_CREATED with
+  // ttlSec 300, so staleness is exact: startAutoRefresh(60_000)
+  // creates one timer at 60_000 ms and unrefs it once; a second
+  // start while it runs throws the pinned error; one manual tick
+  // refreshes the never-refreshed (stale) snapshot and
+  // stats().refreshes steps to 1; advancing the injected clock
+  // 301s makes the snapshot stale again, but a tick after stop()
+  // fetches nothing (stop() is idempotent — a second call clears
+  // nothing more); a restart followed by clear() stops the second
+  // timer and resets the stats counters, and the restart's stop()
+  // after clear() is a safe no-op. Outside the printed lines the
+  // demo asserts every count, size, timestamp and error message
+  // equals the hand-pinned DEMO_JWKS_AUTO_REFRESH_*
+  // expectations (the same lifecycle rules
+  // test/jwksAutoRefresh.test.ts pins). Only the loopback port
+  // and the key pair are fresh per run, so the segment is
+  // byte-identical between runs.
+  const jwksAutoRefreshPair = generateEd25519KeyPair();
+  let jwksAutoRefreshFetchCalls = 0;
+  const jwksAutoRefreshSockets = new Set<Socket>();
+  const jwksAutoRefreshServer = createServer((req, res) => {
+    jwksAutoRefreshFetchCalls++;
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        keys: [
+          {
+            ...exportPublicKeyJwk(jwksAutoRefreshPair.publicKey),
+            kid: DEMO_JWKS_AUTO_REFRESH_KEY_ID,
+          },
+        ],
+      }),
+    );
+  });
+  jwksAutoRefreshServer.on("connection", (socket) => {
+    jwksAutoRefreshSockets.add(socket);
+    socket.on("close", () => {
+      jwksAutoRefreshSockets.delete(socket);
+    });
+  });
+  // Recording fake interval: one entry per timer created, fired
+  // only on demand, never on real time — the same stub shape
+  // test/jwksAutoRefresh.test.ts uses.
+  const jwksAutoRefreshTimers: {
+    callback: () => void;
+    ms: number;
+    unrefCalls: number;
+    clearCalls: number;
+    cleared: boolean;
+  }[] = [];
+  const jwksAutoRefreshSetIntervalImpl: JwksSetIntervalImpl = (
+    callback,
+    ms,
+  ) => {
+    const timer = {
+      callback,
+      ms,
+      unrefCalls: 0,
+      clearCalls: 0,
+      cleared: false,
+    };
+    jwksAutoRefreshTimers.push(timer);
+    return {
+      unref: () => {
+        timer.unrefCalls++;
+      },
+      clear: () => {
+        timer.clearCalls++;
+        timer.cleared = true;
+      },
+    };
+  };
+  const fireJwksAutoRefreshTick = (): void => {
+    const latest =
+      jwksAutoRefreshTimers[jwksAutoRefreshTimers.length - 1];
+    if (latest === undefined || latest.cleared) return;
+    latest.callback();
+  };
+  let jwksAutoRefreshNowSec = DEMO_CREATED;
+  let jwksAutoRefreshIntervalMs = -1;
+  let jwksAutoRefreshUnrefCalls = -1;
+  let jwksAutoRefreshSecondStartError = "";
+  let jwksAutoRefreshRefreshes = -1;
+  let jwksAutoRefreshSize = 0;
+  let jwksAutoRefreshResolved = false;
+  let jwksAutoRefreshLastRefreshedAt: number | null = null;
+  let jwksAutoRefreshStoppedFetchCalls = -1;
+  let jwksAutoRefreshStoppedRefreshes = -1;
+  let jwksAutoRefreshStopClearCalls = -1;
+  let jwksAutoRefreshClearedRefreshes = -1;
+  let jwksAutoRefreshClearedSize = -1;
+  let jwksAutoRefreshClearCalls = -1;
+  try {
+    const jwksAutoRefreshPort = await new Promise<AddressInfo>(
+      (resolve, reject) => {
+        jwksAutoRefreshServer.on("error", reject);
+        jwksAutoRefreshServer.listen(0, "127.0.0.1", () => {
+          resolve(jwksAutoRefreshServer.address() as AddressInfo);
+        });
+      },
+    ).then((info) => info.port);
+    const jwksAutoRefreshUrl = `http://127.0.0.1:${jwksAutoRefreshPort}/.well-known/jwks.json`;
+    const jwksAutoRefreshStore = new JwksKeyStore(jwksAutoRefreshUrl, {
+      ttlSec: DEMO_JWKS_AUTO_REFRESH_TTL_SEC,
+      now: () => jwksAutoRefreshNowSec,
+    });
+    const jwksAutoRefreshStop =
+      jwksAutoRefreshStore.startAutoRefresh(
+        DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS,
+        { setIntervalImpl: jwksAutoRefreshSetIntervalImpl },
+      );
+    jwksAutoRefreshIntervalMs = jwksAutoRefreshTimers[0]!.ms;
+    jwksAutoRefreshUnrefCalls = jwksAutoRefreshTimers[0]!.unrefCalls;
+    try {
+      jwksAutoRefreshStore.startAutoRefresh(
+        DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS,
+        { setIntervalImpl: jwksAutoRefreshSetIntervalImpl },
+      );
+    } catch (err) {
+      jwksAutoRefreshSecondStartError =
+        err instanceof Error ? err.message : String(err);
+    }
+    fireJwksAutoRefreshTick();
+    // The tick's refresh is async (a real loopback fetch), so
+    // wait for it to settle by polling the stats counter — the
+    // wait is bounded and nothing timed is printed, so the
+    // segment stays byte-identical between runs.
+    for (
+      let i = 0;
+      i < 5000 &&
+      jwksAutoRefreshStore.stats().refreshes !==
+        DEMO_JWKS_AUTO_REFRESH_REFRESHES;
+      i++
+    ) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+    }
+    jwksAutoRefreshRefreshes = jwksAutoRefreshStore.stats().refreshes;
+    jwksAutoRefreshSize = jwksAutoRefreshStore.size;
+    jwksAutoRefreshResolved =
+      jwksAutoRefreshStore.resolve(DEMO_JWKS_AUTO_REFRESH_KEY_ID) !==
+      undefined;
+    jwksAutoRefreshLastRefreshedAt =
+      jwksAutoRefreshStore.lastRefreshedAt;
+    // Make the snapshot stale again, so the post-stop tick would
+    // have fetched had the timer still been live.
+    jwksAutoRefreshNowSec += DEMO_JWKS_AUTO_REFRESH_STALE_ADVANCE_SEC;
+    jwksAutoRefreshStop();
+    fireJwksAutoRefreshTick();
+    jwksAutoRefreshStoppedFetchCalls = jwksAutoRefreshFetchCalls;
+    jwksAutoRefreshStoppedRefreshes =
+      jwksAutoRefreshStore.stats().refreshes;
+    jwksAutoRefreshStop();
+    jwksAutoRefreshStopClearCalls =
+      jwksAutoRefreshTimers[0]!.clearCalls;
+    const jwksAutoRefreshSecondStop =
+      jwksAutoRefreshStore.startAutoRefresh(
+        DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS,
+        { setIntervalImpl: jwksAutoRefreshSetIntervalImpl },
+      );
+    jwksAutoRefreshStore.clear();
+    jwksAutoRefreshClearedRefreshes =
+      jwksAutoRefreshStore.stats().refreshes;
+    jwksAutoRefreshClearedSize = jwksAutoRefreshStore.size;
+    jwksAutoRefreshSecondStop();
+    // stop() after clear() must not clear anything more.
+    jwksAutoRefreshClearCalls = jwksAutoRefreshTimers.reduce(
+      (sum, timer) => sum + timer.clearCalls,
+      0,
+    );
+    if (
+      jwksAutoRefreshTimers.length !== 2 ||
+      jwksAutoRefreshTimers[1]!.unrefCalls !== 1 ||
+      jwksAutoRefreshIntervalMs !==
+        DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS ||
+      jwksAutoRefreshUnrefCalls !== 1 ||
+      jwksAutoRefreshSecondStartError !==
+        DEMO_JWKS_AUTO_REFRESH_SECOND_START_ERROR ||
+      jwksAutoRefreshFetchCalls !==
+        DEMO_JWKS_AUTO_REFRESH_FETCH_CALLS ||
+      jwksAutoRefreshRefreshes !==
+        DEMO_JWKS_AUTO_REFRESH_REFRESHES ||
+      jwksAutoRefreshSize !== DEMO_JWKS_AUTO_REFRESH_SIZE ||
+      jwksAutoRefreshResolved !== true ||
+      jwksAutoRefreshLastRefreshedAt !==
+        DEMO_JWKS_AUTO_REFRESH_LAST_REFRESHED_AT ||
+      jwksAutoRefreshStoppedFetchCalls !==
+        DEMO_JWKS_AUTO_REFRESH_STOPPED_FETCH_CALLS ||
+      jwksAutoRefreshStoppedRefreshes !==
+        DEMO_JWKS_AUTO_REFRESH_REFRESHES ||
+      jwksAutoRefreshStopClearCalls !==
+        DEMO_JWKS_AUTO_REFRESH_STOP_CLEAR_CALLS ||
+      jwksAutoRefreshClearedRefreshes !==
+        DEMO_JWKS_AUTO_REFRESH_CLEARED_REFRESHES ||
+      jwksAutoRefreshClearedSize !==
+        DEMO_JWKS_AUTO_REFRESH_CLEARED_SIZE ||
+      jwksAutoRefreshClearCalls !==
+        DEMO_JWKS_AUTO_REFRESH_CLEAR_CALLS
+    ) {
+      throw new Error(
+        `demo fixture broken: JWKS auto-refresh gave ${jwksAutoRefreshTimers.length} timers ` +
+          `(second unref ${jwksAutoRefreshTimers[1]?.unrefCalls}), interval ` +
+          `${jwksAutoRefreshIntervalMs} with ${jwksAutoRefreshUnrefCalls} unref() calls, second-start ` +
+          `error ${JSON.stringify(jwksAutoRefreshSecondStartError)}, ${jwksAutoRefreshFetchCalls} fetches, ` +
+          `${jwksAutoRefreshRefreshes} refreshes, size ${jwksAutoRefreshSize}, resolved ` +
+          `${jwksAutoRefreshResolved}, lastRefreshedAt ${jwksAutoRefreshLastRefreshedAt}, stopped at ` +
+          `${jwksAutoRefreshStoppedFetchCalls} fetches / ${jwksAutoRefreshStoppedRefreshes} refreshes with ` +
+          `${jwksAutoRefreshStopClearCalls} clear() calls, cleared to ${jwksAutoRefreshClearedRefreshes} ` +
+          `refreshes / size ${jwksAutoRefreshClearedSize} with ${jwksAutoRefreshClearCalls} total clear() ` +
+          `calls, instead of the pinned ${DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS} ms / 1 unref / ` +
+          `${JSON.stringify(DEMO_JWKS_AUTO_REFRESH_SECOND_START_ERROR)} / ` +
+          `${DEMO_JWKS_AUTO_REFRESH_FETCH_CALLS} fetches / ${DEMO_JWKS_AUTO_REFRESH_REFRESHES} refreshes / ` +
+          `size ${DEMO_JWKS_AUTO_REFRESH_SIZE} / resolved true / lastRefreshedAt ` +
+          `${DEMO_JWKS_AUTO_REFRESH_LAST_REFRESHED_AT} / stopped ${DEMO_JWKS_AUTO_REFRESH_STOPPED_FETCH_CALLS} ` +
+          `fetches / ${DEMO_JWKS_AUTO_REFRESH_STOP_CLEAR_CALLS} clear() call / cleared ` +
+          `${DEMO_JWKS_AUTO_REFRESH_CLEARED_REFRESHES} refreshes / size ${DEMO_JWKS_AUTO_REFRESH_CLEARED_SIZE} / ` +
+          `${DEMO_JWKS_AUTO_REFRESH_CLEAR_CALLS} total clear() calls`,
+      );
+    }
+  } finally {
+    for (const socket of jwksAutoRefreshSockets) socket.destroy();
+    jwksAutoRefreshServer.close();
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -17196,6 +17552,13 @@ export async function runDemo(): Promise<DemoResult> {
     sfTypesByLabelMismatchVerification[1]!.ok === false
       ? `Dictionary field "x-quota: a=1" verified with structuredFieldTypesByLabel { sig1: dictionary, gateway: item }: sig1 OK (label ${DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_SF_TYPES_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway FAILED (label ${DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL}, code ${sfTypesByLabelMismatchVerification[1]!.code}: ${sfTypesByLabelMismatchVerification[1]!.reason}) — only the mis-registered label is rejected`
       : `Dictionary field "x-quota: a=1" verified with structuredFieldTypesByLabel { sig1: dictionary, gateway: item }: sig1 ${sfTypesByLabelMismatchVerification[0]!.ok ? "OK" : `FAILED (unexpected — the Dictionary-registered label was dragged down by the gateway mismatch)`}, gateway ${sfTypesByLabelMismatchVerification[1]!.ok ? "OK (unexpected — the Item-registered label was not rejected for the Dictionary value)" : `code ${sfTypesByLabelMismatchVerification[1]!.code}`}`,
+    "",
+    "JWKS auto-refresh: startAutoRefresh(60000) drives refreshIfStale() on a timer, so a long-lived gateway verifier picks up key rotation without a hand-written polling loop — the timer is unref()d and a failed tick never throws",
+    `Auto-refresh timer created with interval ${DEMO_JWKS_AUTO_REFRESH_INTERVAL_MS} ms, unref() called ${jwksAutoRefreshUnrefCalls} time (the timer never holds the process open on its own)`,
+    `Auto-refresh second start while running: FAILED (${jwksAutoRefreshSecondStartError})`,
+    `Auto-refresh tick 1 (stale snapshot): refreshed — ${jwksAutoRefreshFetchCalls} fetch, stats.refreshes ${jwksAutoRefreshRefreshes}, size ${jwksAutoRefreshSize}, lastRefreshedAt ${jwksAutoRefreshLastRefreshedAt}, key "${DEMO_JWKS_AUTO_REFRESH_KEY_ID}" resolves`,
+    `Auto-refresh stop() then tick 2 (stale again after +${DEMO_JWKS_AUTO_REFRESH_STALE_ADVANCE_SEC}s): no fetch — ${jwksAutoRefreshStoppedFetchCalls} fetch total, stats.refreshes still ${jwksAutoRefreshStoppedRefreshes}, clear() calls ${jwksAutoRefreshStopClearCalls} (stop() is idempotent: a second stop() clears nothing more)`,
+    `Auto-refresh restart then clear(): timer stopped (clear() calls ${jwksAutoRefreshClearCalls} across both timers), stats reset (refreshes ${jwksAutoRefreshClearedRefreshes}, size ${jwksAutoRefreshClearedSize}), stop() afterwards is a no-op`,
   ];
 
   return {
@@ -17612,6 +17975,19 @@ export async function runDemo(): Promise<DemoResult> {
     signGuardControlVerification,
     sfTypesByLabelTokenVerification,
     sfTypesByLabelMismatchVerification,
+    jwksAutoRefreshIntervalMs,
+    jwksAutoRefreshUnrefCalls,
+    jwksAutoRefreshSecondStartError,
+    jwksAutoRefreshFetchCalls,
+    jwksAutoRefreshRefreshes,
+    jwksAutoRefreshSize,
+    jwksAutoRefreshResolved,
+    jwksAutoRefreshLastRefreshedAt,
+    jwksAutoRefreshStoppedFetchCalls,
+    jwksAutoRefreshStopClearCalls,
+    jwksAutoRefreshClearedRefreshes,
+    jwksAutoRefreshClearedSize,
+    jwksAutoRefreshClearCalls,
     lines,
   };
 }
