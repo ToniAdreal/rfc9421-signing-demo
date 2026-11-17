@@ -7,7 +7,16 @@
  * ecdsa-p521-sha512, rsa-pss-sha512,
  * rsa-v1_5-sha256) on the machine that
  * runs it, plus a multi-party scenario (merchant ed25519 + gateway
- * hmac-sha256 dual labels via verifyAllLabels) and the key-resolution
+ * hmac-sha256 dual labels via verifyAllLabels) and its throwing twin
+ * (`verifyAllLabelsOrThrow` over the same dual-signed shape — merchant
+ * `sig1` ed25519 with a pinned nonce, gateway hmac-sha256, `created`
+ * pinned, see THROW_ALL_* below — self-checked on every measured pass
+ * with both results ok in wire order, each with its pinned label /
+ * keyid / alg and the merchant nonce, and the one-byte-tampered-body
+ * call throwing the first label's `VerifyError`
+ * (`BODY_DIGEST_MISMATCH` for `sig1`) with the non-throwing contrast
+ * showing both labels failing with that code, asserted outside
+ * timing) and the key-resolution
  * hot path a gateway verifier hits on every request: `JwksKeyStore.resolve`
  * (Map hit on an offline-restored snapshot, zero network) and
  * `memoizeKeyResolver` cache hits / misses, plus the endpoint-rule
@@ -1002,6 +1011,7 @@ import {
   signatureInputValue,
   verifiedFetch,
   verifyAllLabels,
+  verifyAllLabelsOrThrow,
   verifyAllResponseLabels,
   verifyRequest,
   verifyRequestOrThrow,
@@ -1148,6 +1158,137 @@ function benchmarkMultiLabel(): number {
         `benchmark self-check failed: ${JSON.stringify(results)}`,
       );
     }
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllLabelsOrThrow` benchmark: the
+ * throwing twin of the `benchmarkMultiLabel` row above — the same
+ * dual-signed fixture shape (merchant `sig1` ed25519 with a pinned
+ * nonce, gateway hmac-sha256 under the `gateway` label, `created`
+ * pinned, verifier `now` injected at the `created` instant — see
+ * THROW_ALL_* below), verified in one throwing call per measured
+ * op. Every measured pass self-checks the returned `VerifyResult[]`
+ * (both labels ok, in wire order, each with its pinned label /
+ * keyid / alg, and the merchant nonce echoed), so the row cannot be
+ * measuring a path that skips verification; outside timing, the
+ * tampered-body half is pinned once: the same request with one body
+ * byte changed (amount 100 -> 101) throws the first failing label's
+ * `VerifyError` (`BODY_DIGEST_MISMATCH` for `sig1`, the first label
+ * in wire order, carrying its pinned label / keyid / alg and
+ * passing the `isVerifyError` guard), and the non-throwing
+ * `verifyAllLabels` contrast on the same tampered request reports
+ * both labels failing with that code — the body-digest check runs
+ * for every label whenever a `content-digest` header is present,
+ * covered or not — so the throwing call hides the second failure by
+ * surfacing only the first. Zero network, zero randomness in the
+ * measured assertions, no wall clock (every verify instant is
+ * injected).
+ */
+const THROW_ALL_CREATED = 1_700_000_000;
+const THROW_ALL_MERCHANT_KID = "bench-throw-all-merchant-1";
+const THROW_ALL_GATEWAY_KID = "bench-throw-all-gateway-1";
+const THROW_ALL_NONCE = "bench-throw-all-nonce-1";
+const THROW_ALL_TAMPERED_CODE = "BODY_DIGEST_MISMATCH";
+const THROW_ALL_TAMPERED_BODY = JSON.stringify({
+  amount: 101,
+  currency: "USD",
+});
+
+function benchmarkVerifyAllLabelsOrThrow(): number {
+  const { publicKey: merchantPublic, privateKey: merchantPrivate } =
+    generateEd25519KeyPair();
+  const gatewaySecret = secretKey("gateway-shared-secret-32-bytes-0!");
+
+  const merchantSigned = signRequest(fixture, {
+    keyId: THROW_ALL_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    created: THROW_ALL_CREATED,
+    nonce: THROW_ALL_NONCE,
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: THROW_ALL_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    label: "gateway",
+    created: THROW_ALL_CREATED,
+  });
+  const verifyOpts = {
+    key: merchantPublic,
+    keys: { gateway: gatewaySecret },
+    now: THROW_ALL_CREATED,
+  };
+  const assertAccepted = (where: string): void => {
+    const results = verifyAllLabelsOrThrow(dual, verifyOpts);
+    if (
+      results.length !== 2 ||
+      results[0].label !== "sig1" ||
+      !results[0].ok ||
+      results[0].keyId !== THROW_ALL_MERCHANT_KID ||
+      results[0].alg !== "ed25519" ||
+      results[0].nonce !== THROW_ALL_NONCE ||
+      results[1].label !== "gateway" ||
+      !results[1].ok ||
+      results[1].keyId !== THROW_ALL_GATEWAY_KID ||
+      results[1].alg !== "hmac-sha256"
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabelsOrThrow (${where}) gave ${JSON.stringify(results)}`,
+      );
+  };
+
+  // Outside timing: the dual-signed fixture verifies through the
+  // throwing wrapper and returns the pinned per-label results.
+  assertAccepted("outside timing");
+
+  // Outside timing: the same request with one body byte changed
+  // throws the first failing label's VerifyError — `sig1`, the
+  // first label in wire order — with the pinned code, and the
+  // thrown error passes the `isVerifyError` guard.
+  const tampered = { ...dual, body: THROW_ALL_TAMPERED_BODY };
+  let thrown: unknown;
+  try {
+    verifyAllLabelsOrThrow(tampered, verifyOpts);
+  } catch (e) {
+    thrown = e;
+  }
+  if (
+    !isVerifyError(thrown) ||
+    thrown.code !== THROW_ALL_TAMPERED_CODE ||
+    thrown.label !== "sig1" ||
+    thrown.keyId !== THROW_ALL_MERCHANT_KID ||
+    thrown.alg !== "ed25519"
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabelsOrThrow(tampered) gave ` +
+        `${thrown instanceof Error ? `${thrown.name}: ${thrown.message}` : "no throw"} ` +
+        `(expected VerifyError ${THROW_ALL_TAMPERED_CODE} for label "sig1")`,
+    );
+
+  // Outside timing: the non-throwing twin on the same tampered
+  // request reports both labels failing with the pinned code —
+  // the body-digest check runs for every label whenever a
+  // `content-digest` header is present, covered or not — so the
+  // throwing call hides the second failure by surfacing only the
+  // first.
+  const contrast = verifyAllLabels(tampered, verifyOpts);
+  if (
+    contrast.length !== 2 ||
+    contrast[0].label !== "sig1" ||
+    contrast[0].ok ||
+    contrast[0].code !== THROW_ALL_TAMPERED_CODE ||
+    contrast[1].label !== "gateway" ||
+    contrast[1].ok ||
+    contrast[1].code !== THROW_ALL_TAMPERED_CODE
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels(tampered) gave ${JSON.stringify(contrast)} ` +
+        `(expected both labels ${THROW_ALL_TAMPERED_CODE})`,
+    );
+
+  return measure(() => {
+    assertAccepted("measured pass");
   }, ITERATIONS);
 }
 
@@ -17801,6 +17942,11 @@ results.push({
   alg: "verifyAllLabels (2 labels)",
   op: "verify",
   ops: benchmarkMultiLabel(),
+});
+results.push({
+  alg: "verifyAllLabelsOrThrow (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllLabelsOrThrow(),
 });
 const benchStore = offlineJwksStore();
 results.push({
