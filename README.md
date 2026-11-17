@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2288 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2289 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -302,7 +302,17 @@ asserted outside the printed lines against hand-pinned
 expectations, while the input request's headers are shown
 unchanged; the same request signed the legal way, with ed25519,
 is printed verifying, so the segment shows the guards refuse the
-parameters, not the request.
+parameters, not the request. The demo closes with a per-label
+structured-field types segment: the same `x-quota` field is
+judged under `verifyAllLabels`' `structuredFieldTypesByLabel`
+map — a lone token `a` verifies under both labels when the
+merchant (`sig1`) registry reads it as a Dictionary and the
+gateway registry reads it as an Item, while a Dictionary-shaped
+`a=1` signed with no registry verifies under the same split map
+for the merchant label only and fails the gateway label closed
+with `SIGNATURE_BASE_BUILD_FAILED` — showing that a field's type
+is a per-label agreement, and a mis-registered label is rejected
+alone without dragging the other label down.
 
 ```bash
 npm run demo
@@ -4999,7 +5009,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2288 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2289 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

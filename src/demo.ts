@@ -1302,6 +1302,19 @@
  * text. The base carries no key or signature bytes and every input
  * is a fixed demo constant, so the printed base is identical
  * between runs.
+ * The demo closes with a per-label structured-field types
+ * segment: the same `x-quota` field is judged under
+ * `verifyAllLabels`' `structuredFieldTypesByLabel` map — a lone
+ * token `a` verifies under both labels when the merchant (`sig1`)
+ * registry reads it as a Dictionary and the gateway registry
+ * reads it as an Item, while a Dictionary-shaped `a=1` signed
+ * with no registry verifies under the same split map for the
+ * merchant label only and fails the gateway label closed with
+ * `SIGNATURE_BASE_BUILD_FAILED` — showing that a field's type
+ * is a per-label agreement, and a mis-registered label is
+ * rejected alone without dragging the other label down. Every
+ * input and expectation is a fixed constant, so the segment is
+ * byte-identical between runs.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the library
@@ -3966,6 +3979,53 @@ export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_CODE: VerifyFailureCode =
  */
 export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_REJECT_REASON =
   `signature is too old: created ${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_AGE_SEC}s ago, older than maxSignatureAgeSec=${DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_WINDOW_SEC}`;
+
+/** Label of the per-label structured-field types segment's merchant signature (the demo's main `sig1` label). */
+export const DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL = "sig1";
+/** Label of the per-label structured-field types segment's gateway signature. */
+export const DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL = "gateway";
+/** Key id the per-label structured-field types segment's merchant signature carries. */
+export const DEMO_SF_TYPES_BY_LABEL_MERCHANT_KEY_ID = "sig1-key-1";
+/** Key id the per-label structured-field types segment's gateway signature carries. */
+export const DEMO_SF_TYPES_BY_LABEL_GATEWAY_KEY_ID = "gateway-key-1";
+/** Absolute URL the per-label structured-field types segment signs. */
+export const DEMO_SF_TYPES_BY_LABEL_URL =
+  "https://api.example.com/v1/payments";
+/** `created` both segment signatures carry (the pinned `DEMO_CREATED` instant). */
+export const DEMO_SF_TYPES_BY_LABEL_CREATED = DEMO_CREATED;
+/** Verifier clock for the per-label structured-field types segment (60s after `DEMO_CREATED`). */
+export const DEMO_SF_TYPES_BY_LABEL_NOW = DEMO_CREATED + 60;
+/**
+ * Lone-token field value for the segment's first pass: `a`
+ * serializes identically as a Dictionary (bare key) and as an
+ * Item (token), so both labels verify under their own registries.
+ */
+export const DEMO_SF_TYPES_BY_LABEL_TOKEN_VALUE = "a";
+/**
+ * Dictionary-shaped field value for the segment's second pass:
+ * `a=1` parses as a Dictionary but not as an Item, so the
+ * Item-registered label fails closed while the
+ * Dictionary-registered label still verifies.
+ */
+export const DEMO_SF_TYPES_BY_LABEL_DICT_VALUE = "a=1";
+/** Covered components both segment signatures carry: the method plus the `;sf` field under test. */
+export const DEMO_SF_TYPES_BY_LABEL_COVERED: string[] = [
+  "@method",
+  "x-quota;sf",
+];
+/**
+ * Hand-pinned failure code when a label's registry disagrees
+ * with the wire value's type (`SIGNATURE_BASE_BUILD_FAILED`).
+ */
+export const DEMO_SF_TYPES_BY_LABEL_REJECT_CODE: VerifyFailureCode =
+  "SIGNATURE_BASE_BUILD_FAILED";
+/**
+ * Hand-pinned `SIGNATURE_BASE_BUILD_FAILED` reason for the
+ * gateway label (the exact wording `src/verify.ts` returns
+ * when `x-quota: a=1` is registered as an Item).
+ */
+export const DEMO_SF_TYPES_BY_LABEL_REJECT_REASON =
+  `cannot rebuild signature base: covered header field "x-quota" cannot be serialized with ";sf": not a valid Item Structured Field value: trailing characters after item`;
 
 /** Absolute URL the `@query-param` segment signs (`a` bound, `b` unbound). */
 export const DEMO_QUERY_PARAM_URL =
@@ -6896,6 +6956,22 @@ export interface DemoResult {
    * `DEMO_NONCE` expectations).
    */
   signGuardControlVerification: VerifyResult;
+  /**
+   * The per-label structured-field types segment's first pass:
+   * the lone-token `x-quota: a` request verified with
+   * `structuredFieldTypesByLabel` mapping `sig1` to a Dictionary
+   * registry and `gateway` to an Item registry — both labels
+   * verify, in wire order.
+   */
+  sfTypesByLabelTokenVerification: VerifyResult[];
+  /**
+   * The per-label structured-field types segment's second pass:
+   * the Dictionary-shaped `x-quota: a=1` request (signed with no
+   * registry) verified under the same split map — the `sig1`
+   * label verifies while the `gateway` label fails with
+   * `SIGNATURE_BASE_BUILD_FAILED`, in wire order.
+   */
+  sfTypesByLabelMismatchVerification: VerifyResult[];
   lines: string[];
 }
 
@@ -16099,6 +16175,154 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Per-label structured-field types segment (backlog #1209):
+  // the global `structuredFieldTypes` registry cannot split a
+  // dual signature whose labels disagree on a field's type — the
+  // merchant reads `x-quota` as a Dictionary while the gateway
+  // reads the same wire value as an Item. `verifyAllLabels`'
+  // `structuredFieldTypesByLabel` map gives each label its own
+  // registry. Two fresh ed25519 key pairs mint the dual-label
+  // fixture (`sig1` via `signRequest`, `gateway` appended via
+  // `addSignature`). First pass: a lone token `a` serializes
+  // identically as a Dictionary (bare key) and as an Item
+  // (token), so both labels verify under their own registries.
+  // Second pass: a Dictionary-shaped `a=1` signed with no
+  // registry is verified under the same split map — the `sig1`
+  // label still verifies while the gateway label fails closed
+  // with `SIGNATURE_BASE_BUILD_FAILED`, proving a mis-registered
+  // label is rejected alone and never drags the other label
+  // down. Outside the printed lines the demo asserts every
+  // outcome, label, code, reason and keyid equals the
+  // hand-pinned expectations.
+  const sfTypesByLabelMerchantPair = generateEd25519KeyPair();
+  const sfTypesByLabelGatewayPair = generateEd25519KeyPair();
+  const sfTypesByLabelKeys = {
+    [DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL]:
+      sfTypesByLabelMerchantPair.publicKey,
+    [DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL]:
+      sfTypesByLabelGatewayPair.publicKey,
+  };
+  const sfTypesByLabelTokenRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_SF_TYPES_BY_LABEL_URL,
+    headers: { "x-quota": DEMO_SF_TYPES_BY_LABEL_TOKEN_VALUE },
+  };
+  const sfTypesByLabelTokenMerchantSigned = signRequest(
+    sfTypesByLabelTokenRequest,
+    {
+      keyId: DEMO_SF_TYPES_BY_LABEL_MERCHANT_KEY_ID,
+      alg: "ed25519",
+      key: sfTypesByLabelMerchantPair.privateKey,
+      created: DEMO_SF_TYPES_BY_LABEL_CREATED,
+      label: DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL,
+      coveredComponents: [...DEMO_SF_TYPES_BY_LABEL_COVERED],
+      structuredFieldTypes: { "x-quota": "dictionary" },
+    },
+  );
+  const sfTypesByLabelTokenSigned = addSignature(
+    sfTypesByLabelTokenMerchantSigned,
+    {
+      keyId: DEMO_SF_TYPES_BY_LABEL_GATEWAY_KEY_ID,
+      alg: "ed25519",
+      key: sfTypesByLabelGatewayPair.privateKey,
+      created: DEMO_SF_TYPES_BY_LABEL_CREATED,
+      label: DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL,
+      coveredComponents: [...DEMO_SF_TYPES_BY_LABEL_COVERED],
+      structuredFieldTypes: { "x-quota": "item" },
+    },
+  );
+  const sfTypesByLabelTokenVerification = verifyAllLabels(
+    sfTypesByLabelTokenSigned,
+    {
+      keys: sfTypesByLabelKeys,
+      now: DEMO_SF_TYPES_BY_LABEL_NOW,
+      structuredFieldTypesByLabel: {
+        [DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL]: {
+          "x-quota": "dictionary",
+        },
+        [DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL]: {
+          "x-quota": "item",
+        },
+      },
+    },
+  );
+  const sfTypesByLabelDictRequest: RequestLike = {
+    method: "POST",
+    url: DEMO_SF_TYPES_BY_LABEL_URL,
+    headers: { "x-quota": DEMO_SF_TYPES_BY_LABEL_DICT_VALUE },
+  };
+  const sfTypesByLabelDictMerchantSigned = signRequest(
+    sfTypesByLabelDictRequest,
+    {
+      keyId: DEMO_SF_TYPES_BY_LABEL_MERCHANT_KEY_ID,
+      alg: "ed25519",
+      key: sfTypesByLabelMerchantPair.privateKey,
+      created: DEMO_SF_TYPES_BY_LABEL_CREATED,
+      label: DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL,
+      coveredComponents: [...DEMO_SF_TYPES_BY_LABEL_COVERED],
+    },
+  );
+  const sfTypesByLabelDictSigned = addSignature(
+    sfTypesByLabelDictMerchantSigned,
+    {
+      keyId: DEMO_SF_TYPES_BY_LABEL_GATEWAY_KEY_ID,
+      alg: "ed25519",
+      key: sfTypesByLabelGatewayPair.privateKey,
+      created: DEMO_SF_TYPES_BY_LABEL_CREATED,
+      label: DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL,
+      coveredComponents: [...DEMO_SF_TYPES_BY_LABEL_COVERED],
+    },
+  );
+  const sfTypesByLabelMismatchVerification = verifyAllLabels(
+    sfTypesByLabelDictSigned,
+    {
+      keys: sfTypesByLabelKeys,
+      now: DEMO_SF_TYPES_BY_LABEL_NOW,
+      structuredFieldTypesByLabel: {
+        [DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL]: {
+          "x-quota": "dictionary",
+        },
+        [DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL]: {
+          "x-quota": "item",
+        },
+      },
+    },
+  );
+  if (
+    sfTypesByLabelTokenVerification.length !== 2 ||
+    sfTypesByLabelTokenVerification[0].label !==
+      DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL ||
+    sfTypesByLabelTokenVerification[0].ok !== true ||
+    sfTypesByLabelTokenVerification[0].keyId !==
+      DEMO_SF_TYPES_BY_LABEL_MERCHANT_KEY_ID ||
+    sfTypesByLabelTokenVerification[1].label !==
+      DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL ||
+    sfTypesByLabelTokenVerification[1].ok !== true ||
+    sfTypesByLabelTokenVerification[1].keyId !==
+      DEMO_SF_TYPES_BY_LABEL_GATEWAY_KEY_ID ||
+    sfTypesByLabelMismatchVerification.length !== 2 ||
+    sfTypesByLabelMismatchVerification[0].label !==
+      DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL ||
+    sfTypesByLabelMismatchVerification[0].ok !== true ||
+    sfTypesByLabelMismatchVerification[0].keyId !==
+      DEMO_SF_TYPES_BY_LABEL_MERCHANT_KEY_ID ||
+    sfTypesByLabelMismatchVerification[1].label !==
+      DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL ||
+    sfTypesByLabelMismatchVerification[1].ok !== false ||
+    sfTypesByLabelMismatchVerification[1].code !==
+      DEMO_SF_TYPES_BY_LABEL_REJECT_CODE ||
+    sfTypesByLabelMismatchVerification[1].reason !==
+      DEMO_SF_TYPES_BY_LABEL_REJECT_REASON
+  ) {
+    throw new Error(
+      `demo fixture broken: per-label structured-field types gave ` +
+        `token ${JSON.stringify(sfTypesByLabelTokenVerification)} and mismatch ` +
+        `${JSON.stringify(sfTypesByLabelMismatchVerification)}, instead of both labels ` +
+        `verifying the token field and only the gateway label failing the ` +
+        `Dictionary field with ${DEMO_SF_TYPES_BY_LABEL_REJECT_CODE}`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -16962,6 +17186,16 @@ export async function runDemo(): Promise<DemoResult> {
     signGuardControlVerification.ok
       ? `Control: the same request signed with ed25519: OK (label ${signGuardControlVerification.label}, keyid="${signGuardControlVerification.keyId}", alg="ed25519")`
       : `Control: the same request signed with ed25519: FAILED (code ${signGuardControlVerification.code}: ${signGuardControlVerification.reason})`,
+    "",
+    "Per-label structured-field types: verifyAllLabels' structuredFieldTypesByLabel map gives each label its own structured-field type registry — the merchant signature parses \"x-quota\" as a Dictionary while the gateway signature parses the same field as an Item, and a single global registry cannot split a dual signature whose labels disagree on a field's type — a type disagreement fails that label's base build, it never drags the other label down",
+    sfTypesByLabelTokenVerification[0]!.ok === true &&
+    sfTypesByLabelTokenVerification[1]!.ok === true
+      ? `Token field "x-quota: a" verified with structuredFieldTypesByLabel { sig1: dictionary, gateway: item }: sig1 OK (label ${DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_SF_TYPES_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_SF_TYPES_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — the lone token serializes identically as a Dictionary and an Item`
+      : `Token field "x-quota: a" verified with structuredFieldTypesByLabel { sig1: dictionary, gateway: item }: sig1 ${sfTypesByLabelTokenVerification[0]!.ok ? "OK" : `FAILED (unexpected — the Dictionary-registered label was not supposed to fail)`}, gateway ${sfTypesByLabelTokenVerification[1]!.ok ? "OK" : `FAILED (unexpected — the Item-registered label was not supposed to fail on a lone token)`}`,
+    sfTypesByLabelMismatchVerification[0]!.ok === true &&
+    sfTypesByLabelMismatchVerification[1]!.ok === false
+      ? `Dictionary field "x-quota: a=1" verified with structuredFieldTypesByLabel { sig1: dictionary, gateway: item }: sig1 OK (label ${DEMO_SF_TYPES_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_SF_TYPES_BY_LABEL_MERCHANT_KEY_ID}", alg="ed25519"), gateway FAILED (label ${DEMO_SF_TYPES_BY_LABEL_GATEWAY_LABEL}, code ${sfTypesByLabelMismatchVerification[1]!.code}: ${sfTypesByLabelMismatchVerification[1]!.reason}) — only the mis-registered label is rejected`
+      : `Dictionary field "x-quota: a=1" verified with structuredFieldTypesByLabel { sig1: dictionary, gateway: item }: sig1 ${sfTypesByLabelMismatchVerification[0]!.ok ? "OK" : `FAILED (unexpected — the Dictionary-registered label was dragged down by the gateway mismatch)`}, gateway ${sfTypesByLabelMismatchVerification[1]!.ok ? "OK (unexpected — the Item-registered label was not rejected for the Dictionary value)" : `code ${sfTypesByLabelMismatchVerification[1]!.code}`}`,
   ];
 
   return {
@@ -17376,6 +17610,8 @@ export async function runDemo(): Promise<DemoResult> {
     signGuardRequestHeadersUnchanged,
     signGuardControlSigned,
     signGuardControlVerification,
+    sfTypesByLabelTokenVerification,
+    sfTypesByLabelMismatchVerification,
     lines,
   };
 }
