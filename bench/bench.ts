@@ -508,7 +508,24 @@
  * fresh store is built on every measured pass and must refresh once
  * with an effective TTL of 60, fresh at +59s and stale at +61s —
  * with the `max-age=3600` never-lengthens half (effective TTL stays
- * 300) asserted outside timing, plus the key-retirement path a gateway runs when a
+ * 300) asserted outside timing, plus the body-limit rejection path a
+ * gateway pays when its JWKS endpoint serves an over-limit body:
+ * `JwksKeyStore.refresh` with `maxBodyBytes: 128` over a real
+ * loopback `http` server that serves a small pinned document on the
+ * first request only (the priming refresh) and an oversized
+ * three-shape JWKS document on every later request, both with an
+ * honest Content-Length, so every measured refresh trips the
+ * Content-Length precheck and never reads the body (a recording stub
+ * sleep is injected and must stay at zero waits — the rejection is
+ * terminal for retries, so no wall clock is ever spent waiting),
+ * self-checked on every measured pass (each refresh throws the exact
+ * Content-Length rejection carrying the endpoint URL, makes exactly
+ * one fetch, counts exactly one `stats().refreshFailures` and no
+ * more `stats().refreshes`, and leaves the primed snapshot and
+ * `lastRefreshedAt` untouched), with a lying Content-Length
+ * (advertised 10 bytes, actually over the cap) still intercepted by
+ * the post-read byte check asserted outside timing, plus the
+ * key-retirement path a gateway runs when a
  * key is distrusted or rotated out: `JwksKeyStore.clear` + `keyIds`
  * over a store holding three cached kids fetched from a real
  * loopback `http` server — every measured op lists the kids, clears
@@ -11117,6 +11134,248 @@ async function benchmarkJwksRefreshCacheControlMaxAge(): Promise<number> {
 }
 
 /**
+ * Pinned shape of the `JwksKeyStore.refresh` maxBodyBytes benchmark
+ * documents: a small one-key (ed25519) JWKS document that fits under
+ * the 128-byte cap, and the three-shape document (ed25519 / P-256 /
+ * RSA) the loopback row serves, which is far over it. Both bodies
+ * are built once, outside timing, and their byte lengths are pinned
+ * against the cap before anything serves them.
+ */
+const JWKS_REFRESH_MAX_BODY_KID = "bench-max-body";
+const JWKS_REFRESH_MAX_BODY_LIMIT = 128;
+const JWKS_REFRESH_MAX_BODY_KIDS = [
+  "bench-max-body-ed25519",
+  "bench-max-body-p256",
+  "bench-max-body-rsa",
+] as const;
+
+/**
+ * `JwksKeyStore.refresh` with `maxBodyBytes: 128` over a real
+ * loopback endpoint serving an over-limit JWKS body: the rejection
+ * path a gateway pays when its JWKS endpoint is compromised or
+ * hostile and serves an absurd body. The server serves the small
+ * pinned document on its first request only (the priming refresh)
+ * and the oversized three-shape document on every later request,
+ * both with an honest Content-Length, so every measured refresh
+ * trips the Content-Length precheck and never reads the body. One
+ * store is primed once, outside timing, and reused for every
+ * measured pass — the rejection must leave the primed snapshot
+ * usable, so a fresh store per pass would time an unprimed path
+ * instead. A recording stub sleep is injected (a rejection is
+ * terminal for retries, so zero waits must ever be recorded).
+ * Every measured pass self-checks the same pins: the refresh throws
+ * the exact Content-Length rejection carrying the endpoint URL, the
+ * server saw exactly one more fetch, `stats()` counted exactly one
+ * more `refreshFailures` and no more `refreshes`, `lastRefreshedAt`
+ * is unchanged, and the primed kid still resolves. Outside timing,
+ * a lying Content-Length (advertised 10 bytes, actually over the
+ * cap) is served through a fake fetch and must still be intercepted
+ * by the post-read byte check, with the same old-snapshot-kept
+ * pins.
+ */
+async function benchmarkJwksRefreshMaxBodyBytes(): Promise<number> {
+  const ed25519 = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const rsa = generateRsaPssKeyPair();
+  const smallDoc = {
+    keys: [
+      {
+        ...exportPublicKeyJwk(ed25519.publicKey),
+        kid: JWKS_REFRESH_MAX_BODY_KID,
+      },
+    ],
+  };
+  const bigDoc = {
+    keys: [
+      {
+        ...exportPublicKeyJwk(ed25519.publicKey),
+        kid: JWKS_REFRESH_MAX_BODY_KIDS[0],
+      },
+      {
+        ...exportPublicKeyJwkP256(p256.publicKey),
+        kid: JWKS_REFRESH_MAX_BODY_KIDS[1],
+      },
+      {
+        ...exportPublicKeyJwkRsa(rsa.publicKey),
+        kid: JWKS_REFRESH_MAX_BODY_KIDS[2],
+      },
+    ],
+  };
+  const smallBody = JSON.stringify(smallDoc);
+  const bigBody = JSON.stringify(bigDoc);
+  const smallBytes = Buffer.byteLength(smallBody, "utf8");
+  const bigBytes = Buffer.byteLength(bigBody, "utf8");
+  if (smallBytes >= JWKS_REFRESH_MAX_BODY_LIMIT)
+    throw new Error(
+      `benchmark self-check failed: priming JWKS body is ${smallBytes} bytes (expected under the ${JWKS_REFRESH_MAX_BODY_LIMIT} byte cap)`,
+    );
+  if (bigBytes <= JWKS_REFRESH_MAX_BODY_LIMIT)
+    throw new Error(
+      `benchmark self-check failed: oversized JWKS body is ${bigBytes} bytes (expected over the ${JWKS_REFRESH_MAX_BODY_LIMIT} byte cap)`,
+    );
+  const sleepMs: number[] = [];
+  const sleepImpl = async (ms: number): Promise<void> => {
+    sleepMs.push(ms);
+  };
+  // Outside timing: a lying Content-Length under the cap must not
+  // bypass the post-read byte check. The fake fetch serves the small
+  // document on its first call (the prime) and the oversized
+  // document with an advertised 10-byte Content-Length afterwards.
+  // `number`, not the inferred literal `0`: the `!== 1` throw below
+  // would otherwise narrow the counter to `1` and the `!== 2` check
+  // after the lying refresh would fail to compile (TS2367) — the
+  // expected count is therefore a `number` constant, the same dodge
+  // as `JWKS_CLEAR_COUNT` below.
+  let lyingCalls: number = 0;
+  const LYING_FETCH_EXPECTED_CALLS: number = 2;
+  const lyingFetch: JwksFetchImpl = async () => {
+    lyingCalls++;
+    if (lyingCalls === 1)
+      return {
+        ok: true,
+        status: 200,
+        json: async () => JSON.parse(smallBody) as unknown,
+        text: async () => smallBody,
+        headers: { get: () => null },
+      };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new Error("json() must not be called on the text() path");
+      },
+      text: async () => bigBody,
+      headers: {
+        get: (name: string) =>
+          name.toLowerCase() === "content-length" ? "10" : null,
+      },
+    };
+  };
+  const lyingUrl = "https://gateway.example.com/.well-known/jwks.json";
+  const lyingStore = new JwksKeyStore(lyingUrl, {
+    fetchImpl: lyingFetch,
+    maxBodyBytes: JWKS_REFRESH_MAX_BODY_LIMIT,
+    sleepImpl,
+  });
+  await lyingStore.refresh();
+  const lyingPrimedAt = lyingStore.lastRefreshedAt;
+  if (
+    lyingCalls !== 1 ||
+    lyingPrimedAt === null ||
+    lyingStore.resolve(JWKS_REFRESH_MAX_BODY_KID) === undefined ||
+    lyingStore.stats().refreshes !== 1 ||
+    lyingStore.stats().refreshFailures !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: lying-fetch prime gave calls ${lyingCalls}, lastRefreshedAt ${lyingPrimedAt}, stats ${JSON.stringify(lyingStore.stats())} (expected calls 1, a lastRefreshedAt, refreshes 1, refreshFailures 0, pinned kid resolving)`,
+    );
+  let lyingErr: unknown;
+  try {
+    await lyingStore.refresh();
+  } catch (e) {
+    lyingErr = e;
+  }
+  const expectedLyingMessage =
+    `JwksKeyStore: JWKS response from ${lyingUrl} exceeds the ` +
+    `${JWKS_REFRESH_MAX_BODY_LIMIT} byte body limit (received ${bigBytes} bytes)`;
+  if (!(lyingErr instanceof Error) || lyingErr.message !== expectedLyingMessage)
+    throw new Error(
+      `benchmark self-check failed: lying Content-Length refresh threw ${lyingErr instanceof Error ? JSON.stringify(lyingErr.message) : String(lyingErr)} (expected ${JSON.stringify(expectedLyingMessage)})`,
+    );
+  if (
+    lyingCalls !== LYING_FETCH_EXPECTED_CALLS ||
+    lyingStore.resolve(JWKS_REFRESH_MAX_BODY_KID) === undefined ||
+    lyingStore.lastRefreshedAt !== lyingPrimedAt ||
+    lyingStore.stats().refreshes !== 1 ||
+    lyingStore.stats().refreshFailures !== 1
+  )
+    throw new Error(
+      `benchmark self-check failed: lying Content-Length refresh left calls ${lyingCalls}, lastRefreshedAt ${lyingStore.lastRefreshedAt}, stats ${JSON.stringify(lyingStore.stats())} (expected calls ${LYING_FETCH_EXPECTED_CALLS}, lastRefreshedAt ${lyingPrimedAt}, refreshes 1, refreshFailures 1, pinned kid resolving)`,
+    );
+  // The loopback server serves the small document on its first
+  // request only (the priming refresh) and the oversized document on
+  // every later request, both with an honest Content-Length.
+  let requests = 0;
+  const server = createServer((req, res) => {
+    void req;
+    requests++;
+    const body = requests === 1 ? smallBody : bigBody;
+    res.writeHead(200, {
+      "content-type": "application/json",
+      "content-length": String(Buffer.byteLength(body, "utf8")),
+    });
+    res.end(body);
+  });
+  try {
+    const url = await new Promise<string>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => {
+        const port = (server.address() as AddressInfo).port;
+        resolve(`http://127.0.0.1:${port}/.well-known/jwks.json`);
+      });
+      server.on("error", reject);
+    });
+    const store = new JwksKeyStore(url, {
+      maxBodyBytes: JWKS_REFRESH_MAX_BODY_LIMIT,
+      sleepImpl,
+    });
+    // Outside timing: the priming refresh installs the small snapshot.
+    await store.refresh();
+    const primedAt = store.lastRefreshedAt;
+    if (
+      requests !== 1 ||
+      primedAt === null ||
+      store.resolve(JWKS_REFRESH_MAX_BODY_KID) === undefined ||
+      store.stats().refreshes !== 1 ||
+      store.stats().refreshFailures !== 0
+    )
+      throw new Error(
+        `benchmark self-check failed: priming maxBodyBytes refresh gave requests ${requests}, lastRefreshedAt ${primedAt}, stats ${JSON.stringify(store.stats())} (expected requests 1, a lastRefreshedAt, refreshes 1, refreshFailures 0, pinned kid resolving)`,
+      );
+    const expectedMessage =
+      `JwksKeyStore: JWKS response from ${url} exceeds the ` +
+      `${JWKS_REFRESH_MAX_BODY_LIMIT} byte body limit (Content-Length: ${bigBytes} bytes)`;
+    const ops = await measureAsync(async () => {
+      const beforeRequests = requests;
+      const beforeFailures = store.stats().refreshFailures;
+      let err: unknown;
+      try {
+        await store.refresh();
+      } catch (e) {
+        err = e;
+      }
+      if (!(err instanceof Error) || err.message !== expectedMessage)
+        throw new Error(
+          `benchmark self-check failed: maxBodyBytes refresh threw ${err instanceof Error ? JSON.stringify(err.message) : String(err)} (expected ${JSON.stringify(expectedMessage)})`,
+        );
+      if (requests - beforeRequests !== 1)
+        throw new Error(
+          `benchmark self-check failed: maxBodyBytes refresh made ${requests - beforeRequests} fetches (expected 1)`,
+        );
+      const stats = store.stats();
+      if (stats.refreshFailures - beforeFailures !== 1 || stats.refreshes !== 1)
+        throw new Error(
+          `benchmark self-check failed: maxBodyBytes refresh counted stats ${JSON.stringify(stats)} (expected refreshFailures +1, refreshes 1)`,
+        );
+      if (store.lastRefreshedAt !== primedAt)
+        throw new Error(
+          `benchmark self-check failed: maxBodyBytes refresh moved lastRefreshedAt from ${primedAt} to ${store.lastRefreshedAt} (expected unchanged)`,
+        );
+      if (store.resolve(JWKS_REFRESH_MAX_BODY_KID) === undefined)
+        throw new Error(
+          "benchmark self-check failed: maxBodyBytes refresh dropped the primed kid",
+        );
+    }, ITERATIONS);
+    if (sleepMs.length !== 0)
+      throw new Error(
+        `benchmark self-check failed: maxBodyBytes path recorded ${sleepMs.length} sleeps (${JSON.stringify(sleepMs)} ms) (expected 0 — the rejection is terminal for retries)`,
+      );
+    return ops;
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/**
  * Pinned shape of the `JwksKeyStore.clear` + `keyIds` benchmark
  * document: the three key shapes the store supports (ed25519 /
  * P-256 / RSA), one freshly generated key pair per shape
@@ -17853,6 +18112,11 @@ results.push({
   alg: "JwksKeyStore.refresh (Cache-Control max-age=60)",
   op: "refresh",
   ops: await benchmarkJwksRefreshCacheControlMaxAge(),
+});
+results.push({
+  alg: "JwksKeyStore.refresh (maxBodyBytes 128, loopback reject)",
+  op: "refresh",
+  ops: await benchmarkJwksRefreshMaxBodyBytes(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (fresh)",
