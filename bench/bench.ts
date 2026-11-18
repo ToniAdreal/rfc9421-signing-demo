@@ -582,7 +582,17 @@
  * resolving and two unknown kids missing — self-checked on every
  * measured pass against the hand-pinned six-counter snapshot, with
  * the detached-copy, empty-store and cleared-store readings
- * asserted outside timing, plus the snapshot-restore
+ * asserted outside timing, plus the memoized-resolver
+ * observability snapshot path a verifier's monitoring polls on
+ * every tick: `memoizeKeyResolver(...).stats()` over a fixed-clock
+ * resolver with a pinned four-key set and a three-entry capacity
+ * (see MEMOIZE_STATS_* below) — three hits, six misses and one
+ * LRU eviction accumulated during construction, the unknown keyid
+ * looked up twice and never cached — self-checked on every
+ * measured pass against the hand-pinned `{ size, hits, misses,
+ * evictions }` snapshot, with the detached-copy, empty-resolver
+ * and cleared-resolver readings asserted outside timing, plus the
+ * snapshot-restore
  * path a single-process verifier runs at startup to rebuild its
  * replay cache from the persisted snapshot:
  * `ReplayCache.fromSnapshot` over a pinned envelope exported from
@@ -1040,6 +1050,7 @@ import {
   type JwksFetchImpl,
   type JwksFetchInit,
   type JwksFetchResponse,
+  type MemoizedKeyResolver,
   type RequestLike,
   type ReplayCacheSignedSnapshotEnvelope,
   type SignatureParams,
@@ -12791,6 +12802,173 @@ async function benchmarkJwksKeyStoreStats(): Promise<number> {
   }, ITERATIONS);
 }
 
+/** Base instant of the memoized-resolver stats fixture (no wall clock). */
+const MEMOIZE_STATS_NOW = 1_700_000_000;
+/** TTL of the memoized-resolver stats fixture, in seconds. */
+const MEMOIZE_STATS_TTL_SEC = 300;
+/** Capacity of the memoized-resolver stats fixture. */
+const MEMOIZE_STATS_MAX_ENTRIES = 3;
+/** Pinned keyids of the memoized-resolver stats fixture. */
+const MEMOIZE_STATS_KIDS = [
+  "bench-memoize-stats-k1",
+  "bench-memoize-stats-k2",
+  "bench-memoize-stats-k3",
+  "bench-memoize-stats-k4",
+] as const;
+/** Keyid the fixture looks up but the store never holds. */
+const MEMOIZE_STATS_UNKNOWN_KID = "bench-memoize-stats-missing";
+/**
+ * Hand-pinned stats of the fixture — written literally from the
+ * construction script in {@link memoizeStatsFixture} and
+ * cross-checked against the memoizeKeyResolverStats tests, never
+ * derived from `stats()` itself: three cached keys, three hits,
+ * six misses and one LRU eviction.
+ */
+const MEMOIZE_STATS_EXPECTED = { size: 3, hits: 3, misses: 6, evictions: 1 };
+
+/**
+ * Build the fixed memoized-resolver stats fixture: a counting
+ * underlying resolver over a pinned four-key store, wrapped with
+ * an injected clock frozen at MEMOIZE_STATS_NOW (no wall clock
+ * is ever read). The keys are cheap deterministic secret keys —
+ * memoization never inspects key material, so the key shape is
+ * irrelevant to the counters (the same approach the
+ * memoizeKeyResolverStats tests use).
+ *
+ * - Resolving k1, k2, k3 fills the three-entry cache (3 misses).
+ * - Re-resolving k1, k3, k1 again serves three hits — each hit
+ *   refreshes LRU recency but never extends the entry's TTL.
+ * - Looking up the unknown kid twice counts two more misses and
+ *   caches nothing (unknown keyids are deliberately never cached).
+ * - Resolving k4 is the sixth miss: making room LRU-evicts k2
+ *   (the head of the map — the hits above moved k1 and k3 to
+ *   the tail), so the map holds k3, k1, k4 and one eviction is
+ *   counted.
+ *
+ * Every miss penetrates to the underlying resolver exactly once,
+ * so the underlying call count equals the miss count.
+ */
+function memoizeStatsFixture(): {
+  memoized: MemoizedKeyResolver;
+  calls: () => number;
+} {
+  const store = new Map<string, KeyObject>(
+    MEMOIZE_STATS_KIDS.map((id) => [
+      id,
+      createSecretKey(Buffer.from(`memoize-stats-${id}`, "utf8")),
+    ]),
+  );
+  let underlying = 0;
+  const counting = (keyId: string): KeyObject | undefined => {
+    underlying++;
+    return store.get(keyId);
+  };
+  const memoized = memoizeKeyResolver(counting, {
+    ttlSec: MEMOIZE_STATS_TTL_SEC,
+    maxEntries: MEMOIZE_STATS_MAX_ENTRIES,
+    now: () => MEMOIZE_STATS_NOW,
+  });
+  const resolve = (keyId: string): void => {
+    const resolved = memoized(keyId);
+    if (resolved !== store.get(keyId))
+      throw new Error(
+        `benchmark self-check failed: memoize stats fixture kid ${JSON.stringify(keyId)} ` +
+          `resolved to ${resolved === undefined ? "undefined" : "the wrong key"}`,
+      );
+  };
+  for (const kid of MEMOIZE_STATS_KIDS.slice(0, 3)) resolve(kid);
+  resolve(MEMOIZE_STATS_KIDS[0]!);
+  resolve(MEMOIZE_STATS_KIDS[2]!);
+  resolve(MEMOIZE_STATS_KIDS[0]!);
+  resolve(MEMOIZE_STATS_UNKNOWN_KID);
+  resolve(MEMOIZE_STATS_UNKNOWN_KID);
+  resolve(MEMOIZE_STATS_KIDS[3]!);
+  assertMemoizeKeyResolverStats(memoized, () => underlying);
+  return { memoized, calls: () => underlying };
+}
+
+/**
+ * Pin one stats reading of the fixture against the hand-written
+ * expectation, field by field, with the underlying call count
+ * agreeing with the miss count (every miss penetrates exactly
+ * once; hits never do).
+ */
+function assertMemoizeKeyResolverStats(
+  memoized: MemoizedKeyResolver,
+  calls: () => number,
+): void {
+  const stats = memoized.stats();
+  if (
+    stats.size !== MEMOIZE_STATS_EXPECTED.size ||
+    stats.hits !== MEMOIZE_STATS_EXPECTED.hits ||
+    stats.misses !== MEMOIZE_STATS_EXPECTED.misses ||
+    stats.evictions !== MEMOIZE_STATS_EXPECTED.evictions ||
+    calls() !== MEMOIZE_STATS_EXPECTED.misses
+  )
+    throw new Error(
+      `benchmark self-check failed: memoize stats ${JSON.stringify(stats)} ` +
+        `(expected ${JSON.stringify(MEMOIZE_STATS_EXPECTED)}, ` +
+        `underlying calls ${calls()})`,
+    );
+}
+
+/**
+ * `memoizeKeyResolver(...).stats` steady state: every measured call
+ * re-reads the observability snapshot of the fixed-clock fixture and
+ * re-pins it (see {@link assertMemoizeKeyResolverStats}) — the
+ * four-counter detached copy a verifier's monitoring pays on every
+ * polling tick. `stats()` is a pure read, so the timed loop reuses
+ * this one fixture. Outside timing, the detached-copy semantics are
+ * asserted (mutating a returned snapshot — every field rewritten to
+ * 999 — leaves a re-read unchanged), a fresh resolver must report
+ * all-zero stats, and clearing a second primed fixture must reset
+ * all four counters (with `size` 0).
+ */
+function benchmarkMemoizeKeyResolverStats(): number {
+  const { memoized, calls } = memoizeStatsFixture();
+  assertMemoizeKeyResolverStats(memoized, calls);
+  const detached = memoized.stats();
+  detached.size = 999;
+  detached.hits = 999;
+  detached.misses = 999;
+  detached.evictions = 999;
+  assertMemoizeKeyResolverStats(memoized, calls);
+  const empty = memoizeKeyResolver(() => undefined, {
+    now: () => MEMOIZE_STATS_NOW,
+  }).stats();
+  if (
+    empty.size !== 0 ||
+    empty.hits !== 0 ||
+    empty.misses !== 0 ||
+    empty.evictions !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: empty memoize stats ${JSON.stringify(empty)} ` +
+        `(expected { size: 0, hits: 0, misses: 0, evictions: 0 })`,
+    );
+  // Outside timing: clearing a primed fixture resets all four
+  // counters, so a post-clear stats() reads as a fresh resolver
+  // (the same rule the memoizeKeyResolverStats tests pin). A
+  // second fixture is primed for this probe so the measured
+  // fixture stays intact.
+  const cleared = memoizeStatsFixture();
+  cleared.memoized.clear();
+  const clearedStats = cleared.memoized.stats();
+  if (
+    clearedStats.size !== 0 ||
+    clearedStats.hits !== 0 ||
+    clearedStats.misses !== 0 ||
+    clearedStats.evictions !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: cleared memoize stats ${JSON.stringify(clearedStats)} ` +
+        `(expected all-zero stats)`,
+    );
+  return measure(() => {
+    assertMemoizeKeyResolverStats(memoized, calls);
+  }, ITERATIONS);
+}
+
 /** Export instant of the ReplayCache restore fixture (no wall clock). */
 const REPLAY_RESTORE_NOW = 1_700_200_000;
 /** TTL of the ReplayCache restore fixture, in seconds. */
@@ -18780,6 +18958,11 @@ results.push({
   alg: "JwksKeyStore.stats (3 keys)",
   op: "stats",
   ops: await benchmarkJwksKeyStoreStats(),
+});
+results.push({
+  alg: "memoizeKeyResolver stats (3 keys)",
+  op: "stats",
+  ops: benchmarkMemoizeKeyResolverStats(),
 });
 results.push({
   alg: "ReplayCache.fromSnapshot (4 live)",
