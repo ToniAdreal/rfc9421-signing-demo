@@ -574,7 +574,15 @@
  * self-checked on every measured pass against the hand-pinned
  * `{ size, hits, misses, evictions }` snapshot (size counts only
  * the live entries), with the detached-copy and empty-cache
- * readings asserted outside timing, plus the snapshot-restore
+ * readings asserted outside timing, plus the JWKS observability
+ * snapshot path a gateway's monitoring polls on every tick:
+ * `JwksKeyStore.stats()` over a fixed store primed by a counting
+ * fake fetch (see JWKS_STATS_* below) — two 200s under remembered
+ * ETags, one failed refresh and one 304, three pinned kids
+ * resolving and two unknown kids missing — self-checked on every
+ * measured pass against the hand-pinned six-counter snapshot, with
+ * the detached-copy and empty-store readings asserted outside
+ * timing, plus the snapshot-restore
  * path a single-process verifier runs at startup to rebuild its
  * replay cache from the persisted snapshot:
  * `ReplayCache.fromSnapshot` over a pinned envelope exported from
@@ -1030,6 +1038,8 @@ import {
   type IncomingRequestLike,
   type JwksDocumentEntry,
   type JwksFetchImpl,
+  type JwksFetchInit,
+  type JwksFetchResponse,
   type RequestLike,
   type ReplayCacheSignedSnapshotEnvelope,
   type SignatureParams,
@@ -12505,6 +12515,259 @@ function benchmarkReplayCacheStats(): number {
   }, ITERATIONS);
 }
 
+/** Base instant of the JwksKeyStore stats fixture (no wall clock). */
+const JWKS_STATS_NOW_SEC = 1_700_000_000;
+/** TTL of the JwksKeyStore stats fixture, in seconds. */
+const JWKS_STATS_TTL_SEC = 300;
+/** Endpoint the JwksKeyStore stats fixture fetches from (fake fetch, zero network). */
+const JWKS_STATS_URL =
+  "https://gateway.example.com/.well-known/jwks.json";
+/** Pinned kids of the JwksKeyStore stats fixture (ed25519 / P-256 / RSA). */
+const JWKS_STATS_KIDS = [
+  "bench-stats-ed25519",
+  "bench-stats-p256",
+  "bench-stats-rsa",
+] as const;
+/** Unknown kids resolved against the fixture (counted as misses). */
+const JWKS_STATS_UNKNOWN_KIDS = [
+  "bench-stats-retired",
+  "bench-stats-unknown",
+] as const;
+/** ETag the scripted endpoint stamps on its first 200. */
+const JWKS_STATS_ETAG_V1 = '"bench-stats-v1"';
+/** ETag the scripted endpoint stamps on its second (conditional) 200. */
+const JWKS_STATS_ETAG_V2 = '"bench-stats-v2"';
+/**
+ * Hand-pinned stats of the fixture — written literally from the
+ * construction script in {@link jwksStatsFixture} and cross-checked
+ * against the jwksStats tests, never derived from `stats()` itself:
+ * three successful refreshes (two 200s plus the 304, which counts
+ * as a refresh), one failed refresh (the 500), three hits (one per
+ * pinned kid) and two misses (the unknown kids), two conditional
+ * refreshes (the second 200 and the 304 both carried an
+ * If-None-Match) and one not-modified (the 304).
+ */
+const JWKS_STATS_EXPECTED = {
+  refreshes: 3,
+  refreshFailures: 1,
+  hits: 3,
+  misses: 2,
+  conditionalRefreshes: 2,
+  notModified: 1,
+};
+
+/**
+ * A stub 200 serving `doc` and reporting an `ETag` header (looked
+ * up case-insensitively, like the native `Headers`) — the same
+ * shape as the conditional-refresh tests use.
+ */
+function jwksStatsEtagResponse(
+  etag: string,
+  doc: { keys: unknown[] },
+): JwksFetchResponse {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => doc,
+    headers: {
+      get: (name: string) => (name.toLowerCase() === "etag" ? etag : null),
+    },
+  };
+}
+
+/** A 304 response whose `json()` throws if called: a 304 has no body. */
+function jwksStatsNotModifiedResponse(): JwksFetchResponse {
+  return {
+    ok: false,
+    status: 304,
+    json: async () => {
+      throw new Error("json() must not be called on a 304 response");
+    },
+  };
+}
+
+/**
+ * Pin the fetch count after one scripted refresh. A module-level
+ * helper (rather than an inline literal comparison): an earlier
+ * `fetchCalls !== 1` check narrows the counter to the literal `1`
+ * in this file's control flow, and a later `fetchCalls !== 2`
+ * comparison then trips TS2367 — the `number` parameters here keep
+ * the comparison un-narrowed.
+ */
+function assertJwksStatsFetchCount(
+  actual: number,
+  expected: number,
+  where: string,
+): void {
+  if (actual !== expected)
+    throw new Error(
+      `benchmark self-check failed: jwks stats ${where} made ${actual} fetches (expected ${expected})`,
+    );
+}
+
+/**
+ * Build the fixed JwksKeyStore stats fixture: a counting fake fetch
+ * scripts four refreshes against one injected clock (frozen at
+ * JWKS_STATS_NOW_SEC, so no wall clock is ever read).
+ *
+ * - Call 1: an unconditional 200 stamping ETag v1 — the first fetch
+ *   carries no `If-None-Match` (nothing remembered yet) and the
+ *   ETag is remembered at the swap.
+ * - Call 2: a 500 — one `refreshFailures`, the old snapshot kept,
+ *   and the remembered ETag unmoved (a failed refresh never moves
+ *   it).
+ * - Call 3: a conditional 200 stamping ETag v2 — the remembered v1
+ *   ETag is sent as `If-None-Match` and v2 replaces it.
+ * - Call 4: a 304 — conditional on the v2 ETag, the snapshot is
+ *   kept and only the freshness timestamp advances.
+ *
+ * Each pinned kid is then resolved once (three hits) and two
+ * unknown kids are resolved (two misses), so all six counters hold
+ * the non-trivial values in {@link JWKS_STATS_EXPECTED}.
+ */
+async function jwksStatsFixture(): Promise<JwksKeyStore> {
+  const ed25519 = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const rsa = generateRsaPssKeyPair();
+  const doc = {
+    keys: [
+      { ...exportPublicKeyJwk(ed25519.publicKey), kid: JWKS_STATS_KIDS[0] },
+      { ...exportPublicKeyJwkP256(p256.publicKey), kid: JWKS_STATS_KIDS[1] },
+      { ...exportPublicKeyJwkRsa(rsa.publicKey), kid: JWKS_STATS_KIDS[2] },
+    ],
+  };
+  const calls: { url: string; init: JwksFetchInit | undefined }[] = [];
+  let fetchCalls = 0;
+  const fetchImpl: JwksFetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    fetchCalls++;
+    const call = fetchCalls;
+    if (call === 1) return jwksStatsEtagResponse(JWKS_STATS_ETAG_V1, doc);
+    if (call === 2)
+      return { ok: false, status: 500, json: async () => ({}) };
+    if (call === 3) return jwksStatsEtagResponse(JWKS_STATS_ETAG_V2, doc);
+    return jwksStatsNotModifiedResponse();
+  };
+  const store = new JwksKeyStore(JWKS_STATS_URL, {
+    fetchImpl,
+    ttlSec: JWKS_STATS_TTL_SEC,
+    now: () => JWKS_STATS_NOW_SEC,
+  });
+  await store.refresh();
+  assertJwksStatsFetchCount(fetchCalls, 1, "priming refresh");
+  if (calls[0]?.init !== undefined)
+    throw new Error(
+      `benchmark self-check failed: jwks stats priming fetch ${JSON.stringify(calls[0]?.init)} ` +
+        `(expected no init on the first fetch)`,
+    );
+  let failure: unknown;
+  try {
+    await store.refresh();
+  } catch (err) {
+    failure = err;
+  }
+  if (!(failure instanceof Error) || !/HTTP 500/.test(failure.message))
+    throw new Error(
+      `benchmark self-check failed: jwks stats failing refresh gave ${JSON.stringify(String(failure))} ` +
+        `(expected an HTTP 500 rejection)`,
+    );
+  assertJwksStatsFetchCount(fetchCalls, 2, "failing refresh");
+  await store.refresh();
+  assertJwksStatsFetchCount(fetchCalls, 3, "conditional refresh");
+  const thirdInit = calls[2]?.init;
+  if (thirdInit?.headers?.["If-None-Match"] !== JWKS_STATS_ETAG_V1)
+    throw new Error(
+      `benchmark self-check failed: jwks stats third fetch init ${JSON.stringify(thirdInit)} ` +
+        `(expected If-None-Match ${JWKS_STATS_ETAG_V1})`,
+    );
+  await store.refresh();
+  assertJwksStatsFetchCount(fetchCalls, 4, "fixture");
+  const fourthInit = calls[3]?.init;
+  if (fourthInit?.headers?.["If-None-Match"] !== JWKS_STATS_ETAG_V2)
+    throw new Error(
+      `benchmark self-check failed: jwks stats fourth fetch init ${JSON.stringify(fourthInit)} ` +
+        `(expected If-None-Match ${JWKS_STATS_ETAG_V2})`,
+    );
+  for (const kid of JWKS_STATS_KIDS) {
+    if (store.resolve(kid) === undefined)
+      throw new Error(
+        `benchmark self-check failed: jwks stats fixture kid ${JSON.stringify(kid)} does not resolve`,
+      );
+  }
+  for (const kid of JWKS_STATS_UNKNOWN_KIDS) {
+    if (store.resolve(kid) !== undefined)
+      throw new Error(
+        `benchmark self-check failed: jwks stats fixture unknown kid ${JSON.stringify(kid)} resolves`,
+      );
+  }
+  assertJwksStats(store);
+  return store;
+}
+
+/**
+ * Pin one stats reading of the fixture against the hand-written
+ * expectation, counter by counter.
+ */
+function assertJwksStats(store: JwksKeyStore): void {
+  const stats = store.stats();
+  if (
+    stats.refreshes !== JWKS_STATS_EXPECTED.refreshes ||
+    stats.refreshFailures !== JWKS_STATS_EXPECTED.refreshFailures ||
+    stats.hits !== JWKS_STATS_EXPECTED.hits ||
+    stats.misses !== JWKS_STATS_EXPECTED.misses ||
+    stats.conditionalRefreshes !== JWKS_STATS_EXPECTED.conditionalRefreshes ||
+    stats.notModified !== JWKS_STATS_EXPECTED.notModified
+  )
+    throw new Error(
+      `benchmark self-check failed: jwks stats ${JSON.stringify(stats)} ` +
+        `(expected ${JSON.stringify(JWKS_STATS_EXPECTED)})`,
+    );
+}
+
+/**
+ * `JwksKeyStore.stats` steady state: every measured call re-reads
+ * the observability snapshot of the fixed store and re-pins it (see
+ * {@link assertJwksStats}) — the six-counter detached copy a
+ * gateway's monitoring pays on every polling tick. `stats()` is a
+ * pure read, so the timed loop reuses this one fixture. Outside
+ * timing, the detached-copy semantics are asserted (mutating a
+ * returned snapshot — every field rewritten to 999 — leaves a
+ * re-read unchanged) and an empty store must report all-zero stats.
+ */
+async function benchmarkJwksKeyStoreStats(): Promise<number> {
+  const store = await jwksStatsFixture();
+  assertJwksStats(store);
+  const detached = store.stats();
+  detached.refreshes = 999;
+  detached.refreshFailures = 999;
+  detached.hits = 999;
+  detached.misses = 999;
+  detached.conditionalRefreshes = 999;
+  detached.notModified = 999;
+  assertJwksStats(store);
+  const empty = new JwksKeyStore(JWKS_STATS_URL, {
+    fetchImpl: async () => {
+      throw new Error("benchmark must not fetch (offline store)");
+    },
+    now: () => JWKS_STATS_NOW_SEC,
+  }).stats();
+  if (
+    empty.refreshes !== 0 ||
+    empty.refreshFailures !== 0 ||
+    empty.hits !== 0 ||
+    empty.misses !== 0 ||
+    empty.conditionalRefreshes !== 0 ||
+    empty.notModified !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: empty jwks stats ${JSON.stringify(empty)} ` +
+        `(expected all-zero stats)`,
+    );
+  return measure(() => {
+    assertJwksStats(store);
+  }, ITERATIONS);
+}
+
 /** Export instant of the ReplayCache restore fixture (no wall clock). */
 const REPLAY_RESTORE_NOW = 1_700_200_000;
 /** TTL of the ReplayCache restore fixture, in seconds. */
@@ -18489,6 +18752,11 @@ results.push({
   alg: "ReplayCache.stats (5 live)",
   op: "stats",
   ops: benchmarkReplayCacheStats(),
+});
+results.push({
+  alg: "JwksKeyStore.stats (3 keys)",
+  op: "stats",
+  ops: await benchmarkJwksKeyStoreStats(),
 });
 results.push({
   alg: "ReplayCache.fromSnapshot (4 live)",
