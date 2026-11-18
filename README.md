@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2291 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2293 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -235,7 +235,14 @@ gateway appends its hmac-sha256 label with
 `addResponseSignature` — so the response-side twin of the
 request-side `signRequest` / `addSignature` pair is shown
 end to end, again with per-label tamper isolation. The demo
-then runs a fetch-adapter segment: the same loopback
+then verifies the same dual-signed response in one call
+with `verifyAllResponseLabels`, the response-side twin of
+`verifyAllLabels` — no request-shape adaptation first — and
+shows that tampering one body byte (the settlement amount
+`10000` -> `10001`) fails both labels with
+`BODY_DIGEST_MISMATCH`, because the digest check runs for
+every label whenever a `content-digest` header is present.
+The demo then runs a fetch-adapter segment: the same loopback
 settlement response, now signed with `signResponse` and
 fetched with the global `fetch()`, read with `arrayBuffer()`,
 adapted with `fromFetchResponse` and verified with
@@ -5147,7 +5154,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2291 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2293 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

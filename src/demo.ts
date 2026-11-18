@@ -1440,6 +1440,7 @@ import {
   verifiedFetch,
   verifyAllLabels,
   verifyAllLabelsOrThrow,
+  verifyAllResponseLabels,
   verifyRequest,
   verifyRequestOrThrow,
   verifyResponse,
@@ -1464,6 +1465,7 @@ import {
   type SignatureParams,
   type SignedHttpRequest,
   type SignedHttpResponse,
+  type VerifyAllOptions,
   type VerifyError,
   type VerifyFailureCode,
   type VerifyResult,
@@ -4687,6 +4689,17 @@ export const DEMO_ADD_RESPONSE_SIG_GATEWAY_NONCE =
  */
 export const DEMO_ADD_RESPONSE_SIG_TAMPER_CODE: VerifyFailureCode =
   "SIGNATURE_MISMATCH";
+/**
+ * Hand-pinned failure code for the verifyAllResponseLabels segment's
+ * one-byte body tamper (`BODY_DIGEST_MISMATCH`): both labels fail —
+ * the digest check runs for every label whenever a `content-digest`
+ * header is present, so a body tamper has no per-label isolation
+ * (unlike the signature-byte tamper in the addResponseSignature
+ * segment above, which fails only the gateway label). Pinned by a
+ * live probe before this segment was written (backlog #1235).
+ */
+export const DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE: VerifyFailureCode =
+  "BODY_DIGEST_MISMATCH";
 /** Label both allowed-algs whitelist signatures carry (two separate signings of one request). */
 export const DEMO_ALLOWED_ALGS_LABEL = "sig1";
 /** URL of the single request signed twice in the allowed-algs whitelist segment. */
@@ -6824,6 +6837,22 @@ export interface DemoResult {
    */
   addResponseSignatureResponseTamperedVerification: VerifyResult[];
   /**
+   * Per-label results returned by `verifyAllResponseLabels` for the
+   * same dual-signed response the addResponseSignature segment
+   * fetched (both ok — the response entry point checks both
+   * co-signatures in one call, with no request-shape adaptation).
+   */
+  verifyAllResponseLabelsVerification: VerifyResult[];
+  /**
+   * Per-label results returned by `verifyAllResponseLabels` for the
+   * same response with the body tampered by one byte (the settlement
+   * amount `10000` -> `10001`): both labels fail with
+   * `DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE` — the
+   * body-digest check runs for every label whenever a
+   * `content-digest` header is present.
+   */
+  verifyAllResponseLabelsTamperedVerification: VerifyResult[];
+  /**
    * The client's adapted `RequestLike` for the fetch-adapter
    * segment's settlement response: the same
    * `DEMO_GATEWAY_RESPONSE_*` settlement response, fetched with
@@ -7707,6 +7736,14 @@ interface AddResponseSignatureFixture {
    * `DEMO_ADD_RESPONSE_SIG_TAMPER_CODE`.
    */
   tamperedVerification: VerifyResult[];
+  /**
+   * The per-label verify options the fixture verified with
+   * (`keys` by label, `now`, `requiredComponents`) — reused by the
+   * `verifyAllResponseLabels` segment so the same dual-signed
+   * response is checked through the response entry point with the
+   * same keys, clock, and component requirement.
+   */
+  verifyOptions: VerifyAllOptions;
 }
 
 async function fetchAddResponseSignatureResponse(): Promise<AddResponseSignatureFixture> {
@@ -7875,7 +7912,12 @@ async function fetchAddResponseSignatureResponse(): Promise<AddResponseSignature
           `merchant ok and gateway ${DEMO_ADD_RESPONSE_SIG_TAMPER_CODE}`,
       );
     }
-    return { requestLike, verification, tamperedVerification };
+    return {
+      requestLike,
+      verification,
+      tamperedVerification,
+      verifyOptions,
+    };
   } finally {
     server.close();
   }
@@ -13988,6 +14030,96 @@ export async function runDemo(): Promise<DemoResult> {
   const addResponseSignatureResponse =
     await fetchAddResponseSignatureResponse();
 
+  // verifyAllResponseLabels segment (client direction): the
+  // response-entry-point twin of the addResponseSignature segment
+  // above — the *same* dual-signed loopback settlement response
+  // (merchant `signResponse` + gateway `addResponseSignature`),
+  // now verified in one call with `verifyAllResponseLabels`, the
+  // response-side twin of `verifyAllLabels`, so a webhook receiver
+  // checks both co-signatures without first adapting the response
+  // into a request shape. A second pass tampers one body byte (the
+  // settlement amount 10000 -> 10001): both labels fail with
+  // `BODY_DIGEST_MISMATCH` — the digest check runs for every label
+  // whenever a `content-digest` header is present, so a body tamper
+  // has no per-label isolation, unlike the signature-byte tamper
+  // above, which fails only the gateway label. The fail-fast
+  // asserts below pin every outcome outside the printed lines
+  // (the both-fail shape was confirmed by a live probe before
+  // this segment was written, backlog #1235); only the port (never
+  // printed) and the merchant key pair are fresh per run, so the
+  // segment's printed lines are byte-identical between runs.
+  const verifyAllResponseLabelsStatus =
+    addResponseSignatureResponse.requestLike.status;
+  if (
+    verifyAllResponseLabelsStatus !== DEMO_GATEWAY_RESPONSE_STATUS ||
+    addResponseSignatureResponse.requestLike.body?.toString() !==
+      DEMO_GATEWAY_RESPONSE_BODY
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllResponseLabels segment adapted status ` +
+        `${verifyAllResponseLabelsStatus} / body ` +
+        `${JSON.stringify(addResponseSignatureResponse.requestLike.body?.toString())} ` +
+        `instead of ${DEMO_GATEWAY_RESPONSE_STATUS} / the pinned settlement body`,
+    );
+  }
+  const verifyAllResponseLabelsResponse: HttpResponseLike = {
+    status: verifyAllResponseLabelsStatus,
+    headers: addResponseSignatureResponse.requestLike.headers,
+    body: addResponseSignatureResponse.requestLike.body,
+  };
+  const verifyAllResponseLabelsVerification = verifyAllResponseLabels(
+    verifyAllResponseLabelsResponse,
+    addResponseSignatureResponse.verifyOptions,
+  );
+  if (
+    verifyAllResponseLabelsVerification.length !== 2 ||
+    verifyAllResponseLabelsVerification[0].label !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL ||
+    !verifyAllResponseLabelsVerification[0].ok ||
+    verifyAllResponseLabelsVerification[0].keyId !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID ||
+    verifyAllResponseLabelsVerification[0].alg !== "ed25519" ||
+    verifyAllResponseLabelsVerification[0].nonce !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE ||
+    verifyAllResponseLabelsVerification[1].label !==
+      DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL ||
+    !verifyAllResponseLabelsVerification[1].ok ||
+    verifyAllResponseLabelsVerification[1].keyId !==
+      DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID ||
+    verifyAllResponseLabelsVerification[1].alg !== "hmac-sha256" ||
+    verifyAllResponseLabelsVerification[1].nonce !==
+      DEMO_ADD_RESPONSE_SIG_GATEWAY_NONCE
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllResponseLabels on the dual-signed response ` +
+        `returned ${JSON.stringify(verifyAllResponseLabelsVerification.map((r) => ({ label: r.label, ok: r.ok, keyId: r.keyId, alg: r.alg, code: r.code })))} ` +
+        `instead of both labels ok with the pinned label/keyid/alg/nonce`,
+    );
+  }
+  const verifyAllResponseLabelsTamperedVerification =
+    verifyAllResponseLabels(
+      {
+        ...verifyAllResponseLabelsResponse,
+        body: DEMO_FETCH_RESPONSE_TAMPERED_BODY,
+      },
+      addResponseSignatureResponse.verifyOptions,
+    );
+  if (
+    verifyAllResponseLabelsTamperedVerification.length !== 2 ||
+    verifyAllResponseLabelsTamperedVerification[0].ok ||
+    verifyAllResponseLabelsTamperedVerification[0].code !==
+      DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE ||
+    verifyAllResponseLabelsTamperedVerification[1].ok ||
+    verifyAllResponseLabelsTamperedVerification[1].code !==
+      DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllResponseLabels on the tampered-body dual-signed response ` +
+        `returned ${JSON.stringify(verifyAllResponseLabelsTamperedVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
+        `instead of both labels failing with ${DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE}`,
+    );
+  }
+
   // Fetch-adapter segment (client direction): the fetch-API twin
   // of the gateway segment above — the same loopback settlement
   // response, now signed with `signResponse` and fetched with the
@@ -17415,6 +17547,16 @@ export async function runDemo(): Promise<DemoResult> {
       ? "addResponseSignature after gateway signature tampering: gateway OK (unexpected — the tampered gateway signature was not rejected), merchant OK"
       : `addResponseSignature after gateway signature tampering: gateway FAILED (code ${addResponseSignatureResponse.tamperedVerification[1].code}: ${addResponseSignatureResponse.tamperedVerification[1].reason}), merchant still OK (label ${addResponseSignatureResponse.tamperedVerification[0].label}, keyid="${addResponseSignatureResponse.tamperedVerification[0].keyId}", alg="${addResponseSignatureResponse.tamperedVerification[0].alg}")`,
     "",
+    "verifyAllResponseLabels multi-label response verification: the same dual-signed loopback settlement response, now verified in one call with the response entry point verifyAllResponseLabels — no request-shape adaptation first — and a one-byte body tamper fails both labels because the content-digest check runs for every label",
+    `verifyAllResponseLabels response status: ${verifyAllResponseLabelsStatus}`,
+    verifyAllResponseLabelsVerification.every((r) => r.ok)
+      ? `verifyAllResponseLabels verification: merchant OK (label ${verifyAllResponseLabelsVerification[0].label}, keyid="${verifyAllResponseLabelsVerification[0].keyId}", alg="${verifyAllResponseLabelsVerification[0].alg}"), gateway OK (label ${verifyAllResponseLabelsVerification[1].label}, keyid="${verifyAllResponseLabelsVerification[1].keyId}", alg="${verifyAllResponseLabelsVerification[1].alg}")`
+      : `verifyAllResponseLabels verification: FAILED (merchant ${verifyAllResponseLabelsVerification[0].ok ? "OK" : `code ${verifyAllResponseLabelsVerification[0].code}: ${verifyAllResponseLabelsVerification[0].reason}`}, gateway ${verifyAllResponseLabelsVerification[1].ok ? "OK" : `code ${verifyAllResponseLabelsVerification[1].code}: ${verifyAllResponseLabelsVerification[1].reason}`})`,
+    verifyAllResponseLabelsTamperedVerification[0].ok ||
+    verifyAllResponseLabelsTamperedVerification[1].ok
+      ? "verifyAllResponseLabels after body tampering (amount 10000 -> 10001): OK (unexpected — the tampered body was not detected)"
+      : `verifyAllResponseLabels after body tampering (amount 10000 -> 10001): merchant FAILED (code ${verifyAllResponseLabelsTamperedVerification[0].code}: ${verifyAllResponseLabelsTamperedVerification[0].reason}), gateway FAILED (code ${verifyAllResponseLabelsTamperedVerification[1].code}: ${verifyAllResponseLabelsTamperedVerification[1].reason})`,
+    "",
     "Fetch-adapter response verification: the fetch-API twin of the gateway segment — the same loopback settlement response, now fetched with the global fetch(), read with arrayBuffer(), adapted with fromFetchResponse and verified with verifyResponse — the shape a webhook receiver sees when the callback arrives as a fetch Response",
     `Fetch response status: ${fetchResponse.requestLike.status}`,
     fetchResponse.verification.ok
@@ -18018,6 +18160,8 @@ export async function runDemo(): Promise<DemoResult> {
       addResponseSignatureResponse.verification,
     addResponseSignatureResponseTamperedVerification:
       addResponseSignatureResponse.tamperedVerification,
+    verifyAllResponseLabelsVerification,
+    verifyAllResponseLabelsTamperedVerification,
     fetchResponseRequest: fetchResponse.requestLike,
     fetchResponseVerification: fetchResponse.verification,
     fetchResponseTamperedVerification: fetchResponse.tamperedVerification,

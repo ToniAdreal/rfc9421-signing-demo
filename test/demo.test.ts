@@ -662,6 +662,7 @@ import {
   DEMO_VERIFIED_FETCH_HANDLER_OVERSIZED_CODE,
   DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE,
   DEMO_VERIFIED_FETCH_HANDLER_URL,
+  DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE,
   runDemo,
 } from "../src/demo.js";
 
@@ -7605,10 +7606,13 @@ test("demo addResponseSignature segment signs the response with signResponse and
     `addResponseSignature verification: merchant OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
     `addResponseSignature after gateway signature tampering: gateway FAILED (code ${DEMO_ADD_RESPONSE_SIG_TAMPER_CODE}: ${addResponseSignatureResponseTamperedVerification[1].reason}), merchant still OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519")`,
   ]);
-  // The fetch-adapter segment follows the addResponseSignature segment.
+  // The verifyAllResponseLabels segment follows the
+  // addResponseSignature segment.
   assert.equal(lines[headerIdx + 4], "");
   assert.ok(
-    lines[headerIdx + 5]!.startsWith("Fetch-adapter response verification:"),
+    lines[headerIdx + 5]!.startsWith(
+      "verifyAllResponseLabels multi-label response verification:",
+    ),
   );
 });
 
@@ -7630,6 +7634,113 @@ test("demo addResponseSignature segment prints byte-identical lines across runs"
   // signatures themselves are never printed, so the segment's
   // printed lines — header, status, both verifications and the
   // tamper isolation — are byte-identical between runs.
+  assert.deepEqual(
+    first.lines.slice(a, aEnd),
+    second.lines.slice(b, bEnd),
+  );
+});
+
+test("demo verifyAllResponseLabels segment verifies both labels of the dual-signed response in one response entry-point call", async () => {
+  const {
+    lines,
+    verifyAllResponseLabelsVerification,
+    verifyAllResponseLabelsTamperedVerification,
+  } = await runDemo();
+
+  // Both labels verify with their own pinned keyids/algs/nonces —
+  // the merchant with ed25519, the gateway with hmac-sha256 — the
+  // same dual-signed response the addResponseSignature segment
+  // fetched, now checked through the response entry point.
+  assert.equal(verifyAllResponseLabelsVerification.length, 2);
+  assert.deepEqual(
+    verifyAllResponseLabelsVerification.map((r) => [
+      r.label,
+      r.ok,
+      r.keyId,
+      r.alg,
+      r.nonce,
+    ]),
+    [
+      [
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+        true,
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID,
+        "ed25519",
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE,
+      ],
+      [
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+        true,
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID,
+        "hmac-sha256",
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_NONCE,
+      ],
+    ],
+  );
+  // Tampering one body byte fails *both* labels: the digest check
+  // runs for every label whenever a `content-digest` header is
+  // present, so a body tamper has no per-label isolation — unlike
+  // the signature-byte tamper above, which fails only the gateway
+  // label.
+  assert.equal(verifyAllResponseLabelsTamperedVerification.length, 2);
+  assert.equal(verifyAllResponseLabelsTamperedVerification[0].ok, false);
+  assert.equal(
+    verifyAllResponseLabelsTamperedVerification[0].label,
+    DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+  );
+  assert.equal(
+    verifyAllResponseLabelsTamperedVerification[0].code,
+    DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE,
+  );
+  assert.equal(verifyAllResponseLabelsTamperedVerification[1].ok, false);
+  assert.equal(
+    verifyAllResponseLabelsTamperedVerification[1].label,
+    DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+  );
+  assert.equal(
+    verifyAllResponseLabelsTamperedVerification[1].code,
+    DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE,
+  );
+
+  // Printed lines: header + status + dual ok + both-fail tamper —
+  // byte-exact, between the addResponseSignature segment and the
+  // fetch-adapter segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("verifyAllResponseLabels multi-label response verification:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 4), [
+    `verifyAllResponseLabels response status: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
+    `verifyAllResponseLabels verification: merchant OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
+    `verifyAllResponseLabels after body tampering (amount 10000 -> 10001): merchant FAILED (code ${DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE}: ${verifyAllResponseLabelsTamperedVerification[0].reason}), gateway FAILED (code ${DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE}: ${verifyAllResponseLabelsTamperedVerification[1].reason})`,
+  ]);
+  // The fetch-adapter segment follows the verifyAllResponseLabels segment.
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(
+    lines[headerIdx + 5]!.startsWith("Fetch-adapter response verification:"),
+  );
+});
+
+test("demo verifyAllResponseLabels segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) =>
+      l.startsWith(
+        "verifyAllResponseLabels multi-label response verification:",
+      ),
+    );
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Fetch-adapter response verification:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // Only the merchant ed25519 key pair is fresh per run and the
+  // signatures themselves are never printed, so the segment's
+  // printed lines — header, status, both verifications and the
+  // both-fail tamper — are byte-identical between runs.
   assert.deepEqual(
     first.lines.slice(a, aEnd),
     second.lines.slice(b, bEnd),
