@@ -771,7 +771,23 @@
  * CSPRNG-plus-floor-check cost is visible as the fixed
  * per-provisioning overhead it is (same system CSPRNG source),
  * with an explicit-length probe and a below-floor throw probe
- * outside timing, plus
+ * outside timing, plus the key-pair generation a signer pays
+ * when it provisions or rotates a signing key:
+ * `generateEd25519KeyPair` and `generateP256KeyPair` (one
+ * generation per tier per measured call, see KEY_PAIR_* below),
+ * self-checked on every measured call only for the shape the
+ * JWK tests pin — the public-key JWK `kty` / `crv` verbatim
+ * (`OKP` / `Ed25519`, `EC` / `P-256`) — and for freshness
+ * (each generation differs from the previous one in public
+ * coordinates), never a specific value, so the key-generation
+ * cost is visible as the fixed per-provisioning overhead it
+ * is (the random source is the system CSPRNG via node:crypto,
+ * so the numbers include entropy-source cost), with P-384 /
+ * P-521 shape-and-freshness probes outside timing; the two
+ * RSA generators are deliberately excluded from timing, since
+ * a single RSA-2048 generation costs on the order of a few
+ * hundred milliseconds and 3000 timed iterations would take
+ * on the order of ten minutes per generator, plus
  * the case-insensitive header lookup every covered-component
  * resolution pays on the signer and the verifier: `getHeader`
  * (canonical form — multi-value elements trimmed and joined
@@ -17489,6 +17505,138 @@ function benchmarkGenerateHmacSecret(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed key-pair tiers for the `generate*KeyPair` path — the two
+ * generators the backlog names: ed25519 (the default signing key
+ * for new deployments) and NIST P-256 (the `ecdsa-p256-sha256`
+ * curve). The expected public-key JWK `kty` / `crv` are hand-pinned
+ * from the shapes `node:crypto` exports for these curves and the
+ * shape test/jwk.test.ts pins — never derived from the generators
+ * at bench time.
+ */
+const KEY_PAIR_TIERS = [
+  {
+    name: "ed25519",
+    generate: generateEd25519KeyPair,
+    kty: "OKP",
+    crv: "Ed25519",
+  },
+  {
+    name: "ecdsa-p256-sha256",
+    generate: generateP256KeyPair,
+    kty: "EC",
+    crv: "P-256",
+  },
+] as const;
+
+/** Public-key JWK coordinates a freshness check compares. */
+interface KeyPairCoordinates {
+  x: string;
+  y: string | undefined;
+}
+
+function assertKeyPairShape(
+  pair: ReturnType<typeof generateEd25519KeyPair>,
+  expectedKty: string,
+  expectedCrv: string,
+): KeyPairCoordinates {
+  if (pair.publicKey.type !== "public" || pair.privateKey.type !== "private")
+    throw new Error(
+      `benchmark self-check failed: key pair has public type ${JSON.stringify(pair.publicKey.type)} ` +
+        `and private type ${JSON.stringify(pair.privateKey.type)} (expected "public" / "private")`,
+    );
+  const jwk = pair.publicKey.export({ format: "jwk" });
+  if (jwk.kty !== expectedKty || jwk.crv !== expectedCrv)
+    throw new Error(
+      `benchmark self-check failed: public-key JWK gave kty ${JSON.stringify(jwk.kty)} / ` +
+        `crv ${JSON.stringify(jwk.crv)} (expected ${expectedKty} / ${expectedCrv})`,
+    );
+  if (
+    typeof jwk.x !== "string" ||
+    jwk.x.length === 0 ||
+    (expectedKty === "EC" &&
+      (typeof jwk.y !== "string" || jwk.y.length === 0))
+  )
+    throw new Error(
+      `benchmark self-check failed: public-key JWK for ${expectedKty} / ${expectedCrv} is missing coordinates`,
+    );
+  return { x: jwk.x, y: jwk.y };
+}
+
+function assertKeyPairCoordinatesDiffer(
+  name: string,
+  first: KeyPairCoordinates,
+  second: KeyPairCoordinates,
+): void {
+  if (first.x === second.x && first.y === second.y)
+    throw new Error(
+      `benchmark self-check failed: ${name} key generation drew identical public coordinates twice`,
+    );
+}
+
+/**
+ * Out-of-timing probes for the `generate*KeyPair` path: the shape
+ * half for the two timed tiers (fails fast before timing), the
+ * freshness half for all four generators (two consecutive
+ * generations differ in public coordinates), and the P-384 / P-521
+ * shape half the timed row does not cover (same `kty` / `crv`
+ * verbatim pin as the timed tiers). These run once before timing,
+ * so a broken generator fails the bench fast instead of producing
+ * a row of meaningless numbers.
+ */
+function probeGenerateKeyPairs(): void {
+  for (const tier of KEY_PAIR_TIERS) {
+    const first = assertKeyPairShape(tier.generate(), tier.kty, tier.crv);
+    const second = assertKeyPairShape(tier.generate(), tier.kty, tier.crv);
+    assertKeyPairCoordinatesDiffer(tier.name, first, second);
+  }
+  for (const [name, generate, crv] of [
+    ["ecdsa-p384-sha384", generateP384KeyPair, "P-384"],
+    ["ecdsa-p521-sha512", generateP521KeyPair, "P-521"],
+  ] as const) {
+    const first = assertKeyPairShape(generate(), "EC", crv);
+    const second = assertKeyPairShape(generate(), "EC", crv);
+    assertKeyPairCoordinatesDiffer(name, first, second);
+  }
+}
+
+/**
+ * `generateEd25519KeyPair` / `generateP256KeyPair` steady state: one
+ * measured call generates one key pair per tier (2 generations per
+ * op) — the fixed per-provisioning cost a signer pays when it mints
+ * a fresh signing key for issuance or rotation. Self-checks assert
+ * shape only on every measured call — the public-key JWK `kty` /
+ * `crv` verbatim — and freshness against the previous generation
+ * of the same tier (public coordinates differ), never a specific
+ * value: the output is random by design, and that randomness comes
+ * only from the function under test itself. The random source is
+ * the system CSPRNG (`node:crypto` `generateKeyPairSync`), so the
+ * numbers include entropy-source cost.
+ *
+ * The two RSA generators (`generateRsaPssKeyPair` /
+ * `generateRsaV15KeyPair`) are deliberately NOT timed: a single
+ * RSA-2048 generation costs on the order of a few hundred
+ * milliseconds (a three-sample probe on this host averaged ~260 ms
+ * per key), so 3000 timed iterations would take on the order of
+ * ten minutes per generator. The RSA key-generation cost is
+ * documented here instead of measured; the RSA sign/verify rows
+ * above already price the per-request cost of using those keys.
+ * Zero network, no wall-clock assertions.
+ */
+function benchmarkGenerateKeyPairs(): number {
+  probeGenerateKeyPairs();
+  const previous = new Map<string, KeyPairCoordinates>();
+  return measure(() => {
+    for (const tier of KEY_PAIR_TIERS) {
+      const coords = assertKeyPairShape(tier.generate(), tier.kty, tier.crv);
+      const prev = previous.get(tier.name);
+      if (prev !== undefined)
+        assertKeyPairCoordinatesDiffer(tier.name, prev, coords);
+      previous.set(tier.name, coords);
+    }
+  }, ITERATIONS);
+}
+
 /** Fixed `created` for the OrThrow fixture (no wall clock). */
 const ORTHROW_CREATED = 1_700_000_000;
 /** Pinned failure code for the tampered OrThrow fixture — written
@@ -19291,6 +19439,11 @@ results.push({
   alg: "generateHmacSecret (32 + 64 bytes)",
   op: "generate",
   ops: benchmarkGenerateHmacSecret(),
+});
+results.push({
+  alg: "generateKeyPairs (ed25519 + P-256)",
+  op: "generate",
+  ops: benchmarkGenerateKeyPairs(),
 });
 results.push({
   alg: "verifyRequestOrThrow (valid)",
