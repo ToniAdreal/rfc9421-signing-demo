@@ -581,8 +581,8 @@
  * ETags, one failed refresh and one 304, three pinned kids
  * resolving and two unknown kids missing — self-checked on every
  * measured pass against the hand-pinned six-counter snapshot, with
- * the detached-copy and empty-store readings asserted outside
- * timing, plus the snapshot-restore
+ * the detached-copy, empty-store and cleared-store readings
+ * asserted outside timing, plus the snapshot-restore
  * path a single-process verifier runs at startup to rebuild its
  * replay cache from the persisted snapshot:
  * `ReplayCache.fromSnapshot` over a pinned envelope exported from
@@ -12732,7 +12732,9 @@ function assertJwksStats(store: JwksKeyStore): void {
  * pure read, so the timed loop reuses this one fixture. Outside
  * timing, the detached-copy semantics are asserted (mutating a
  * returned snapshot — every field rewritten to 999 — leaves a
- * re-read unchanged) and an empty store must report all-zero stats.
+ * re-read unchanged), an empty store must report all-zero stats,
+ * and clearing a second primed store must reset all six counters
+ * (with `size` 0 and `lastRefreshedAt` null).
  */
 async function benchmarkJwksKeyStoreStats(): Promise<number> {
   const store = await jwksStatsFixture();
@@ -12762,6 +12764,27 @@ async function benchmarkJwksKeyStoreStats(): Promise<number> {
     throw new Error(
       `benchmark self-check failed: empty jwks stats ${JSON.stringify(empty)} ` +
         `(expected all-zero stats)`,
+    );
+  // Outside timing: clearing a primed store resets all six
+  // counters, so a post-clear stats() reads as a fresh store
+  // (the same rule the jwksClear tests pin). A second fixture is
+  // primed for this probe so the measured store stays intact.
+  const cleared = await jwksStatsFixture();
+  cleared.clear();
+  const clearedStats = cleared.stats();
+  if (
+    clearedStats.refreshes !== 0 ||
+    clearedStats.refreshFailures !== 0 ||
+    clearedStats.hits !== 0 ||
+    clearedStats.misses !== 0 ||
+    clearedStats.conditionalRefreshes !== 0 ||
+    clearedStats.notModified !== 0 ||
+    cleared.size !== 0 ||
+    cleared.lastRefreshedAt !== null
+  )
+    throw new Error(
+      `benchmark self-check failed: cleared jwks stats ${JSON.stringify(clearedStats)} ` +
+        `(expected all-zero stats, size 0, lastRefreshedAt null)`,
     );
   return measure(() => {
     assertJwksStats(store);

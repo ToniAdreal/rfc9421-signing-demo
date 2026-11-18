@@ -3864,8 +3864,9 @@ conditionalRefreshes: 2, notModified: 1 }` — every counter
 non-zero, so the row cannot be measuring an empty or
 never-refreshed store. Outside timing the bench also asserts
 the detached-copy semantics (a returned snapshot overwritten
-with 999s leaves a re-read unchanged) and that an empty store
-reports all-zero stats. In this run it measured ~5,470,938
+with 999s leaves a re-read unchanged), that an empty store
+reports all-zero stats, and that clearing a primed store resets
+all six counters (size 0, lastRefreshedAt null). In this run it measured ~5,470,938
 ops/sec (~0.18 µs/op) — about 4.1x the same run's
 `ReplayCache.stats` reading (~1,337,552 ops/sec, ~0.75 µs/op),
 which is the expected shape: a JWKS stats reading only copies
