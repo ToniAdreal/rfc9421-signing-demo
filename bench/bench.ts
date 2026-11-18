@@ -761,6 +761,17 @@
  * CSPRNG-plus-encoding cost is visible as the fixed per-request
  * overhead it is (the random source is the system CSPRNG via
  * node:crypto, so the numbers include entropy-source cost), plus
+ * the HMAC secret generation a webhook issuer pays when it
+ * provisions or rotates a signing secret: `generateHmacSecret`
+ * at the two default tiers (hmac-sha256 32 bytes, hmac-sha512
+ * 64 bytes, one generation per tier per measured call, see
+ * HMAC_SECRET_* below), self-checked on every measured call only
+ * for the shape the generateHmacSecret test pins — a Buffer of
+ * exactly the pinned length — never a specific value, so the
+ * CSPRNG-plus-floor-check cost is visible as the fixed
+ * per-provisioning overhead it is (same system CSPRNG source),
+ * with an explicit-length probe and a below-floor throw probe
+ * outside timing, plus
  * the case-insensitive header lookup every covered-component
  * resolution pays on the signer and the verifier: `getHeader`
  * (canonical form — multi-value elements trimmed and joined
@@ -1004,6 +1015,7 @@ import {
   fromNodeRequest,
   fromNodeResponse,
   generateEd25519KeyPair,
+  generateHmacSecret,
   generateNonce,
   generateP256KeyPair,
   generateP384KeyPair,
@@ -17367,6 +17379,116 @@ function benchmarkGenerateNonce(): number {
   }, ITERATIONS);
 }
 
+/**
+ * Fixed algorithm tiers for the `generateHmacSecret` path — the two
+ * defaults the backlog names: `hmac-sha256` at its 32-byte floor and
+ * `hmac-sha512` at its 64-byte floor (RFC 2104 §3: the key SHOULD be
+ * at least as long as the hash output). The expected lengths are
+ * hand-pinned from the constants MIN_HMAC_SECRET_BYTES /
+ * MIN_HMAC_SHA512_SECRET_BYTES and the shape
+ * test/generateHmacSecret.test.ts pins — never derived from
+ * `generateHmacSecret` at bench time.
+ */
+const HMAC_SECRET_TIERS = [
+  { alg: "hmac-sha256", expectedLength: 32 },
+  { alg: "hmac-sha512", expectedLength: 64 },
+] as const;
+
+function assertHmacSecretShape(
+  secret: Buffer,
+  alg: string,
+  expectedLength: number,
+): void {
+  if (!Buffer.isBuffer(secret) || secret.length !== expectedLength)
+    throw new Error(
+      `benchmark self-check failed: generateHmacSecret(${JSON.stringify(alg)}) gave ` +
+        `${Buffer.isBuffer(secret) ? `${secret.length} bytes` : typeof secret} ` +
+        `(expected a Buffer of ${expectedLength} bytes)`,
+    );
+}
+
+/** Pinned below-floor throw for the explicit-length probe — the exact
+ * wording `assertHmacSecretLength` uses on the sign/verify side,
+ * written here as a literal from src/keys.ts (same pin as
+ * test/generateHmacSecret.test.ts). */
+const HMAC_SECRET_BELOW_FLOOR_MESSAGE =
+  "assertHmacSecretLength: hmac-sha256 secret must be at least 32 bytes " +
+  "(RFC 2104: the key SHOULD be at least as long as the hash output; " +
+  "sha-256 → 32 bytes), got 16 bytes";
+
+/**
+ * Out-of-timing probes for the `generateHmacSecret` path: an explicit
+ * 64-byte hmac-sha256 secret keeps exactly that length, two consecutive
+ * draws differ in bytes for each algorithm (fresh randomness, never a
+ * cached value), and an explicit length below the floor throws with the
+ * same wording the sign/verify side uses for a weak key. These run once
+ * before timing, so a broken generator fails the bench fast instead of
+ * producing a row of meaningless numbers.
+ */
+function probeGenerateHmacSecret(): void {
+  assertHmacSecretShape(
+    generateHmacSecret("hmac-sha256", 64),
+    "hmac-sha256",
+    64,
+  );
+  for (const tier of HMAC_SECRET_TIERS) {
+    const first = generateHmacSecret(tier.alg);
+    const second = generateHmacSecret(tier.alg);
+    assertHmacSecretShape(first, tier.alg, tier.expectedLength);
+    assertHmacSecretShape(second, tier.alg, tier.expectedLength);
+    if (first.equals(second))
+      throw new Error(
+        `benchmark self-check failed: generateHmacSecret(${JSON.stringify(tier.alg)}) ` +
+          `drew identical bytes twice`,
+      );
+  }
+  try {
+    generateHmacSecret("hmac-sha256", 16);
+  } catch (err) {
+    if (
+      !(err instanceof Error) ||
+      err.message !== HMAC_SECRET_BELOW_FLOOR_MESSAGE
+    )
+      throw new Error(
+        `benchmark self-check failed: generateHmacSecret("hmac-sha256", 16) threw ` +
+          `${err instanceof Error ? JSON.stringify(err.message) : String(err)} ` +
+          `(expected ${JSON.stringify(HMAC_SECRET_BELOW_FLOOR_MESSAGE)})`,
+      );
+    return;
+  }
+  throw new Error(
+    'benchmark self-check failed: generateHmacSecret("hmac-sha256", 16) did not throw',
+  );
+}
+
+/**
+ * `generateHmacSecret` steady state: one measured call generates one
+ * secret per default tier (2 generations per op) — the default
+ * `hmac-sha256` 32-byte secret through the no-argument default and the
+ * `hmac-sha512` 64-byte secret through the explicit algorithm. This is
+ * the fixed per-provisioning cost a webhook issuer or gateway pays when
+ * it mints a fresh HMAC secret for signing or rotation: drawing bytes
+ * from the system CSPRNG (`node:crypto` `randomBytes`, so the numbers
+ * include entropy-source cost) plus the per-algorithm floor check the
+ * generator reuses from the sign/verify side. Self-checks assert shape
+ * only — a Buffer of exactly the pinned length — on every measured
+ * call, and never a specific value: the output is random by design,
+ * and that randomness comes only from the function under test itself.
+ * Zero network, no wall-clock assertions.
+ */
+function benchmarkGenerateHmacSecret(): number {
+  probeGenerateHmacSecret();
+  return measure(() => {
+    for (const tier of HMAC_SECRET_TIERS) {
+      const secret =
+        tier.alg === "hmac-sha256"
+          ? generateHmacSecret()
+          : generateHmacSecret(tier.alg);
+      assertHmacSecretShape(secret, tier.alg, tier.expectedLength);
+    }
+  }, ITERATIONS);
+}
+
 /** Fixed `created` for the OrThrow fixture (no wall clock). */
 const ORTHROW_CREATED = 1_700_000_000;
 /** Pinned failure code for the tampered OrThrow fixture — written
@@ -19164,6 +19286,11 @@ results.push({
   alg: "generateNonce (16 + 32 bytes)",
   op: "generate",
   ops: benchmarkGenerateNonce(),
+});
+results.push({
+  alg: "generateHmacSecret (32 + 64 bytes)",
+  op: "generate",
+  ops: benchmarkGenerateHmacSecret(),
 });
 results.push({
   alg: "verifyRequestOrThrow (valid)",

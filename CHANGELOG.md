@@ -7,6 +7,12 @@ and the version below is the version declared in `package.json`. Every entry
 summarizes one or more commits in this repository's `git log`, grouped by
 change type; no entry describes a feature that is not in the history.
 
+## [Unreleased]
+
+### Added
+
+- Benchmark now covers the `generateHmacSecret` key-generation path (backlog #1232): a new `generateHmacSecret (32 + 64 bytes)` row measures the fresh-secret provisioning a webhook issuer pays when it mints or rotates an HMAC signing secret — one `generateHmacSecret()` call (`hmac-sha256`, 32-byte default) and one `generateHmacSecret("hmac-sha512")` call (64-byte default) per measured op, self-checking each draw is a Buffer of exactly the pinned length on every pass. Outside timing the bench pins the explicit-length half (a 64-byte `hmac-sha256` secret keeps exactly 64 bytes), the freshness half (two consecutive draws differ in bytes for each algorithm), and the below-floor half (an explicit 16-byte length throws with the exact `assertHmacSecretLength` wording the sign/verify side uses for a weak key); a mutation check confirms the row goes red when the pinned 32-byte expectation is changed. In this run it measured 116,505 ops/sec (8.58 µs/op), about 2.1x the same run's `generateNonce` row (54,640 ops/sec) — the expected shape, since the secret row pays two CSPRNG draws and a floor check but no base64url encoding. The README Benchmarks table is refreshed from the same run (2026-11-18, Node v24.22.1, AMD EPYC 9D25) with a prose paragraph for the new row.
+
 ## [0.2.0] - 2026-11-18
 
 ### Added
