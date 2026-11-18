@@ -212,6 +212,16 @@ import {
   DEMO_JWKS_AUTO_REFRESH_STOP_CLEAR_CALLS,
   DEMO_JWKS_AUTO_REFRESH_STOPPED_FETCH_CALLS,
   DEMO_JWKS_AUTO_REFRESH_TTL_SEC,
+  DEMO_JWKS_SINGLE_FLIGHT_CONCURRENCY,
+  DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS,
+  DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS_AFTER_SERIAL,
+  DEMO_JWKS_SINGLE_FLIGHT_KEY_ID,
+  DEMO_JWKS_SINGLE_FLIGHT_LAST_REFRESHED_AT,
+  DEMO_JWKS_SINGLE_FLIGHT_REFRESHES,
+  DEMO_JWKS_SINGLE_FLIGHT_REFRESHES_AFTER_SERIAL,
+  DEMO_JWKS_SINGLE_FLIGHT_STATS,
+  DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL,
+  DEMO_JWKS_SINGLE_FLIGHT_TTL_SEC,
   DEMO_JWKS_FETCHED_AT_SEC,
   DEMO_JWKS_URL,
   DEMO_HMAC_GUARD_ACCEPTED,
@@ -11661,7 +11671,9 @@ test("demo per-label structured-field types segment verifies the token field und
   ]);
 
   // The segment is followed by the JWKS auto-refresh segment
-  // (backlog #1212), which closes the demo.
+  // (backlog #1212), which is followed in turn by the JWKS
+  // single-flight refresh segment (backlog #1240) that closes
+  // the demo.
   assert.equal(lines[headerIdx + 3], "");
   assert.ok(
     lines[headerIdx + 4].startsWith("JWKS auto-refresh:"),
@@ -11926,7 +11938,9 @@ test("demo JWKS auto-refresh segment drives startAutoRefresh on a fake timer (ti
 
   // Printed lines: the auto-refresh header plus five lines, in
   // order, sitting after the per-label structured-field types
-  // segment — and the segment is the last one.
+  // segment — and the segment is followed by the JWKS
+  // single-flight refresh segment (backlog #1240), which closes
+  // the demo.
   assert.match(
     out,
     /JWKS auto-refresh: startAutoRefresh\(60000\) drives refreshIfStale\(\) on a timer/,
@@ -11949,7 +11963,10 @@ test("demo JWKS auto-refresh segment drives startAutoRefresh on a fake timer (ti
     `Auto-refresh stop() then tick 2 (stale again after +${DEMO_JWKS_AUTO_REFRESH_STALE_ADVANCE_SEC}s): no fetch — 1 fetch total, stats.refreshes still 1, clear() calls 1 (stop() is idempotent: a second stop() clears nothing more)`,
     `Auto-refresh restart then clear(): timer stopped (clear() calls 2 across both timers), stats reset (refreshes 0, size 0), stop() afterwards is a no-op`,
   ]);
-  assert.equal(headerIdx + 6, lines.length);
+  assert.equal(lines[headerIdx + 6], "");
+  assert.ok(
+    lines[headerIdx + 7].startsWith("JWKS single-flight refresh:"),
+  );
 
   // Deterministic double run: the segment's lines are pinned
   // constants, identical between runs.
@@ -11960,5 +11977,160 @@ test("demo JWKS auto-refresh segment drives startAutoRefresh on a fake timer (ti
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 6),
     lines.slice(headerIdx, headerIdx + 6),
+  );
+});
+
+test("demo JWKS single-flight refresh segment merges eight concurrent refresh() calls into one fetch (serial refresh fetches again)", async () => {
+  const {
+    jwksSingleFlightFetchCalls,
+    jwksSingleFlightLastRefreshedAt,
+    jwksSingleFlightResolved,
+    jwksSingleFlightStats,
+    jwksSingleFlightFetchCallsAfterSerial,
+    jwksSingleFlightStatsAfterSerial,
+    lines,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // The fixtures are the literals pinned in src/demo.ts — the
+  // test pins them again here so a drift in either place fails
+  // loudly.
+  assert.equal(
+    DEMO_JWKS_SINGLE_FLIGHT_KEY_ID,
+    "demo-jwks-single-flight-1",
+  );
+  assert.equal(DEMO_JWKS_SINGLE_FLIGHT_TTL_SEC, 300);
+  assert.equal(DEMO_JWKS_SINGLE_FLIGHT_CONCURRENCY, 8);
+  assert.equal(DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS, 1);
+  assert.equal(DEMO_JWKS_SINGLE_FLIGHT_REFRESHES, 1);
+  assert.equal(
+    DEMO_JWKS_SINGLE_FLIGHT_LAST_REFRESHED_AT,
+    DEMO_CREATED,
+  );
+  assert.deepEqual(DEMO_JWKS_SINGLE_FLIGHT_STATS, {
+    refreshes: 1,
+    refreshFailures: 0,
+    hits: 1,
+    misses: 0,
+    conditionalRefreshes: 0,
+    notModified: 0,
+  });
+  assert.equal(DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS_AFTER_SERIAL, 2);
+  assert.equal(DEMO_JWKS_SINGLE_FLIGHT_REFRESHES_AFTER_SERIAL, 2);
+  assert.deepEqual(DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL, {
+    refreshes: 2,
+    refreshFailures: 0,
+    hits: 1,
+    misses: 0,
+    conditionalRefreshes: 0,
+    notModified: 0,
+  });
+
+  // DemoResult fields: the eight-way batch made one fetch and
+  // counted one refresh, the shared snapshot reads the pinned
+  // instant and resolves the scripted key, and the serial
+  // refresh afterwards fetched again.
+  assert.equal(
+    jwksSingleFlightFetchCalls,
+    DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS,
+  );
+  assert.equal(
+    jwksSingleFlightLastRefreshedAt,
+    DEMO_JWKS_SINGLE_FLIGHT_LAST_REFRESHED_AT,
+  );
+  assert.equal(jwksSingleFlightResolved, true);
+  assert.deepEqual(
+    jwksSingleFlightStats,
+    DEMO_JWKS_SINGLE_FLIGHT_STATS,
+  );
+  assert.equal(
+    jwksSingleFlightFetchCallsAfterSerial,
+    DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS_AFTER_SERIAL,
+  );
+  assert.deepEqual(
+    jwksSingleFlightStatsAfterSerial,
+    DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL,
+  );
+
+  // Independent re-derivation with a fresh key pair and a
+  // counting fake fetch (not the demo's): eight concurrent
+  // refresh() calls make one fetch and count one refresh, every
+  // waiter sees the same snapshot instant, and a serial refresh
+  // afterwards fetches again.
+  const pair = generateEd25519KeyPair();
+  let fetchCalls = 0;
+  const store = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      fetchCalls++;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          keys: [
+            {
+              ...exportPublicKeyJwk(pair.publicKey),
+              kid: DEMO_JWKS_SINGLE_FLIGHT_KEY_ID,
+            },
+          ],
+        }),
+      };
+    },
+    ttlSec: DEMO_JWKS_SINGLE_FLIGHT_TTL_SEC,
+    now: () => DEMO_CREATED,
+  });
+  await Promise.all(
+    Array.from(
+      { length: DEMO_JWKS_SINGLE_FLIGHT_CONCURRENCY },
+      () => store.refresh(),
+    ),
+  );
+  assert.equal(fetchCalls, 1);
+  assert.equal(store.stats().refreshes, 1);
+  assert.equal(store.lastRefreshedAt, DEMO_CREATED);
+  assert.notEqual(
+    store.resolve(DEMO_JWKS_SINGLE_FLIGHT_KEY_ID),
+    undefined,
+  );
+  assert.equal(store.stats().hits, 1);
+  await store.refresh();
+  assert.equal(fetchCalls, 2);
+  assert.equal(store.stats().refreshes, 2);
+  assert.equal(store.lastRefreshedAt, DEMO_CREATED);
+
+  // Printed lines: the single-flight header plus two lines, in
+  // order, sitting after the JWKS auto-refresh segment — and the
+  // segment is the last one.
+  assert.match(
+    out,
+    /JWKS single-flight refresh: eight concurrent refresh\(\) calls share one in-flight fetch/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS single-flight refresh:"),
+  );
+  const autoRefreshIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS auto-refresh:"),
+  );
+  assert.ok(
+    autoRefreshIdx !== -1 &&
+      headerIdx !== -1 &&
+      autoRefreshIdx < headerIdx,
+  );
+  assert.equal(lines[headerIdx - 1], "");
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), [
+    "JWKS single-flight refresh: eight concurrent refresh() calls share one in-flight fetch — a gateway cold-start or key rotation never stampedes the JWKS endpoint, because only overlapping calls merge and a settled refresh is never cached",
+    `JWKS single-flight refresh: 8 concurrent refresh() calls made 1 fetch (stats.refreshes 1), lastRefreshedAt ${DEMO_CREATED}, key "${DEMO_JWKS_SINGLE_FLIGHT_KEY_ID}" resolves (all eight waiters shared the one snapshot)`,
+    `JWKS single-flight refresh: a serial refresh() afterwards fetched again — 2 fetches total, stats.refreshes 2 (only overlapping calls merge)`,
+  ]);
+  assert.equal(headerIdx + 3, lines.length);
+
+  // Deterministic double run: the segment's lines are pinned
+  // constants, identical between runs.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("JWKS single-flight refresh:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 3),
+    lines.slice(headerIdx, headerIdx + 3),
   );
 });

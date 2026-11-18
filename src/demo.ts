@@ -1327,7 +1327,7 @@
  * rejected alone without dragging the other label down. Every
  * input and expectation is a fixed constant, so the segment is
  * byte-identical between runs.
- * The demo closes with a JWKS auto-refresh segment:
+ * The demo then shows a JWKS auto-refresh segment:
  * `JwksKeyStore.startAutoRefresh(60_000)` drives
  * `refreshIfStale()` on a timer — the opt-in loop a long-lived
  * gateway verifier runs instead of hand-writing its own polling.
@@ -1346,6 +1346,26 @@
  * tick, and never outlives its store. Only the loopback port
  * (never printed) and the key pair are fresh per run, so the
  * segment is byte-identical between runs.
+ * The demo closes with a JWKS single-flight refresh segment:
+ * eight concurrent `refresh()` calls against one `JwksKeyStore`
+ * share a single in-flight fetch — the merge a gateway needs
+ * when a cold start or a key rotation lands and many waiters
+ * refresh at once, instead of stampeding the JWKS endpoint. The
+ * segment drives the store through a counting fake fetch (zero
+ * network) and an injected clock pinned at the demo's fixed
+ * instant: the eight-way batch makes exactly one fetch,
+ * `stats().refreshes` steps to 1, `lastRefreshedAt` reads the
+ * pinned instant, and the scripted key resolves — all eight
+ * waiters shared the one snapshot — and a serial `refresh()`
+ * afterwards fetches again (fetch count 2), because only
+ * overlapping calls merge and a settled refresh is never cached.
+ * Outside the printed lines the demo asserts every count,
+ * timestamp and counter equals the hand-pinned
+ * `DEMO_JWKS_SINGLE_FLIGHT_*` expectations (the same merging
+ * rules `test/jwksSingleFlight.test.ts` pins). The segment key
+ * pair is a fresh ed25519 pair (generation is not printed) and
+ * every clock is injected, so the segment's printed lines are
+ * identical between runs.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the library
@@ -4106,6 +4126,41 @@ export const DEMO_JWKS_AUTO_REFRESH_CLEARED_REFRESHES = 0;
 export const DEMO_JWKS_AUTO_REFRESH_CLEARED_SIZE = 0;
 /** Total `clear()` calls across both timers at the end (each timer cleared exactly once). */
 export const DEMO_JWKS_AUTO_REFRESH_CLEAR_CALLS = 2;
+
+/** Key id the JWKS single-flight refresh segment's scripted key carries. */
+export const DEMO_JWKS_SINGLE_FLIGHT_KEY_ID = "demo-jwks-single-flight-1";
+/** Snapshot TTL of the single-flight segment's store, in seconds (the clock never moves, so the snapshot is fresh after the batch). */
+export const DEMO_JWKS_SINGLE_FLIGHT_TTL_SEC = 300;
+/** Concurrent `refresh()` callers in the segment's single-flight batch. */
+export const DEMO_JWKS_SINGLE_FLIGHT_CONCURRENCY = 8;
+/** Fetch count after the eight-way concurrent batch (one fetch shared by all eight waiters). */
+export const DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS = 1;
+/** `stats().refreshes` after the batch (the merged refresh counts once). */
+export const DEMO_JWKS_SINGLE_FLIGHT_REFRESHES = 1;
+/** `lastRefreshedAt` after the batch (the pinned `DEMO_CREATED` instant — all eight waiters shared the one snapshot). */
+export const DEMO_JWKS_SINGLE_FLIGHT_LAST_REFRESHED_AT = DEMO_CREATED;
+/** Hand-pinned `stats()` after the batch and one resolve of the scripted keyid (one merged refresh, one hit, nothing else). */
+export const DEMO_JWKS_SINGLE_FLIGHT_STATS: JwksKeyStoreStats = {
+  refreshes: 1,
+  refreshFailures: 0,
+  hits: 1,
+  misses: 0,
+  conditionalRefreshes: 0,
+  notModified: 0,
+};
+/** Fetch count after the serial `refresh()` that follows the batch (only overlapping calls merge — a settled refresh fetches again). */
+export const DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS_AFTER_SERIAL = 2;
+/** `stats().refreshes` after the serial refresh. */
+export const DEMO_JWKS_SINGLE_FLIGHT_REFRESHES_AFTER_SERIAL = 2;
+/** Hand-pinned `stats()` after the serial refresh (the hit from the batch resolve is unchanged). */
+export const DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL: JwksKeyStoreStats = {
+  refreshes: 2,
+  refreshFailures: 0,
+  hits: 1,
+  misses: 0,
+  conditionalRefreshes: 0,
+  notModified: 0,
+};
 
 /** Absolute URL the `@query-param` segment signs (`a` bound, `b` unbound). */
 export const DEMO_QUERY_PARAM_URL =
@@ -7174,6 +7229,44 @@ export interface DemoResult {
    * a no-op).
    */
   jwksAutoRefreshClearCalls: number;
+  /**
+   * Fake-fetch count after the JWKS single-flight refresh
+   * segment's eight-way concurrent batch (equals the
+   * hand-pinned `DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS`: one
+   * fetch shared by all eight waiters).
+   */
+  jwksSingleFlightFetchCalls: number;
+  /**
+   * `lastRefreshedAt` after the batch (equals the hand-pinned
+   * `DEMO_JWKS_SINGLE_FLIGHT_LAST_REFRESHED_AT`: the pinned
+   * `DEMO_CREATED` instant — one shared snapshot).
+   */
+  jwksSingleFlightLastRefreshedAt: number | null;
+  /**
+   * Whether the store resolves the scripted keyid after the
+   * batch (`true` — the shared snapshot holds the key).
+   */
+  jwksSingleFlightResolved: boolean;
+  /**
+   * The segment's `stats()` after the batch and one resolve
+   * (equals the hand-pinned `DEMO_JWKS_SINGLE_FLIGHT_STATS`:
+   * one merged refresh, one hit, nothing else).
+   */
+  jwksSingleFlightStats: JwksKeyStoreStats;
+  /**
+   * Fake-fetch count after the serial `refresh()` that follows
+   * the batch (equals the hand-pinned
+   * `DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS_AFTER_SERIAL`: only
+   * overlapping calls merge, a settled refresh fetches again).
+   */
+  jwksSingleFlightFetchCallsAfterSerial: number;
+  /**
+   * The segment's `stats()` after the serial refresh (equals
+   * the hand-pinned
+   * `DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL`: two
+   * refreshes, the batch resolve's hit unchanged).
+   */
+  jwksSingleFlightStatsAfterSerial: JwksKeyStoreStats;
   lines: string[];
 }
 
@@ -16956,6 +17049,112 @@ export async function runDemo(): Promise<DemoResult> {
     jwksAutoRefreshServer.close();
   }
 
+  // JWKS single-flight refresh segment (backlog #1240): the
+  // segments above only ever refresh one call at a time, so the
+  // merge that protects a gateway when a cold start or a key
+  // rotation lands — many waiters calling refresh() at once —
+  // is invisible in the demo. This segment drives a fresh
+  // JwksKeyStore through a counting fake fetch (zero network)
+  // and an injected clock pinned at DEMO_CREATED: eight
+  // concurrent refresh() calls share one in-flight fetch, so
+  // the fetch count stays 1, stats().refreshes steps to 1,
+  // lastRefreshedAt reads the pinned instant, and the scripted
+  // key resolves — all eight waiters shared the one snapshot —
+  // and a serial refresh() afterwards fetches again (fetch
+  // count 2, refreshes 2), because only overlapping calls merge
+  // and a settled refresh is never cached. The segment key pair
+  // is a fresh ed25519 pair (generation is not printed);
+  // outside the printed lines the demo asserts every count,
+  // timestamp and counter equals the hand-pinned
+  // DEMO_JWKS_SINGLE_FLIGHT_* expectations (the same merging
+  // rules test/jwksSingleFlight.test.ts pins).
+  const jwksSingleFlightPair = generateEd25519KeyPair();
+  let jwksSingleFlightFetchCalls = 0;
+  const jwksSingleFlightStore = new JwksKeyStore(DEMO_JWKS_URL, {
+    fetchImpl: async () => {
+      jwksSingleFlightFetchCalls++;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          keys: [
+            {
+              ...exportPublicKeyJwk(jwksSingleFlightPair.publicKey),
+              kid: DEMO_JWKS_SINGLE_FLIGHT_KEY_ID,
+            },
+          ],
+        }),
+      };
+    },
+    ttlSec: DEMO_JWKS_SINGLE_FLIGHT_TTL_SEC,
+    now: () => DEMO_CREATED,
+  });
+  await Promise.all(
+    Array.from(
+      { length: DEMO_JWKS_SINGLE_FLIGHT_CONCURRENCY },
+      () => jwksSingleFlightStore.refresh(),
+    ),
+  );
+  const jwksSingleFlightFetchCallsAfterBatch =
+    jwksSingleFlightFetchCalls;
+  const jwksSingleFlightLastRefreshedAt =
+    jwksSingleFlightStore.lastRefreshedAt;
+  const jwksSingleFlightResolved =
+    jwksSingleFlightStore.resolve(DEMO_JWKS_SINGLE_FLIGHT_KEY_ID) !==
+    undefined;
+  const jwksSingleFlightStats = jwksSingleFlightStore.stats();
+  await jwksSingleFlightStore.refresh();
+  const jwksSingleFlightFetchCallsAfterSerial =
+    jwksSingleFlightFetchCalls;
+  const jwksSingleFlightStatsAfterSerial =
+    jwksSingleFlightStore.stats();
+  if (
+    jwksSingleFlightFetchCallsAfterBatch !==
+      DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS ||
+    jwksSingleFlightFetchCallsAfterSerial !==
+      DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS_AFTER_SERIAL ||
+    jwksSingleFlightLastRefreshedAt !==
+      DEMO_JWKS_SINGLE_FLIGHT_LAST_REFRESHED_AT ||
+    jwksSingleFlightResolved !== true ||
+    jwksSingleFlightStats.refreshes !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS.refreshes ||
+    jwksSingleFlightStats.refreshFailures !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS.refreshFailures ||
+    jwksSingleFlightStats.hits !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS.hits ||
+    jwksSingleFlightStats.misses !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS.misses ||
+    jwksSingleFlightStats.conditionalRefreshes !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS.conditionalRefreshes ||
+    jwksSingleFlightStats.notModified !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS.notModified ||
+    jwksSingleFlightStatsAfterSerial.refreshes !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.refreshes ||
+    jwksSingleFlightStatsAfterSerial.refreshFailures !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.refreshFailures ||
+    jwksSingleFlightStatsAfterSerial.hits !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.hits ||
+    jwksSingleFlightStatsAfterSerial.misses !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.misses ||
+    jwksSingleFlightStatsAfterSerial.conditionalRefreshes !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.conditionalRefreshes ||
+    jwksSingleFlightStatsAfterSerial.notModified !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.notModified
+  ) {
+    throw new Error(
+      `demo fixture broken: JWKS single-flight refresh gave ${jwksSingleFlightFetchCallsAfterBatch} fetches ` +
+        `after the eight-way batch (${jwksSingleFlightFetchCallsAfterSerial} after the serial refresh), ` +
+        `lastRefreshedAt ${jwksSingleFlightLastRefreshedAt}, resolved ${jwksSingleFlightResolved}, stats ` +
+        `${JSON.stringify(jwksSingleFlightStats)} after the batch and ` +
+        `${JSON.stringify(jwksSingleFlightStatsAfterSerial)} after the serial refresh, instead of the pinned ` +
+        `fetch count ${DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS} after the batch ` +
+        `(${DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS_AFTER_SERIAL} after the serial refresh), lastRefreshedAt ` +
+        `${DEMO_JWKS_SINGLE_FLIGHT_LAST_REFRESHED_AT}, resolved true, stats ` +
+        `${JSON.stringify(DEMO_JWKS_SINGLE_FLIGHT_STATS)} after the batch and ` +
+        `${JSON.stringify(DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL)} after the serial refresh`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -17856,6 +18055,10 @@ export async function runDemo(): Promise<DemoResult> {
     `Auto-refresh tick 1 (stale snapshot): refreshed — ${jwksAutoRefreshFetchCalls} fetch, stats.refreshes ${jwksAutoRefreshRefreshes}, size ${jwksAutoRefreshSize}, lastRefreshedAt ${jwksAutoRefreshLastRefreshedAt}, key "${DEMO_JWKS_AUTO_REFRESH_KEY_ID}" resolves`,
     `Auto-refresh stop() then tick 2 (stale again after +${DEMO_JWKS_AUTO_REFRESH_STALE_ADVANCE_SEC}s): no fetch — ${jwksAutoRefreshStoppedFetchCalls} fetch total, stats.refreshes still ${jwksAutoRefreshStoppedRefreshes}, clear() calls ${jwksAutoRefreshStopClearCalls} (stop() is idempotent: a second stop() clears nothing more)`,
     `Auto-refresh restart then clear(): timer stopped (clear() calls ${jwksAutoRefreshClearCalls} across both timers), stats reset (refreshes ${jwksAutoRefreshClearedRefreshes}, size ${jwksAutoRefreshClearedSize}), stop() afterwards is a no-op`,
+    "",
+    "JWKS single-flight refresh: eight concurrent refresh() calls share one in-flight fetch — a gateway cold-start or key rotation never stampedes the JWKS endpoint, because only overlapping calls merge and a settled refresh is never cached",
+    `JWKS single-flight refresh: ${DEMO_JWKS_SINGLE_FLIGHT_CONCURRENCY} concurrent refresh() calls made ${jwksSingleFlightFetchCallsAfterBatch} fetch (stats.refreshes ${jwksSingleFlightStats.refreshes}), lastRefreshedAt ${jwksSingleFlightLastRefreshedAt}, key "${DEMO_JWKS_SINGLE_FLIGHT_KEY_ID}" resolves (all eight waiters shared the one snapshot)`,
+    `JWKS single-flight refresh: a serial refresh() afterwards fetched again — ${jwksSingleFlightFetchCallsAfterSerial} fetches total, stats.refreshes ${jwksSingleFlightStatsAfterSerial.refreshes} (only overlapping calls merge)`,
   ];
 
   return {
@@ -18291,6 +18494,12 @@ export async function runDemo(): Promise<DemoResult> {
     jwksAutoRefreshClearedRefreshes,
     jwksAutoRefreshClearedSize,
     jwksAutoRefreshClearCalls,
+    jwksSingleFlightFetchCalls: jwksSingleFlightFetchCallsAfterBatch,
+    jwksSingleFlightLastRefreshedAt,
+    jwksSingleFlightResolved,
+    jwksSingleFlightStats,
+    jwksSingleFlightFetchCallsAfterSerial,
+    jwksSingleFlightStatsAfterSerial,
     lines,
   };
 }
