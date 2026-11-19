@@ -385,6 +385,58 @@ export function assertNoDuplicateCoveredComponents(
 }
 
 /**
+ * The `SignOptions` field names, kept as a data list so the
+ * fail-closed unknown-option check below (and the response-side
+ * `SignResponseOptions` allowlist, which is this list plus
+ * `"request"`) can never drift from the interface: add a field to
+ * `SignOptions` and add its name here in the same commit.
+ */
+export const SIGN_OPTION_KEYS: readonly string[] = [
+  "keyId",
+  "alg",
+  "key",
+  "created",
+  "expires",
+  "expiresInSec",
+  "label",
+  "nonce",
+  "autoNonce",
+  "tag",
+  "coveredComponents",
+  "contentDigestAlg",
+  "structuredFieldTypes",
+];
+
+/**
+ * Fail-closed unknown-option check, shared by every sign / verify
+ * entry point (backlog #1251): reject an options object carrying a
+ * key the entry point never reads, before any other validation runs.
+ * A misspelled freshness key (`maxSignatureAge` for
+ * `maxSignatureAgeSec`, `requireNonces` for `requireNonce`) would
+ * otherwise be silently ignored while the caller believes the safety
+ * check is on — exactly the footgun the constructor unknown-option
+ * rejection (escrow #548) guards against, except here the dropped
+ * option is a security check, not ordinary configuration. `caller`
+ * names the entry point in the thrown message, so the error points
+ * at the function the caller actually used. The check reads only
+ * the object's own enumerable keys; an option set to `undefined`
+ * still counts as present (a caller that typed the key meant it).
+ */
+export function assertNoUnknownOptions(
+  opts: object,
+  allowed: readonly string[],
+  caller: string,
+): void {
+  const allowedSet = new Set(allowed);
+  for (const key of Object.keys(opts)) {
+    if (!allowedSet.has(key))
+      throw new Error(
+        `invalid ${caller} options: unknown option "${key}"`,
+      );
+  }
+}
+
+/**
  * `created`/`expires` are Unix seconds on the wire, and the verifier's
  * `signature-input` parser only recognizes the `-?\d+` integer shape.
  * Reject anything else here so the signer can never emit a timestamp the
@@ -543,6 +595,7 @@ export function signRequest(
   req: RequestLike,
   opts: SignOptions,
 ): SignedHttpRequest {
+  assertNoUnknownOptions(opts, SIGN_OPTION_KEYS, "signRequest");
   const label = opts.label ?? "sig1";
   assertLabelShape(label);
   const created = opts.created ?? Math.floor(Date.now() / 1000);
@@ -877,6 +930,7 @@ export function addSignature(
   signedReq: SignedHttpRequest,
   opts: SignOptions,
 ): SignedHttpRequest {
+  assertNoUnknownOptions(opts, SIGN_OPTION_KEYS, "addSignature");
   const label = opts.label ?? "sig1";
   if (label.length === 0)
     throw new Error('addSignature: "label" must be a non-empty string');

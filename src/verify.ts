@@ -19,7 +19,7 @@ import {
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
 import { assertHmacSecretLength, assertRsaModulusLength, algMatchesKeyShape, describeKey, inferAlgFromKeyShape as inferAlgFromKey } from "./keys.js";
 import type { JwksKeyStore } from "./jwks.js";
-import type { SignAlg } from "./sign.js";
+import { assertNoUnknownOptions, type SignAlg } from "./sign.js";
 import type { NonceStore } from "./replay.js";
 import {
   assertStructuredFieldTypes,
@@ -896,6 +896,64 @@ function coversWholeDigestField(componentIds: string[]): boolean {
 }
 
 /**
+ * The `VerifyOptions` field names, kept as a data list so the
+ * fail-closed unknown-option check (backlog #1251) can never drift
+ * from the interface: add a field to `VerifyOptions` and add its
+ * name here in the same commit. `VERIFY_ALL_OPTION_KEYS` is this
+ * list minus `"label"` (which `VerifyAllOptions` omits) plus the
+ * per-label keys — the response-side `VerifyAllResponseOptions`
+ * allowlist is that list plus `"request"`.
+ */
+export const VERIFY_OPTION_KEYS: readonly string[] = [
+  "key",
+  "keyResolver",
+  "singleKeyFallback",
+  "candidateKeys",
+  "label",
+  "now",
+  "clockSkewToleranceSec",
+  "expiredToleranceSec",
+  "requireCreated",
+  "requireExpires",
+  "requireNonce",
+  "requireTag",
+  "maxSignatureAgeSec",
+  "maxSignatureInputLength",
+  "maxSignatureLength",
+  "expectedKeyId",
+  "expectedTag",
+  "algFallback",
+  "allowedAlgs",
+  "replayCache",
+  "requiredComponents",
+  "structuredFieldTypes",
+];
+
+export const VERIFY_ALL_OPTION_KEYS: readonly string[] = [
+  ...VERIFY_OPTION_KEYS.filter((k) => k !== "label"),
+  "keys",
+  "expectedKeyIds",
+  "expectedTags",
+  "keyResolvers",
+  "candidateKeysByLabel",
+  "maxSignatureAgeSecByLabel",
+  "maxSignatureInputLengthByLabel",
+  "maxSignatureLengthByLabel",
+  "clockSkewToleranceSecByLabel",
+  "expiredToleranceSecByLabel",
+  "requiredComponentsByLabel",
+  "requiredLabels",
+  "algFallbackByLabel",
+  "allowedAlgsByLabel",
+  "requireCreatedByLabel",
+  "requireExpiresByLabel",
+  "requireNonceByLabel",
+  "replayCacheByLabel",
+  "requireTagByLabel",
+  "structuredFieldTypesByLabel",
+];
+
+/**
  * Verify an RFC 9421 signed request: rebuild the signature base from the
  * covered components, check the cryptographic signature, then enforce
  * freshness (expires / created).
@@ -908,12 +966,16 @@ function coversWholeDigestField(componentIds: string[]): boolean {
  * and a configured HMAC secret shorter
  * than the per-algorithm floor (≥ 32 bytes for `hmac-sha256`, ≥ 64 bytes
  * for `hmac-sha512`), which is rejected loudly on both the sign and verify
- * sides).
+ * sides). An unknown option key is likewise a configuration error:
+ * `assertNoUnknownOptions` runs first, so a misspelled freshness or
+ * pinning key (`maxSignatureAge`, `requireNonces`) throws instead of
+ * silently disabling the check it names (backlog #1251).
  */
 export function verifyRequest(
   req: RequestLike,
   opts: VerifyOptions,
 ): VerifyResult {
+  assertNoUnknownOptions(opts, VERIFY_OPTION_KEYS, "verifyRequest");
   assertKeyConfig(opts);
   assertSingleKeyFallback(opts, "verifyRequest");
   assertCandidateKeys(opts.candidateKeys);
@@ -2551,12 +2613,15 @@ function assertRequireFlagByLabel(
  * carries no usable label) — that failure already fails any
  * `every((r) => r.ok)` check, so no synthetic entries are added
  * there. Like `verifyRequest`, this function never throws on malformed
- * input. Duplicate labels are verified once (first occurrence).
+ * input. Duplicate labels are verified once (first occurrence). An
+ * unknown option key is a caller configuration error, thrown by
+ * `assertNoUnknownOptions` before anything else (backlog #1251).
  */
 export function verifyAllLabels(
   req: RequestLike,
   opts: VerifyAllOptions,
 ): VerifyResult[] {
+  assertNoUnknownOptions(opts, VERIFY_ALL_OPTION_KEYS, "verifyAllLabels");
   // `requiredLabels` is validated first, before the unsigned-request
   // early return below: a misconfigured policy must throw even for an
   // unsigned request, and an unsigned request with required labels
@@ -2618,6 +2683,21 @@ export function verifyAllLabels(
     ];
   }
   const results = labels.map((label) => {
+    // Per-label delegation base: only the `VerifyOptions` keys
+    // travel into `verifyRequest` — the per-label maps (`keys`,
+    // `keyResolvers`, `*ByLabel`, `requiredLabels`) are consumed
+    // here, never by the single-label entry point, which rejects
+    // unknown keys fail-closed (backlog #1251). Picking by the
+    // allowlist keeps the delegation honest if `VerifyOptions`
+    // grows a field: the scan in `verifyRequest` would catch a key
+    // this list forgot.
+    const verifyOptionsBase: VerifyOptions = {};
+    for (const key of VERIFY_OPTION_KEYS) {
+      if (key === "label") continue;
+      const value = (opts as VerifyOptions)[key as keyof VerifyOptions];
+      if (value !== undefined)
+        (verifyOptionsBase as Record<string, unknown>)[key] = value;
+    }
     const key = opts.keys?.[label] ?? opts.key;
     // Per-label resolver: the label's dedicated resolver wins; any
     // other label falls back to the global `keyResolver`.
@@ -2752,7 +2832,7 @@ export function verifyAllLabels(
     const structuredFieldTypes =
       opts.structuredFieldTypesByLabel?.[label] ?? opts.structuredFieldTypes;
     return verifyRequest(req, {
-      ...opts,
+      ...verifyOptionsBase,
       label,
       ...(key !== undefined ? { key } : {}),
       ...(keyResolver !== undefined ? { keyResolver } : {}),

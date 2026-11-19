@@ -2,15 +2,17 @@ export {
   addSignature,
   assertLabelShape,
   assertNoDuplicateCoveredComponents,
+  assertNoUnknownOptions,
   coveredComponentKey,
   MAX_KEY_ID_LENGTH,
   MAX_NONCE_LENGTH,
   MAX_TAG_LENGTH,
   signRequest,
+  SIGN_OPTION_KEYS,
 } from "./sign.js";
 export type { SignAlg, SignedHttpRequest, SignOptions } from "./sign.js";
 export { verifyAllLabels, verifyAllLabelsOrThrow, verifyRequest, verifyRequestOrThrow } from "./verify.js";
-export { DEFAULT_MAX_SIGNATURE_INPUT_LENGTH, DEFAULT_MAX_SIGNATURE_LENGTH } from "./verify.js";
+export { DEFAULT_MAX_SIGNATURE_INPUT_LENGTH, DEFAULT_MAX_SIGNATURE_LENGTH, VERIFY_ALL_OPTION_KEYS, VERIFY_OPTION_KEYS } from "./verify.js";
 export type { VerifyAllOptions, VerifyOptions, VerifyResult } from "./verify.js";
 export { isVerifyError, VerifyError } from "./errors.js";
 export type { VerifyErrorOptions, VerifyFailureCode } from "./errors.js";

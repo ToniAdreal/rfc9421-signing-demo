@@ -104,8 +104,24 @@ import {
   type VerifyAllResponseOptions,
   type VerifyResponseOptions,
 } from "./response.js";
-import { signRequest, type SignOptions } from "./sign.js";
+import { assertNoUnknownOptions, signRequest, type SignOptions } from "./sign.js";
 import type { VerifyResult } from "./verify.js";
+
+/**
+ * The `VerifiedFetchOptions` field names (backlog #1251). The
+ * nested `sign` / `verify` objects are scanned where they are
+ * consumed — `signRequest` / `verifyResponse` /
+ * `verifyAllResponseLabels` run their own unknown-option check, and
+ * the pre-flight dry runs below run them before any network
+ * happens — so this list only guards the helper's own boundary.
+ */
+const VERIFIED_FETCH_OPTION_KEYS: readonly string[] = [
+  "sign",
+  "verify",
+  "fetchImpl",
+  "maxBodyBytes",
+  "responseBody",
+];
 
 /**
  * Signing options for `verifiedFetch`: exactly the options
@@ -734,8 +750,11 @@ async function readResponseBodyCapped(
  * attached to the error as `verifyResults`.
  *
  * Fail-fast configuration errors (thrown, before any network):
- * everything `signRequest` already rejects, plus a verifier with no
- * key source or any other misconfiguration the dry run catches, a
+ * everything `signRequest` already rejects, plus an unknown option
+ * key on `opts` itself (`invalid verifiedFetch options: unknown
+ * option "…"` — the nested `sign` / `verify` objects are scanned by
+ * their own entry points, in the pre-flight dry runs below, before
+ * any network happens), a verifier with no key source or any other
  * non-positive-integer `maxBodyBytes`, an illegal `responseBody`
  * value, a caller-supplied
  * `verify.request` (managed by this helper — pass no `request`),
@@ -769,6 +788,7 @@ export async function verifiedFetch(
     throw new Error(
       `verifiedFetch: opts must be an object, got ${opts === null ? "null" : typeof opts}`,
     );
+  assertNoUnknownOptions(opts, VERIFIED_FETCH_OPTION_KEYS, "verifiedFetch");
   if (opts.sign === null || typeof opts.sign !== "object")
     throw new Error(
       `verifiedFetch: opts.sign (SignOptions) is required, got ${opts.sign === null ? "null" : typeof opts.sign}`,

@@ -53,6 +53,7 @@ import {
   signResponse,
   type SignResponseOptions,
 } from "./response.js";
+import { assertNoUnknownOptions } from "./sign.js";
 import {
   verifyAllLabels,
   verifyRequest,
@@ -60,6 +61,24 @@ import {
   type VerifyOptions,
   type VerifyResult,
 } from "./verify.js";
+
+/**
+ * The option field names both verified-handler factories accept
+ * (`CreateVerifiedHandlerOptions` and
+ * `CreateVerifiedFetchHandlerOptions` carry the same four keys —
+ * backlog #1251). The nested `signResponse` / `signResponses` /
+ * `verifyAllLabels` objects are scanned where they are consumed:
+ * `signResponse` / `verifyAllLabels` run their own unknown-option
+ * check inside the creation-time dry runs, so a misspelled key in a
+ * nested object still fails handler creation, never the first live
+ * request. This list only guards the factories' own boundary.
+ */
+const VERIFIED_HANDLER_OPTION_KEYS: readonly string[] = [
+  "maxBodyBytes",
+  "signResponse",
+  "signResponses",
+  "verifyAllLabels",
+];
 
 /**
  * The trailer fields an adapter actually reads, shared by the request
@@ -1270,6 +1289,8 @@ export function createVerifiedHandler(
   handler: VerifiedRequestHandler,
   opts?: CreateVerifiedHandlerOptions,
 ): RequestListener {
+  if (opts !== undefined)
+    assertNoUnknownOptions(opts, VERIFIED_HANDLER_OPTION_KEYS, "createVerifiedHandler");
   const maxBodyBytes = opts?.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0)
     throw new Error(
@@ -1944,6 +1965,8 @@ export function createVerifiedFetchHandler(
   handler: VerifiedFetchHandler,
   opts?: CreateVerifiedFetchHandlerOptions,
 ): (req: Request) => Promise<Response> {
+  if (opts !== undefined)
+    assertNoUnknownOptions(opts, VERIFIED_HANDLER_OPTION_KEYS, "createVerifiedFetchHandler");
   const maxBodyBytes = opts?.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0)
     throw new Error(

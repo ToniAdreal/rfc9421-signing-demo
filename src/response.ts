@@ -50,15 +50,40 @@ import {
 } from "./components.js";
 import { contentDigestAlgOf } from "./digest.js";
 import { VerifyError } from "./errors.js";
-import { signRequest, assertLabelShape, assertNoDuplicateCoveredComponents, type SignOptions } from "./sign.js";
+import { signRequest, assertLabelShape, assertNoDuplicateCoveredComponents, assertNoUnknownOptions, SIGN_OPTION_KEYS, type SignOptions } from "./sign.js";
 import {
   checkSignatureHeaderLengths,
   verifyAllLabels,
   verifyRequest,
+  VERIFY_ALL_OPTION_KEYS,
+  VERIFY_OPTION_KEYS,
   type VerifyAllOptions,
   type VerifyOptions,
   type VerifyResult,
 } from "./verify.js";
+
+/**
+ * Response-side option allowlists (backlog #1251): each is the
+ * request-side list plus `"request"`, the one option the response
+ * wrappers consume themselves instead of forwarding. The unknown-key
+ * scan runs at the top of each wrapper, before the status guard, so
+ * a misspelled option throws with the wrapper's own name in the
+ * message — the delegated `signRequest` / `verifyRequest` /
+ * `verifyAllLabels` call would reject it too, but under its own
+ * name.
+ */
+const SIGN_RESPONSE_OPTION_KEYS: readonly string[] = [
+  ...SIGN_OPTION_KEYS,
+  "request",
+];
+const VERIFY_RESPONSE_OPTION_KEYS: readonly string[] = [
+  ...VERIFY_OPTION_KEYS,
+  "request",
+];
+const VERIFY_ALL_RESPONSE_OPTION_KEYS: readonly string[] = [
+  ...VERIFY_ALL_OPTION_KEYS,
+  "request",
+];
 
 /**
  * The response shape both wrappers accept. `headers` keeps the
@@ -301,6 +326,7 @@ export function signResponse(
   res: HttpResponseLike,
   opts: SignResponseOptions,
 ): SignedHttpResponse {
+  assertNoUnknownOptions(opts, SIGN_RESPONSE_OPTION_KEYS, "signResponse");
   assertStatus("signResponse", res.status);
   const covered =
     opts.coveredComponents ?? defaultResponseCoveredComponents(res.body !== undefined);
@@ -366,6 +392,7 @@ export function verifyResponse(
   res: HttpResponseLike,
   opts: VerifyResponseOptions,
 ): VerifyResult {
+  assertNoUnknownOptions(opts, VERIFY_RESPONSE_OPTION_KEYS, "verifyResponse");
   assertStatus("verifyResponse", res.status);
   // Header length limits (fail-closed, before the guard below parses
   // `signature-input`): the guard's own parse must never run over an
@@ -478,6 +505,7 @@ export function verifyAllResponseLabels(
   res: HttpResponseLike,
   opts: VerifyAllResponseOptions,
 ): VerifyResult[] {
+  assertNoUnknownOptions(opts, VERIFY_ALL_RESPONSE_OPTION_KEYS, "verifyAllResponseLabels");
   assertStatus("verifyAllResponseLabels", res.status);
   // Header length limits (fail-closed, before the guard below parses
   // `signature-input`): the guard's own parse must never run over an
@@ -648,6 +676,7 @@ export function addResponseSignature(
   signedRes: SignedHttpResponse,
   opts: SignResponseOptions,
 ): SignedHttpResponse {
+  assertNoUnknownOptions(opts, SIGN_RESPONSE_OPTION_KEYS, "addResponseSignature");
   const label = opts.label ?? "sig1";
   if (label.length === 0)
     throw new Error(
