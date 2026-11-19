@@ -687,7 +687,7 @@
  * (generation is not printed) and every clock is
  * injected, so the segment's printed lines are
  * identical between runs.
- * The demo closes with a JWKS fetch retries segment:
+ * The demo then shows a JWKS fetch retries segment:
  * the observability segment above refreshes exactly once
  * over a healthy fake endpoint, so it cannot show what
  * `fetchRetries` does when the endpoint is briefly sick.
@@ -709,6 +709,28 @@
  * (generation is not printed) and every sleep is injected,
  * so the segment's printed lines are identical between
  * runs.
+ * The demo then shows a JWKS fetch timeout segment: the
+ * fetch retries segment above covers a sick endpoint that
+ * still answers, but never one that stops answering at all.
+ * A `JwksKeyStore` with `fetchTimeoutMs: 500` over a real
+ * loopback `http` server refreshes once — the server answers
+ * the first fetch with the one-key document — and then the
+ * server hangs on every later request: the second `refresh()`
+ * fails with the pinned timeout message, the snapshot size
+ * and `lastRefreshedAt` are unchanged, and a request signed
+ * under the scripted keyid still verifies through the kept
+ * snapshot, with `stats()` counting the timeout as one
+ * refresh failure and the verification as one hit. A second
+ * store with `fetchTimeoutMs: 5000` refreshes against the
+ * same server's always-answering path as the control: a fetch
+ * that finishes inside the deadline is unaffected. Outside
+ * the printed lines the demo asserts every count, size,
+ * timestamp and error message equals the hand-pinned
+ * expectations below (the same timeout rules
+ * `test/jwksFetchTimeout.test.ts` pins). Only the loopback
+ * port (never printed) and the key pairs are fresh per run,
+ * and the pinned clock keeps every timestamp fixed, so the
+ * segment's printed lines are identical between runs.
  * The demo closes with a ReplayCache observability segment:
  * a small `ReplayCache` (capacity 3, TTL 100s) under an
  * injected clock is driven through a pinned script — two
@@ -3197,6 +3219,67 @@ export const DEMO_JWKS_FETCH_RETRY_NOT_FOUND_SLEEP_CALLS = 0;
  */
 export const DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR =
   `JwksKeyStore: JWKS fetch failed: HTTP 404 from ${DEMO_JWKS_URL}`;
+
+/** Key id of the closing JWKS fetch timeout segment's scripted key. */
+export const DEMO_JWKS_FETCH_TIMEOUT_KEY_ID = "demo-jwks-fetch-timeout-1";
+/**
+ * Fetch timeout of the closing JWKS fetch timeout segment's
+ * store in milliseconds: short enough that the demo never
+ * waits long on the hung endpoint, long enough that the
+ * first (healthy) loopback fetch always finishes inside it.
+ */
+export const DEMO_JWKS_FETCH_TIMEOUT_MS = 500;
+/** Nonce of the JWKS fetch timeout segment's signed request. */
+export const DEMO_JWKS_FETCH_TIMEOUT_NONCE =
+  "demo-nonce-jwks-fetch-timeout-001";
+/**
+ * Hand-pinned refresh failure of the hung endpoint: the same
+ * message `test/jwksFetchTimeout.test.ts` pins for a timed-out
+ * default fetch.
+ */
+export const DEMO_JWKS_FETCH_TIMEOUT_ERROR =
+  `JwksKeyStore: JWKS fetch timed out after ${DEMO_JWKS_FETCH_TIMEOUT_MS}ms`;
+/**
+ * Fetch count of the timeout store: the first refresh seeds
+ * the snapshot from the answering endpoint, the second hangs
+ * and times out.
+ */
+export const DEMO_JWKS_FETCH_TIMEOUT_FETCH_CALLS = 2;
+/**
+ * Snapshot size of the timeout store after the timed-out
+ * refresh: the seeded key survives the outage untouched.
+ */
+export const DEMO_JWKS_FETCH_TIMEOUT_SIZE = 1;
+/**
+ * Hand-pinned `stats()` of the timeout store after the seed,
+ * the timed-out refresh and the verification through the kept
+ * snapshot: one refresh, one refresh failure, one hit from
+ * the verification, no misses.
+ */
+export const DEMO_JWKS_FETCH_TIMEOUT_STATS: JwksKeyStoreStats = {
+  refreshes: 1,
+  refreshFailures: 1,
+  hits: 1,
+  misses: 0,
+  conditionalRefreshes: 0,
+  notModified: 0,
+};
+/** Key id of the JWKS fetch timeout segment's control key. */
+export const DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID =
+  "demo-jwks-fetch-timeout-control-1";
+/**
+ * Fetch timeout of the control store in milliseconds: far
+ * above any loopback round-trip, so a healthy fetch always
+ * finishes inside the deadline.
+ */
+export const DEMO_JWKS_FETCH_TIMEOUT_CONTROL_MS = 5000;
+/**
+ * Fetch count of the control store: exactly one fetch serves
+ * the scripted key.
+ */
+export const DEMO_JWKS_FETCH_TIMEOUT_CONTROL_FETCH_CALLS = 1;
+/** Snapshot size of the control store after its refresh. */
+export const DEMO_JWKS_FETCH_TIMEOUT_CONTROL_SIZE = 1;
 
 /** Key id of the closing JWKS requireHttps segment's scripted key. */
 export const DEMO_JWKS_REQUIRE_HTTPS_KEY_ID = "demo-jwks-require-https-1";
@@ -6136,6 +6219,59 @@ export interface DemoResult {
    * `DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR`).
    */
   jwksFetchRetryNotFoundError: string;
+  /**
+   * Loopback request count of the closing JWKS fetch timeout
+   * segment's store (equals the hand-pinned
+   * `DEMO_JWKS_FETCH_TIMEOUT_FETCH_CALLS`: one seeding fetch,
+   * one hung fetch that times out).
+   */
+  jwksFetchTimeoutFetchCalls: number;
+  /**
+   * Refresh failure message of the hung endpoint (equals the
+   * hand-pinned `DEMO_JWKS_FETCH_TIMEOUT_ERROR`).
+   */
+  jwksFetchTimeoutError: string;
+  /**
+   * Snapshot size of the timeout store after the timed-out
+   * refresh (equals the hand-pinned
+   * `DEMO_JWKS_FETCH_TIMEOUT_SIZE`: the seeded key survives).
+   */
+  jwksFetchTimeoutSizeAfterTimeout: number;
+  /**
+   * Freshness timestamp of the timeout store after the
+   * timed-out refresh (the pinned `DEMO_CREATED`: the failed
+   * refresh never advances it).
+   */
+  jwksFetchTimeoutLastRefreshedAfterTimeout: number | null;
+  /**
+   * Whether the request signed under the scripted keyid still
+   * verifies through the kept snapshot after the timed-out
+   * refresh (`true`).
+   */
+  jwksFetchTimeoutVerificationOk: boolean;
+  /**
+   * `stats()` of the timeout store after the seed, the
+   * timed-out refresh and the verification (equals the
+   * hand-pinned `DEMO_JWKS_FETCH_TIMEOUT_STATS`).
+   */
+  jwksFetchTimeoutStats: JwksKeyStoreStats;
+  /**
+   * Loopback request count of the control store (equals the
+   * hand-pinned
+   * `DEMO_JWKS_FETCH_TIMEOUT_CONTROL_FETCH_CALLS`).
+   */
+  jwksFetchTimeoutControlFetchCalls: number;
+  /**
+   * Snapshot size of the control store after its refresh
+   * (equals the hand-pinned
+   * `DEMO_JWKS_FETCH_TIMEOUT_CONTROL_SIZE`).
+   */
+  jwksFetchTimeoutControlSize: number;
+  /**
+   * Whether the control store's `resolve()` of the scripted
+   * keyid returned a key after its refresh (`true`).
+   */
+  jwksFetchTimeoutControlResolved: boolean;
   /**
    * Construction rejection of the closing JWKS requireHttps
    * segment's store built over the loopback `http:` endpoint with
@@ -12742,6 +12878,227 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // JWKS fetch timeout segment: the fetch retries segment
+  // above covers a sick endpoint that still answers, but
+  // never one that stops answering at all. This segment
+  // drives a JwksKeyStore with `fetchTimeoutMs: 500` over a
+  // real loopback `http` server that answers the first
+  // fetch with the one-key document and then hangs on every
+  // later request: the second `refresh()` must fail with the
+  // pinned timeout message while the snapshot size and
+  // `lastRefreshedAt` stay exactly as the seed left them,
+  // and a request signed under the scripted keyid must
+  // still verify through the kept snapshot. A second store
+  // with `fetchTimeoutMs: 5000` refreshes against the same
+  // server's always-answering path as the control: a fetch
+  // that finishes inside the deadline must succeed and
+  // resolve. The segment key pairs are fresh ed25519 pairs
+  // (generation is not printed) and the store clock is
+  // pinned at DEMO_CREATED; outside the printed lines the
+  // demo asserts every count, size, timestamp and error
+  // message equals the hand-pinned
+  // DEMO_JWKS_FETCH_TIMEOUT_* expectations. The hanging
+  // request's socket is destroyed with the server in the
+  // finally below, so the demo process never waits on it.
+  const jwksFetchTimeoutPair = generateEd25519KeyPair();
+  const jwksFetchTimeoutControlPair = generateEd25519KeyPair();
+  let jwksFetchTimeoutFetchCalls = 0;
+  let jwksFetchTimeoutControlFetchCalls = 0;
+  const jwksFetchTimeoutSockets = new Set<Socket>();
+  const jwksFetchTimeoutServer = createServer((req, res) => {
+    if (req.url === "/control.json") {
+      jwksFetchTimeoutControlFetchCalls++;
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          keys: [
+            {
+              ...exportPublicKeyJwk(
+                jwksFetchTimeoutControlPair.publicKey,
+              ),
+              kid: DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID,
+            },
+          ],
+        }),
+      );
+      return;
+    }
+    jwksFetchTimeoutFetchCalls++;
+    if (jwksFetchTimeoutFetchCalls === 1) {
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          keys: [
+            {
+              ...exportPublicKeyJwk(jwksFetchTimeoutPair.publicKey),
+              kid: DEMO_JWKS_FETCH_TIMEOUT_KEY_ID,
+            },
+          ],
+        }),
+      );
+      return;
+    }
+    // Every later request hangs: never respond, so the
+    // store's `fetchTimeoutMs` is the only thing that ends
+    // the refresh. The socket is destroyed in the finally
+    // below once the timeout has fired.
+  });
+  jwksFetchTimeoutServer.on("connection", (socket) => {
+    jwksFetchTimeoutSockets.add(socket);
+    socket.on("close", () => {
+      jwksFetchTimeoutSockets.delete(socket);
+    });
+  });
+  let jwksFetchTimeoutError = "";
+  let jwksFetchTimeoutSizeAfterTimeout = 0;
+  let jwksFetchTimeoutLastRefreshedAfterTimeout: number | null = null;
+  let jwksFetchTimeoutVerificationOk = false;
+  let jwksFetchTimeoutStats: JwksKeyStoreStats = {
+    refreshes: 0,
+    refreshFailures: 0,
+    hits: 0,
+    misses: 0,
+    conditionalRefreshes: 0,
+    notModified: 0,
+  };
+  let jwksFetchTimeoutControlSize = 0;
+  let jwksFetchTimeoutControlResolved = false;
+  try {
+    const jwksFetchTimeoutPort = await new Promise<AddressInfo>(
+      (resolve, reject) => {
+        jwksFetchTimeoutServer.on("error", reject);
+        jwksFetchTimeoutServer.listen(0, "127.0.0.1", () => {
+          resolve(jwksFetchTimeoutServer.address() as AddressInfo);
+        });
+      },
+    ).then((info) => info.port);
+    const jwksFetchTimeoutUrl =
+      `http://127.0.0.1:${jwksFetchTimeoutPort}/.well-known/jwks.json`;
+    const jwksFetchTimeoutControlUrl =
+      `http://127.0.0.1:${jwksFetchTimeoutPort}/control.json`;
+    const jwksFetchTimeoutStore = new JwksKeyStore(jwksFetchTimeoutUrl, {
+      fetchTimeoutMs: DEMO_JWKS_FETCH_TIMEOUT_MS,
+      now: () => DEMO_CREATED,
+    });
+    await jwksFetchTimeoutStore.refresh();
+    const jwksFetchTimeoutLastRefreshedBeforeTimeout =
+      jwksFetchTimeoutStore.lastRefreshedAt;
+    const jwksFetchTimeoutSizeBeforeTimeout =
+      jwksFetchTimeoutStore.size;
+    try {
+      await jwksFetchTimeoutStore.refresh();
+    } catch (err) {
+      jwksFetchTimeoutError =
+        err instanceof Error ? err.message : String(err);
+    }
+    jwksFetchTimeoutSizeAfterTimeout = jwksFetchTimeoutStore.size;
+    jwksFetchTimeoutLastRefreshedAfterTimeout =
+      jwksFetchTimeoutStore.lastRefreshedAt;
+    const jwksFetchTimeoutSigned = signRequest(
+      {
+        method: "POST",
+        url: "https://api.example.com/v1/payments",
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        keyId: DEMO_JWKS_FETCH_TIMEOUT_KEY_ID,
+        alg: "ed25519",
+        key: jwksFetchTimeoutPair.privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_JWKS_FETCH_TIMEOUT_NONCE,
+      },
+    );
+    const jwksFetchTimeoutVerification = verifyRequest(
+      jwksFetchTimeoutSigned,
+      {
+        keyResolver: jwksFetchTimeoutStore.resolve,
+        now: DEMO_CREATED + 60,
+      },
+    );
+    jwksFetchTimeoutVerificationOk = jwksFetchTimeoutVerification.ok;
+    jwksFetchTimeoutStats = jwksFetchTimeoutStore.stats();
+    const jwksFetchTimeoutControlStore = new JwksKeyStore(
+      jwksFetchTimeoutControlUrl,
+      {
+        fetchTimeoutMs: DEMO_JWKS_FETCH_TIMEOUT_CONTROL_MS,
+        now: () => DEMO_CREATED,
+      },
+    );
+    await jwksFetchTimeoutControlStore.refresh();
+    jwksFetchTimeoutControlSize = jwksFetchTimeoutControlStore.size;
+    jwksFetchTimeoutControlResolved =
+      jwksFetchTimeoutControlStore.resolve(
+        DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID,
+      ) !== undefined;
+    if (
+      jwksFetchTimeoutFetchCalls !==
+        DEMO_JWKS_FETCH_TIMEOUT_FETCH_CALLS ||
+      jwksFetchTimeoutError !== DEMO_JWKS_FETCH_TIMEOUT_ERROR ||
+      jwksFetchTimeoutSizeBeforeTimeout !==
+        DEMO_JWKS_FETCH_TIMEOUT_SIZE ||
+      jwksFetchTimeoutSizeAfterTimeout !==
+        DEMO_JWKS_FETCH_TIMEOUT_SIZE ||
+      jwksFetchTimeoutLastRefreshedBeforeTimeout !== DEMO_CREATED ||
+      jwksFetchTimeoutLastRefreshedAfterTimeout !== DEMO_CREATED ||
+      jwksFetchTimeoutVerification.ok !== true ||
+      jwksFetchTimeoutVerification.label !==
+        DEMO_JWKS_OBSERVABILITY_LABEL ||
+      jwksFetchTimeoutVerification.keyId !==
+        DEMO_JWKS_FETCH_TIMEOUT_KEY_ID ||
+      jwksFetchTimeoutVerification.alg !==
+        DEMO_JWKS_OBSERVABILITY_ALG ||
+      jwksFetchTimeoutVerification.nonce !==
+        DEMO_JWKS_FETCH_TIMEOUT_NONCE ||
+      jwksFetchTimeoutStats.refreshes !==
+        DEMO_JWKS_FETCH_TIMEOUT_STATS.refreshes ||
+      jwksFetchTimeoutStats.refreshFailures !==
+        DEMO_JWKS_FETCH_TIMEOUT_STATS.refreshFailures ||
+      jwksFetchTimeoutStats.hits !==
+        DEMO_JWKS_FETCH_TIMEOUT_STATS.hits ||
+      jwksFetchTimeoutStats.misses !==
+        DEMO_JWKS_FETCH_TIMEOUT_STATS.misses ||
+      jwksFetchTimeoutStats.conditionalRefreshes !==
+        DEMO_JWKS_FETCH_TIMEOUT_STATS.conditionalRefreshes ||
+      jwksFetchTimeoutStats.notModified !==
+        DEMO_JWKS_FETCH_TIMEOUT_STATS.notModified ||
+      jwksFetchTimeoutControlFetchCalls !==
+        DEMO_JWKS_FETCH_TIMEOUT_CONTROL_FETCH_CALLS ||
+      jwksFetchTimeoutControlSize !==
+        DEMO_JWKS_FETCH_TIMEOUT_CONTROL_SIZE ||
+      jwksFetchTimeoutControlResolved !== true
+    ) {
+      throw new Error(
+        `demo fixture broken: JWKS fetch timeout gave fetches ` +
+          `${jwksFetchTimeoutFetchCalls} with error ` +
+          `${jwksFetchTimeoutError}, size before/after timeout ` +
+          `${jwksFetchTimeoutSizeBeforeTimeout}/` +
+          `${jwksFetchTimeoutSizeAfterTimeout}, lastRefreshedAt before/after ` +
+          `${jwksFetchTimeoutLastRefreshedBeforeTimeout}/` +
+          `${jwksFetchTimeoutLastRefreshedAfterTimeout}, verification ` +
+          `${jwksFetchTimeoutVerification.ok}/${jwksFetchTimeoutVerification.ok ? jwksFetchTimeoutVerification.label : jwksFetchTimeoutVerification.code}/` +
+          `${jwksFetchTimeoutVerification.ok ? jwksFetchTimeoutVerification.keyId : "-"}/` +
+          `${jwksFetchTimeoutVerification.ok ? jwksFetchTimeoutVerification.nonce : "-"} with stats ` +
+          `${JSON.stringify(jwksFetchTimeoutStats)}, and control fetches ` +
+          `${jwksFetchTimeoutControlFetchCalls} with size ` +
+          `${jwksFetchTimeoutControlSize} resolved ` +
+          `${jwksFetchTimeoutControlResolved}, instead of the pinned ` +
+          `${DEMO_JWKS_FETCH_TIMEOUT_FETCH_CALLS} fetches with error ` +
+          `${DEMO_JWKS_FETCH_TIMEOUT_ERROR}, size ` +
+          `${DEMO_JWKS_FETCH_TIMEOUT_SIZE} and lastRefreshedAt ` +
+          `${DEMO_CREATED} on both sides, verification ` +
+          `true/${DEMO_JWKS_OBSERVABILITY_LABEL}/${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}/` +
+          `${DEMO_JWKS_FETCH_TIMEOUT_NONCE} with stats ` +
+          `${JSON.stringify(DEMO_JWKS_FETCH_TIMEOUT_STATS)}, and control ` +
+          `${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_FETCH_CALLS} fetch with size ` +
+          `${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_SIZE} resolved true`,
+      );
+    }
+  } finally {
+    for (const socket of jwksFetchTimeoutSockets) socket.destroy();
+    jwksFetchTimeoutServer.close();
+  }
+
   // ReplayCache observability segment: the replay and
   // snapshot segments above each use a ReplayCache, but
   // neither shows the observability surface an operator
@@ -17902,6 +18259,13 @@ export async function runDemo(): Promise<DemoResult> {
     `JWKS fetch retries over a 500, 500, 200 script (fetchRetries ${DEMO_JWKS_FETCH_RETRY_RETRIES}, backoff ${DEMO_JWKS_FETCH_RETRY_BACKOFF_MS}ms): refresh() succeeded on attempt ${jwksFetchRetryFetchCalls} after ${jwksFetchRetrySleeps.length} sleeps, the snapshot holds ${jwksFetchRetrySize} key and resolve("${DEMO_JWKS_FETCH_RETRY_KEY_ID}") returned a key`,
     `JWKS fetch retries over a 404 endpoint (same fetchRetries ${DEMO_JWKS_FETCH_RETRY_RETRIES}): refresh() FAILED (${jwksFetchRetryNotFoundError}) after exactly ${jwksFetchRetryNotFoundFetchCalls} fetch and ${jwksFetchRetryNotFoundSleeps.length} sleeps — a 4xx response is terminal, never retried`,
     "",
+    "JWKS fetch timeout: JwksKeyStore fetchTimeoutMs caps how long a JWKS refresh may wait — a hung endpoint aborts instead of stalling key rotation forever, and the last good snapshot keeps serving",
+    `JWKS fetch timeout over a loopback endpoint that answers once and then hangs (fetchTimeoutMs ${DEMO_JWKS_FETCH_TIMEOUT_MS}ms): the first refresh() seeded the snapshot (size ${DEMO_JWKS_FETCH_TIMEOUT_SIZE}), the second refresh() FAILED (${jwksFetchTimeoutError}) after ${jwksFetchTimeoutFetchCalls} fetches — lastRefreshedAt stayed ${jwksFetchTimeoutLastRefreshedAfterTimeout} and size stayed ${jwksFetchTimeoutSizeAfterTimeout}`,
+    jwksFetchTimeoutVerificationOk
+      ? `JWKS fetch timeout verification after the timed-out refresh: the request signed under "${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}" still verifies through the kept snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_FETCH_TIMEOUT_NONCE}"), stats() = { refreshes: ${jwksFetchTimeoutStats.refreshes}, refreshFailures: ${jwksFetchTimeoutStats.refreshFailures}, hits: ${jwksFetchTimeoutStats.hits}, misses: ${jwksFetchTimeoutStats.misses}, conditionalRefreshes: ${jwksFetchTimeoutStats.conditionalRefreshes}, notModified: ${jwksFetchTimeoutStats.notModified} } (the timeout counted one refresh failure, the verification one hit)`
+      : `JWKS fetch timeout verification after the timed-out refresh: the request signed under "${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}": FAILED (the kept snapshot stopped serving — the timeout must not take the old keys down with it)`,
+    `JWKS fetch timeout control store (fetchTimeoutMs ${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_MS}ms) against an endpoint that answers inside the deadline: refresh() succeeded (fetch count ${jwksFetchTimeoutControlFetchCalls}), the snapshot holds ${jwksFetchTimeoutControlSize} key and resolve("${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID}") returned a key`,
+    "",
     "ReplayCache observability: ReplayCache.stats() exposes { size, hits, misses, evictions } — the health view a gateway operator watches to judge whether its replay cache is absorbing replays, filling up, or churning entries",
     `ReplayCache observability on a fresh cache (capacity ${DEMO_REPLAY_STATS_MAX_ENTRIES}, TTL ${DEMO_REPLAY_STATS_TTL_SEC}s, injected clock pinned at ${DEMO_CREATED}): stats() = ${formatReplayStats(replayStatsSteps[0]!)} (nothing seen yet)`,
     `ReplayCache observability after check("${DEMO_REPLAY_STATS_NONCES[0]}"): returned ${replayStatsChecks[0]} (a fresh nonce, recorded — a miss), stats() = ${formatReplayStats(replayStatsSteps[1]!)}`,
@@ -18638,6 +19002,15 @@ export async function runDemo(): Promise<DemoResult> {
     jwksFetchRetryNotFoundFetchCalls,
     jwksFetchRetryNotFoundSleeps,
     jwksFetchRetryNotFoundError,
+    jwksFetchTimeoutFetchCalls,
+    jwksFetchTimeoutError,
+    jwksFetchTimeoutSizeAfterTimeout,
+    jwksFetchTimeoutLastRefreshedAfterTimeout,
+    jwksFetchTimeoutVerificationOk,
+    jwksFetchTimeoutStats,
+    jwksFetchTimeoutControlFetchCalls,
+    jwksFetchTimeoutControlSize,
+    jwksFetchTimeoutControlResolved,
     replayStatsChecks,
     replayStatsSteps,
     replayStatsAfterDetachedMutation,

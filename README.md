@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2296 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2297 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -307,7 +307,14 @@ the generate -> export -> wire -> import -> sign loop a KMS
 backup/restore closes without a PEM detour — and a public key
 passed to the private exporter is shown rejected with the pinned
 caller-configuration error; only the JWK's shape is printed,
-never the `d` or `x` bytes. The demo closes with a verified-handler segment: a real
+never the `d` or `x` bytes. The demo then closes with a JWKS fetch timeout
+segment: a `JwksKeyStore` with `fetchTimeoutMs: 500` refreshes once against a
+loopback endpoint that answers, then hangs on the next refresh — the refresh
+fails with the pinned timeout message while the seeded snapshot, its
+`lastRefreshedAt` and a verification through it are unchanged — and a second
+store with `fetchTimeoutMs: 5000` refreshes against the same server's
+always-answering path as the control, showing a fetch that finishes inside
+the deadline is unaffected. The demo closes with a verified-handler segment: a real
 loopback server runs `createVerifiedHandler`, and three POSTs hit
 it — a `signRequest`-signed request reaches the business handler
 (200), a request with one base64 character of its signature
@@ -5213,7 +5220,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2296 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2297 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

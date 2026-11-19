@@ -319,6 +319,17 @@ import {
   DEMO_JWKS_FETCH_RETRY_RETRIES,
   DEMO_JWKS_FETCH_RETRY_SIZE,
   DEMO_JWKS_FETCH_RETRY_SLEEP_CALLS,
+  DEMO_JWKS_FETCH_TIMEOUT_CONTROL_FETCH_CALLS,
+  DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID,
+  DEMO_JWKS_FETCH_TIMEOUT_CONTROL_MS,
+  DEMO_JWKS_FETCH_TIMEOUT_CONTROL_SIZE,
+  DEMO_JWKS_FETCH_TIMEOUT_ERROR,
+  DEMO_JWKS_FETCH_TIMEOUT_FETCH_CALLS,
+  DEMO_JWKS_FETCH_TIMEOUT_KEY_ID,
+  DEMO_JWKS_FETCH_TIMEOUT_MS,
+  DEMO_JWKS_FETCH_TIMEOUT_NONCE,
+  DEMO_JWKS_FETCH_TIMEOUT_SIZE,
+  DEMO_JWKS_FETCH_TIMEOUT_STATS,
   DEMO_JWKS_MAX_BODY_BYTES,
   DEMO_JWKS_MAX_BODY_CONTENT_LENGTH,
   DEMO_JWKS_MAX_BODY_CONTENT_LENGTH_ERROR,
@@ -5778,7 +5789,175 @@ test("demo JWKS fetch retries segment retries 500s to a 200 and never retries a 
   assert.deepEqual(directNotFoundSleeps, jwksFetchRetryNotFoundSleeps);
 });
 
-test("demo lines contain the JWKS fetch retries segment (500, 500, 200 retry success, terminal 404, followed by the ReplayCache observability segment)", async () => {
+test("demo JWKS fetch timeout segment aborts a hung endpoint, keeps the old snapshot serving, and leaves a fast endpoint alone", async () => {
+  const {
+    lines,
+    jwksFetchTimeoutFetchCalls,
+    jwksFetchTimeoutError,
+    jwksFetchTimeoutSizeAfterTimeout,
+    jwksFetchTimeoutLastRefreshedAfterTimeout,
+    jwksFetchTimeoutVerificationOk,
+    jwksFetchTimeoutStats,
+    jwksFetchTimeoutControlFetchCalls,
+    jwksFetchTimeoutControlSize,
+    jwksFetchTimeoutControlResolved,
+  } = await runDemo();
+  assert.equal(DEMO_JWKS_FETCH_TIMEOUT_KEY_ID, "demo-jwks-fetch-timeout-1");
+  assert.equal(DEMO_JWKS_FETCH_TIMEOUT_MS, 500);
+  assert.equal(
+    DEMO_JWKS_FETCH_TIMEOUT_NONCE,
+    "demo-nonce-jwks-fetch-timeout-001",
+  );
+  assert.equal(
+    DEMO_JWKS_FETCH_TIMEOUT_ERROR,
+    "JwksKeyStore: JWKS fetch timed out after 500ms",
+  );
+  assert.equal(DEMO_JWKS_FETCH_TIMEOUT_FETCH_CALLS, 2);
+  assert.equal(DEMO_JWKS_FETCH_TIMEOUT_SIZE, 1);
+  assert.deepEqual(DEMO_JWKS_FETCH_TIMEOUT_STATS, {
+    refreshes: 1,
+    refreshFailures: 1,
+    hits: 1,
+    misses: 0,
+    conditionalRefreshes: 0,
+    notModified: 0,
+  });
+  assert.equal(
+    DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID,
+    "demo-jwks-fetch-timeout-control-1",
+  );
+  assert.equal(DEMO_JWKS_FETCH_TIMEOUT_CONTROL_MS, 5000);
+  assert.equal(DEMO_JWKS_FETCH_TIMEOUT_CONTROL_FETCH_CALLS, 1);
+  assert.equal(DEMO_JWKS_FETCH_TIMEOUT_CONTROL_SIZE, 1);
+  assert.equal(
+    jwksFetchTimeoutFetchCalls,
+    DEMO_JWKS_FETCH_TIMEOUT_FETCH_CALLS,
+  );
+  assert.equal(jwksFetchTimeoutError, DEMO_JWKS_FETCH_TIMEOUT_ERROR);
+  assert.equal(
+    jwksFetchTimeoutSizeAfterTimeout,
+    DEMO_JWKS_FETCH_TIMEOUT_SIZE,
+  );
+  assert.equal(jwksFetchTimeoutLastRefreshedAfterTimeout, DEMO_CREATED);
+  assert.equal(jwksFetchTimeoutVerificationOk, true);
+  assert.deepEqual(jwksFetchTimeoutStats, DEMO_JWKS_FETCH_TIMEOUT_STATS);
+  assert.equal(
+    jwksFetchTimeoutControlFetchCalls,
+    DEMO_JWKS_FETCH_TIMEOUT_CONTROL_FETCH_CALLS,
+  );
+  assert.equal(
+    jwksFetchTimeoutControlSize,
+    DEMO_JWKS_FETCH_TIMEOUT_CONTROL_SIZE,
+  );
+  assert.equal(jwksFetchTimeoutControlResolved, true);
+
+  // Independent reproduction of the same two paths, outside
+  // runDemo(): a stubbed default fetch that never resolves is
+  // aborted at the deadline with the pinned message and the
+  // store stays empty, while a stubbed fetch that answers
+  // inside the deadline refreshes normally. The timeout is
+  // the library's behavior, not a fixture echo. The global
+  // fetch is always restored, so the demo's own loopback
+  // fetches in later tests are unaffected.
+  const stubGlobalFetch = (
+    impl: (url: string, init?: RequestInit) => Promise<unknown>,
+  ) => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init?: RequestInit) =>
+      impl(url, init)) as typeof globalThis.fetch;
+    return () => {
+      globalThis.fetch = original;
+    };
+  };
+  const hangingFetch =
+    () => (_url: string, init?: RequestInit) =>
+      new Promise<never>((_resolve, reject) => {
+        const signal = init?.signal;
+        const onAbort = () =>
+          reject(
+            new DOMException("This operation was aborted", "AbortError"),
+          );
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+  const { publicKey } = generateEd25519KeyPair();
+  const restoreHang = stubGlobalFetch(hangingFetch());
+  try {
+    const directStore = new JwksKeyStore(DEMO_JWKS_URL, {
+      fetchTimeoutMs: DEMO_JWKS_FETCH_TIMEOUT_MS,
+    });
+    await assert.rejects(
+      () => directStore.refresh(),
+      (err: unknown) =>
+        err instanceof Error &&
+        err.message === DEMO_JWKS_FETCH_TIMEOUT_ERROR,
+    );
+    assert.equal(directStore.size, 0);
+    assert.equal(directStore.lastRefreshedAt, null);
+  } finally {
+    restoreHang();
+  }
+  const restoreFast = stubGlobalFetch(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      keys: [
+        {
+          ...exportPublicKeyJwk(publicKey),
+          kid: DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID,
+        },
+      ],
+    }),
+  }));
+  try {
+    const directControl = new JwksKeyStore(DEMO_JWKS_URL, {
+      fetchTimeoutMs: DEMO_JWKS_FETCH_TIMEOUT_CONTROL_MS,
+    });
+    await directControl.refresh();
+    assert.equal(directControl.size, 1);
+    assert.ok(
+      directControl.resolve(DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID),
+    );
+  } finally {
+    restoreFast();
+  }
+
+  // Printed lines: header, the timed-out refresh, the
+  // verification through the kept snapshot, the control —
+  // byte-exact, and byte-identical between runs.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS fetch timeout:"),
+  );
+  assert.ok(headerIdx !== -1);
+  const retryIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS fetch retries:"),
+  );
+  assert.ok(retryIdx !== -1 && retryIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    `JWKS fetch timeout: JwksKeyStore fetchTimeoutMs caps how long a JWKS refresh may wait — a hung endpoint aborts instead of stalling key rotation forever, and the last good snapshot keeps serving`,
+    `JWKS fetch timeout over a loopback endpoint that answers once and then hangs (fetchTimeoutMs ${DEMO_JWKS_FETCH_TIMEOUT_MS}ms): the first refresh() seeded the snapshot (size ${DEMO_JWKS_FETCH_TIMEOUT_SIZE}), the second refresh() FAILED (${DEMO_JWKS_FETCH_TIMEOUT_ERROR}) after ${DEMO_JWKS_FETCH_TIMEOUT_FETCH_CALLS} fetches — lastRefreshedAt stayed ${DEMO_CREATED} and size stayed ${DEMO_JWKS_FETCH_TIMEOUT_SIZE}`,
+    `JWKS fetch timeout verification after the timed-out refresh: the request signed under "${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}" still verifies through the kept snapshot: OK (label sig1, keyid="${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}", alg="ed25519", nonce="${DEMO_JWKS_FETCH_TIMEOUT_NONCE}"), stats() = { refreshes: 1, refreshFailures: 1, hits: 1, misses: 0, conditionalRefreshes: 0, notModified: 0 } (the timeout counted one refresh failure, the verification one hit)`,
+    `JWKS fetch timeout control store (fetchTimeoutMs ${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_MS}ms) against an endpoint that answers inside the deadline: refresh() succeeded (fetch count ${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_FETCH_CALLS}), the snapshot holds ${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_SIZE} key and resolve("${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID}") returned a key`,
+  ]);
+  assert.equal(lines[headerIdx + 4], "");
+  const replayIdx = lines.findIndex((l) =>
+    l.startsWith("ReplayCache observability:"),
+  );
+  assert.ok(replayIdx !== -1 && headerIdx < replayIdx);
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("JWKS fetch timeout:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
+  );
+});
+
+test("demo lines contain the JWKS fetch retries segment (500, 500, 200 retry success, terminal 404, followed by the JWKS fetch timeout segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(out, /JWKS fetch retries: JwksKeyStore fetchRetries retries only transient/);
@@ -5791,11 +5970,16 @@ test("demo lines contain the JWKS fetch retries segment (500, 500, 200 retry suc
     `JWKS fetch retries over a 404 endpoint (same fetchRetries ${DEMO_JWKS_FETCH_RETRY_RETRIES}): refresh() FAILED (${DEMO_JWKS_FETCH_RETRY_NOT_FOUND_ERROR}) after exactly ${DEMO_JWKS_FETCH_RETRY_NOT_FOUND_FETCH_CALLS} fetch and ${DEMO_JWKS_FETCH_RETRY_NOT_FOUND_SLEEP_CALLS} sleeps — a 4xx response is terminal, never retried`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), expectedLines);
-  // The ReplayCache observability segment follows the JWKS fetch retries segment.
+  // The JWKS fetch timeout segment follows the JWKS fetch retries segment,
+  // and the ReplayCache observability segment follows the fetch timeout segment.
+  const timeoutIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS fetch timeout:"),
+  );
+  assert.ok(headerIdx !== -1 && timeoutIdx !== -1 && headerIdx < timeoutIdx);
   const replayStatsIdx = lines.findIndex((l) =>
     l.startsWith("ReplayCache observability:"),
   );
-  assert.ok(headerIdx !== -1 && replayStatsIdx !== -1 && headerIdx < replayStatsIdx);
+  assert.ok(timeoutIdx !== -1 && replayStatsIdx !== -1 && timeoutIdx < replayStatsIdx);
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) => l.startsWith("JWKS fetch retries:"));
   assert.deepEqual(again.lines.slice(againIdx, againIdx + 3), lines.slice(headerIdx, headerIdx + 3));
