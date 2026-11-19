@@ -50,7 +50,7 @@ import {
 } from "./components.js";
 import { contentDigestAlgOf } from "./digest.js";
 import { VerifyError } from "./errors.js";
-import { signRequest, assertLabelShape, assertNoDuplicateCoveredComponents, assertNoUnknownOptions, SIGN_OPTION_KEYS, type SignOptions } from "./sign.js";
+import { signRequest, assertCoveredComponentsShape, assertLabelShape, assertNoDuplicateCoveredComponents, assertNoUnknownOptions, SIGN_OPTION_KEYS, type SignOptions } from "./sign.js";
 import {
   checkSignatureHeaderLengths,
   verifyAllLabels,
@@ -328,8 +328,18 @@ export function signResponse(
 ): SignedHttpResponse {
   assertNoUnknownOptions(opts, SIGN_RESPONSE_OPTION_KEYS, "signResponse");
   assertStatus("signResponse", res.status);
+  // `undefined` means "use the default list"; an explicit `null`
+  // is a caller mistake, not a request for the default — it must
+  // reach the shape guard below instead of being swallowed by `??`.
   const covered =
-    opts.coveredComponents ?? defaultResponseCoveredComponents(res.body !== undefined);
+    opts.coveredComponents === undefined
+      ? defaultResponseCoveredComponents(res.body !== undefined)
+      : opts.coveredComponents;
+  // Shape first, for the same reason as the request side: the
+  // duplicate guard below calls `entry.trim()` and would throw a
+  // bare TypeError on a non-string entry before the delegated
+  // signRequest call could reject it in this entry point's words.
+  assertCoveredComponentsShape("signResponse", covered);
   // Same duplicate guard as the request side, naming this entry
   // point; the delegated signRequest call would reject it too, but
   // with the wrong caller in the message.

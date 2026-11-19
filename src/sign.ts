@@ -360,13 +360,49 @@ export function coveredComponentKey(entry: string): string {
 }
 
 /**
+ * Fail fast on a malformed `coveredComponents` list, before the
+ * signature base is built and before any crypto runs. Without this,
+ * a JS caller passing a non-array (`"content-digest"`) or a
+ * non-string entry (`[123]`, `[null]`) reaches
+ * `covered.map((c) => c.toLowerCase())` / `coveredComponentKey`
+ * and surfaces as a bare `TypeError: c.toLowerCase is not a
+ * function` — a crash in library internals, not a configuration
+ * error in this entry point's own words. Both entry points call
+ * this first: `signRequest` directly, `signResponse` before its
+ * own duplicate guard (its delegation to `signRequest` would
+ * otherwise arrive too late — the response-side duplicate check
+ * runs first and would throw the same bare `TypeError`).
+ * `addSignature` / `addResponseSignature` inherit it through
+ * `signRequest` / `signResponse`.
+ */
+export function assertCoveredComponentsShape(
+  caller: "signRequest" | "signResponse",
+  covered: unknown,
+): asserts covered is string[] {
+  if (!Array.isArray(covered))
+    throw new Error(
+      `${caller}: "coveredComponents" must be an array of component identifiers`,
+    );
+  for (let i = 0; i < covered.length; i++) {
+    const entry = covered[i];
+    if (typeof entry !== "string" || entry.length === 0)
+      throw new Error(
+        `${caller}: coveredComponents[${i}] must be a non-empty string, got ${typeof entry}`,
+      );
+  }
+}
+
+/**
  * Fail fast on a repeated covered component, before the signature
  * base is built and before any crypto runs. Without this,
  * `["@method", "@method"]` mints a base with the `@method` line
  * twice; the verifier applies the same identity at parse time and
  * rejects it as `MALFORMED_SIGNATURE_INPUT` (backlog #1001), so
  * this guard keeps the signer from minting signatures its own
- * verifier refuses. `signResponse` calls this
+ * verifier refuses. Callers must run
+ * `assertCoveredComponentsShape` first: this helper assumes every
+ * entry is a non-empty string and would throw a bare `TypeError`
+ * on anything else. `signResponse` calls this
  * with its own name (it delegates the actual signing to
  * `signRequest`, so the message names the entry point the caller
  * used); `addSignature` / `addResponseSignature` inherit the
@@ -702,8 +738,20 @@ export function signRequest(
     assertSignParamLength("nonce", nonce, MAX_NONCE_LENGTH);
   if (opts.tag !== undefined)
     assertSignParamLength("tag", opts.tag, MAX_TAG_LENGTH);
+  // `undefined` means "use the default list"; an explicit `null`
+  // is a caller mistake, not a request for the default — it must
+  // reach the shape guard below instead of being swallowed by `??`.
   const covered =
-    opts.coveredComponents ?? defaultCoveredComponents(req.body !== undefined);
+    opts.coveredComponents === undefined
+      ? defaultCoveredComponents(req.body !== undefined)
+      : opts.coveredComponents;
+  // Shape first: a non-array or a non-string entry would otherwise
+  // crash `covered.map((c) => c.toLowerCase())` below (or the
+  // duplicate guard) with a bare TypeError instead of a
+  // configuration error in this entry point's own words. Runs
+  // before the empty-list, length, and duplicate checks so a
+  // malformed list is never misreported as one of those.
+  assertCoveredComponentsShape("signRequest", covered);
   if (covered.length === 0)
     throw new Error(
       'signRequest: "coveredComponents" must cover at least one component; an empty list would sign nothing',

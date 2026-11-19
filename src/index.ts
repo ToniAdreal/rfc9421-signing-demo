@@ -1,5 +1,6 @@
 export {
   addSignature,
+  assertCoveredComponentsShape,
   assertLabelShape,
   assertNoDuplicateCoveredComponents,
   assertNoUnknownOptions,
