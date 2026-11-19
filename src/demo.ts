@@ -1292,6 +1292,19 @@
  * paths enforce. Only the JWK's shape (kty/kid/alg and the
  * 43-character `k` length) is printed, never the secret bytes, so
  * the segment is byte-identical between runs.
+ * The demo closes with an HMAC secret generation and rotation
+ * segment: `generateHmacSecret()` mints a fresh hmac-sha256 secret
+ * (32 bytes) and `generateHmacSecret("hmac-sha512")` a 64-byte one,
+ * each wrapped with `secretKey` and carried through a sign -> verify
+ * round-trip — the key-management closed loop the demo's fixed
+ * gateway secret skips: mint, sign, verify, then rotate. Rotation
+ * mints a second secret, signs the same request with it and verifies
+ * under it, while the superseded secret fails the same signature
+ * with `SIGNATURE_MISMATCH`. An explicit 16-byte generation is
+ * shown rejected with the same `assertHmacSecretLength` wording the
+ * sign/verify side uses for a weak key. Only the secrets' lengths
+ * and algorithms are printed, never the secret bytes, so the segment
+ * is byte-identical between runs.
  * The demo closes with a private-key JWK import segment: the
  * JWK segments above cover a public key (`importPublicKeyJwk`)
  * and a symmetric secret (`importSymmetricKeyJwk`), but a signing
@@ -1424,6 +1437,7 @@ import {
   fromNodeRequest,
   fromNodeResponse,
   generateEd25519KeyPair,
+  generateHmacSecret,
   generateNonce,
   generateP256KeyPair,
   generateP384KeyPair,
@@ -1571,6 +1585,36 @@ export const DEMO_OCT_JWK_SHORT_SECRET = createSecretKey(
  */
 export const DEMO_OCT_JWK_IMPORT_ERROR =
   "importSymmetricKeyJwk: invalid JWK: hmac-sha256 secret must be at least 32 bytes (RFC 2104: the key SHOULD be at least as long as the hash output; sha-256 → 32 bytes), got 16 bytes";
+/** Key id the HMAC secret generation segment's sha256 request signs under. */
+export const DEMO_HMAC_SECRET_GEN_KEY_ID = "hmac-gen-key-1";
+/** Key id the HMAC secret generation segment's sha512 request signs under. */
+export const DEMO_HMAC_SECRET_GEN_512_KEY_ID = "hmac-gen-key-512-1";
+/** Key id the rotated secret signs under in the rotation half. */
+export const DEMO_HMAC_SECRET_GEN_ROTATED_KEY_ID = "hmac-gen-rotated-key-1";
+/** Nonce the generated sha256 secret's round-trip request carries. */
+export const DEMO_HMAC_SECRET_GEN_NONCE = "demo-nonce-hmac-secret-gen-001";
+/** Nonce the generated sha512 secret's round-trip request carries. */
+export const DEMO_HMAC_SECRET_GEN_512_NONCE =
+  "demo-nonce-hmac-secret-gen-512-001";
+/** Nonce the rotated secret's round-trip request carries. */
+export const DEMO_HMAC_SECRET_GEN_ROTATED_NONCE =
+  "demo-nonce-hmac-secret-gen-rotated-001";
+/**
+ * Pinned rejection for generating a 16-byte hmac-sha256 secret: the
+ * same `assertHmacSecretLength` wording the sign/verify side uses
+ * for a weak key (`src/keys.ts`), cross-checked against the floor
+ * the oct-JWK segment pins in `DEMO_HMAC_GUARD_ERRORS[0]` (31
+ * bytes there, 16 here — the wording is identical apart from the
+ * byte count).
+ */
+export const DEMO_HMAC_SECRET_GEN_FLOOR_ERROR =
+  "assertHmacSecretLength: hmac-sha256 secret must be at least 32 bytes (RFC 2104: the key SHOULD be at least as long as the hash output; sha-256 → 32 bytes), got 16 bytes";
+/**
+ * Hand-pinned failure code when the superseded secret verifies a
+ * signature made after rotation (`SIGNATURE_MISMATCH`).
+ */
+export const DEMO_HMAC_SECRET_GEN_ROTATION_MISMATCH_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
 /**
  * Key id the private-key JWK segment signs under.
  */
@@ -7033,6 +7077,38 @@ export interface DemoResult {
    * hmac-sha256 floor): `DEMO_OCT_JWK_IMPORT_ERROR`.
    */
   octJwkImportError: string;
+  /**
+   * Length in bytes of the freshly generated hmac-sha256 secret
+   * (`generateHmacSecret()` default: 32) — only the length is
+   * recorded here, never the secret bytes.
+   */
+  hmacSecretGenSha256Bytes: number;
+  /**
+   * Length in bytes of the freshly generated hmac-sha512 secret
+   * (`generateHmacSecret("hmac-sha512")` default: 64) — only the
+   * length is recorded here, never the secret bytes.
+   */
+  hmacSecretGenSha512Bytes: number;
+  /** Verification of the request signed with the generated sha256 secret (ok). */
+  hmacSecretGenSha256Verification: VerifyResult;
+  /** Verification of the request signed with the generated sha512 secret (ok). */
+  hmacSecretGenSha512Verification: VerifyResult;
+  /**
+   * Pinned rejection from generating a 16-byte hmac-sha256 secret
+   * (below the floor): `DEMO_HMAC_SECRET_GEN_FLOOR_ERROR`.
+   */
+  hmacSecretGenFloorError: string;
+  /**
+   * Verification of the request signed with the rotated secret
+   * (ok — the new secret signs and verifies).
+   */
+  hmacSecretRotationVerification: VerifyResult;
+  /**
+   * Verification of the rotated-secret signature under the
+   * superseded secret: rejected with
+   * `DEMO_HMAC_SECRET_GEN_ROTATION_MISMATCH_CODE`.
+   */
+  hmacSecretRotationOldSecretVerification: VerifyResult;
   /**
    * The fixed ed25519 private JWK imported in the private-JWK
    * segment: only its shape is recorded here (kty/crv/kid) — the
@@ -16471,6 +16547,144 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // HMAC secret generation and rotation segment (backlog #1244):
+  // the key-management closed loop the demo's fixed gateway secret
+  // skips. `generateHmacSecret()` mints a fresh hmac-sha256 secret
+  // (32 bytes) and `generateHmacSecret("hmac-sha512")` a 64-byte
+  // one; each is wrapped with `secretKey` and carried through a
+  // sign -> verify round-trip. Rotation then mints a second
+  // hmac-sha256 secret, signs the same request with it and verifies
+  // under it, while the superseded secret fails the same signature
+  // with `SIGNATURE_MISMATCH` — the old key stops verifying the
+  // moment the new key takes over. An explicit 16-byte generation
+  // is rejected with the same `assertHmacSecretLength` wording the
+  // sign/verify side uses for a weak key (cross-checked against the
+  // floor the oct-JWK segment pins). Only the secrets' lengths and
+  // algorithms are printed, never the secret bytes, so the segment
+  // is byte-identical between runs.
+  const hmacSecretGen = generateHmacSecret();
+  const hmacSecretGen512 = generateHmacSecret("hmac-sha512");
+  const hmacSecretGenKey = secretKey(hmacSecretGen);
+  const hmacSecretGen512Key = secretKey(hmacSecretGen512);
+  const hmacSecretGenSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_HMAC_SECRET_GEN_KEY_ID,
+      alg: "hmac-sha256",
+      key: hmacSecretGenKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_HMAC_SECRET_GEN_NONCE,
+    },
+  );
+  const hmacSecretGenSha256Verification = verifyRequest(
+    hmacSecretGenSigned,
+    {
+      key: hmacSecretGenKey,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const hmacSecretGen512Signed = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_HMAC_SECRET_GEN_512_KEY_ID,
+      alg: "hmac-sha512",
+      key: hmacSecretGen512Key,
+      created: DEMO_CREATED,
+      nonce: DEMO_HMAC_SECRET_GEN_512_NONCE,
+    },
+  );
+  const hmacSecretGenSha512Verification = verifyRequest(
+    hmacSecretGen512Signed,
+    {
+      key: hmacSecretGen512Key,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  let hmacSecretGenFloorError = "";
+  try {
+    generateHmacSecret("hmac-sha256", 16);
+  } catch (e) {
+    hmacSecretGenFloorError = (e as Error).message;
+  }
+  const hmacSecretGenRotated = generateHmacSecret();
+  const hmacSecretGenRotatedKey = secretKey(hmacSecretGenRotated);
+  const hmacSecretRotationSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_HMAC_SECRET_GEN_ROTATED_KEY_ID,
+      alg: "hmac-sha256",
+      key: hmacSecretGenRotatedKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_HMAC_SECRET_GEN_ROTATED_NONCE,
+    },
+  );
+  const hmacSecretRotationVerification = verifyRequest(
+    hmacSecretRotationSigned,
+    {
+      key: hmacSecretGenRotatedKey,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const hmacSecretRotationOldSecretVerification = verifyRequest(
+    hmacSecretRotationSigned,
+    {
+      key: hmacSecretGenKey,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  if (
+    hmacSecretGen.length !== 32 ||
+    hmacSecretGen512.length !== 64 ||
+    hmacSecretGenRotated.length !== 32 ||
+    !hmacSecretGenSha256Verification.ok ||
+    hmacSecretGenSha256Verification.label !== "sig1" ||
+    hmacSecretGenSha256Verification.keyId !==
+      DEMO_HMAC_SECRET_GEN_KEY_ID ||
+    hmacSecretGenSha256Verification.alg !== "hmac-sha256" ||
+    hmacSecretGenSha256Verification.nonce !== DEMO_HMAC_SECRET_GEN_NONCE ||
+    !hmacSecretGenSha512Verification.ok ||
+    hmacSecretGenSha512Verification.label !== "sig1" ||
+    hmacSecretGenSha512Verification.keyId !==
+      DEMO_HMAC_SECRET_GEN_512_KEY_ID ||
+    hmacSecretGenSha512Verification.alg !== "hmac-sha512" ||
+    hmacSecretGenSha512Verification.nonce !==
+      DEMO_HMAC_SECRET_GEN_512_NONCE ||
+    hmacSecretGenFloorError !== DEMO_HMAC_SECRET_GEN_FLOOR_ERROR ||
+    !hmacSecretRotationVerification.ok ||
+    hmacSecretRotationVerification.label !== "sig1" ||
+    hmacSecretRotationVerification.keyId !==
+      DEMO_HMAC_SECRET_GEN_ROTATED_KEY_ID ||
+    hmacSecretRotationVerification.alg !== "hmac-sha256" ||
+    hmacSecretRotationVerification.nonce !==
+      DEMO_HMAC_SECRET_GEN_ROTATED_NONCE ||
+    hmacSecretRotationOldSecretVerification.ok ||
+    hmacSecretRotationOldSecretVerification.code !==
+      DEMO_HMAC_SECRET_GEN_ROTATION_MISMATCH_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: HMAC secret generation segment gave sha256=${hmacSecretGen.length} bytes/sha512=${hmacSecretGen512.length} bytes/rotated=${hmacSecretGenRotated.length} bytes, ` +
+        `sha256 verification ${hmacSecretGenSha256Verification.ok}/${hmacSecretGenSha256Verification.label}/${hmacSecretGenSha256Verification.keyId}/${hmacSecretGenSha256Verification.alg}, ` +
+        `sha512 verification ${hmacSecretGenSha512Verification.ok}/${hmacSecretGenSha512Verification.label}/${hmacSecretGenSha512Verification.keyId}/${hmacSecretGenSha512Verification.alg}, ` +
+        `floor error=${JSON.stringify(hmacSecretGenFloorError)}, rotation verification ${hmacSecretRotationVerification.ok}/${hmacSecretRotationVerification.label}/${hmacSecretRotationVerification.keyId}/${hmacSecretRotationVerification.alg} ` +
+        `and old-secret verification ${hmacSecretRotationOldSecretVerification.ok}/${hmacSecretRotationOldSecretVerification.code}, instead of 32/64/32 bytes, two ok verifications, the pinned floor rejection, an ok rotation and a ${DEMO_HMAC_SECRET_GEN_ROTATION_MISMATCH_CODE} old-secret rejection`,
+    );
+  }
+
   // Private-key JWK import segment (backlog #1005): the JWK
   // segments above cover a public key (`importPublicKeyJwk`) and a
   // symmetric secret (`importSymmetricKeyJwk`), but a signing key
@@ -18012,6 +18226,22 @@ export async function runDemo(): Promise<DemoResult> {
     `Short secret rejected at export: ${octJwkExportError}`,
     `Short oct JWK rejected at import: ${octJwkImportError}`,
     "",
+    `HMAC secret generation and rotation: generateHmacSecret() mints a fresh hmac-sha256 secret (32 bytes) and generateHmacSecret("hmac-sha512") a 64-byte one — the key-management closed loop the demo's fixed gateway secret skips: mint, sign, verify, then rotate; only lengths and algorithms are printed, never the secret bytes`,
+    `Generated hmac-sha256 secret: ${hmacSecretGen.length} bytes; generated hmac-sha512 secret: ${hmacSecretGen512.length} bytes (fresh CSPRNG draws — lengths and algs only, the secrets themselves are never printed)`,
+    hmacSecretGenSha256Verification.ok
+      ? `Generated hmac-sha256 secret verification: OK (label ${hmacSecretGenSha256Verification.label}, keyid="${hmacSecretGenSha256Verification.keyId}", alg="hmac-sha256", nonce="${hmacSecretGenSha256Verification.nonce}")`
+      : `Generated hmac-sha256 secret verification: FAILED (code ${hmacSecretGenSha256Verification.code}: ${hmacSecretGenSha256Verification.reason})`,
+    hmacSecretGenSha512Verification.ok
+      ? `Generated hmac-sha512 secret verification: OK (label ${hmacSecretGenSha512Verification.label}, keyid="${hmacSecretGenSha512Verification.keyId}", alg="hmac-sha512", nonce="${hmacSecretGenSha512Verification.nonce}")`
+      : `Generated hmac-sha512 secret verification: FAILED (code ${hmacSecretGenSha512Verification.code}: ${hmacSecretGenSha512Verification.reason})`,
+    `Below-floor generation rejected: ${hmacSecretGenFloorError}`,
+    hmacSecretRotationVerification.ok
+      ? `Rotated secret verification: OK (label ${hmacSecretRotationVerification.label}, keyid="${hmacSecretRotationVerification.keyId}", alg="hmac-sha256", nonce="${hmacSecretRotationVerification.nonce}") — the new secret signs and verifies`
+      : `Rotated secret verification: FAILED (code ${hmacSecretRotationVerification.code}: ${hmacSecretRotationVerification.reason})`,
+    hmacSecretRotationOldSecretVerification.ok
+      ? "Old secret verifying the rotated signature: OK (unexpected — the superseded secret was not supposed to verify a signature made after rotation)"
+      : `Old secret verifying the rotated signature: FAILED (code ${hmacSecretRotationOldSecretVerification.code}: ${hmacSecretRotationOldSecretVerification.reason}) — the old secret no longer verifies a signature made after rotation`,
+    "",
     `Private-key JWK import: a fixed ed25519 private JWK is read back through a JSON wire round-trip with importPrivateKeyJwk — the asymmetric half of JWK key distribution, for KMS-exported signing keys; the private key material itself is never printed`,
     `Private JWK: kty="OKP" crv="Ed25519" kid="${DEMO_PRIVATE_JWK_KEY_ID}" (d and x are never printed)`,
     privateJwkVerification.ok
@@ -18458,6 +18688,13 @@ export async function runDemo(): Promise<DemoResult> {
     octJwkVerification,
     octJwkExportError,
     octJwkImportError,
+    hmacSecretGenSha256Bytes: hmacSecretGen.length,
+    hmacSecretGenSha512Bytes: hmacSecretGen512.length,
+    hmacSecretGenSha256Verification,
+    hmacSecretGenSha512Verification,
+    hmacSecretGenFloorError,
+    hmacSecretRotationVerification,
+    hmacSecretRotationOldSecretVerification,
     privateJwkKty: DEMO_PRIVATE_JWK.kty,
     privateJwkCrv: DEMO_PRIVATE_JWK.crv,
     privateJwkKid: DEMO_PRIVATE_JWK.kid,

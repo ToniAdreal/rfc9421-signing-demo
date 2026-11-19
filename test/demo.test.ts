@@ -28,6 +28,7 @@ import {
   exportSymmetricKeyJwk,
   fromNodeRequest,
   generateEd25519KeyPair,
+  generateHmacSecret,
   generateP256KeyPair,
   generateP384KeyPair,
   generateP521KeyPair,
@@ -227,6 +228,14 @@ import {
   DEMO_HMAC_GUARD_ACCEPTED,
   DEMO_HMAC_GUARD_ERRORS,
   DEMO_HMAC_GUARD_REJECTED,
+  DEMO_HMAC_SECRET_GEN_512_KEY_ID,
+  DEMO_HMAC_SECRET_GEN_512_NONCE,
+  DEMO_HMAC_SECRET_GEN_FLOOR_ERROR,
+  DEMO_HMAC_SECRET_GEN_KEY_ID,
+  DEMO_HMAC_SECRET_GEN_NONCE,
+  DEMO_HMAC_SECRET_GEN_ROTATED_KEY_ID,
+  DEMO_HMAC_SECRET_GEN_ROTATED_NONCE,
+  DEMO_HMAC_SECRET_GEN_ROTATION_MISMATCH_CODE,
   DEMO_OCT_JWK_IMPORT_ERROR,
   DEMO_OCT_JWK_KEY_ID,
   DEMO_OCT_JWK_NONCE,
@@ -8035,8 +8044,8 @@ test("demo oct JWK segment exports, imports and verifies an HMAC secret, and rej
   );
 
   // Ordering: the segment follows the response-signing segment and
-  // is followed by the private-key JWK segment that closes the
-  // demo — byte-exact lines.
+  // is followed by the HMAC secret generation segment (blank
+  // separator, then its header) — byte-exact lines.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("HMAC oct JWK key distribution:"),
   );
@@ -8054,7 +8063,7 @@ test("demo oct JWK segment exports, imports and verifies an HMAC secret, and rej
   ]);
   assert.equal(lines[headerIdx + 5], "");
   assert.ok(
-    lines[headerIdx + 6]!.startsWith("Private-key JWK import:"),
+    lines[headerIdx + 6]!.startsWith("HMAC secret generation and rotation:"),
   );
 });
 
@@ -8064,7 +8073,9 @@ test("demo oct JWK segment prints byte-identical lines across runs", async () =>
   const start = (ls: string[]) =>
     ls.findIndex((l) => l.startsWith("HMAC oct JWK key distribution:"));
   const end = (ls: string[]) =>
-    ls.findIndex((l) => l.startsWith("Private-key JWK import:"));
+    ls.findIndex((l) =>
+      l.startsWith("HMAC secret generation and rotation:"),
+    );
   const a = start(first.lines);
   const b = start(second.lines);
   const aEnd = end(first.lines);
@@ -8076,6 +8087,209 @@ test("demo oct JWK segment prints byte-identical lines across runs", async () =>
   assert.deepEqual(
     first.lines.slice(a, aEnd),
     second.lines.slice(b, bEnd),
+  );
+});
+
+test("demo HMAC secret generation segment mints, signs, verifies and rotates secrets, and rejects below-floor generation", async () => {
+  const {
+    lines,
+    hmacSecretGenSha256Bytes,
+    hmacSecretGenSha512Bytes,
+    hmacSecretGenSha256Verification,
+    hmacSecretGenSha512Verification,
+    hmacSecretGenFloorError,
+    hmacSecretRotationVerification,
+    hmacSecretRotationOldSecretVerification,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // Only the lengths are recorded — the generated secret bytes
+  // themselves never appear in the result.
+  assert.equal(hmacSecretGenSha256Bytes, 32);
+  assert.equal(hmacSecretGenSha512Bytes, 64);
+
+  // Both freshly minted secrets sign and verify.
+  assert.equal(hmacSecretGenSha256Verification.ok, true);
+  assert.equal(hmacSecretGenSha256Verification.label, "sig1");
+  assert.equal(
+    hmacSecretGenSha256Verification.keyId,
+    DEMO_HMAC_SECRET_GEN_KEY_ID,
+  );
+  assert.equal(hmacSecretGenSha256Verification.alg, "hmac-sha256");
+  assert.equal(
+    hmacSecretGenSha256Verification.nonce,
+    DEMO_HMAC_SECRET_GEN_NONCE,
+  );
+  assert.equal(hmacSecretGenSha512Verification.ok, true);
+  assert.equal(hmacSecretGenSha512Verification.label, "sig1");
+  assert.equal(
+    hmacSecretGenSha512Verification.keyId,
+    DEMO_HMAC_SECRET_GEN_512_KEY_ID,
+  );
+  assert.equal(hmacSecretGenSha512Verification.alg, "hmac-sha512");
+  assert.equal(
+    hmacSecretGenSha512Verification.nonce,
+    DEMO_HMAC_SECRET_GEN_512_NONCE,
+  );
+
+  // The below-floor generation carries the pinned wording — the
+  // same `assertHmacSecretLength` text the sign/verify side uses
+  // for a weak key, cross-checked against the floor the oct-JWK
+  // segment pins in `DEMO_HMAC_GUARD_ERRORS[0]` (31 bytes there,
+  // 16 here — the wording is identical apart from the byte count).
+  assert.equal(hmacSecretGenFloorError, DEMO_HMAC_SECRET_GEN_FLOOR_ERROR);
+  assert.equal(
+    hmacSecretGenFloorError,
+    DEMO_HMAC_GUARD_ERRORS[0].replace("got 31 bytes", "got 16 bytes"),
+  );
+
+  // Rotation: the new secret signs and verifies, the superseded
+  // secret fails the same signature with SIGNATURE_MISMATCH.
+  assert.equal(hmacSecretRotationVerification.ok, true);
+  assert.equal(hmacSecretRotationVerification.label, "sig1");
+  assert.equal(
+    hmacSecretRotationVerification.keyId,
+    DEMO_HMAC_SECRET_GEN_ROTATED_KEY_ID,
+  );
+  assert.equal(hmacSecretRotationVerification.alg, "hmac-sha256");
+  assert.equal(
+    hmacSecretRotationVerification.nonce,
+    DEMO_HMAC_SECRET_GEN_ROTATED_NONCE,
+  );
+  assert.equal(hmacSecretRotationOldSecretVerification.ok, false);
+  assert.equal(
+    hmacSecretRotationOldSecretVerification.code,
+    DEMO_HMAC_SECRET_GEN_ROTATION_MISMATCH_CODE,
+  );
+
+  // Independent re-derivation: a freshly minted secret signs and
+  // verifies on its own, two consecutive draws differ, a rotated
+  // secret's signature fails under the superseded secret, and an
+  // explicit 16-byte generation throws the pinned wording — the
+  // loop is the library's behavior, not a fixture echo.
+  const fresh = generateHmacSecret();
+  assert.equal(fresh.length, 32);
+  const fresh512 = generateHmacSecret("hmac-sha512");
+  assert.equal(fresh512.length, 64);
+  assert.notDeepEqual(fresh, generateHmacSecret());
+  const crossSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_HMAC_SECRET_GEN_KEY_ID,
+      alg: "hmac-sha256",
+      key: secretKey(fresh),
+      created: DEMO_CREATED,
+      nonce: DEMO_HMAC_SECRET_GEN_NONCE,
+    },
+  );
+  assert.equal(
+    verifyRequest(crossSigned, { key: secretKey(fresh), now: DEMO_CREATED + 60 })
+      .ok,
+    true,
+  );
+  const rotated = generateHmacSecret();
+  const rotatedSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_HMAC_SECRET_GEN_ROTATED_KEY_ID,
+      alg: "hmac-sha256",
+      key: secretKey(rotated),
+      created: DEMO_CREATED,
+      nonce: DEMO_HMAC_SECRET_GEN_ROTATED_NONCE,
+    },
+  );
+  assert.equal(
+    verifyRequest(rotatedSigned, {
+      key: secretKey(fresh),
+      now: DEMO_CREATED + 60,
+    }).code,
+    "SIGNATURE_MISMATCH",
+  );
+  assert.throws(
+    () => generateHmacSecret("hmac-sha256", 16),
+    (e: unknown) =>
+      (e as Error).message === DEMO_HMAC_SECRET_GEN_FLOOR_ERROR,
+  );
+
+  // Printed lines: header, lengths, both verifications, the floor
+  // rejection, rotation ok and old-secret failure.
+  assert.match(
+    out,
+    /HMAC secret generation and rotation: generateHmacSecret\(\) mints a fresh hmac-sha256 secret/,
+  );
+  assert.match(
+    out,
+    /Generated hmac-sha256 secret: 32 bytes; generated hmac-sha512 secret: 64 bytes/,
+  );
+  assert.match(
+    out,
+    /Generated hmac-sha256 secret verification: OK \(label sig1, keyid="hmac-gen-key-1", alg="hmac-sha256", nonce="demo-nonce-hmac-secret-gen-001"\)/,
+  );
+  assert.match(
+    out,
+    /Generated hmac-sha512 secret verification: OK \(label sig1, keyid="hmac-gen-key-512-1", alg="hmac-sha512", nonce="demo-nonce-hmac-secret-gen-512-001"\)/,
+  );
+  assert.match(
+    out,
+    /Below-floor generation rejected: assertHmacSecretLength: hmac-sha256 secret must be at least 32 bytes/,
+  );
+  assert.match(
+    out,
+    /Rotated secret verification: OK \(label sig1, keyid="hmac-gen-rotated-key-1", alg="hmac-sha256", nonce="demo-nonce-hmac-secret-gen-rotated-001"\)/,
+  );
+  assert.match(
+    out,
+    /Old secret verifying the rotated signature: FAILED \(code SIGNATURE_MISMATCH/,
+  );
+
+  // Ordering: the segment follows the HMAC oct JWK segment and is
+  // followed by the private-key JWK segment (blank separator, then
+  // its header) — byte-exact lines.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("HMAC secret generation and rotation:"),
+  );
+  assert.ok(headerIdx !== -1);
+  const octIdx = lines.findIndex((l) =>
+    l.startsWith("HMAC oct JWK key distribution:"),
+  );
+  assert.ok(octIdx !== -1 && octIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 7), [
+    `HMAC secret generation and rotation: generateHmacSecret() mints a fresh hmac-sha256 secret (32 bytes) and generateHmacSecret("hmac-sha512") a 64-byte one — the key-management closed loop the demo's fixed gateway secret skips: mint, sign, verify, then rotate; only lengths and algorithms are printed, never the secret bytes`,
+    `Generated hmac-sha256 secret: 32 bytes; generated hmac-sha512 secret: 64 bytes (fresh CSPRNG draws — lengths and algs only, the secrets themselves are never printed)`,
+    `Generated hmac-sha256 secret verification: OK (label sig1, keyid="${DEMO_HMAC_SECRET_GEN_KEY_ID}", alg="hmac-sha256", nonce="${DEMO_HMAC_SECRET_GEN_NONCE}")`,
+    `Generated hmac-sha512 secret verification: OK (label sig1, keyid="${DEMO_HMAC_SECRET_GEN_512_KEY_ID}", alg="hmac-sha512", nonce="${DEMO_HMAC_SECRET_GEN_512_NONCE}")`,
+    `Below-floor generation rejected: ${DEMO_HMAC_SECRET_GEN_FLOOR_ERROR}`,
+    `Rotated secret verification: OK (label sig1, keyid="${DEMO_HMAC_SECRET_GEN_ROTATED_KEY_ID}", alg="hmac-sha256", nonce="${DEMO_HMAC_SECRET_GEN_ROTATED_NONCE}") — the new secret signs and verifies`,
+    `Old secret verifying the rotated signature: FAILED (code ${hmacSecretRotationOldSecretVerification.code}: ${hmacSecretRotationOldSecretVerification.reason}) — the old secret no longer verifies a signature made after rotation`,
+  ]);
+  assert.equal(lines[headerIdx + 7], "");
+  assert.ok(
+    lines[headerIdx + 8]!.startsWith("Private-key JWK import:"),
+  );
+
+  // Double-run determinism: only lengths, algs and verdicts are
+  // printed — the secret bytes never appear — so the segment is
+  // identical across runs.
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("HMAC secret generation and rotation:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Private-key JWK import:"));
+  assert.ok(start(lines) !== -1 && end(lines) !== -1);
+  assert.ok(start(second.lines) !== -1 && end(second.lines) !== -1);
+  assert.deepEqual(
+    lines.slice(start(lines), end(lines)),
+    second.lines.slice(start(second.lines), end(second.lines)),
   );
 });
 
