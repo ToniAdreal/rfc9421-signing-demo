@@ -122,9 +122,9 @@ export interface SignOptions {
    * both the sign and verify sides).
    */
   key: KeyObject;
-  /** Unix seconds. Defaults to now. */
+  /** Unix seconds, must be >= 0 (a negative value is rejected). Defaults to now. */
   created?: number;
-  /** Unix seconds. Optional; verifiers reject the signature after this time. */
+  /** Unix seconds, must be >= 0 (a negative value is rejected). Optional; verifiers reject the signature after this time. */
   expires?: number;
   /**
    * Relative expiry in whole seconds from `created` (or from now when
@@ -440,12 +440,21 @@ export function assertNoUnknownOptions(
  * `created`/`expires` are Unix seconds on the wire, and the verifier's
  * `signature-input` parser only recognizes the `-?\d+` integer shape.
  * Reject anything else here so the signer can never emit a timestamp the
- * verifier would silently truncate (e.g. `1759.5` → `1759`).
+ * verifier would silently truncate (e.g. `1759.5` → `1759`). Negative
+ * values are rejected too: a `created` before the Unix epoch can never
+ * be fresh, so without an `expires` it would verify as a signature that
+ * never expires, and an `expires` before the epoch is expired at birth
+ * in disguise (the `expires < created` check alone cannot catch
+ * `created: -5, expires: -5`, which it passes as equal).
  */
 function assertTimestamp(name: "created" | "expires", value: number): void {
   if (!Number.isInteger(value))
     throw new Error(
       `signRequest: "${name}" must be an integer number of Unix seconds, got ${value}`,
+    );
+  if (value < 0)
+    throw new Error(
+      `signRequest: "${name}" must be a non-negative integer number of Unix seconds, got ${value}`,
     );
 }
 
@@ -536,10 +545,12 @@ function isSupportedAlg(alg: string): alg is SignAlg {
  *   `"@method";req` is NOT a
  *   duplicate — `;req` reroutes the component to the associated
  *   request, so the two bind different values;
- * - `created` / `expires` must be finite integers (Unix seconds) — the
- *   verifier's `signature-input` parser only recognizes integer values, so
- *   a fractional timestamp would silently diverge between signer and
- *   verifier;
+ * - `created` / `expires` must be non-negative finite integers (Unix
+ *   seconds) — the verifier's `signature-input` parser only recognizes
+ *   integer values, so a fractional timestamp would silently diverge
+ *   between signer and verifier, and a negative one is before the Unix
+ *   epoch (a negative `created` with no `expires` would verify as a
+ *   signature that never expires);
  * - `expires < created` would mint a signature that is already expired, so
  *   it is rejected (`expires === created` is allowed);
  * - `expiresInSec` is the relative form of `expires` (wire `expires` =

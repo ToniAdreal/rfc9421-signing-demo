@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2323 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2333 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2039,10 +2039,12 @@ values. Without a request to bind to, keep using the request-side API
   Limitations); the comparison counts
   the parameter suffix, so `"@method"` + `"@method";req` is not a
   duplicate — `;req` reroutes the component to the associated request and
-  the two bind different values), and non-integer
+  the two bind different values), and non-integer or negative
   `created`/`expires` (the verifier's `signature-input` parser only
   recognizes integer seconds, so a fractional value would silently diverge
-  between signer and verifier), and a non-token `label` (commas/spaces
+  between signer and verifier; a negative value is before the Unix epoch,
+  so a negative `created` with no `expires` would verify as a signature
+  that never expires), and a non-token `label` (commas/spaces
   would corrupt the `signature-input` dictionary; the label is the member
   key `verifyAllLabels` splits on). An `alg` that does not match the shape
   of `key` (ed25519 needs an Ed25519 key, `hmac-*` a secret key, each
@@ -5278,7 +5280,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2323 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2333 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
