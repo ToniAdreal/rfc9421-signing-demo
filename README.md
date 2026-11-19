@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2333 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2340 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2069,7 +2069,10 @@ values. Without a request to bind to, keep using the request-side API
   `keyId` is too, and omitting it emits no `keyid` parameter on the wire.
   The verifier reports `keyId: undefined`, and pinning/resolution flows
   treat it as a missing claim (e.g. `keyResolver` → `KEY_RESOLUTION_FAILED`,
-  `expectedKeyId` → `KEYID_MISMATCH`).
+  `expectedKeyId` → `KEYID_MISMATCH`). An empty-string `keyId` is rejected
+  outright, like an empty `nonce` or `tag`: the verifier treats an empty
+  `keyid` as missing, so an empty value would mint a signature no
+  key-resolution flow can ever resolve.
 - **Algorithms**: `ed25519`, `ecdsa-p256-sha256` (NIST P-256; ECDSA
   signature values are the raw concatenation of the two integers r and
   s, each padded to 32 octets — 64 octets total — exactly as RFC 9421
@@ -5280,7 +5283,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2333 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2340 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

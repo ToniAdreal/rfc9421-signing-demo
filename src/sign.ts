@@ -73,8 +73,11 @@ export interface SignOptions {
    * do — e.g. `keyResolver` reports `KEY_RESOLUTION_FAILED`).
    * Longer than `MAX_KEY_ID_LENGTH` (256) characters is rejected with
    * a configuration error (a keyid is a short lookup key, not a
-   * payload); the verifier applies no such cap (see the constants
-   * above for the reasoning).
+   * payload); an empty string is rejected the same way, because the
+   * verifier treats an empty `keyid` exactly like a missing one, so
+   * an empty `keyId` would mint a signature no key-resolution flow
+   * can ever resolve. The verifier applies no such cap (see the
+   * constants above for the reasoning).
    */
   keyId?: string;
   /**
@@ -677,6 +680,15 @@ export function signRequest(
   if (opts.tag !== undefined && opts.tag === "")
     throw new Error(
       'signRequest: "tag" must not be an empty string; an empty tag binds the signature to no application protocol',
+    );
+  // An empty-string keyId would be emitted as `keyid=""` yet the
+  // verifier treats an empty keyid exactly like a missing one
+  // (keyResolver reports KEY_RESOLUTION_FAILED, expectedKeyId reports
+  // KEYID_MISMATCH) — fail fast rather than minting a signature no
+  // key-resolution flow can ever resolve.
+  if (opts.keyId !== undefined && opts.keyId === "")
+    throw new Error(
+      'signRequest: "keyId" must not be an empty string; an empty keyid cannot be resolved',
     );
   // Over-long identifiers fail fast for the same reason as the empty
   // checks above: tag/nonce/keyid are short identifiers, and a value
