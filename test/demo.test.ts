@@ -19,6 +19,7 @@ import {
   assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
+  exportPrivateKeyJwk,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
   exportPublicKeyJwkP384,
@@ -386,6 +387,9 @@ import {
   DEMO_PARSE_TAMPERED_ERROR,
   DEMO_PEM_NONCE,
   DEMO_PRIVATE_JWK,
+  DEMO_PRIVATE_JWK_EXPORT_KEY_ID,
+  DEMO_PRIVATE_JWK_EXPORT_NONCE,
+  DEMO_PRIVATE_JWK_EXPORT_PUBLIC_KEY_ERROR,
   DEMO_PRIVATE_JWK_IMPORT_ERROR,
   DEMO_PRIVATE_JWK_KEY_ID,
   DEMO_PRIVATE_JWK_NONCE,
@@ -8377,8 +8381,8 @@ test("demo private-key JWK segment imports a fixed ed25519 private JWK, signs wi
   );
 
   // Ordering: the segment follows the HMAC oct JWK segment and is
-  // followed by the verified-handler segment that closes the demo
-  // (blank separator, then its header).
+  // followed by the private-key JWK export round-trip segment
+  // (backlog #1245) — a blank separator, then its header.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Private-key JWK import:"),
   );
@@ -8395,7 +8399,151 @@ test("demo private-key JWK segment imports a fixed ed25519 private JWK, signs wi
   ]);
   assert.equal(lines[headerIdx + 4], "");
   assert.ok(
+    lines[headerIdx + 5]!.startsWith(
+      "Private-key JWK export round-trip:",
+    ),
+  );
+});
+
+test("demo private-key JWK export round-trip segment exports a fresh key, re-imports it, signs with it, and rejects a public key at export", async () => {
+  const {
+    lines,
+    privateJwkExportKty,
+    privateJwkExportCrv,
+    privateJwkExportVerification,
+    privateJwkExportPublicKeyError,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // The exported JWK's shape: OKP / Ed25519 — the `d` and `x`
+  // bytes themselves never appear in the result.
+  assert.equal(privateJwkExportKty, "OKP");
+  assert.equal(privateJwkExportCrv, "Ed25519");
+
+  // The re-imported exported key is the signing key, so the
+  // round-trip request verifies under the exported kid.
+  assert.equal(privateJwkExportVerification.ok, true);
+  assert.equal(privateJwkExportVerification.label, "sig1");
+  assert.equal(
+    privateJwkExportVerification.keyId,
+    DEMO_PRIVATE_JWK_EXPORT_KEY_ID,
+  );
+  assert.equal(privateJwkExportVerification.alg, "ed25519");
+  assert.equal(
+    privateJwkExportVerification.nonce,
+    DEMO_PRIVATE_JWK_EXPORT_NONCE,
+  );
+
+  // The public half is rejected at the private exporter with the
+  // pinned caller-configuration message.
+  assert.equal(
+    privateJwkExportPublicKeyError,
+    DEMO_PRIVATE_JWK_EXPORT_PUBLIC_KEY_ERROR,
+  );
+
+  // Independent re-derivation: a fresh key pair exported, carried
+  // through a JSON wire round-trip and re-imported, re-exports to
+  // byte-identical `x` and `d` — the loop preserves the key — and
+  // a request signed with the re-imported key verifies against
+  // the generated public half; the public half is rejected at
+  // export with the same pinned message. The round-trip is the
+  // library's behavior, not a fixture echo.
+  const pair = generateEd25519KeyPair();
+  const exported = exportPrivateKeyJwk(pair.privateKey);
+  const reimported = importPrivateKeyJwk(
+    JSON.parse(JSON.stringify(exported)) as unknown,
+  );
+  assert.equal(reimported.type, "private");
+  assert.equal(reimported.asymmetricKeyType, "ed25519");
+  const reexported = exportPrivateKeyJwk(reimported);
+  assert.equal(reexported.kty, "OKP");
+  assert.equal(reexported.crv, "Ed25519");
+  assert.equal(reexported.x, exported.x);
+  assert.equal(reexported.d, exported.d);
+  const crossSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_PRIVATE_JWK_EXPORT_KEY_ID,
+      alg: "ed25519",
+      key: reimported,
+      created: DEMO_CREATED,
+      nonce: DEMO_PRIVATE_JWK_EXPORT_NONCE,
+    },
+  );
+  assert.equal(
+    verifyRequest(crossSigned, {
+      key: pair.publicKey,
+      now: DEMO_CREATED + 60,
+    }).ok,
+    true,
+  );
+  assert.throws(
+    () => exportPrivateKeyJwk(pair.publicKey),
+    (e: unknown) =>
+      e instanceof Error &&
+      e.message === DEMO_PRIVATE_JWK_EXPORT_PUBLIC_KEY_ERROR,
+  );
+
+  // Printed lines: header, shape, verification, the rejection —
+  // and the `d` bytes never appear anywhere in the output.
+  assert.match(
+    out,
+    /Private-key JWK export round-trip: generateEd25519KeyPair\(\) is exported with exportPrivateKeyJwk/,
+  );
+  assert.match(
+    out,
+    /Exported private JWK: kty="OKP" crv="Ed25519" \(d and x are never printed\)/,
+  );
+  assert.match(
+    out,
+    /Private JWK export round-trip verification: OK \(label sig1, keyid="private-jwk-export-key-1", alg="ed25519", nonce="demo-nonce-private-jwk-export-001"\)/,
+  );
+  assert.match(
+    out,
+    /Public key rejected at private export: exportPrivateKeyJwk: expected an ed25519 private KeyObject, got type=public/,
+  );
+
+  // Ordering: the segment follows the private-key JWK import
+  // segment and is followed by the verified-handler segment
+  // (blank separator, then its header) — byte-exact lines.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Private-key JWK export round-trip:"),
+  );
+  assert.ok(headerIdx !== -1);
+  const importIdx = lines.findIndex((l) =>
+    l.startsWith("Private-key JWK import:"),
+  );
+  assert.ok(importIdx !== -1 && importIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    `Private-key JWK export round-trip: generateEd25519KeyPair() is exported with exportPrivateKeyJwk, carried through a JSON wire round-trip and read back with importPrivateKeyJwk — the generate -> export -> wire -> import -> sign loop a KMS backup/restore closes without a PEM detour; the private key material itself is never printed`,
+    `Exported private JWK: kty="OKP" crv="Ed25519" (d and x are never printed)`,
+    `Private JWK export round-trip verification: OK (label sig1, keyid="${DEMO_PRIVATE_JWK_EXPORT_KEY_ID}", alg="ed25519", nonce="${DEMO_PRIVATE_JWK_EXPORT_NONCE}")`,
+    `Public key rejected at private export: ${DEMO_PRIVATE_JWK_EXPORT_PUBLIC_KEY_ERROR}`,
+  ]);
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(
     lines[headerIdx + 5]!.startsWith("Verified handler:"),
+  );
+
+  // Double-run determinism: only the JWK shape, verdicts and the
+  // pinned rejection are printed — the key bytes and the
+  // signature bytes never appear — so the segment is identical
+  // across runs.
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Private-key JWK export round-trip:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Verified handler:"));
+  assert.ok(start(lines) !== -1 && end(lines) !== -1);
+  assert.ok(start(second.lines) !== -1 && end(second.lines) !== -1);
+  assert.deepEqual(
+    lines.slice(start(lines), end(lines)),
+    second.lines.slice(start(second.lines), end(second.lines)),
   );
 });
 

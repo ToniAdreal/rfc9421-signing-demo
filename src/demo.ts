@@ -1319,6 +1319,20 @@
  * on the same missing member. Only the JWK's shape (kty/crv/kid)
  * is printed, never the `d` or `x` bytes, so the segment is
  * byte-identical between runs.
+ * The demo closes with a private-key JWK export round-trip
+ * segment: the missing half of the import segment above. A fresh
+ * `generateEd25519KeyPair()` is exported with
+ * `exportPrivateKeyJwk`, carried through a JSON wire round-trip
+ * and read back with `importPrivateKeyJwk`, and the re-imported
+ * key completes an ed25519 sign -> verify round-trip against the
+ * generated public half — the generate -> export -> wire ->
+ * import -> sign loop a KMS backup/restore closes without a PEM
+ * detour. The exported `x`/`d` are asserted byte-identical
+ * against a re-export of the re-imported key outside the print
+ * path, and a public key passed to the private exporter is
+ * printed rejected with the pinned caller-configuration error.
+ * Only the JWK's shape (kty/crv) is printed, never the `d` or
+ * `x` bytes, so the segment is byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -1423,6 +1437,7 @@ import {
   contentDigestAlgOf,
   createVerifiedFetchHandler,
   createVerifiedHandler,
+  exportPrivateKeyJwk,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -1651,6 +1666,28 @@ export const DEMO_PRIVATE_JWK: {
  */
 export const DEMO_PRIVATE_JWK_IMPORT_ERROR =
   'importPrivateKeyJwk: invalid JWK: missing or empty "d" (a required member for this private JWK)';
+/**
+ * Key id the private-key JWK export round-trip segment signs
+ * under — distinct from `DEMO_PRIVATE_JWK_KEY_ID`, so the two
+ * private-JWK segments' verifications never share a keyid.
+ */
+export const DEMO_PRIVATE_JWK_EXPORT_KEY_ID = "private-jwk-export-key-1";
+/**
+ * Nonce the private-key JWK export round-trip segment's request
+ * carries.
+ */
+export const DEMO_PRIVATE_JWK_EXPORT_NONCE =
+  "demo-nonce-private-jwk-export-001";
+/**
+ * Pinned rejection for passing a public key to the private-key
+ * exporter — the caller-configuration wording
+ * `exportPrivateKeyJwk` uses for any key that is not an ed25519
+ * private KeyObject (a public key, a symmetric secret, another
+ * algorithm or curve), verified live against the helper before
+ * this constant was pinned.
+ */
+export const DEMO_PRIVATE_JWK_EXPORT_PUBLIC_KEY_ERROR =
+  "exportPrivateKeyJwk: expected an ed25519 private KeyObject, got type=public asymmetricKeyType=ed25519 (this helper exports ed25519 private keys only — a public key or a symmetric secret is a caller error)";
 /**
  * Components the gateway signature covers. Unlike the merchant's
  * `sig1` signature (the default set, including `content-digest`), the
@@ -7127,6 +7164,26 @@ export interface DemoResult {
    * member stripped: `DEMO_PRIVATE_JWK_IMPORT_ERROR`.
    */
   privateJwkImportError: string;
+  /**
+   * The freshly generated ed25519 key exported in the
+   * private-JWK export round-trip segment: only its shape is
+   * recorded here (kty/crv) — the `d` and `x` bytes themselves
+   * never leave this file's locals.
+   */
+  privateJwkExportKty: string;
+  privateJwkExportCrv: string;
+  /**
+   * Verification of the request signed with the re-imported
+   * exported key (ok — the export -> wire -> import loop
+   * preserves the signing key).
+   */
+  privateJwkExportVerification: VerifyResult;
+  /**
+   * Pinned rejection from passing the generated public half to
+   * the private-key exporter:
+   * `DEMO_PRIVATE_JWK_EXPORT_PUBLIC_KEY_ERROR`.
+   */
+  privateJwkExportPublicKeyError: string;
   /**
    * Status the verified-handler loopback answered for the signed
    * request (200 — the business handler ran).
@@ -16755,6 +16812,89 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Private-key JWK export round-trip segment (backlog #1245): the
+  // missing half of the private-JWK import segment above. That
+  // segment imports a fixed private JWK; this one closes the
+  // generate -> export -> wire round-trip -> import -> sign loop a
+  // KMS backup/restore closes without a PEM detour: a fresh
+  // `generateEd25519KeyPair()` is exported with
+  // `exportPrivateKeyJwk`, carried through a JSON wire round-trip,
+  // read back with `importPrivateKeyJwk`, and the re-imported key
+  // signs a request that verifies against the generated public
+  // half. The exported `x`/`d` are asserted byte-identical
+  // against a re-export of the re-imported key outside the print
+  // path — `d` is never printed. A public key passed to the
+  // private exporter is rejected with the pinned
+  // caller-configuration error (the same refusal a symmetric
+  // secret or another algorithm hits). Only the JWK's shape is
+  // printed, never the `d` or `x` bytes, so the segment is
+  // byte-identical between runs.
+  const privateJwkExportPair = generateEd25519KeyPair();
+  const privateJwkExported = exportPrivateKeyJwk(
+    privateJwkExportPair.privateKey,
+  );
+  const privateJwkExportWire = JSON.parse(
+    JSON.stringify(privateJwkExported),
+  ) as unknown;
+  const privateJwkExportReimported = importPrivateKeyJwk(
+    privateJwkExportWire,
+  );
+  const privateJwkExportReimportedJwk = exportPrivateKeyJwk(
+    privateJwkExportReimported,
+  );
+  const privateJwkExportSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_PRIVATE_JWK_EXPORT_KEY_ID,
+      alg: "ed25519",
+      key: privateJwkExportReimported,
+      created: DEMO_CREATED,
+      nonce: DEMO_PRIVATE_JWK_EXPORT_NONCE,
+    },
+  );
+  const privateJwkExportVerification = verifyRequest(
+    privateJwkExportSigned,
+    {
+      key: privateJwkExportPair.publicKey,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  let privateJwkExportPublicKeyError = "";
+  try {
+    exportPrivateKeyJwk(privateJwkExportPair.publicKey);
+  } catch (e) {
+    privateJwkExportPublicKeyError = (e as Error).message;
+  }
+  if (
+    privateJwkExported.kty !== "OKP" ||
+    privateJwkExported.crv !== "Ed25519" ||
+    privateJwkExportReimportedJwk.x !== privateJwkExported.x ||
+    privateJwkExportReimportedJwk.d !== privateJwkExported.d ||
+    privateJwkExportReimported.type !== "private" ||
+    privateJwkExportReimported.asymmetricKeyType !== "ed25519" ||
+    !privateJwkExportVerification.ok ||
+    privateJwkExportVerification.label !== "sig1" ||
+    privateJwkExportVerification.keyId !==
+      DEMO_PRIVATE_JWK_EXPORT_KEY_ID ||
+    privateJwkExportVerification.alg !== "ed25519" ||
+    privateJwkExportVerification.nonce !==
+      DEMO_PRIVATE_JWK_EXPORT_NONCE ||
+    privateJwkExportPublicKeyError !==
+      DEMO_PRIVATE_JWK_EXPORT_PUBLIC_KEY_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: private JWK export round-trip segment gave exported-kty=${privateJwkExported.kty}/${privateJwkExported.crv}, ` +
+        `x-match=${privateJwkExportReimportedJwk.x === privateJwkExported.x}, d-match=${privateJwkExportReimportedJwk.d === privateJwkExported.d}, reimported-type=${privateJwkExportReimported.type}/${privateJwkExportReimported.asymmetricKeyType}, ` +
+        `verification ${privateJwkExportVerification.ok}/${privateJwkExportVerification.label}/${privateJwkExportVerification.keyId}/${privateJwkExportVerification.alg} and public-key-export-error=${JSON.stringify(privateJwkExportPublicKeyError)}, ` +
+        `instead of an OKP/Ed25519 export whose x and d survive the wire round-trip byte-identical, an ok ed25519 verification and the pinned public-key rejection`,
+    );
+  }
+
   // Verified-handler segment (backlog #1047): the last loopback
   // segment, and the server-side twin of the request-side sign -> verify
   // story the demo opened with. A real loopback server runs
@@ -18249,6 +18389,13 @@ export async function runDemo(): Promise<DemoResult> {
       : `Private JWK round-trip verification: FAILED (code ${privateJwkVerification.code}: ${privateJwkVerification.reason})`,
     `Private JWK without "d" rejected at import: ${privateJwkImportError}`,
     "",
+    `Private-key JWK export round-trip: generateEd25519KeyPair() is exported with exportPrivateKeyJwk, carried through a JSON wire round-trip and read back with importPrivateKeyJwk — the generate -> export -> wire -> import -> sign loop a KMS backup/restore closes without a PEM detour; the private key material itself is never printed`,
+    `Exported private JWK: kty="OKP" crv="Ed25519" (d and x are never printed)`,
+    privateJwkExportVerification.ok
+      ? `Private JWK export round-trip verification: OK (label ${privateJwkExportVerification.label}, keyid="${privateJwkExportVerification.keyId}", alg="ed25519", nonce="${privateJwkExportVerification.nonce}")`
+      : `Private JWK export round-trip verification: FAILED (code ${privateJwkExportVerification.code}: ${privateJwkExportVerification.reason})`,
+    `Public key rejected at private export: ${privateJwkExportPublicKeyError}`,
+    "",
     `Verified handler: a real loopback server runs createVerifiedHandler — it verifies each request before the business handler runs, so a signed request reaches the handler while a bad or missing signature never does`,
     `Signed request to the verified handler: ${verifiedHandler.signedStatus} (verified, business handler ran)`,
     `Tampered signature to the verified handler: ${verifiedHandler.tamperedStatus} (code ${verifiedHandler.tamperedCode})`,
@@ -18700,6 +18847,10 @@ export async function runDemo(): Promise<DemoResult> {
     privateJwkKid: DEMO_PRIVATE_JWK.kid,
     privateJwkVerification,
     privateJwkImportError,
+    privateJwkExportKty: privateJwkExported.kty,
+    privateJwkExportCrv: privateJwkExported.crv,
+    privateJwkExportVerification,
+    privateJwkExportPublicKeyError,
     verifiedHandlerSignedStatus: verifiedHandler.signedStatus,
     verifiedHandlerTamperedStatus: verifiedHandler.tamperedStatus,
     verifiedHandlerTamperedCode: verifiedHandler.tamperedCode,
