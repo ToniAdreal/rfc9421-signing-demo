@@ -415,15 +415,25 @@ export interface VerifyOptions {
    * swapped) and/or `@path` (so the URL target cannot be changed)
    * covered. When set and non-empty, every listed component must appear
    * in the signature's covered component list, otherwise verification
-   * fails with `MISSING_REQUIRED_COMPONENT`. The check is
-   * case-insensitive (matching the `cid.toLowerCase()` convention of
-   * `resolveComponent`) and happens *before* any cryptographic work:
-   * a missing component is a policy violation, not an authenticity
-   * verdict. An empty array disables the check. Defaults to unset:
-   * no check is made (backwards compatible). Composes with
-   * `verifyAllLabels` (checked independently per label; see
-   * `VerifyAllOptions.requiredComponentsByLabel` for a per-label list
-   * that replaces this global list for the labels it maps).
+   * fails with `MISSING_REQUIRED_COMPONENT`. The check compares by
+   * component base name, case-insensitively (matching the
+   * `cid.toLowerCase()` convention of `resolveComponent`): value
+   * parameters (`;bs`, `;sf`, `;key="…"`, `;tr`) do not affect the
+   * decision, so a signature covering `"content-digest";bs` satisfies
+   * a `content-digest` requirement. The one exception is `;req`
+   * (backlog #1267): it redirects the binding to the associated
+   * request, so it must match exactly — a signature covering only
+   * `"content-digest";req` does not satisfy a plain `content-digest`
+   * requirement (this message's body would be unbound), and a plain
+   * `content-digest` coverage does not satisfy an explicit
+   * `content-digest;req` requirement. The check happens *before* any
+   * cryptographic work: a missing component is a policy violation,
+   * not an authenticity verdict. An empty array disables the check.
+   * Defaults to unset: no check is made (backwards compatible).
+   * Composes with `verifyAllLabels` (checked independently per
+   * label; see `VerifyAllOptions.requiredComponentsByLabel` for a
+   * per-label list that replaces this global list for the labels it
+   * maps).
    *
    * A malformed value (non-array, or a non-string / empty-string entry)
    * is a caller configuration error (throw), in the same style as
@@ -896,6 +906,33 @@ function coversWholeDigestField(componentIds: string[]): boolean {
 }
 
 /**
+ * Split a component identifier into the bare base name and whether it
+ * carries the RFC 9421 §2.4 `;req` parameter, for the
+ * `requiredComponents` coverage check (backlog #1267). Component ids
+ * arrive base-lowercased with their parameters attached
+ * (`content-digest;bs`, `content-digest;req`, … — see
+ * `parseComponentIds`), so the base name is the part before the first
+ * `;` and `;req` is a bare parameter token. The other parameters
+ * (`;bs`, `;sf`, `;key="…"`, `;tr`) only change how the value enters
+ * the signature base, not which component is bound, so they do not
+ * affect the coverage decision — but `;req` redirects the binding to
+ * the associated request, so a `;req` coverage must never satisfy a
+ * plain requirement for this message's component (and vice versa).
+ * Both sides are lowercased, matching the case-insensitive coverage
+ * convention; surrounding whitespace on either side is tolerated.
+ */
+function splitComponentIdForCoverage(id: string): {
+  base: string;
+  req: boolean;
+} {
+  const [base, ...params] = id.toLowerCase().split(";");
+  return {
+    base: (base ?? "").trim(),
+    req: params.some((p) => p.trim() === "req"),
+  };
+}
+
+/**
  * The `VerifyOptions` field names, kept as a data list so the
  * fail-closed unknown-option check (backlog #1251) can never drift
  * from the interface: add a field to `VerifyOptions` and add its
@@ -1032,16 +1069,28 @@ export function verifyRequest(
   // signature covering only "@method" is cryptographically valid but
   // protects nothing. This runs *before* any crypto work — a missing
   // component is a policy violation, not an authenticity verdict — and
-  // is case-insensitive, matching the `cid.toLowerCase()` convention of
-  // `resolveComponent`.
+  // compares by component base name, case-insensitively, matching the
+  // `cid.toLowerCase()` convention of `resolveComponent`: value
+  // parameters (`;bs`, `;sf`, `;key="…"`, `;tr`) only change how the
+  // value enters the signature base, so e.g. `"content-digest";bs`
+  // (a strictly stronger, byte-level body binding) satisfies a
+  // `content-digest` requirement. The one exception is `;req`
+  // (backlog #1267): it redirects the binding to the associated
+  // request, so a `;req` coverage must match a `;req` requirement
+  // exactly — `"content-digest";req` does not satisfy
+  // `content-digest` (this message's body would be unbound), and a
+  // plain `content-digest` does not satisfy `content-digest;req`.
   const requiredComponents = opts.requiredComponents;
   if (requiredComponents !== undefined && requiredComponents.length > 0) {
-    const covered = new Set(
-      parsed.componentIds.map((c) => c.toLowerCase()),
+    const covered = parsed.componentIds.map((c) =>
+      splitComponentIdForCoverage(c),
     );
-    const missing = requiredComponents.filter(
-      (r) => !covered.has(r.toLowerCase()),
-    );
+    const missing = requiredComponents.filter((r) => {
+      const want = splitComponentIdForCoverage(r);
+      return !covered.some(
+        (c) => c.base === want.base && c.req === want.req,
+      );
+    });
     if (missing.length > 0)
       return {
         ok: false,
@@ -2023,10 +2072,12 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * unioned with it — so mapping a label to `[]` disables the check
    * for that label even when a global list is set. Each list follows
    * the global list's rules (an array of non-empty strings, otherwise
-   * a configuration error); a missing component reuses the global
-   * error code (`MISSING_REQUIRED_COMPONENT`) and the same
-   * fail-fast-before-crypto check position, so a label that fails
-   * coverage never reaches the cryptographic check. A coverage policy
+   * a configuration error; base-name comparison with the `;req`
+   * exact-match exception, see `VerifyOptions.requiredComponents`); a
+   * missing component reuses the global error code
+   * (`MISSING_REQUIRED_COMPONENT`) and the same fail-fast-before-crypto
+   * check position, so a label that fails coverage never reaches the
+   * cryptographic check. A coverage policy
    * is not key selection, so it never joins the
    * `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
    */
