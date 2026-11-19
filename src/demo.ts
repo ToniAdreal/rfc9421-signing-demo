@@ -4919,6 +4919,19 @@ export const DEMO_ADD_RESPONSE_SIG_TAMPER_CODE: VerifyFailureCode =
  */
 export const DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
+/**
+ * Hand-pinned failure code for the verifyAllResponseLabels segment's
+ * required-labels pass (`MISSING_REQUIRED_LABEL`): with
+ * `requiredLabels: ["merchant", "gateway"]` a response whose gateway
+ * label was stripped from both signature headers still verifies the
+ * merchant label, while the missing gateway label comes back as a
+ * synthetic failure appended after the wire-order results — the
+ * response-side twin of the request-side requiredLabels segment.
+ * Pinned by a live probe before this segment was written (backlog
+ * #1249).
+ */
+export const DEMO_VERIFY_ALL_RESPONSE_LABELS_REQUIRED_CODE: VerifyFailureCode =
+  "MISSING_REQUIRED_LABEL";
 /** Label both allowed-algs whitelist signatures carry (two separate signings of one request). */
 export const DEMO_ALLOWED_ALGS_LABEL = "sig1";
 /** URL of the single request signed twice in the allowed-algs whitelist segment. */
@@ -7125,6 +7138,24 @@ export interface DemoResult {
    */
   verifyAllResponseLabelsTamperedVerification: VerifyResult[];
   /**
+   * Per-label results returned by `verifyAllResponseLabels` for the
+   * same dual-signed response with `requiredLabels: ["merchant",
+   * "gateway"]` (both ok — the required-labels pass demands both
+   * co-signatures be on the wire, not just that every present label
+   * passes).
+   */
+  verifyAllResponseLabelsRequiredVerification: VerifyResult[];
+  /**
+   * Per-label results returned by `verifyAllResponseLabels` for the
+   * same response with the gateway label stripped from both
+   * signature headers and the same `requiredLabels`: the merchant
+   * label still verifies, the gateway label comes back as a
+   * synthetic `MISSING_REQUIRED_LABEL` failure — a downgrade that
+   * drops a co-signature is a fail-closed policy failure, not a
+   * silent absence.
+   */
+  verifyAllResponseLabelsRequiredStrippedVerification: VerifyResult[];
+  /**
    * The client's adapted `RequestLike` for the fetch-adapter
    * segment's settlement response: the same
    * `DEMO_GATEWAY_RESPONSE_*` settlement response, fetched with
@@ -7701,6 +7732,49 @@ function stripSignatureLabel(
     if (kept.length === members.length) {
       throw new Error(
         `demo fixture broken: stripSignatureLabel found no ${label} ` +
+          `member in the ${header} header`,
+      );
+    }
+    return kept.join(", ");
+  };
+  return {
+    ...signed,
+    headers: {
+      ...signed.headers,
+      "signature-input": stripFromHeader("signature-input"),
+      signature: stripFromHeader("signature"),
+    },
+  };
+}
+
+/**
+ * Return a copy of a signed response with one label's member removed
+ * from both the `signature-input` and the `signature` headers — the
+ * response-side twin of `stripSignatureLabel` above, for the
+ * `verifyAllResponseLabels` required-labels pass: a downgrade attack
+ * that strips a co-signature removes the whole member, params and
+ * bytes, from both headers. A missing header or a label that is not
+ * on the wire is a broken demo fixture, not a silent no-op: the
+ * caller asserts on the stripped result, so a bad strip must throw
+ * here instead of printing a misleading segment.
+ */
+function stripResponseSignatureLabel(
+  signed: HttpResponseLike,
+  label: string,
+): HttpResponseLike {
+  const stripFromHeader = (header: string): string => {
+    const value = getHeader(signed.headers, header);
+    if (value === undefined) {
+      throw new Error(
+        `demo fixture broken: stripResponseSignatureLabel found no ${header} ` +
+          `header on the dual-signed response`,
+      );
+    }
+    const members = splitTopLevelMembers(value);
+    const kept = members.filter((m) => !m.startsWith(`${label}=`));
+    if (kept.length === members.length) {
+      throw new Error(
+        `demo fixture broken: stripResponseSignatureLabel found no ${label} ` +
           `member in the ${header} header`,
       );
     }
@@ -14703,6 +14777,93 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Required co-signatures segment (response direction): the
+  // response-side twin of the request-side requiredLabels segment
+  // above — a settlement receiver that only settles when both the
+  // merchant and the gateway signed must not accept a response just
+  // because every label present passed: `verifyAllResponseLabels`
+  // without `requiredLabels` returns only the merchant result for a
+  // gateway-stripped response, and a naive `results.every((r) =>
+  // r.ok)` check passes silently. With `requiredLabels` set to the
+  // demo's two labels, the dual-signed response verifies label by
+  // label. Strip the gateway label's members from both signature
+  // headers and the same call still reports the merchant label ok,
+  // while the gateway label comes back as a synthetic
+  // `MISSING_REQUIRED_LABEL` failure appended after the wire-order
+  // results — a downgrade that drops a co-signature is a fail-closed
+  // policy failure, not a silent absence. The fail-fast asserts
+  // below pin every outcome outside the printed lines (the
+  // synthetic-failure shape was confirmed by a live probe before
+  // this segment was written, backlog #1249); only the port (never
+  // printed) and the merchant key pair are fresh per run, so the
+  // segment's printed lines are byte-identical between runs.
+  const verifyAllResponseLabelsRequiredVerification =
+    verifyAllResponseLabels(verifyAllResponseLabelsResponse, {
+      ...addResponseSignatureResponse.verifyOptions,
+      requiredLabels: [
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+      ],
+    });
+  if (
+    verifyAllResponseLabelsRequiredVerification.length !== 2 ||
+    verifyAllResponseLabelsRequiredVerification[0].label !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL ||
+    !verifyAllResponseLabelsRequiredVerification[0].ok ||
+    verifyAllResponseLabelsRequiredVerification[0].keyId !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID ||
+    verifyAllResponseLabelsRequiredVerification[0].alg !== "ed25519" ||
+    verifyAllResponseLabelsRequiredVerification[0].nonce !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE ||
+    verifyAllResponseLabelsRequiredVerification[1].label !==
+      DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL ||
+    !verifyAllResponseLabelsRequiredVerification[1].ok ||
+    verifyAllResponseLabelsRequiredVerification[1].keyId !==
+      DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID ||
+    verifyAllResponseLabelsRequiredVerification[1].alg !== "hmac-sha256" ||
+    verifyAllResponseLabelsRequiredVerification[1].nonce !==
+      DEMO_ADD_RESPONSE_SIG_GATEWAY_NONCE
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllResponseLabels with requiredLabels on the dual-signed response ` +
+        `returned ${JSON.stringify(verifyAllResponseLabelsRequiredVerification.map((r) => ({ label: r.label, ok: r.ok, keyId: r.keyId, alg: r.alg, code: r.code })))} ` +
+        `instead of both labels ok with the pinned label/keyid/alg/nonce`,
+    );
+  }
+  const verifyAllResponseLabelsRequiredStrippedResponse =
+    stripResponseSignatureLabel(
+      verifyAllResponseLabelsResponse,
+      DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+    );
+  const verifyAllResponseLabelsRequiredStrippedVerification =
+    verifyAllResponseLabels(
+      verifyAllResponseLabelsRequiredStrippedResponse,
+      {
+        ...addResponseSignatureResponse.verifyOptions,
+        requiredLabels: [
+          DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+          DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+        ],
+      },
+    );
+  if (
+    verifyAllResponseLabelsRequiredStrippedVerification.length !== 2 ||
+    verifyAllResponseLabelsRequiredStrippedVerification[0].label !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL ||
+    !verifyAllResponseLabelsRequiredStrippedVerification[0].ok ||
+    verifyAllResponseLabelsRequiredStrippedVerification[1].label !==
+      DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL ||
+    verifyAllResponseLabelsRequiredStrippedVerification[1].ok ||
+    verifyAllResponseLabelsRequiredStrippedVerification[1].code !==
+      DEMO_VERIFY_ALL_RESPONSE_LABELS_REQUIRED_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllResponseLabels with requiredLabels on the gateway-stripped response ` +
+        `returned ${JSON.stringify(verifyAllResponseLabelsRequiredStrippedVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
+        `instead of merchant ok plus a synthetic ${DEMO_VERIFY_ALL_RESPONSE_LABELS_REQUIRED_CODE} gateway failure`,
+    );
+  }
+
   // Fetch-adapter segment (client direction): the fetch-API twin
   // of the gateway segment above — the same loopback settlement
   // response, now signed with `signResponse` and fetched with the
@@ -18473,6 +18634,13 @@ export async function runDemo(): Promise<DemoResult> {
     verifyAllResponseLabelsTamperedVerification[1].ok
       ? "verifyAllResponseLabels after body tampering (amount 10000 -> 10001): OK (unexpected — the tampered body was not detected)"
       : `verifyAllResponseLabels after body tampering (amount 10000 -> 10001): merchant FAILED (code ${verifyAllResponseLabelsTamperedVerification[0].code}: ${verifyAllResponseLabelsTamperedVerification[0].reason}), gateway FAILED (code ${verifyAllResponseLabelsTamperedVerification[1].code}: ${verifyAllResponseLabelsTamperedVerification[1].reason})`,
+    `Required co-signatures (response): verifyAllResponseLabels with requiredLabels ["${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}", "${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}"] demands both labels be on the wire — a response whose present labels merely all pass is not enough`,
+    verifyAllResponseLabelsRequiredVerification.every((r) => r.ok)
+      ? `verifyAllResponseLabels required-label verification: merchant OK (label ${verifyAllResponseLabelsRequiredVerification[0].label}, keyid="${verifyAllResponseLabelsRequiredVerification[0].keyId}", alg="${verifyAllResponseLabelsRequiredVerification[0].alg}"), gateway OK (label ${verifyAllResponseLabelsRequiredVerification[1].label}, keyid="${verifyAllResponseLabelsRequiredVerification[1].keyId}", alg="${verifyAllResponseLabelsRequiredVerification[1].alg}")`
+      : `verifyAllResponseLabels required-label verification: FAILED (merchant ${verifyAllResponseLabelsRequiredVerification[0].ok ? "OK" : `code ${verifyAllResponseLabelsRequiredVerification[0].code}: ${verifyAllResponseLabelsRequiredVerification[0].reason}`}, gateway ${verifyAllResponseLabelsRequiredVerification[1].ok ? "OK" : `code ${verifyAllResponseLabelsRequiredVerification[1].code}: ${verifyAllResponseLabelsRequiredVerification[1].reason}`})`,
+    verifyAllResponseLabelsRequiredStrippedVerification[1].ok
+      ? "verifyAllResponseLabels after gateway label stripped: gateway OK (unexpected — the stripped co-signature was not reported missing), merchant OK"
+      : `verifyAllResponseLabels after gateway label stripped: gateway FAILED (code ${verifyAllResponseLabelsRequiredStrippedVerification[1].code}: ${verifyAllResponseLabelsRequiredStrippedVerification[1].reason}), merchant still OK (label ${verifyAllResponseLabelsRequiredStrippedVerification[0].label}, keyid="${verifyAllResponseLabelsRequiredStrippedVerification[0].keyId}", alg="${verifyAllResponseLabelsRequiredStrippedVerification[0].alg}")`,
     "",
     "Fetch-adapter response verification: the fetch-API twin of the gateway segment — the same loopback settlement response, now fetched with the global fetch(), read with arrayBuffer(), adapted with fromFetchResponse and verified with verifyResponse — the shape a webhook receiver sees when the callback arrives as a fetch Response",
     `Fetch response status: ${fetchResponse.requestLike.status}`,
@@ -19115,6 +19283,8 @@ export async function runDemo(): Promise<DemoResult> {
       addResponseSignatureResponse.tamperedVerification,
     verifyAllResponseLabelsVerification,
     verifyAllResponseLabelsTamperedVerification,
+    verifyAllResponseLabelsRequiredVerification,
+    verifyAllResponseLabelsRequiredStrippedVerification,
     fetchResponseRequest: fetchResponse.requestLike,
     fetchResponseVerification: fetchResponse.verification,
     fetchResponseTamperedVerification: fetchResponse.tamperedVerification,

@@ -697,6 +697,7 @@ import {
   DEMO_VERIFIED_FETCH_HANDLER_TAMPER_CODE,
   DEMO_VERIFIED_FETCH_HANDLER_URL,
   DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE,
+  DEMO_VERIFY_ALL_RESPONSE_LABELS_REQUIRED_CODE,
   runDemo,
 } from "../src/demo.js";
 
@@ -7852,6 +7853,7 @@ test("demo verifyAllResponseLabels segment verifies both labels of the dual-sign
     lines,
     verifyAllResponseLabelsVerification,
     verifyAllResponseLabelsTamperedVerification,
+    verifyAllResponseLabelsRequiredStrippedVerification,
   } = await runDemo();
 
   // Both labels verify with their own pinned keyids/algs/nonces —
@@ -7909,22 +7911,26 @@ test("demo verifyAllResponseLabels segment verifies both labels of the dual-sign
     DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE,
   );
 
-  // Printed lines: header + status + dual ok + both-fail tamper —
+  // Printed lines: header + status + dual ok + both-fail tamper +
+  // required-labels header + required pass + stripped-gateway fail —
   // byte-exact, between the addResponseSignature segment and the
   // fetch-adapter segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("verifyAllResponseLabels multi-label response verification:"),
   );
   assert.ok(headerIdx !== -1);
-  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 4), [
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 7), [
     `verifyAllResponseLabels response status: ${DEMO_GATEWAY_RESPONSE_STATUS}`,
     `verifyAllResponseLabels verification: merchant OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
     `verifyAllResponseLabels after body tampering (amount 10000 -> 10001): merchant FAILED (code ${DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE}: ${verifyAllResponseLabelsTamperedVerification[0].reason}), gateway FAILED (code ${DEMO_VERIFY_ALL_RESPONSE_LABELS_TAMPER_CODE}: ${verifyAllResponseLabelsTamperedVerification[1].reason})`,
+    `Required co-signatures (response): verifyAllResponseLabels with requiredLabels ["${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}", "${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}"] demands both labels be on the wire — a response whose present labels merely all pass is not enough`,
+    `verifyAllResponseLabels required-label verification: merchant OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
+    `verifyAllResponseLabels after gateway label stripped: gateway FAILED (code ${DEMO_VERIFY_ALL_RESPONSE_LABELS_REQUIRED_CODE}: ${verifyAllResponseLabelsRequiredStrippedVerification[1].reason}), merchant still OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519")`,
   ]);
   // The fetch-adapter segment follows the verifyAllResponseLabels segment.
-  assert.equal(lines[headerIdx + 4], "");
+  assert.equal(lines[headerIdx + 7], "");
   assert.ok(
-    lines[headerIdx + 5]!.startsWith("Fetch-adapter response verification:"),
+    lines[headerIdx + 8]!.startsWith("Fetch-adapter response verification:"),
   );
 });
 
@@ -7946,11 +7952,113 @@ test("demo verifyAllResponseLabels segment prints byte-identical lines across ru
   assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
   // Only the merchant ed25519 key pair is fresh per run and the
   // signatures themselves are never printed, so the segment's
-  // printed lines — header, status, both verifications and the
-  // both-fail tamper — are byte-identical between runs.
+  // printed lines — header, status, both verifications, the
+  // both-fail tamper, and the required-labels pass — are
+  // byte-identical between runs.
   assert.deepEqual(
     first.lines.slice(a, aEnd),
     second.lines.slice(b, bEnd),
+  );
+});
+
+test("demo verifyAllResponseLabels requiredLabels segment reports a stripped gateway label as a synthetic missing-label failure", async () => {
+  const {
+    lines,
+    verifyAllResponseLabelsRequiredVerification,
+    verifyAllResponseLabelsRequiredStrippedVerification,
+  } = await runDemo();
+
+  // With requiredLabels set, the dual-signed response verifies label
+  // by label — both co-signatures on the wire, both ok, with their
+  // own pinned keyids/algs/nonces.
+  assert.equal(verifyAllResponseLabelsRequiredVerification.length, 2);
+  assert.deepEqual(
+    verifyAllResponseLabelsRequiredVerification.map((r) => [
+      r.label,
+      r.ok,
+      r.keyId,
+      r.alg,
+      r.nonce,
+    ]),
+    [
+      [
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+        true,
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID,
+        "ed25519",
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE,
+      ],
+      [
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+        true,
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID,
+        "hmac-sha256",
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_NONCE,
+      ],
+    ],
+  );
+  // Strip the gateway label from both signature headers and the same
+  // call still reports the merchant label ok, while the gateway label
+  // comes back as a synthetic MISSING_REQUIRED_LABEL failure appended
+  // after the wire-order results — a downgrade that drops a
+  // co-signature is a fail-closed policy failure, not a silent
+  // absence (without requiredLabels the same stripped response would
+  // verify with only the merchant result, and a naive
+  // `results.every((r) => r.ok)` check would pass).
+  assert.equal(
+    verifyAllResponseLabelsRequiredStrippedVerification.length,
+    2,
+  );
+  assert.equal(
+    verifyAllResponseLabelsRequiredStrippedVerification[0].label,
+    DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+  );
+  assert.equal(
+    verifyAllResponseLabelsRequiredStrippedVerification[0].ok,
+    true,
+  );
+  assert.equal(
+    verifyAllResponseLabelsRequiredStrippedVerification[1].label,
+    DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+  );
+  assert.equal(
+    verifyAllResponseLabelsRequiredStrippedVerification[1].ok,
+    false,
+  );
+  assert.equal(
+    verifyAllResponseLabelsRequiredStrippedVerification[1].code,
+    DEMO_VERIFY_ALL_RESPONSE_LABELS_REQUIRED_CODE,
+  );
+
+  // Printed lines: the required-labels header + both passes, in
+  // order, after the body-tamper line and before the fetch-adapter
+  // segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("verifyAllResponseLabels multi-label response verification:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 4, headerIdx + 7), [
+    `Required co-signatures (response): verifyAllResponseLabels with requiredLabels ["${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}", "${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}"] demands both labels be on the wire — a response whose present labels merely all pass is not enough`,
+    `verifyAllResponseLabels required-label verification: merchant OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
+    `verifyAllResponseLabels after gateway label stripped: gateway FAILED (code ${DEMO_VERIFY_ALL_RESPONSE_LABELS_REQUIRED_CODE}: ${verifyAllResponseLabelsRequiredStrippedVerification[1].reason}), merchant still OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519")`,
+  ]);
+  // The fetch-adapter segment follows the verifyAllResponseLabels segment.
+  assert.equal(lines[headerIdx + 7], "");
+  assert.ok(
+    lines[headerIdx + 8]!.startsWith("Fetch-adapter response verification:"),
+  );
+
+  // Deterministic double run: only the port (never printed) and the
+  // merchant key pair are fresh per run, so the segment's lines are
+  // byte-identical between runs.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("verifyAllResponseLabels multi-label response verification:"),
+  );
+  assert.ok(againIdx !== -1);
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 7),
+    lines.slice(headerIdx, headerIdx + 7),
   );
 });
 
