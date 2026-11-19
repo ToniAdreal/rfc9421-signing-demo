@@ -49,6 +49,7 @@ import {
   type RequestLike,
 } from "./components.js";
 import { contentDigestAlgOf } from "./digest.js";
+import { VerifyError } from "./errors.js";
 import { signRequest, assertLabelShape, assertNoDuplicateCoveredComponents, type SignOptions } from "./sign.js";
 import {
   checkSignatureHeaderLengths,
@@ -412,6 +413,36 @@ export function verifyResponse(
 }
 
 /**
+ * Like `verifyResponse`, but throws a `VerifyError` — an `Error` subclass
+ * carrying a machine-readable `.code` — instead of returning
+ * `{ ok: false, ... }`. Use when callers prefer exceptions over
+ * result-branching (e.g. a settlement-webhook receiver that rejects a
+ * bad gateway signature with one call instead of branching on
+ * `result.ok`).
+ *
+ * On success returns the verified identity (`label`, `keyid`, `alg`,
+ * `nonce`, `tag`, `created`, `expires`, `coveredComponents`) — the same
+ * shape `verifyRequestOrThrow` returns. Caller configuration errors (a
+ * missing, non-integer, or out-of-range `status`; a wire signature
+ * whose covered components derive from the request without `;req`, or
+ * carry `;req` with no `request` attached) still throw a plain `Error`,
+ * exactly as `verifyResponse` does.
+ */
+export function verifyResponseOrThrow(
+  res: HttpResponseLike,
+  opts: VerifyResponseOptions,
+): { label: string; keyId?: string | undefined; alg?: string | undefined; nonce?: string | undefined; tag?: string | undefined; created?: number | undefined; expires?: number | undefined; coveredComponents?: string[] | undefined } {
+  const result = verifyResponse(res, opts);
+  if (result.ok)
+    return { label: result.label, keyId: result.keyId, alg: result.alg, nonce: result.nonce, tag: result.tag, created: result.created, expires: result.expires, coveredComponents: result.coveredComponents };
+  throw new VerifyError(
+    result.code ?? "VERIFICATION_ERROR",
+    result.reason ?? "verification failed",
+    { label: result.label, keyId: result.keyId, alg: result.alg, nonce: result.nonce, tag: result.tag, created: result.created, expires: result.expires },
+  );
+}
+
+/**
  * Verify every signature carried by the response — the response-side
  * twin of `verifyAllLabels`, for the multi-party settlement flow
  * `addResponseSignature` documents (merchant ed25519 signs, gateway
@@ -514,6 +545,58 @@ export function verifyAllResponseLabels(
   // request, per label.
   const { request, ...verifyAllOpts } = opts;
   return verifyAllLabels(responseToRequestLike(res, request), verifyAllOpts);
+}
+
+/**
+ * Throwing variant of `verifyAllResponseLabels`, for callers that prefer
+ * exception flow over per-label result inspection (e.g. a settlement
+ * webhook receiver that rejects the whole response on the first bad
+ * co-signature instead of reporting per-signer outcomes).
+ *
+ * Calls `verifyAllResponseLabels` and throws a `VerifyError` carrying the
+ * first failing label's stable `code` and `label` (plus the wire fields
+ * `keyId` / `alg` / `nonce` / `tag` / `created` / `expires` the failure
+ * result reported, mirroring `verifyRequestOrThrow`), with the full
+ * per-label array attached as `verifyResults` — a detached copy, so a
+ * bad gateway signature never hides the merchant signature that
+ * verified, and mutating the attached array never affects a later
+ * verification. When every label verifies, returns the per-label
+ * success results in wire order.
+ *
+ * A response with no `signature-input` header returns `[]` without
+ * throwing, exactly as `verifyAllResponseLabels` does — callers that
+ * must reject unsigned responses should check the returned length
+ * themselves, or pass `requiredLabels` (with required labels set, an
+ * unsigned response yields `MISSING_REQUIRED_LABEL` failures and this
+ * function throws a `VerifyError` carrying that code). Caller
+ * configuration errors (a missing, non-integer, or out-of-range
+ * `status`; a wire signature whose covered components derive from the
+ * request without `;req`, or carry `;req` with no `request` attached)
+ * still throw a plain `Error`, never a `VerifyError`.
+ */
+export function verifyAllResponseLabelsOrThrow(
+  res: HttpResponseLike,
+  opts: VerifyAllResponseOptions,
+): VerifyResult[] {
+  const results = verifyAllResponseLabels(res, opts);
+  for (const result of results) {
+    if (!result.ok)
+      throw new VerifyError(
+        result.code ?? "VERIFICATION_ERROR",
+        result.reason ?? "verification failed",
+        {
+          label: result.label,
+          keyId: result.keyId,
+          alg: result.alg,
+          nonce: result.nonce,
+          tag: result.tag,
+          created: result.created,
+          expires: result.expires,
+          verifyResults: [...results],
+        },
+      );
+  }
+  return results;
 }
 
 /**

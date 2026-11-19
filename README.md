@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2298 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2308 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1783,6 +1783,14 @@ const result = verifyResponse(signed, { key: gatewayPublicKey });
 if (!result.ok) {
   throw new Error(`bad gateway signature: ${result.code}`);
 }
+
+// Prefer exceptions over result-branching? `verifyResponseOrThrow`
+// is the throwing twin: it returns the verified identity (`label`,
+// `keyid`, `alg`, `nonce`, `tag`, `created`, `expires`,
+// `coveredComponents`) on success and throws a `VerifyError` carrying
+// the stable `.code` on failure — the same shape
+// `verifyRequestOrThrow` returns.
+const identity = verifyResponseOrThrow(signed, { key: gatewayPublicKey });
 ```
 
 A legacy gateway that still sends RFC 3230 `Digest` instead of
@@ -1823,6 +1831,18 @@ const results = verifyAllResponseLabels(dual, {
 if (!results.every((r) => r.ok)) {
   throw new Error(`bad settlement signature: ${results.find((r) => !r.ok)?.code}`);
 }
+
+// The throwing twin, `verifyAllResponseLabelsOrThrow`, returns the
+// per-label results when every label verifies and otherwise throws a
+// `VerifyError` carrying the first failing label's stable `.code`,
+// with the full per-label array attached as `.verifyResults` — so the
+// merchant label that verified stays visible when the gateway label
+// fails. An unsigned response returns `[]` without throwing, exactly
+// as `verifyAllResponseLabels` does.
+const allResults = verifyAllResponseLabelsOrThrow(dual, {
+  keys: { merchant: merchantPublicKey, gateway: gatewaySecret },
+  requiredLabels: ["merchant", "gateway"],
+});
 ```
 
 Honest limit, with one opt-in exception: response signing covers
@@ -2335,7 +2355,13 @@ values. Without a request to bind to, keep using the request-side API
   is the multi-label twin: one `VerifyResult` per label in wire
   order, `requiredLabels` fail-closed, per-label `keys` — the
   multi-party settlement shape (`signResponse` + `addResponseSignature`).
-  See the Quickstart response-signing example.
+  Both have throwing twins: `verifyResponseOrThrow(res, opts)` returns
+  the verified identity on success and throws a `VerifyError` carrying
+  the stable `.code` on failure, and
+  `verifyAllResponseLabelsOrThrow(res, opts)` returns the per-label
+  results when every label verifies and otherwise throws the first
+  failing label's `VerifyError` with the full per-label array attached
+  as `.verifyResults`. See the Quickstart response-signing example.
 - **Multi-signature verification**: `verifyAllLabels(req, { key, keys })`
   parses every label from the `Signature-Input` header and verifies each
   one with `verifyRequest`, returning one `VerifyResult` per label in wire
@@ -2466,6 +2492,12 @@ const dual = addResponseSignature(merchantSigned, {
   per-signer outcomes. An unsigned request returns `[]` without
   throwing, exactly as `verifyAllLabels` does, and caller configuration
   errors (mutually exclusive key options) still throw a plain `Error`.
+  The response side mirrors it: `verifyResponseOrThrow(res, opts)` and
+  `verifyAllResponseLabelsOrThrow(res, opts)` throw the same way over
+  `verifyResponse` / `verifyAllResponseLabels` (the multi-label one
+  attaches the full per-label array as `.verifyResults` on the thrown
+  error, so a bad gateway co-signature never hides the merchant label
+  that verified).
 
 ## FAQ (honest)
 
@@ -5177,6 +5209,10 @@ throughput — run `npm run bench` on your own hardware.
 `verifyRequestOrThrow` is the throwing twin — it raises a `VerifyError`
 (an `Error` subclass, so existing generic `catch (e)` handlers keep working)
 carrying the same machine-readable `.code`, plus `.label`, `.keyId`, `.alg`.
+The response side uses the same codes: `verifyResponse` /
+`verifyAllResponseLabels` return them, `verifyResponseOrThrow` /
+`verifyAllResponseLabelsOrThrow` throw them (the multi-label one
+attaches the full per-label array as `.verifyResults` on the error).
 
 Codes are stable across versions; the human-readable `reason` strings are not.
 
@@ -5227,7 +5263,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2298 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2308 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
