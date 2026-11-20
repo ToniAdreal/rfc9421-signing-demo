@@ -195,6 +195,14 @@ export interface JwksKeyStoreOptions {
    * Injected clock returning unix seconds — the same convention as
    * `ReplayCacheOptions.now` / `MemoizeKeyResolverOptions.now` — so
    * tests can pin time deterministically. Defaults to the wall clock.
+   *
+   * The clock must return a finite number of seconds since the epoch:
+   * every clock read goes through one private guard (see
+   * {@link JwksKeyStore.readClock}), and a `NaN` / `Infinity` / non-
+   * number reading throws a configuration `Error` instead of silently
+   * poisoning freshness — a `NaN` reading would make `isStale()`'s
+   * comparison false forever, so a rotated or revoked kid would be
+   * trusted indefinitely (backlog #1291).
    */
   now?: () => number;
   /**
@@ -1409,15 +1417,48 @@ export class JwksKeyStore {
   }
 
   /**
+   * Resolve the current time (unix seconds) from the injected clock:
+   * the value must be a finite number. A `NaN` reading would make
+   * `isStale()`'s `clock() - lastRefreshAtSec >= ttlSec` comparison
+   * false forever — `refreshIfStale()` would never re-fetch and a
+   * rotated or revoked kid would be trusted indefinitely — a `NaN`
+   * stored as `lastRefreshAtSec` would do the same, and a `NaN`
+   * retry delay would collapse the `Retry-After` backoff to an
+   * immediate retry. A bad value throws a configuration `Error`
+   * before any store state is read or changed (backlog #1291), so a
+   * failed call leaves no residue: no `NaN` timestamp is ever
+   * stored and the counters are untouched. Every `this.clock()`
+   * read in this class goes through this helper — `isStale()`, both
+   * `lastRefreshAtSec` assignments in `fetchAndSwap()`, the
+   * `Retry-After` date branch, and the signed-snapshot restore
+   * fallback (whose explicit `now` override is already validated by
+   * `signedSnapshotRestoreNowSec`).
+   */
+  private readClock(): number {
+    const t = this.clock();
+    if (typeof t !== "number" || !Number.isFinite(t))
+      throw new Error(
+        `JwksKeyStore: clock must return a finite number of seconds since the epoch, got ${typeof t === "number" ? String(t) : typeof t}`,
+      );
+    return t;
+  }
+
+  /**
    * Whether the snapshot should be re-fetched: `true` when no refresh
    * has succeeded yet, or when the last successful refresh is at least
    * the effective TTL (see {@link JwksKeyStore.effectiveTtlSec}) old
    * by the store's clock. Advisory only — see the class
    * documentation for why `resolve` keeps serving a stale snapshot.
+   *
+   * A clock that does not return a finite number throws a
+   * configuration `Error` (see {@link JwksKeyStore.readClock}) rather
+   * than reporting the snapshot fresh forever (backlog #1291).
+   * Before the first successful refresh no clock read happens: the
+   * snapshot is trivially stale.
    */
   isStale(): boolean {
     if (this.lastRefreshAtSec === null) return true;
-    return this.clock() - this.lastRefreshAtSec >= this.effectiveTtlSec;
+    return this.readClock() - this.lastRefreshAtSec >= this.effectiveTtlSec;
   }
 
   /**
@@ -1658,9 +1699,10 @@ export class JwksKeyStore {
    * JSON, the document is not a `{ keys: [...] }` object, or any
    * `kid`-carrying entry is rejected by the JWK importers (wrong shape,
    * unsupported `kty`, or private `"d"` material) or declares an `alg`
-   * that disagrees with its key family, or — with
-   * `requireHttps: true` — when the response's final `url` shows the
-   * fetch was redirected to plaintext `http:`. Entries with a
+   * that disagrees with its key family, when the injected clock does
+   * not return a finite number (see {@link JwksKeyStore.readClock}),
+   * or — with `requireHttps: true` — when the response's final `url`
+   * shows the fetch was redirected to plaintext `http:`. Entries with a
    * missing or empty `kid` — and entries that declare a non-signing
    * purpose (`use` / `key_ops`, see class documentation) — are
    * skipped.
@@ -1826,7 +1868,10 @@ export class JwksKeyStore {
    * response carries no usable one. Two forms are accepted:
    * delay-seconds (`Retry-After: 2`) and an HTTP-date
    * (`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`), the latter
-   * measured against the injected clock (`now`, unix seconds).
+   * measured against the injected clock (`now`, unix seconds),
+   * read through the validated {@link JwksKeyStore.readClock} so
+   * a non-finite clock throws a configuration `Error` instead of
+   * collapsing the backoff to an immediate retry.
    * The value is capped at `fetchMaxRetryDelayMs` — an endpoint
    * that asks for an hour of silence never stalls a refresh
    * longer than the caller allows. Unparseable values (a
@@ -1848,7 +1893,7 @@ export class JwksKeyStore {
     }
     const dateMs = Date.parse(trimmed);
     if (!Number.isFinite(dateMs)) return null;
-    const delayMs = dateMs - this.clock() * 1000;
+    const delayMs = dateMs - this.readClock() * 1000;
     if (delayMs < 0) return null;
     return Math.min(delayMs, this.fetchMaxRetryDelayMs);
   }
@@ -1896,9 +1941,14 @@ export class JwksKeyStore {
     // http must not extend a requireHttps store's freshness.
     if (typeof res === "object" && res !== null && res.status === 304) {
       this.assertFinalUrlSecure(res);
+      // Read the clock before touching any state: a non-finite
+      // reading throws (see `readClock`) and the failed refresh
+      // must leave the snapshot, the freshness timestamp, and the
+      // counters exactly as they were (backlog #1291).
+      const nowSec = this.readClock();
       if (this.sentConditionalRequest) this.conditionalRefreshCount++;
       this.notModifiedCount++;
-      this.lastRefreshAtSec = this.clock();
+      this.lastRefreshAtSec = nowSec;
       return;
     }
     if (
@@ -2022,8 +2072,13 @@ export class JwksKeyStore {
       );
       if (maxAge !== null) effectiveTtlSec = Math.min(this.ttlSec, maxAge);
     }
+    // Read the clock before swapping anything in: a non-finite
+    // reading throws (see `readClock`) and the failed refresh must
+    // leave the old snapshot, the freshness timestamp, and the
+    // effective TTL exactly as they were (backlog #1291).
+    const nowSec = this.readClock();
     this.keysByKid = next;
-    this.lastRefreshAtSec = this.clock();
+    this.lastRefreshAtSec = nowSec;
     this.snapshotTtlSec = effectiveTtlSec;
     // Remember the validator for this snapshot (see the class
     // documentation): the next refresh sends it as `If-None-Match`.
@@ -2330,7 +2385,7 @@ export class JwksKeyStore {
     // stolen envelope cannot resurrect retired keys.
     assertSignedSnapshotNotExpired(
       expiresAt,
-      signedSnapshotRestoreNowSec(opts.now, () => this.clock()),
+      signedSnapshotRestoreNowSec(opts.now, () => this.readClock()),
     );
     const { fetchedAtSec, keysByKid } = parseJwksSnapshot(snapshot);
     this.keysByKid = keysByKid;
