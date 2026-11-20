@@ -685,8 +685,12 @@ export function resolveComponent(
       return url.pathname || "/";
     case "@query":
       // RFC 9421 §2.2.7: the query component of the request target,
-      // including the leading "?" — empty string when the URL has no query.
-      return url.search;
+      // including the leading "?". When the query string is absent
+      // from the request message, the component value is the leading
+      // "?" character alone — not the empty string. WHATWG URL
+      // reports both "no query" and a bare trailing "?" as
+      // search === "", and both take "?" under the RFC.
+      return url.search === "" ? "?" : url.search;
     case "@query-param":
       // RFC 9421 §2.2.8: one named query parameter, addressed by the
       // REQUIRED ;name parameter (parseComponentId has already

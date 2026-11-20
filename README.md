@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2400 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2403 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1903,6 +1903,15 @@ values. Without a request to bind to, keep using the request-side API
   always the caller's explicit choice. A URL fragment never
   participates. It combines with `;req` like the other derived
   components (resolving against the associated request's override).
+- **Query component (§2.2.7 `@query`)**: `"@query"` binds the query string
+  including the leading `?`. When the request has no query string the
+  value is the bare `?` character alone, not the empty string, exactly
+  as RFC 9421 §2.2.7 directs, so a signature covering `@query` on a
+  query-less request interoperates with compliant implementations. A
+  signature minted under the old empty-string value no longer verifies
+  and must be re-signed. A bare trailing `?` (empty query) binds `?`
+  the same way. `@request-target` keeps its own rule: no trailing `?`
+  when there is no query.
 - **Single query parameters (§2.2.8 `@query-param`)**: `"@query-param";name="amount"`
   binds one named query parameter instead of the whole query string —
   the payment-callback shape where only `amount` must be tamper-proof
@@ -5309,7 +5318,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2400 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2403 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
