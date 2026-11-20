@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2403 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2415 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -5282,7 +5282,7 @@ and `addResponseSignature` inherit the check through delegation.
 | `SIGNATURE_TOO_LARGE` | `signature` header exceeds the `VerifyOptions.maxSignatureLength` byte limit (default 65,536), rejected before any parsing |
 | `UNSUPPORTED_ALG` | `alg` parameter names an unsupported algorithm |
 | `ALG_NOT_ALLOWED` | signature's algorithm (wire `alg`, or the effective algorithm when `alg` is absent: legacy `ed25519` default or `algFallback: "infer"` inference) is outside the opt-in `VerifyOptions.allowedAlgs` whitelist (or, per label, `VerifyAllOptions.allowedAlgsByLabel`); checked before any crypto work |
-| `VERIFICATION_ERROR` | the crypto layer itself threw (e.g. malformed key material) |
+| `VERIFICATION_ERROR` | the crypto layer itself threw (e.g. malformed key material); also a request body that is neither a string nor a Buffer when a body binding is checked |
 | `SIGNATURE_MISMATCH` | cryptographic signature does not verify (wrong key or tampering) |
 | `KEYID_MISMATCH` | signature's `keyid` does not match the verifier's `expectedKeyId` (or no `keyid` present) |
 | `TAG_MISMATCH` | signature's `tag` does not match the verifier's `expectedTag` (or no `tag` present) |
@@ -5318,7 +5318,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2403 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2415 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

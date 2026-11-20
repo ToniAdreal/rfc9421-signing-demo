@@ -41,6 +41,10 @@ export function contentDigest(
   alg: ContentDigestAlg = "sha-512",
 ): string {
   assertContentDigestAlg(alg);
+  if (typeof body !== "string" && !Buffer.isBuffer(body))
+    throw new Error(
+      `contentDigest: "body" must be a string or a Buffer, got ${typeof body}`,
+    );
   const buf = typeof body === "string" ? Buffer.from(body, "utf8") : body;
   return `${alg}=:${createHash(NODE_HASH_ALG[alg]).update(buf).digest("base64")}:`;
 }
@@ -53,6 +57,10 @@ export function contentDigest(
  * where a second signature must cover the same wire value).
  */
 export function contentDigestAlgOf(value: string): ContentDigestAlg | undefined {
+  if (typeof value !== "string")
+    throw new Error(
+      `contentDigestAlgOf: "value" must be a string, got ${typeof value}`,
+    );
   const alg = value.slice(0, value.indexOf("="));
   return alg === "sha-512" || alg === "sha-256" ? alg : undefined;
 }

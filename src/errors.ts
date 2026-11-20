@@ -49,7 +49,13 @@ export type VerifyFailureCode =
    * `SIGNATURE_MISMATCH`.
    */
   | "ALG_NOT_ALLOWED"
-  /** The crypto layer itself threw (e.g. malformed key material). */
+  /**
+   * The crypto layer itself threw (e.g. malformed key material). Also
+   * covers a request body that is neither a string nor a Buffer when a
+   * body binding is checked (backlog #1280): the verifier reports the
+   * failure instead of throwing, so the `verifyRequest` never throws
+   * contract holds for malformed JS callers too.
+   */
   | "VERIFICATION_ERROR"
   /** Cryptographic signature does not verify (wrong key or tampering). */
   | "SIGNATURE_MISMATCH"

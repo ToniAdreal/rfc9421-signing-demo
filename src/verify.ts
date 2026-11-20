@@ -1589,8 +1589,34 @@ function verifyWithKey(
   // content-digest header, so the verifier must additionally check that the
   // body actually matches the digest. Without this, swapping the body while
   // keeping the header would still verify.
+  //
+  // A non-string/non-Buffer body (backlog #1280): `verifyRequest` never
+  // throws, so a body the digest checks cannot consume is a verification
+  // failure, not an escaping TypeError. The signing side throws a
+  // configuration error for the same input (`contentDigest`/`digest`); the
+  // verifier reports it with VERIFICATION_ERROR instead, in both digest
+  // checks below.
+  const invalidBodyType = (): VerifyResult => ({
+    ok: false,
+    code: "VERIFICATION_ERROR",
+    reason: `body must be a string or a Buffer, got ${typeof req.body}`,
+    label,
+    keyId: parsed.params.keyid,
+    alg: effectiveAlg,
+    nonce: parsed.params.nonce,
+    tag: parsed.params.tag,
+    created: parsed.params.created,
+    expires: parsed.params.expires,
+    coveredComponents: [...parsed.componentIds],
+  });
   const digestHeader = getHeader(req.headers, "content-digest");
   if (digestHeader !== undefined) {
+    if (
+      req.body !== undefined &&
+      typeof req.body !== "string" &&
+      !Buffer.isBuffer(req.body)
+    )
+      return invalidBodyType();
     const bodyBytes =
       req.body === undefined
         ? Buffer.alloc(0)
@@ -1659,6 +1685,12 @@ function verifyWithKey(
   if (coversWholeDigestField(parsed.componentIds)) {
     const legacyDigestHeader = getHeader(req.headers, "digest");
     if (legacyDigestHeader !== undefined) {
+      if (
+        req.body !== undefined &&
+        typeof req.body !== "string" &&
+        !Buffer.isBuffer(req.body)
+      )
+        return invalidBodyType();
       const bodyBytes =
         req.body === undefined
           ? Buffer.alloc(0)
