@@ -44,8 +44,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
  * `ReplayCache` is the built-in in-memory implementation of this
  * interface. Implementations must never report a replay for a nonce they
  * have never recorded — verification fails closed only on
- * explicitly-seen nonces — and should reject empty nonces the way
- * `ReplayCache.check` does.
+ * explicitly-seen nonces — and should reject empty or non-string nonces
+ * the way `ReplayCache.check` does.
  */
 export interface NonceStore {
   check(nonce: string, now?: number): boolean;
@@ -526,8 +526,15 @@ export class ReplayCache implements NonceStore {
    * is kept, so repeated replays cannot extend the tracking window.
    * Accepts an explicit `now` (unix seconds) so callers can share their
    * own clock with the cache; defaults to the injected clock.
+   *
+   * An empty or non-string nonce throws a configuration `Error`, the
+   * same caliber as `has()`/`release()` — a non-string nonce must never
+   * be recorded under a coerced key, which would let `check(123)` and
+   * `check("123")` disagree about whether the nonce was seen.
    */
   check(nonce: string, now?: number): boolean {
+    if (typeof nonce !== "string")
+      throw new Error("ReplayCache: nonce must be a non-empty string");
     if (nonce === "")
       throw new Error("ReplayCache: nonce must be non-empty");
     const t = now ?? this.clock();
