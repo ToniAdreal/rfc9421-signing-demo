@@ -167,8 +167,8 @@ export interface VerifyErrorOptions {
   expires?: number | undefined;
   /**
    * Per-label results, in wire order, when the failure came out of a
-   * multi-label verification (`verifyAllLabels` /
-   * `verifyAllResponseLabels` / `verifiedFetch` with
+   * multi-label verification (`verifyAllLabelsOrThrow` /
+   * `verifyAllResponseLabelsOrThrow` / `verifiedFetch` with
    * `verifyAllLabels`). The throwing call reports the first failing
    * label's code / reason / label on the error itself, but the whole
    * array rides along here so a caller can still see which labels

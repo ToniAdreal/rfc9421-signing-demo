@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2392 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2400 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2515,7 +2515,8 @@ const dual = addResponseSignature(merchantSigned, {
   returns the per-label success results (label, keyid, alg, nonce, tag,
   created, expires, coveredComponents) when every label verifies, and
   otherwise throws a `VerifyError` carrying the first failing label's
-  stable `code` and `label` — for a webhook receiver that rejects the
+  stable `code` and `label`, with the full per-label array attached as
+  `.verifyResults` on the thrown error — for a webhook receiver that rejects the
   whole request on the first bad signature instead of reporting
   per-signer outcomes. An unsigned request returns `[]` without
   throwing, exactly as `verifyAllLabels` does, and caller configuration
@@ -5241,6 +5242,8 @@ The response side uses the same codes: `verifyResponse` /
 `verifyAllResponseLabels` return them, `verifyResponseOrThrow` /
 `verifyAllResponseLabelsOrThrow` throw them (the multi-label one
 attaches the full per-label array as `.verifyResults` on the error).
+The request-side `verifyAllLabelsOrThrow` attaches the same full
+per-label array as `.verifyResults` on its thrown error.
 
 Codes are stable across versions; the human-readable `reason` strings are not.
 
@@ -5306,7 +5309,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2392 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2400 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

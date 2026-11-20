@@ -2934,7 +2934,13 @@ export function verifyAllLabels(
  * Calls `verifyAllLabels` and throws a `VerifyError` carrying the
  * first failing label's stable `code` and `label` (plus the wire
  * fields `keyId` / `alg` / `nonce` / `tag` / `created` / `expires`
- * the failure result reported, mirroring `verifyRequestOrThrow`).
+ * the failure result reported, mirroring `verifyRequestOrThrow`),
+ * with the full per-label array attached as `verifyResults` — a
+ * detached copy, so a bad gateway signature never hides the
+ * merchant signature that verified, and mutating the attached
+ * array never affects a later verification. This is the same
+ * attachment `verifyAllResponseLabelsOrThrow` makes on the
+ * response side: request and response throwing twins agree.
  * When every label verifies, returns the per-label success results
  * (`label` / `keyId` / `alg` / `nonce` / `tag` / `created` /
  * `expires` / `coveredComponents`, same fields
@@ -2968,6 +2974,7 @@ export function verifyAllLabelsOrThrow(
           tag: res.tag,
           created: res.created,
           expires: res.expires,
+          verifyResults: [...results],
         },
       );
   }
