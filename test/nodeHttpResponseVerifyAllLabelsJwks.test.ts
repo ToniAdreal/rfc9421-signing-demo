@@ -2,18 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { KeyObject } from "node:crypto";
 import {
-  addSignature,
+  addResponseSignature,
   exportPublicKeyJwk,
   fromNodeResponse,
   generateEd25519KeyPair,
   JwksKeyStore,
-  signRequest,
+  signResponse,
   verifyAllLabels,
   type IncomingResponseLike,
   type JwksFetchImpl,
   type JwksKeyStoreSnapshot,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
 } from "../src/index.js";
 
 // Backlog #780: `test/nodeHttpResponseVerifyAllLabels.test.ts`
@@ -112,7 +112,7 @@ function resolvers(stores_: {
 
 /** Wire-style headers carrying a signature, as a server would send them. */
 function wireHeaders(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
 ): Record<string, string | undefined> {
   const headers: Record<string, string | undefined> = {
     "Signature-Input": signed.headers["signature-input"] as string,
@@ -134,12 +134,12 @@ function incomingResponse(
 }
 
 function response(status = 200, body: string = BODY) {
-  return { method: "GET", url: URL, headers: {}, body, status };
+  return { status, headers: {}, body };
 }
 
 /** A dual-signed response: merchant first, gateway appended. */
-function dualSigned(): SignedHttpRequest {
-  const merchantSigned = signRequest(response(), {
+function dualSigned(): SignedHttpResponse {
+  const merchantSigned = signResponse(response(), {
     keyId: "merchant-key-1",
     alg: "ed25519",
     key: merchant.privateKey,
@@ -147,7 +147,7 @@ function dualSigned(): SignedHttpRequest {
     label: "merchant",
     coveredComponents: ["@status"],
   });
-  return addSignature(merchantSigned, {
+  return addResponseSignature(merchantSigned, {
     keyId: "gateway-key-1",
     alg: "ed25519",
     key: gateway.privateKey,
@@ -159,9 +159,9 @@ function dualSigned(): SignedHttpRequest {
 
 /** Merge two independently signed responses into one wire header set. */
 function mergeSignatures(
-  a: SignedHttpRequest,
-  b: SignedHttpRequest,
-): SignedHttpRequest {
+  a: SignedHttpResponse,
+  b: SignedHttpResponse,
+): SignedHttpResponse {
   return {
     ...a,
     headers: {
@@ -172,7 +172,7 @@ function mergeSignatures(
   };
 }
 
-function adapted(signed: SignedHttpRequest, body: string = BODY): RequestLike {
+function adapted(signed: SignedHttpResponse, body: string = BODY): RequestLike {
   return fromNodeResponse(incomingResponse({ headers: wireHeaders(signed) }), body, {
     method: "GET",
     url: URL,
@@ -256,7 +256,7 @@ test("verifyAllLabels x fromNodeResponse x JwksKeyStore: a label minted over a d
   // SIGNATURE_MISMATCH — its base covers a digest value that is not
   // on the wire — while the merchant label verifies.
   const divergent = mergeSignatures(
-    signRequest(response(200, BODY), {
+    signResponse(response(200, BODY), {
       keyId: "merchant-key-1",
       alg: "ed25519",
       key: merchant.privateKey,
@@ -264,7 +264,7 @@ test("verifyAllLabels x fromNodeResponse x JwksKeyStore: a label minted over a d
       label: "merchant",
       coveredComponents: ["@status", "content-digest"],
     }),
-    signRequest(response(200, BODY_OTHER), {
+    signResponse(response(200, BODY_OTHER), {
       keyId: "gateway-key-1",
       alg: "ed25519",
       key: gateway.privateKey,
@@ -295,7 +295,7 @@ test("verifyAllLabels x fromNodeResponse x JwksKeyStore: a post-signing body swa
   // cover it. This is the global body binding pinned by #730, not a
   // per-label failure, and it must not be "fixed" by asserting a
   // one-label failure here.
-  const merchantSigned = signRequest(response(200, BODY), {
+  const merchantSigned = signResponse(response(200, BODY), {
     keyId: "merchant-key-1",
     alg: "ed25519",
     key: merchant.privateKey,
@@ -303,7 +303,7 @@ test("verifyAllLabels x fromNodeResponse x JwksKeyStore: a post-signing body swa
     label: "merchant",
     coveredComponents: ["@status", "content-digest"],
   });
-  const dual = addSignature(merchantSigned, {
+  const dual = addResponseSignature(merchantSigned, {
     keyId: "gateway-key-1",
     alg: "ed25519",
     key: gateway.privateKey,

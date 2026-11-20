@@ -5,11 +5,11 @@ import type { AddressInfo } from "node:net";
 import {
   fromFetchResponse,
   generateEd25519KeyPair,
-  signRequest,
+  signResponse,
   verifyRequest,
   type FetchResponseLike,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
 } from "../src/index.js";
 
 const CREATED = 1700000000;
@@ -29,7 +29,7 @@ function fetchResponse(
 /** A real fetch Response carrying a signed message's wire headers. */
 function signedResponse(
   status: number,
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
   body: string,
 ): Response {
   const headers = new Headers();
@@ -39,9 +39,9 @@ function signedResponse(
   return new Response(body, { status, headers });
 }
 
-function signedStatusResponse(key: Parameters<typeof signRequest>[1]) {
-  return signRequest(
-    { method: "GET", url: URL, headers: {}, body: BODY, status: 200 },
+function signedStatusResponse(key: Parameters<typeof signResponse>[1]) {
+  return signResponse(
+    { status: 200, headers: {}, body: BODY },
     { ...key, coveredComponents: ["@status"] },
   );
 }
@@ -49,13 +49,11 @@ function signedStatusResponse(key: Parameters<typeof signRequest>[1]) {
 test("loopback: a real http server signs an @status response; a fetch() client verifies end-to-end", async () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
   const server = createServer((req, res) => {
-    const signed = signRequest(
+    const signed = signResponse(
       {
-        method: "GET",
-        url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/settle`,
+        status: 200,
         headers: {},
         body: BODY,
-        status: 200,
       },
       {
         keyId: "gateway-key",
@@ -236,20 +234,18 @@ test("opts.request is attached as RequestLike.request so a ;req component binds"
     headers: { host: "api.example.com", "content-type": "application/json" },
     body: JSON.stringify({ amount: 100 }),
   };
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       body: BODY,
-      status: 200,
-      request,
     },
     {
       keyId: "gateway-key",
       alg: "ed25519",
       key: privateKey,
       created: CREATED,
+      request,
       coveredComponents: ["@status", "@method;req"],
     },
   );
@@ -269,20 +265,18 @@ test("a different bound request breaks the ;req binding", () => {
     url: "https://api.example.com/v1/charge?order=42",
     headers: { host: "api.example.com" },
   };
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       body: BODY,
-      status: 200,
-      request,
     },
     {
       keyId: "gateway-key",
       alg: "ed25519",
       key: privateKey,
       created: CREATED,
+      request,
       coveredComponents: ["@status", "@method;req"],
     },
   );
@@ -333,13 +327,11 @@ test("a tampered @status fails with SIGNATURE_MISMATCH", () => {
 
 test("Headers multi-values join with ', ' like the Node adapter", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: { "x-multi": ["a", "b"] },
       body: BODY,
-      status: 200,
     },
     {
       keyId: "k1",
@@ -386,13 +378,11 @@ test("a literal pairs array groups repeated names and lowercases them", () => {
 
 test("Buffer and Uint8Array bodies verify identically", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       body: BODY,
-      status: 200,
     },
     {
       keyId: "k1",

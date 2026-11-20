@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  addSignature,
+  addResponseSignature,
   fromNodeResponse,
   generateEd25519KeyPair,
-  signRequest,
+  signResponse,
   verifyAllLabels,
   type IncomingResponseLike,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
   type VerifyResult,
 } from "../src/index.js";
 
@@ -47,7 +47,7 @@ const gateway = generateEd25519KeyPair();
 
 /** Wire-style headers carrying a signature, as a server would send them. */
 function wireHeaders(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
 ): Record<string, string | undefined> {
   return {
     "Signature-Input": signed.headers["signature-input"] as string,
@@ -65,15 +65,15 @@ function incomingResponse(
 }
 
 function response(body: string = BODY, status = 200) {
-  return { method: "GET", url: URL, headers: {}, body, status };
+  return { status, headers: {}, body };
 }
 
 /** A dual-signed response: merchant first, gateway appended. */
 function dualSigned(
   merchantKeyId = "merchant-key-1",
   gatewayKeyId = "gateway-key-1",
-): SignedHttpRequest {
-  const merchantSigned = signRequest(response(), {
+): SignedHttpResponse {
+  const merchantSigned = signResponse(response(), {
     keyId: merchantKeyId,
     alg: "ed25519",
     key: merchant.privateKey,
@@ -81,7 +81,7 @@ function dualSigned(
     label: "merchant",
     coveredComponents: ["@status"],
   });
-  return addSignature(merchantSigned, {
+  return addResponseSignature(merchantSigned, {
     keyId: gatewayKeyId,
     alg: "ed25519",
     key: gateway.privateKey,
@@ -91,7 +91,7 @@ function dualSigned(
   });
 }
 
-function adapted(signed: SignedHttpRequest): RequestLike {
+function adapted(signed: SignedHttpResponse): RequestLike {
   return fromNodeResponse(
     incomingResponse({ headers: wireHeaders(signed) }),
     BODY,
@@ -171,7 +171,12 @@ test("verifyAllLabels x fromNodeResponse x keyid pinning: a label missing from t
   assert.equal(adaptedResults["merchant"].ok, true, JSON.stringify(adaptedResults["merchant"]));
   assert.equal(adaptedResults["gateway"].ok, true, JSON.stringify(adaptedResults["gateway"]));
   assert.equal(adaptedResults["gateway"].keyId, "gateway-key-9");
-  const directResults = byLabel(verify(signed, opts));
+  // Direct path: the signed response re-assembled as the RequestLike
+  // `verifyAllLabels` takes (`SignedHttpResponse` carries no
+  // method/url of its own).
+  const directResults = byLabel(
+    verify({ method: "GET", url: URL, ...signed }, opts),
+  );
   assert.deepEqual(
     directResults,
     adaptedResults,

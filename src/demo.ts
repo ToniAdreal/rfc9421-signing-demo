@@ -7827,14 +7827,11 @@ interface GatewaySignedResponseFixture {
 async function fetchGatewaySignedResponse(): Promise<GatewaySignedResponseFixture> {
   const { publicKey, privateKey } = generateEd25519KeyPair();
   const server = createServer((req, res) => {
-    const port = (server.address() as AddressInfo).port;
-    const signed = signRequest(
+    const signed = signResponse(
       {
-        method: "GET",
-        url: `http://127.0.0.1:${port}${DEMO_GATEWAY_RESPONSE_PATH}`,
+        status: DEMO_GATEWAY_RESPONSE_STATUS,
         headers: {},
         body: DEMO_GATEWAY_RESPONSE_BODY,
-        status: DEMO_GATEWAY_RESPONSE_STATUS,
       },
       {
         keyId: DEMO_GATEWAY_RESPONSE_KEY_ID,
@@ -7933,8 +7930,8 @@ async function fetchGatewaySignedResponse(): Promise<GatewaySignedResponseFixtur
  * server on 127.0.0.1 plays the payment gateway serving the same
  * settlement response the closing signed-response segment serves
  * (`DEMO_GATEWAY_RESPONSE_*`), but signed twice — the merchant label
- * first via `signRequest`, the gateway label appended via
- * `addSignature`, both covering `@status` with fresh ed25519 keys
+ * first via `signResponse`, the gateway label appended via
+ * `addResponseSignature`, both covering `@status` with fresh ed25519 keys
  * (pinned keyids, nonces and `created`; the verify instant is
  * injected). The client fetches it with `http.get`, buffers the
  * body, adapts the response with `fromNodeResponse(res, body,
@@ -7969,14 +7966,11 @@ async function fetchDualSignedResponse(): Promise<DualSignedResponseFixture> {
   const merchant = generateEd25519KeyPair();
   const gateway = generateEd25519KeyPair();
   const server = createServer((req, res) => {
-    const port = (server.address() as AddressInfo).port;
-    const merchantSigned = signRequest(
+    const merchantSigned = signResponse(
       {
-        method: "GET",
-        url: `http://127.0.0.1:${port}${DEMO_GATEWAY_RESPONSE_PATH}`,
+        status: DEMO_GATEWAY_RESPONSE_STATUS,
         headers: {},
         body: DEMO_GATEWAY_RESPONSE_BODY,
-        status: DEMO_GATEWAY_RESPONSE_STATUS,
       },
       {
         keyId: DEMO_DUAL_RESPONSE_MERCHANT_KEY_ID,
@@ -7988,7 +7982,7 @@ async function fetchDualSignedResponse(): Promise<DualSignedResponseFixture> {
         coveredComponents: ["@status"],
       },
     );
-    const dual = addSignature(merchantSigned, {
+    const dual = addResponseSignature(merchantSigned, {
       keyId: DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID,
       alg: "ed25519",
       key: gateway.privateKey,

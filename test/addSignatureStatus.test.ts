@@ -1,20 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  addResponseSignature,
   addSignature,
   buildSignatureBase,
   generateEd25519KeyPair,
   secretKey,
   signRequest,
+  signResponse,
   verifyAllLabels,
+  verifyAllResponseLabels,
   verifyRequest,
+  verifyResponse,
   type SignedHttpRequest,
+  type SignedHttpResponse,
 } from "../src/index.js";
 
 const CREATED = 1700000000;
 const NOW = CREATED + 60;
 const URL = "https://api.example.com/v1/charge?order=42";
-const COVER_STATUS = ["@method", "@authority", "@status"];
+const BODY = JSON.stringify({ settled: true, amount: 100 });
+const COVER_STATUS = ["@status"];
 
 function response(status?: number) {
   return status === undefined
@@ -22,19 +28,22 @@ function response(status?: number) {
     : { method: "GET", url: URL, headers: {}, status };
 }
 
-test("signRequest preserves status on the returned object", () => {
+test("signResponse preserves status on the returned object", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(response(200), {
-    keyId: "merchant-key-1",
-    alg: "ed25519",
-    key: privateKey,
-    created: CREATED,
-    label: "merchant",
-    coveredComponents: COVER_STATUS,
-  });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "merchant-key-1",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      label: "merchant",
+      coveredComponents: COVER_STATUS,
+    },
+  );
   assert.equal(signed.status, 200);
   // No manual `{ ...signed, status }` workaround needed anymore.
-  const res = verifyRequest(signed, {
+  const res = verifyResponse(signed, {
     key: publicKey,
     now: NOW,
     label: "merchant",
@@ -42,18 +51,21 @@ test("signRequest preserves status on the returned object", () => {
   assert.equal(res.ok, true);
 });
 
-test("addSignature appends a second label to a signed response covering @status", () => {
+test("addResponseSignature appends a second label to a signed response covering @status", () => {
   const merchant = generateEd25519KeyPair();
   const gatewaySecret = secretKey("gateway-shared-secret-32-bytes-0!");
-  const merchantSigned = signRequest(response(200), {
-    keyId: "merchant-key-1",
-    alg: "ed25519",
-    key: merchant.privateKey,
-    created: CREATED,
-    label: "merchant",
-    coveredComponents: COVER_STATUS,
-  });
-  const dual = addSignature(merchantSigned, {
+  const merchantSigned = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "merchant-key-1",
+      alg: "ed25519",
+      key: merchant.privateKey,
+      created: CREATED,
+      label: "merchant",
+      coveredComponents: COVER_STATUS,
+    },
+  );
+  const dual = addResponseSignature(merchantSigned, {
     keyId: "gateway-key-7",
     alg: "hmac-sha256",
     key: gatewaySecret,
@@ -62,7 +74,7 @@ test("addSignature appends a second label to a signed response covering @status"
     coveredComponents: COVER_STATUS,
   });
   assert.equal(dual.status, 200);
-  const results = verifyAllLabels(dual, {
+  const results = verifyAllResponseLabels(dual, {
     key: merchant.publicKey,
     now: NOW,
     keys: { gateway: gatewaySecret },
@@ -79,16 +91,20 @@ test("addSignature appends a second label to a signed response covering @status"
 test("tampered status fails the @status-covering second label but not the first without @status", () => {
   const merchant = generateEd25519KeyPair();
   const gateway = generateEd25519KeyPair();
-  // Merchant signs with default components (no @status); gateway appends
-  // a signature that does cover @status.
-  const merchantSigned = signRequest(response(200), {
-    keyId: "merchant-key-1",
-    alg: "ed25519",
-    key: merchant.privateKey,
-    created: CREATED,
-    label: "merchant",
-  });
-  const dual = addSignature(merchantSigned, {
+  // Merchant signs with content-digest only (no @status); gateway
+  // appends a signature that does cover @status.
+  const merchantSigned = signResponse(
+    { status: 200, headers: {}, body: BODY },
+    {
+      keyId: "merchant-key-1",
+      alg: "ed25519",
+      key: merchant.privateKey,
+      created: CREATED,
+      label: "merchant",
+      coveredComponents: ["content-digest"],
+    },
+  );
+  const dual = addResponseSignature(merchantSigned, {
     keyId: "gateway-key-7",
     alg: "ed25519",
     key: gateway.privateKey,
@@ -96,8 +112,8 @@ test("tampered status fails the @status-covering second label but not the first 
     label: "gateway",
     coveredComponents: COVER_STATUS,
   });
-  const tampered: SignedHttpRequest = { ...dual, status: 500 };
-  const results = verifyAllLabels(tampered, {
+  const tampered: SignedHttpResponse = { ...dual, status: 500 };
+  const results = verifyAllResponseLabels(tampered, {
     key: merchant.publicKey,
     now: NOW,
     keys: { gateway: gateway.publicKey },
@@ -110,15 +126,18 @@ test("tampered status fails the @status-covering second label but not the first 
 test("tampered status fails both labels when both cover @status", () => {
   const merchant = generateEd25519KeyPair();
   const gatewaySecret = secretKey("gateway-shared-secret-32-bytes-0!");
-  const merchantSigned = signRequest(response(200), {
-    keyId: "merchant-key-1",
-    alg: "ed25519",
-    key: merchant.privateKey,
-    created: CREATED,
-    label: "merchant",
-    coveredComponents: COVER_STATUS,
-  });
-  const dual = addSignature(merchantSigned, {
+  const merchantSigned = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "merchant-key-1",
+      alg: "ed25519",
+      key: merchant.privateKey,
+      created: CREATED,
+      label: "merchant",
+      coveredComponents: COVER_STATUS,
+    },
+  );
+  const dual = addResponseSignature(merchantSigned, {
     keyId: "gateway-key-7",
     alg: "hmac-sha256",
     key: gatewaySecret,
@@ -126,7 +145,7 @@ test("tampered status fails both labels when both cover @status", () => {
     label: "gateway",
     coveredComponents: COVER_STATUS,
   });
-  const results = verifyAllLabels(
+  const results = verifyAllResponseLabels(
     { ...dual, status: 500 },
     { key: merchant.publicKey, now: NOW, keys: { gateway: gatewaySecret } },
   );
@@ -170,7 +189,7 @@ test("ordinary request without status is unchanged: no status field, addSignatur
   assert.deepEqual(results.map((r) => r.ok), [true, true]);
 });
 
-test("addSignature covering @status on a status-less signed request still throws the clear error", () => {
+test("addSignature covering @status on a status-less signed request throws the §2.2.9 rejection", () => {
   const { privateKey } = generateEd25519KeyPair();
   const signed = signRequest(response(), {
     keyId: "k",
@@ -189,7 +208,7 @@ test("addSignature covering @status on a status-less signed request still throws
         label: "gateway",
         coveredComponents: COVER_STATUS,
       }),
-    /"@status" is covered but no status was given/,
+    /signRequest: "@status" must not be covered in a request signature \(RFC 9421 §2\.2\.9/,
   );
 });
 
@@ -218,18 +237,21 @@ test("status passthrough does not affect the base when @status is not covered", 
   assert.equal(res.ok, true);
 });
 
-test("addSignature does not mutate the first signed response", () => {
+test("addResponseSignature does not mutate the first signed response", () => {
   const merchant = generateEd25519KeyPair();
-  const signed = signRequest(response(201), {
-    keyId: "merchant-key-1",
-    alg: "ed25519",
-    key: merchant.privateKey,
-    created: CREATED,
-    label: "merchant",
-    coveredComponents: COVER_STATUS,
-  });
+  const signed = signResponse(
+    { status: 201, headers: {} },
+    {
+      keyId: "merchant-key-1",
+      alg: "ed25519",
+      key: merchant.privateKey,
+      created: CREATED,
+      label: "merchant",
+      coveredComponents: COVER_STATUS,
+    },
+  );
   const before = JSON.stringify(signed.headers);
-  const dual = addSignature(signed, {
+  const dual = addResponseSignature(signed, {
     keyId: "gateway-key-7",
     alg: "ed25519",
     key: generateEd25519KeyPair().privateKey,

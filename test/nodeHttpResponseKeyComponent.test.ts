@@ -3,15 +3,15 @@ import assert from "node:assert/strict";
 import { createServer, get } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
-  addSignature,
+  addResponseSignature,
   fromNodeResponse,
   generateEd25519KeyPair,
-  signRequest,
+  signResponse,
   verifyAllLabels,
   verifyRequest,
   type IncomingResponseLike,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
 } from "../src/index.js";
 
 // Backlog #806: `test/nodeHttpResponse.test.ts` pins `fromNodeResponse`
@@ -42,7 +42,7 @@ const TRAILER_DICT = "p=10, q=20;r=3, s=(x y)";
 
 /** Wire-style headers carrying a signature, as a server would send them. */
 function wireHeaders(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
 ): Record<string, string | undefined> {
   return {
     "Signature-Input": signed.headers["signature-input"] as string,
@@ -63,14 +63,12 @@ function incomingResponse(
 function signedDictResponse(
   privateKey: ReturnType<typeof generateEd25519KeyPair>["privateKey"],
   label?: string,
-): SignedHttpRequest {
-  return signRequest(
+): SignedHttpResponse {
+  return signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: { "x-dict": DICT },
       body: BODY,
-      status: 200,
     },
     {
       keyId: "gateway-key",
@@ -85,7 +83,7 @@ function signedDictResponse(
 
 /** Adapt a signed response through `fromNodeResponse`, as a client would. */
 function adapted(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
   dictValue: string = DICT,
   extra: Partial<IncomingResponseLike> = {},
 ): RequestLike {
@@ -159,7 +157,7 @@ test("verifyAllLabels x fromNodeResponse x ;key: a dual-signed response verifies
   const dict = generateEd25519KeyPair();
   const plain = generateEd25519KeyPair();
   const first = signedDictResponse(dict.privateKey, "dict");
-  const signed = addSignature(first, {
+  const signed = addResponseSignature(first, {
     keyId: "plain-key",
     alg: "ed25519",
     key: plain.privateKey,
@@ -185,7 +183,7 @@ test("verifyAllLabels x fromNodeResponse x ;key: tampering the selected member f
   const dict = generateEd25519KeyPair();
   const plain = generateEd25519KeyPair();
   const first = signedDictResponse(dict.privateKey, "dict");
-  const signed = addSignature(first, {
+  const signed = addResponseSignature(first, {
     keyId: "plain-key",
     alg: "ed25519",
     key: plain.privateKey,
@@ -208,14 +206,12 @@ test("verifyAllLabels x fromNodeResponse x ;key: tampering the selected member f
 
 test("fromNodeResponse x ;tr;key: a dictionary trailer member verifies through the adapter", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       trailers: { "x-tdict": TRAILER_DICT },
       body: BODY,
-      status: 200,
     },
     {
       keyId: "gateway-key",
@@ -242,14 +238,12 @@ test("fromNodeResponse x ;tr;key: a dictionary trailer member verifies through t
 
 test("fromNodeResponse x ;tr;key: tampering the trailer member fails, moving unselected trailer members passes", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       trailers: { "x-tdict": TRAILER_DICT },
       body: BODY,
-      status: 200,
     },
     {
       keyId: "gateway-key",
@@ -283,13 +277,11 @@ test("fromNodeResponse x ;tr;key: tampering the trailer member fails, moving uns
 test("loopback: a real http server signs a ;key dictionary header; http.get client verifies end-to-end", async () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
   const server = createServer((req, res) => {
-    const signed = signRequest(
+    const signed = signResponse(
       {
-        method: "GET",
-        url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/settle`,
+        status: 200,
         headers: { "x-dict": DICT },
         body: BODY,
-        status: 200,
       },
       {
         keyId: "gateway-key",

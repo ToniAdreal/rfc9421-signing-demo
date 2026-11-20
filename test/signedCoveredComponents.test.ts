@@ -5,8 +5,10 @@ import {
   generateEd25519KeyPair,
   secretKey,
   signRequest,
+  signResponse,
   verifyAllLabels,
   verifyRequest,
+  verifyResponse,
   type RequestLike,
 } from "../src/index.js";
 
@@ -189,12 +191,10 @@ test("verifyAllLabels per-label lists match the two sign-side echoes", () => {
 
 test("@status response signature echoes its covered set", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: "https://api.example.com/v1/payments/42",
-      headers: {},
       status: 200,
+      headers: {},
     },
     {
       keyId: "k",
@@ -204,7 +204,7 @@ test("@status response signature echoes its covered set", () => {
     },
   );
   assert.deepEqual(signed.coveredComponents, ["@status"]);
-  assert.equal(verifyRequest(signed, { key: publicKey }).ok, true);
+  assert.equal(verifyResponse(signed, { key: publicKey }).ok, true);
 });
 
 test("derived @query component is echoed and verifies", () => {

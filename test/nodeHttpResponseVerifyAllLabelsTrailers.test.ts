@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  addSignature,
+  addResponseSignature,
   fromNodeResponse,
   generateEd25519KeyPair,
-  signRequest,
+  signResponse,
   verifyAllLabels,
   type IncomingResponseLike,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
 } from "../src/index.js";
 
 // Backlog #777: `test/nodeHttpResponseVerifyAllLabels.test.ts` (#737)
@@ -34,14 +34,14 @@ const URL = "https://api.example.com/v1/charge";
 
 /** A dual-signed response: one label binds the trailer, one does not. */
 function dualSigned(): {
-  signed: SignedHttpRequest;
+  signed: SignedHttpResponse;
   trailerPublicKey: ReturnType<typeof generateEd25519KeyPair>["publicKey"];
   plainPublicKey: ReturnType<typeof generateEd25519KeyPair>["publicKey"];
 } {
   const trailer = generateEd25519KeyPair();
   const plain = generateEd25519KeyPair();
   const first = signResponseWithTrailer(trailer.privateKey);
-  const signed = addSignature(first, {
+  const signed = addResponseSignature(first, {
     keyId: "plain-key",
     alg: "ed25519",
     key: plain.privateKey,
@@ -58,14 +58,12 @@ function dualSigned(): {
 
 function signResponseWithTrailer(
   privateKey: ReturnType<typeof generateEd25519KeyPair>["privateKey"],
-): SignedHttpRequest {
-  return signRequest(
+): SignedHttpResponse {
+  return signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       body: BODY,
-      status: 200,
       trailers: { "x-checksum": TRAILER_VALUE },
     },
     {
@@ -90,7 +88,7 @@ function incomingResponse(
 
 /** Wire-style headers carrying a dual signature, as a server would send them. */
 function wireHeaders(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
 ): Record<string, string | undefined> {
   return {
     "Signature-Input": signed.headers["signature-input"] as string,
@@ -99,7 +97,7 @@ function wireHeaders(
 }
 
 function adapted(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
   extra: Partial<IncomingResponseLike> = {},
 ): RequestLike {
   return fromNodeResponse(

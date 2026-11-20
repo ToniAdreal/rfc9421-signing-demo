@@ -5,7 +5,9 @@ import {
   generateEd25519KeyPair,
   parseSignatureInput,
   signRequest,
+  signResponse,
   verifyRequest,
+  verifyResponse,
   type RequestLike,
 } from "../src/index.js";
 
@@ -30,15 +32,19 @@ function makeResponse(withRequest = true): RequestLike {
   };
 }
 
-function signResponse(covered: string[] = COVERED) {
+function signResp(covered: string[] = COVERED) {
   const keys = generateEd25519KeyPair();
-  const signed = signRequest(makeResponse(), {
-    keyId: "resp-1",
-    alg: "ed25519",
-    key: keys.privateKey,
-    created: CREATED,
-    coveredComponents: covered,
-  });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "resp-1",
+      alg: "ed25519",
+      key: keys.privateKey,
+      created: CREATED,
+      request: makeRequest(),
+      coveredComponents: covered,
+    },
+  );
   return { ...keys, signed };
 }
 
@@ -53,18 +59,21 @@ test("golden: ;req line serializes as \"@method\";req in base and signature-para
 });
 
 test("sign→verify round-trip: response signature bound to its request via ;req", () => {
-  const { publicKey, signed } = signResponse();
+  const { publicKey, signed } = signResp();
   assert.match(signed.headers["signature-input"], /"@method";req/);
   assert.match(signed.headers["signature-input"], /"@authority";req/);
-  // The associated request is carried through on the signed object, so
-  // verification needs nothing re-attached by hand.
-  assert.equal(signed.request?.method, "POST");
-  const res = verifyRequest(signed, { key: publicKey, now: CREATED + 60 });
+  // The associated request travels via the `request` option, so
+  // verification needs it passed back explicitly.
+  const res = verifyResponse(signed, {
+    key: publicKey,
+    now: CREATED + 60,
+    request: makeRequest(),
+  });
   assert.equal(res.ok, true);
 });
 
 test("parse: parseSignatureInput preserves the ;req suffix (does not swallow it)", () => {
-  const { signed } = signResponse();
+  const { signed } = signResp();
   const parsed = parseSignatureInput(signed.headers["signature-input"], "sig1");
   assert.deepEqual(parsed.componentIds, [
     "@status",
@@ -74,26 +83,26 @@ test("parse: parseSignatureInput preserves the ;req suffix (does not swallow it)
 });
 
 test("tampered associated request method (POST→DELETE) fails with SIGNATURE_MISMATCH", () => {
-  const { publicKey, signed } = signResponse();
-  const tampered = {
-    ...signed,
+  const { publicKey, signed } = signResp();
+  const res = verifyResponse(signed, {
+    key: publicKey,
+    now: CREATED + 60,
     request: { ...makeRequest(), method: "DELETE" },
-  };
-  const res = verifyRequest(tampered, { key: publicKey, now: CREATED + 60 });
+  });
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_MISMATCH");
 });
 
 test("tampered associated request authority fails with SIGNATURE_MISMATCH (response transplanted)", () => {
-  const { publicKey, signed } = signResponse();
-  const tampered = {
-    ...signed,
+  const { publicKey, signed } = signResp();
+  const res = verifyResponse(signed, {
+    key: publicKey,
+    now: CREATED + 60,
     request: {
       ...makeRequest(),
       url: "https://attacker.example.com/v1/charge?order=42",
     },
-  };
-  const res = verifyRequest(tampered, { key: publicKey, now: CREATED + 60 });
+  });
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_MISMATCH");
 });
@@ -119,57 +128,78 @@ test("sign with ;req covered but no associated request throws a configuration er
   const { privateKey } = generateEd25519KeyPair();
   assert.throws(
     () =>
-      signRequest(makeResponse(false), {
-        keyId: "resp-1",
-        alg: "ed25519",
-        key: privateKey,
-        created: CREATED,
-        coveredComponents: COVERED,
-      }),
-    /"@method";req is covered but no associated request was given/,
+      signResponse(
+        { status: 200, headers: {} },
+        {
+          keyId: "resp-1",
+          alg: "ed25519",
+          key: privateKey,
+          created: CREATED,
+          coveredComponents: COVERED,
+        },
+      ),
+    /signResponse: covered component "@method;req" derives from the request.*attach the triggering request via the `request` option/,
   );
 });
 
 test("verify with ;req covered but no associated request returns SIGNATURE_BASE_BUILD_FAILED", () => {
-  const { publicKey, signed } = signResponse();
-  const { request: _dropped, ...withoutRequest } = signed;
-  const res = verifyRequest(withoutRequest, {
-    key: publicKey,
-    now: CREATED + 60,
-  });
+  const { publicKey, signed } = signResp();
+  // The request-shaped verify path reports a missing associated
+  // request as a base-build failure rather than throwing (the
+  // response entry point throws instead — see the test above).
+  const res = verifyRequest(
+    {
+      method: "GET",
+      url: "https://callbacks.example.com/v1/result",
+      headers: signed.headers,
+    },
+    { key: publicKey, now: CREATED + 60 },
+  );
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_BASE_BUILD_FAILED");
 });
 
 test("header field with ;req resolves from the associated request and verifies", () => {
-  const { publicKey, signed } = signResponse(["@status", "x-charge-id;req"]);
+  const { publicKey, signed } = signResp(["@status", "x-charge-id;req"]);
   assert.match(signed.headers["signature-input"], /"x-charge-id";req/);
-  const res = verifyRequest(signed, { key: publicKey, now: CREATED + 60 });
+  const res = verifyResponse(signed, {
+    key: publicKey,
+    now: CREATED + 60,
+    request: makeRequest(),
+  });
   assert.equal(res.ok, true);
 });
 
 test("tampered ;req header value on the associated request fails with SIGNATURE_MISMATCH", () => {
-  const { publicKey, signed } = signResponse(["@status", "x-charge-id;req"]);
-  const tampered = {
-    ...signed,
+  const { publicKey, signed } = signResp(["@status", "x-charge-id;req"]);
+  const res = verifyResponse(signed, {
+    key: publicKey,
+    now: CREATED + 60,
     request: { ...makeRequest(), headers: { "x-charge-id": "ch_99" } },
-  };
-  const res = verifyRequest(tampered, { key: publicKey, now: CREATED + 60 });
+  });
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_MISMATCH");
 });
 
 test("component id and ;req parameter are case-insensitive: '@METHOD;REQ' works", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(makeResponse(), {
-    keyId: "resp-1",
-    alg: "ed25519",
-    key: privateKey,
-    created: CREATED,
-    coveredComponents: ["@STATUS", "@METHOD;REQ"],
-  });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "resp-1",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      request: makeRequest(),
+      coveredComponents: ["@STATUS", "@METHOD;REQ"],
+    },
+  );
   assert.match(signed.headers["signature-input"], /"@method";req/);
-  const res = verifyRequest(signed, { key: publicKey, now: CREATED + 60 });
+  const res = verifyResponse(signed, {
+    key: publicKey,
+    now: CREATED + 60,
+    request: makeRequest(),
+  });
   assert.equal(res.ok, true);
 });
 
@@ -177,13 +207,17 @@ test("unsupported component parameter fails closed on the sign side", () => {
   const { privateKey } = generateEd25519KeyPair();
   assert.throws(
     () =>
-      signRequest(makeResponse(), {
-        keyId: "resp-1",
-        alg: "ed25519",
-        key: privateKey,
-        created: CREATED,
-        coveredComponents: ["@status", "content-digest;zz"],
-      }),
+      signResponse(
+        { status: 200, headers: {} },
+        {
+          keyId: "resp-1",
+          alg: "ed25519",
+          key: privateKey,
+          created: CREATED,
+          request: makeRequest(),
+          coveredComponents: ["@status", "content-digest;zz"],
+        },
+      ),
     /unsupported component parameter ";zz".*only ";req", ";bs", ";sf", ";key", ";tr" and ";name" are supported/,
   );
 });

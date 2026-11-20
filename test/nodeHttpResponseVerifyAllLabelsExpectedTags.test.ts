@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  addSignature,
+  addResponseSignature,
   fromNodeResponse,
   generateEd25519KeyPair,
-  signRequest,
+  signResponse,
   verifyAllLabels,
   type IncomingResponseLike,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
   type VerifyResult,
 } from "../src/index.js";
 
@@ -48,7 +48,7 @@ const gateway = generateEd25519KeyPair();
 
 /** Wire-style headers carrying a signature, as a server would send them. */
 function wireHeaders(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
 ): Record<string, string | undefined> {
   return {
     "Signature-Input": signed.headers["signature-input"] as string,
@@ -66,7 +66,7 @@ function incomingResponse(
 }
 
 function response(body: string = BODY, status = 200) {
-  return { method: "GET", url: URL, headers: {}, body, status };
+  return { status, headers: {}, body };
 }
 
 /**
@@ -76,8 +76,8 @@ function response(body: string = BODY, status = 200) {
 function dualSigned(
   merchantTag: string | null = MERCHANT_TAG,
   gatewayTag: string | null = GATEWAY_TAG,
-): SignedHttpRequest {
-  const merchantSigned = signRequest(response(), {
+): SignedHttpResponse {
+  const merchantSigned = signResponse(response(), {
     keyId: "merchant-key-1",
     alg: "ed25519",
     key: merchant.privateKey,
@@ -86,7 +86,7 @@ function dualSigned(
     coveredComponents: ["@status"],
     ...(merchantTag === null ? {} : { tag: merchantTag }),
   });
-  return addSignature(merchantSigned, {
+  return addResponseSignature(merchantSigned, {
     keyId: "gateway-key-1",
     alg: "ed25519",
     key: gateway.privateKey,
@@ -97,7 +97,7 @@ function dualSigned(
   });
 }
 
-function adapted(signed: SignedHttpRequest): RequestLike {
+function adapted(signed: SignedHttpResponse): RequestLike {
   return fromNodeResponse(
     incomingResponse({ headers: wireHeaders(signed) }),
     BODY,
@@ -188,7 +188,12 @@ test("verifyAllLabels x fromNodeResponse x expectedTags: adapter and direct path
     expectedTags: { merchant: MERCHANT_TAG, gateway: GATEWAY_TAG },
   };
   const adaptedResults = byLabel(verify(adapted(signed), opts));
-  const directResults = byLabel(verify(signed, opts));
+  // Direct path: the signed response re-assembled as the RequestLike
+  // `verifyAllLabels` takes (`SignedHttpResponse` carries no
+  // method/url of its own).
+  const directResults = byLabel(
+    verify({ method: "GET", url: URL, ...signed }, opts),
+  );
   assert.deepEqual(
     directResults,
     adaptedResults,
@@ -208,7 +213,12 @@ test("verifyAllLabels x fromNodeResponse x expectedTags: a label absent from the
   assert.equal(adaptedResults["merchant"].ok, true, JSON.stringify(adaptedResults["merchant"]));
   assert.equal(adaptedResults["merchant"].tag, undefined);
   assert.equal(adaptedResults["gateway"].ok, true, JSON.stringify(adaptedResults["gateway"]));
-  const directResults = byLabel(verify(signed, opts));
+  // Direct path: the signed response re-assembled as the RequestLike
+  // `verifyAllLabels` takes (`SignedHttpResponse` carries no
+  // method/url of its own).
+  const directResults = byLabel(
+    verify({ method: "GET", url: URL, ...signed }, opts),
+  );
   assert.deepEqual(
     directResults,
     adaptedResults,

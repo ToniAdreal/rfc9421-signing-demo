@@ -4,12 +4,23 @@ import {
   buildSignatureBase,
   generateEd25519KeyPair,
   signRequest,
+  signResponse,
   verifyRequest,
+  verifyResponse,
 } from "../src/index.js";
 
 const CREATED = 1700000000;
-const COVERED = ["@method", "@authority", "@status", "@query"];
 const URL = "https://api.example.com/v1/charge?order=42";
+
+// The response-side covered list: `@status` binds the response
+// itself, the rest bind the triggering request via `;req` (a bare
+// `@method` / `@authority` / `@query` would be rejected by
+// `signResponse` — those components derive from the request).
+const COVERED = ["@method;req", "@authority;req", "@status", "@query;req"];
+
+function makeReq() {
+  return { method: "GET", url: URL, headers: {} };
+}
 
 function makeResp(status?: number) {
   return status === undefined
@@ -24,58 +35,85 @@ test("golden: @status serializes as a plain integer line in the signature base",
 
 test("sign→verify round-trip with @status covered (response verification)", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(makeResp(200), {
-    keyId: "s1",
-    alg: "ed25519",
-    key: privateKey,
-    created: CREATED,
-    coveredComponents: COVERED,
-  });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "s1",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      request: makeReq(),
+      coveredComponents: COVERED,
+    },
+  );
   assert.match(signed.headers["signature-input"], /"@status"/);
-  const res = verifyRequest({ ...signed, status: 200 }, { key: publicKey, now: CREATED + 60 });
+  const res = verifyResponse(signed, {
+    key: publicKey,
+    now: CREATED + 60,
+    request: makeReq(),
+  });
   assert.equal(res.ok, true);
 });
 
 test("tampered status (200→500) fails with SIGNATURE_MISMATCH", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(makeResp(200), {
-    keyId: "s1",
-    alg: "ed25519",
-    key: privateKey,
-    created: CREATED,
-    coveredComponents: COVERED,
-  });
-  const res = verifyRequest({ ...signed, status: 500 }, { key: publicKey, now: CREATED + 60 });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "s1",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      request: makeReq(),
+      coveredComponents: COVERED,
+    },
+  );
+  const res = verifyResponse(
+    { ...signed, status: 500 },
+    { key: publicKey, now: CREATED + 60, request: makeReq() },
+  );
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_MISMATCH");
 });
 
-test("sign with @status covered but no status throws a clear configuration error", () => {
+test("signResponse with @status covered but no status throws a clear configuration error", () => {
   const { privateKey } = generateEd25519KeyPair();
   assert.throws(
     () =>
-      signRequest(makeResp(), {
-        keyId: "s1",
-        alg: "ed25519",
-        key: privateKey,
-        created: CREATED,
-        coveredComponents: COVERED,
-      }),
-    /"@status" is covered but no status was given/,
+      signResponse(
+        { status: undefined as unknown as number, headers: {} },
+        {
+          keyId: "s1",
+          alg: "ed25519",
+          key: privateKey,
+          created: CREATED,
+          coveredComponents: COVERED,
+        },
+      ),
+    /signResponse: "status" must be an integer HTTP status code/,
   );
 });
 
 test("verify with @status covered but no status returns SIGNATURE_BASE_BUILD_FAILED", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(makeResp(200), {
-    keyId: "s1",
-    alg: "ed25519",
-    key: privateKey,
-    created: CREATED,
-    coveredComponents: COVERED,
-  });
-  const { status: _dropped, ...withoutStatus } = signed as typeof signed & { status?: number };
-  const res = verifyRequest(withoutStatus, { key: publicKey, now: CREATED + 60 });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "s1",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      request: makeReq(),
+      coveredComponents: COVERED,
+    },
+  );
+  // The request-shaped verify path reports a missing status as a
+  // base-build failure rather than throwing (the response entry
+  // point throws instead — see the test above).
+  const res = verifyRequest(
+    { method: "GET", url: URL, headers: signed.headers, request: makeReq() },
+    { key: publicKey, now: CREATED + 60 },
+  );
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_BASE_BUILD_FAILED");
 });
@@ -98,14 +136,17 @@ test("plain request path unchanged: @status uncovered is ignored, status absent 
 
 test("component id is case-insensitive: '@STATUS' covered works", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(makeResp(204), {
-    keyId: "s1",
-    alg: "ed25519",
-    key: privateKey,
-    created: CREATED,
-    coveredComponents: ["@STATUS"],
-  });
+  const signed = signResponse(
+    { status: 204, headers: {} },
+    {
+      keyId: "s1",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      coveredComponents: ["@STATUS"],
+    },
+  );
   assert.match(signed.headers["signature-input"], /"@status"/);
-  const res = verifyRequest({ ...signed, status: 204 }, { key: publicKey, now: CREATED + 60 });
+  const res = verifyResponse(signed, { key: publicKey, now: CREATED + 60 });
   assert.equal(res.ok, true);
 });

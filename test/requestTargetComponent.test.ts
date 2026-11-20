@@ -4,7 +4,9 @@ import {
   buildSignatureBase,
   generateEd25519KeyPair,
   signRequest,
+  signResponse,
   verifyRequest,
+  verifyResponse,
   type RequestLike,
 } from "../src/index.js";
 
@@ -123,29 +125,31 @@ test("scheme/authority are not bound: same path+query on another authority still
 
 test("\"@request-target\";req resolves against the associated request", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
+  const associated = makeReq("https://api.example.com/v1/payments?a=1");
   const response: RequestLike = {
     method: "GET",
     url: "https://callbacks.example.com/v1/result",
     headers: {},
     status: 200,
-    request: makeReq("https://api.example.com/v1/payments?a=1"),
+    request: associated,
   };
   const base = buildSignatureBase(["@request-target;req"], response, {});
   assert.match(base, /^"@request-target";req: \/v1\/payments\?a=1$/m);
-  const signed = signRequest(response, {
-    keyId: "rt1",
-    alg: "ed25519",
-    key: privateKey,
-    created: CREATED,
-    coveredComponents: ["@status", "@request-target;req"],
-  });
-  const res = verifyRequest(signed, { key: publicKey, now: CREATED + 60 });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "rt1",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      request: associated,
+      coveredComponents: ["@status", "@request-target;req"],
+    },
+  );
+  const res = verifyResponse(signed, { key: publicKey, now: CREATED + 60, request: associated });
   assert.equal(res.ok, true);
-  const tampered = {
-    ...signed,
-    request: makeReq("https://api.example.com/v1/payments?a=9"),
-  };
-  const res2 = verifyRequest(tampered, { key: publicKey, now: CREATED + 60 });
+  const tamperedReq = makeReq("https://api.example.com/v1/payments?a=9");
+  const res2 = verifyResponse(signed, { key: publicKey, now: CREATED + 60, request: tamperedReq });
   assert.equal(res2.ok, false);
   assert.equal(res2.code, "SIGNATURE_MISMATCH");
 });

@@ -5,11 +5,11 @@ import type { AddressInfo } from "node:net";
 import {
   fromNodeResponse,
   generateEd25519KeyPair,
-  signRequest,
+  signResponse,
   verifyRequest,
   type IncomingResponseLike,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
 } from "../src/index.js";
 
 const CREATED = 1700000000;
@@ -19,7 +19,7 @@ const URL = "https://api.example.com/v1/charge";
 
 /** Wire-style headers carrying a signature, as a server would send them. */
 function wireHeaders(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
 ): Record<string, string | undefined> {
   return {
     "Signature-Input": signed.headers["signature-input"] as string,
@@ -36,9 +36,9 @@ function incomingResponse(
   return { statusCode: 200, ...overrides };
 }
 
-function signedStatusResponse(key: Parameters<typeof signRequest>[1]) {
-  return signRequest(
-    { method: "GET", url: URL, headers: {}, body: BODY, status: 200 },
+function signedStatusResponse(key: Parameters<typeof signResponse>[1]) {
+  return signResponse(
+    { status: 200, headers: {}, body: BODY },
     { ...key, coveredComponents: ["@status"] },
   );
 }
@@ -46,13 +46,11 @@ function signedStatusResponse(key: Parameters<typeof signRequest>[1]) {
 test("loopback: a real http server signs an @status response; http.get client verifies end-to-end", async () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
   const server = createServer((req, res) => {
-    const signed = signRequest(
+    const signed = signResponse(
       {
-        method: "GET",
-        url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/settle`,
+        status: 200,
         headers: {},
         body: BODY,
-        status: 200,
       },
       {
         keyId: "gateway-key",
@@ -189,8 +187,8 @@ test("a null statusCode fails fast (it is not the missing case)", () => {
 
 test("an integer 404 statusCode still verifies end-to-end", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(
-    { method: "GET", url: URL, headers: {}, body: BODY, status: 404 },
+  const signed = signResponse(
+    { status: 404, headers: {}, body: BODY },
     {
       keyId: "k1",
       alg: "ed25519",
@@ -266,20 +264,18 @@ test("opts.request is attached as RequestLike.request so a ;req component binds"
     headers: { host: "api.example.com", "content-type": "application/json" },
     body: JSON.stringify({ amount: 100 }),
   };
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       body: BODY,
-      status: 200,
-      request,
     },
     {
       keyId: "gateway-key",
       alg: "ed25519",
       key: privateKey,
       created: CREATED,
+      request,
       coveredComponents: ["@status", "@method;req"],
     },
   );
@@ -301,20 +297,18 @@ test("a different bound request breaks the ;req binding", () => {
     url: "https://api.example.com/v1/charge?order=42",
     headers: { host: "api.example.com" },
   };
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       body: BODY,
-      status: 200,
-      request,
     },
     {
       keyId: "gateway-key",
       alg: "ed25519",
       key: privateKey,
       created: CREATED,
+      request,
       coveredComponents: ["@status", "@method;req"],
     },
   );
@@ -332,14 +326,12 @@ test("a different bound request breaks the ;req binding", () => {
 
 test("rawTrailers verify a ;tr covered response component", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       trailers: { "x-settlement-id": "stl_42" },
       body: BODY,
-      status: 200,
     },
     {
       keyId: "gateway-key",
@@ -366,14 +358,12 @@ test("rawTrailers verify a ;tr covered response component", () => {
 
 test("a tampered trailer fails verification", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       trailers: { "x-settlement-id": "stl_42" },
       body: BODY,
-      status: 200,
     },
     {
       keyId: "gateway-key",
@@ -435,14 +425,12 @@ test("headers are lowercased and multi-values joined, like the request adapter",
 
 test("parsed trailers object verifies a ;tr component when rawTrailers is absent", () => {
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signed = signRequest(
+  const signed = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       trailers: { "x-settlement-id": "stl_42" },
       body: BODY,
-      status: 200,
     },
     {
       keyId: "gateway-key",

@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import { createServer, get } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
-  addSignature,
+  addResponseSignature,
   fromNodeResponse,
   generateEd25519KeyPair,
-  signRequest,
+  signResponse,
   verifyAllLabels,
   type IncomingResponseLike,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
 } from "../src/index.js";
 
 // Backlog #737: `test/nodeHttpResponse.test.ts` never mentions
@@ -36,7 +36,7 @@ const gateway = generateEd25519KeyPair();
 
 /** Wire-style headers carrying a signature, as a server would send them. */
 function wireHeaders(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
 ): Record<string, string | undefined> {
   return {
     "Signature-Input": signed.headers["signature-input"] as string,
@@ -53,15 +53,13 @@ function incomingResponse(
   return { statusCode: 200, ...overrides };
 }
 
-function response(status = 200, request?: RequestLike) {
-  return request === undefined
-    ? { method: "GET", url: URL, headers: {}, body: BODY, status }
-    : { method: "GET", url: URL, headers: {}, body: BODY, status, request };
+function response(status = 200) {
+  return { status, headers: {}, body: BODY };
 }
 
 /** A dual-signed response: merchant first, gateway appended. */
-function dualSigned(status = 200): SignedHttpRequest {
-  const merchantSigned = signRequest(response(status), {
+function dualSigned(status = 200): SignedHttpResponse {
+  const merchantSigned = signResponse(response(status), {
     keyId: "merchant-key",
     alg: "ed25519",
     key: merchant.privateKey,
@@ -69,7 +67,7 @@ function dualSigned(status = 200): SignedHttpRequest {
     label: "merchant",
     coveredComponents: ["@status"],
   });
-  return addSignature(merchantSigned, {
+  return addResponseSignature(merchantSigned, {
     keyId: "gateway-key",
     alg: "ed25519",
     key: gateway.privateKey,
@@ -81,9 +79,9 @@ function dualSigned(status = 200): SignedHttpRequest {
 
 /** Merge two independently signed responses into one wire header set. */
 function mergeSignatures(
-  a: SignedHttpRequest,
-  b: SignedHttpRequest,
-): SignedHttpRequest {
+  a: SignedHttpResponse,
+  b: SignedHttpResponse,
+): SignedHttpResponse {
   return {
     ...a,
     headers: {
@@ -98,7 +96,7 @@ function keys() {
   return { merchant: merchant.publicKey, gateway: gateway.publicKey };
 }
 
-function adaptedDual(signed: SignedHttpRequest): RequestLike {
+function adaptedDual(signed: SignedHttpResponse): RequestLike {
   return fromNodeResponse(incomingResponse({ headers: wireHeaders(signed) }), BODY, {
     method: "GET",
     url: URL,
@@ -129,10 +127,8 @@ test("verifyAllLabels x fromNodeResponse: a dual-signed response verifies both l
 
 test("verifyAllLabels x fromNodeResponse: a real loopback server dual-signs a response; http.get client verifies both labels", async () => {
   const server = createServer((req, res) => {
-    const port = (server.address() as AddressInfo).port;
-    const url = `http://127.0.0.1:${port}/settle`;
-    const merchantSigned = signRequest(
-      { method: "GET", url, headers: {}, body: BODY, status: 200 },
+    const merchantSigned = signResponse(
+      { status: 200, headers: {}, body: BODY },
       {
         keyId: "merchant-key",
         alg: "ed25519",
@@ -142,7 +138,7 @@ test("verifyAllLabels x fromNodeResponse: a real loopback server dual-signs a re
         coveredComponents: ["@status"],
       },
     );
-    const dual = addSignature(merchantSigned, {
+    const dual = addResponseSignature(merchantSigned, {
       keyId: "gateway-key",
       alg: "ed25519",
       key: gateway.privateKey,
@@ -207,7 +203,7 @@ test("verifyAllLabels x fromNodeResponse: a label signed over a different status
   // divergence case): the gateway label is minted over status 500
   // while the wire carries status 200.
   const divergent = mergeSignatures(
-    signRequest(response(200), {
+    signResponse(response(200), {
       keyId: "merchant-key",
       alg: "ed25519",
       key: merchant.privateKey,
@@ -215,7 +211,7 @@ test("verifyAllLabels x fromNodeResponse: a label signed over a different status
       label: "merchant",
       coveredComponents: ["@status"],
     }),
-    signRequest(response(500), {
+    signResponse(response(500), {
       keyId: "gateway-key",
       alg: "ed25519",
       key: gateway.privateKey,
@@ -258,20 +254,22 @@ test("verifyAllLabels x fromNodeResponse: a bound request is attached and a ;req
     headers: { host: "api.example.com", "content-type": "application/json" },
     body: JSON.stringify({ amount: 100 }),
   };
-  const merchantSigned = signRequest(response(200, request), {
+  const merchantSigned = signResponse(response(200), {
     keyId: "merchant-key",
     alg: "ed25519",
     key: merchant.privateKey,
     created: CREATED,
     label: "merchant",
+    request,
     coveredComponents: ["@status", "@method;req"],
   });
-  const dual = addSignature(merchantSigned, {
+  const dual = addResponseSignature(merchantSigned, {
     keyId: "gateway-key",
     alg: "ed25519",
     key: gateway.privateKey,
     created: CREATED,
     label: "gateway",
+    request,
     coveredComponents: ["@status", "@method;req"],
   });
   const reqLike = fromNodeResponse(

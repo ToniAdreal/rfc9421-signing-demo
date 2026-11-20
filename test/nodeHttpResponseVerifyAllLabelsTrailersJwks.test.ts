@@ -2,18 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { KeyObject } from "node:crypto";
 import {
-  addSignature,
+  addResponseSignature,
   exportPublicKeyJwk,
   fromNodeResponse,
   generateEd25519KeyPair,
   JwksKeyStore,
-  signRequest,
+  signResponse,
   verifyAllLabels,
   type IncomingResponseLike,
   type JwksFetchImpl,
   type JwksKeyStoreSnapshot,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
 } from "../src/index.js";
 
 // Backlog #781: the response-side combination was covered only two
@@ -102,14 +102,12 @@ function resolvers(stores_: {
 }
 
 /** A dual-signed response: merchant binds the trailer, gateway does not. */
-function dualSigned(): SignedHttpRequest {
-  const merchantSigned = signRequest(
+function dualSigned(): SignedHttpResponse {
+  const merchantSigned = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       body: BODY,
-      status: 200,
       trailers: { "x-checksum": TRAILER_VALUE },
     },
     {
@@ -121,7 +119,7 @@ function dualSigned(): SignedHttpRequest {
       coveredComponents: ["@status", "x-checksum;tr"],
     },
   );
-  return addSignature(merchantSigned, {
+  return addResponseSignature(merchantSigned, {
     keyId: "gateway-key-1",
     alg: "ed25519",
     key: gateway.privateKey,
@@ -142,7 +140,7 @@ function incomingResponse(
 
 /** Wire-style headers carrying a dual signature, as a server would send them. */
 function wireHeaders(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
 ): Record<string, string | undefined> {
   return {
     "Signature-Input": signed.headers["signature-input"] as string,
@@ -151,7 +149,7 @@ function wireHeaders(
 }
 
 function adapted(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
   extra: Partial<IncomingResponseLike> = {},
 ): RequestLike {
   return fromNodeResponse(

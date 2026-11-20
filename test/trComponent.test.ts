@@ -5,7 +5,9 @@ import {
   generateEd25519KeyPair,
   parseSignatureInput,
   signRequest,
+  signResponse,
   verifyRequest,
+  verifyResponse,
   type RequestLike,
 } from "../src/index.js";
 
@@ -170,24 +172,18 @@ test(";tr combines with ;req (either order): the associated request's trailer is
     headers: { "x-checksum": "req-header" },
     trailers: { "x-checksum": "req-trailer" },
   };
-  const response: RequestLike = {
-    method: "GET",
-    url: "https://callbacks.example.com/v1/result",
-    headers: {},
-    status: 200,
-    request: associated,
-  };
-  const signed = signRequest(response, {
-    keyId: "tr-1", alg: "ed25519", key: keys.privateKey, created: CREATED,
-    coveredComponents: ["@status", "x-checksum;tr;req"],
-  });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "tr-1", alg: "ed25519", key: keys.privateKey, created: CREATED,
+      request: associated,
+      coveredComponents: ["@status", "x-checksum;tr;req"],
+    },
+  );
   assert.match(signed.headers["signature-input"], /"x-checksum";req;tr/);
-  assert.equal(verifyRequest(signed, { key: keys.publicKey, now: CREATED + 60 }).ok, true);
-  const tampered = {
-    ...signed,
-    request: { ...associated, trailers: { "x-checksum": "forged" } },
-  };
-  const res = verifyRequest(tampered, { key: keys.publicKey, now: CREATED + 60 });
+  assert.equal(verifyResponse(signed, { key: keys.publicKey, now: CREATED + 60, request: associated }).ok, true);
+  const tamperedReq = { ...associated, trailers: { "x-checksum": "forged" } };
+  const res = verifyResponse(signed, { key: keys.publicKey, now: CREATED + 60, request: tamperedReq });
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_MISMATCH");
 });

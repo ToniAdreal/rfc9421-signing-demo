@@ -394,6 +394,21 @@ function coversOwnContentDigest(covered: readonly string[]): boolean {
 }
 
 /**
+ * True when the covered list binds `@status`, by base name — so
+ * `"@status"`, `"@STATUS"`, and `"@status";req` all count (the
+ * `;req` form still names the response's own status, it only
+ * reroutes the *other* components). RFC 9421 §2.2.9: "@status" MUST
+ * NOT be used in a request message, so `signRequestCore` refuses
+ * any list this matches when `allowStatus` is false, while
+ * `signResponse` passes `allowStatus: true` through the same core.
+ */
+function coversStatus(covered: readonly string[]): boolean {
+  return covered.some(
+    (entry) => (entry.toLowerCase().split(";")[0] ?? "").trim() === "@status",
+  );
+}
+
+/**
  * Fail fast on a malformed `coveredComponents` list, before the
  * signature base is built and before any crypto runs. Without this,
  * a JS caller passing a non-array (`"content-digest"`) or a
@@ -607,6 +622,13 @@ function isSupportedAlg(alg: string): alg is SignAlg {
  * `Signature-Input`, `Signature` (and `Content-Digest` when the body is
  * covered) headers attached. The input request is not mutated.
  *
+ * This is the shared signing core behind `signRequest` and
+ * `signResponse`: `allowStatus` is `false` for requests and `true`
+ * for responses. Not re-exported from the package index — callers
+ * sign requests with `signRequest` and responses with `signResponse`;
+ * `addSignature` / `addResponseSignature` inherit the same split
+ * through them.
+ *
  * Fail-fast configuration errors (thrown, not embedded in the signature):
  * - `coveredComponents: []` signs nothing, so it is rejected;
  * - a covered component listed twice (same identifier after
@@ -618,6 +640,13 @@ function isSupportedAlg(alg: string): alg is SignAlg {
  *   `"@method";req` is NOT a
  *   duplicate — `;req` reroutes the component to the associated
  *   request, so the two bind different values;
+ * - `"@status"` covered in a request signature is rejected
+ *   (RFC 9421 §2.2.9: "@status" MUST NOT be used in a request
+ *   message) — matched by base name, so `"@STATUS"` and
+ *   `"@status";req` are refused the same way. Only the response-side
+ *   entry point (`signResponse`, `allowStatus: true`) may mint a
+ *   signature covering it; `addSignature` inherits the refusal
+ *   through `signRequest`;
  * - `created` / `expires` must be non-negative finite integers (Unix
  *   seconds) — the verifier's `signature-input` parser only recognizes
  *   integer values, so a fractional timestamp would silently diverge
@@ -673,11 +702,14 @@ function isSupportedAlg(alg: string): alg is SignAlg {
  *   inferred value into `signature-input`; an unmappable key shape is
  *   a configuration error in its own words.
  *   `signResponse`, `addSignature`, and `addResponseSignature` inherit
- *   these checks through `signRequest`.
+ *   these checks through `signRequest` — except the `@status` guard
+ *   above, which `signResponse` deliberately bypasses (`allowStatus:
+ *   true`) because a response is exactly where `@status` belongs.
  */
-export function signRequest(
+export function signRequestCore(
   req: RequestLike,
   opts: SignOptions,
+  allowStatus: boolean,
 ): SignedHttpRequest {
   assertNoUnknownOptions(opts, SIGN_OPTION_KEYS, "signRequest");
   const label = opts.label ?? "sig1";
@@ -800,6 +832,17 @@ export function signRequest(
       `signRequest: too many covered components: ${covered.length} (max ${MAX_COVERED_COMPONENTS})`,
     );
   assertNoDuplicateCoveredComponents("signRequest", covered);
+  // RFC 9421 §2.2.9: "@status" MUST NOT be used in a request
+  // message. A request-side signature covering it would mint exactly
+  // the forbidden shape, so refuse it here — before the base is
+  // built and before any crypto runs — in this entry point's own
+  // words. The response side passes `allowStatus: true` into this
+  // same core; `addSignature` inherits the refusal through the
+  // public `signRequest` wrapper below.
+  if (!allowStatus && coversStatus(covered))
+    throw new Error(
+      'signRequest: "@status" must not be covered in a request signature (RFC 9421 §2.2.9: "@status" MUST NOT be used in a request message); sign the response with signResponse instead',
+    );
   const digestAlg = opts.contentDigestAlg ?? "sha-512";
   assertContentDigestAlg(digestAlg);
   assertStructuredFieldTypes(opts.structuredFieldTypes, "signRequest");
@@ -992,6 +1035,20 @@ export function signRequest(
     // returned array must not alias the caller's options array.
     coveredComponents: [...covered],
   };
+}
+
+/**
+ * Sign an HTTP request per RFC 9421. The request-side entry point
+ * over `signRequestCore` (`allowStatus: false`): covering `"@status"`
+ * is refused here, because RFC 9421 §2.2.9 forbids it in a request
+ * message — sign the response with `signResponse` instead. The full
+ * fail-fast contract lives on `signRequestCore` above.
+ */
+export function signRequest(
+  req: RequestLike,
+  opts: SignOptions,
+): SignedHttpRequest {
+  return signRequestCore(req, opts, false);
 }
 
 /**

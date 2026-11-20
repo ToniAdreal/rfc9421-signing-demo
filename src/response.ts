@@ -50,7 +50,7 @@ import {
 } from "./components.js";
 import { contentDigestAlgOf } from "./digest.js";
 import { VerifyError } from "./errors.js";
-import { signRequest, assertCoveredComponentsShape, assertLabelShape, assertNoDuplicateCoveredComponents, assertNoUnknownOptions, SIGN_OPTION_KEYS, type SignOptions } from "./sign.js";
+import { signRequestCore, assertCoveredComponentsShape, assertLabelShape, assertNoDuplicateCoveredComponents, assertNoUnknownOptions, SIGN_OPTION_KEYS, type SignOptions } from "./sign.js";
 import {
   checkSignatureHeaderLengths,
   verifyAllLabels,
@@ -321,6 +321,12 @@ function responseToRequestLike(
  *   the module docstring — attach the triggering request via the
  *   `request` option, or use `signRequest` with
  *   `RequestLike.request`).
+ *
+ * The one `signRequest` rejection this entry point does NOT inherit
+ * is the `@status` guard: RFC 9421 §2.2.9 forbids `@status` in a
+ * request message but it is exactly what a response signature binds,
+ * so `signResponse` passes `allowStatus: true` into the shared
+ * signing core (`signRequestCore`).
  */
 export function signResponse(
   res: HttpResponseLike,
@@ -356,8 +362,11 @@ export function signResponse(
   // before its switch — so it is a reserved `.invalid` host (RFC 2606)
   // that can never be a real request target, never a plausible one.
   // `request` is consumed here, not forwarded into SignOptions.
+  // `allowStatus: true` — this is the response-side entry point, the
+  // one place a signature covering `@status` may be minted (RFC 9421
+  // §2.2.9); the request side refuses it in `signRequestCore`.
   const { request, ...signOpts } = opts;
-  const signed = signRequest(
+  const signed = signRequestCore(
     {
       method: "",
       url: "https://response.invalid/",
@@ -370,6 +379,7 @@ export function signResponse(
       ...(request !== undefined ? { request } : {}),
     },
     { ...signOpts, coveredComponents: covered },
+    true,
   );
   return {
     status: res.status,

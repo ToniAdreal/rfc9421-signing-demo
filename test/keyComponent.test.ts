@@ -6,7 +6,9 @@ import {
   parseSignatureInput,
   serializeDictionaryMemberValue,
   signRequest,
+  signResponse,
   verifyRequest,
+  verifyResponse,
   type RequestLike,
 } from "../src/index.js";
 
@@ -198,31 +200,26 @@ test('";key" combined with ";bs" or ";sf" is rejected on the sign side', () => {
 
 test('";key" combines with ";req": response signature binds a request dictionary member', () => {
   const keys = generateEd25519KeyPair();
-  const response: RequestLike = {
-    method: "GET",
-    url: "https://callbacks.example.com/v1/result",
-    headers: {},
-    status: 200,
-    request: {
-      method: "POST",
-      url: "https://api.example.com/v1/charge",
-      headers: { "x-dict": DICT },
-    },
+  const associated: RequestLike = {
+    method: "POST",
+    url: "https://api.example.com/v1/charge",
+    headers: { "x-dict": DICT },
   };
-  const signed = signRequest(response, {
-    keyId: "key-1", alg: "ed25519", key: keys.privateKey, created: CREATED,
-    coveredComponents: ["@status", 'x-dict;req;key="b"'],
-  });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "key-1", alg: "ed25519", key: keys.privateKey, created: CREATED,
+      request: associated,
+      coveredComponents: ["@status", 'x-dict;req;key="b"'],
+    },
+  );
   // Canonical wire order is ;req before ;key, regardless of input order.
   const parsed = parseSignatureInput(signed.headers["signature-input"], "sig1");
   assert.deepEqual(parsed.componentIds, ["@status", 'x-dict;req;key="b"']);
-  assert.equal(verifyRequest(signed, { key: keys.publicKey, now: CREATED + 60 }).ok, true);
-  const tampered = {
-    ...signed,
-    request: { ...signed.request!, headers: { "x-dict": "a=1, b=7;x=1;y=2, c=(a b c), d" } },
-  };
+  assert.equal(verifyResponse(signed, { key: keys.publicKey, now: CREATED + 60, request: associated }).ok, true);
+  const tamperedReq = { ...associated, headers: { "x-dict": "a=1, b=7;x=1;y=2, c=(a b c), d" } };
   assert.equal(
-    verifyRequest(tampered, { key: keys.publicKey, now: CREATED + 60 }).code,
+    verifyResponse(signed, { key: keys.publicKey, now: CREATED + 60, request: tamperedReq }).code,
     "SIGNATURE_MISMATCH",
   );
 });

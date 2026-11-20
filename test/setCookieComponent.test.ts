@@ -7,8 +7,9 @@ import path from "node:path";
 import {
   buildSignatureBase,
   generateEd25519KeyPair,
-  signRequest,
-  verifyRequest,
+  signResponse,
+  verifyResponse,
+  type HttpResponseLike,
   type RequestLike,
 } from "../src/index.js";
 
@@ -33,20 +34,27 @@ function makeResponse(cookies: string[]): RequestLike {
   };
 }
 
+// Set-Cookie is a response header and these signatures cover
+// `@status`, so they are response signatures: `signResponse` /
+// `verifyResponse` (RFC 9421 §2.2.9 forbids `@status` in a request
+// message, so `signRequest` refuses it — backlog #1283).
 function sign(cookies: string[], coveredComponents: string[]) {
   const keys = generateEd25519KeyPair();
-  const signed = signRequest(makeResponse(cookies), {
-    keyId: "sc-1",
-    alg: "ed25519",
-    key: keys.privateKey,
-    created: CREATED,
-    coveredComponents,
-  });
+  const signed = signResponse(
+    { status: 200, headers: { "set-cookie": cookies } },
+    {
+      keyId: "sc-1",
+      alg: "ed25519",
+      key: keys.privateKey,
+      created: CREATED,
+      coveredComponents,
+    },
+  );
   return { ...keys, signed };
 }
 
-function verify(signed: RequestLike, publicKey: KeyObject) {
-  return verifyRequest(signed, { key: publicKey, now: CREATED + 60 });
+function verify(signed: HttpResponseLike, publicKey: KeyObject) {
+  return verifyResponse(signed, { key: publicKey, now: CREATED + 60 });
 }
 
 test("single-value set-cookie round-trips", () => {

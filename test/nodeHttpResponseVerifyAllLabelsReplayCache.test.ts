@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  addSignature,
+  addResponseSignature,
   fromNodeResponse,
   generateEd25519KeyPair,
   ReplayCache,
-  signRequest,
+  signResponse,
   verifyAllLabels,
   type IncomingResponseLike,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
   type VerifyResult,
 } from "../src/index.js";
 
@@ -49,7 +49,7 @@ const gateway = generateEd25519KeyPair();
 
 /** Wire-style headers carrying a signature, as a server would send them. */
 function wireHeaders(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
 ): Record<string, string | undefined> {
   return {
     "Signature-Input": signed.headers["signature-input"] as string,
@@ -67,7 +67,7 @@ function incomingResponse(
 }
 
 function response(body: string = BODY, status = 200) {
-  return { method: "GET", url: URL, headers: {}, body, status };
+  return { status, headers: {}, body };
 }
 
 /** A dual-signed response: merchant first, gateway appended. */
@@ -76,8 +76,8 @@ function dualSigned(
   merchantNonce: string,
   gatewayNonce: string,
   status = 200,
-): SignedHttpRequest {
-  const merchantSigned = signRequest(response(body, status), {
+): SignedHttpResponse {
+  const merchantSigned = signResponse(response(body, status), {
     keyId: "merchant-key",
     alg: "ed25519",
     key: merchant.privateKey,
@@ -86,7 +86,7 @@ function dualSigned(
     coveredComponents: ["@status"],
     nonce: merchantNonce,
   });
-  return addSignature(merchantSigned, {
+  return addResponseSignature(merchantSigned, {
     keyId: "gateway-key",
     alg: "ed25519",
     key: gateway.privateKey,
@@ -97,7 +97,7 @@ function dualSigned(
   });
 }
 
-function adapted(signed: SignedHttpRequest, body: string = BODY): RequestLike {
+function adapted(signed: SignedHttpResponse, body: string = BODY): RequestLike {
   return fromNodeResponse(incomingResponse({ headers: wireHeaders(signed) }), body, {
     method: "GET",
     url: URL,
@@ -112,7 +112,7 @@ function freshCaches() {
 }
 
 function verifyDual(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
   body: string,
   caches: { merchantCache: ReplayCache; gatewayCache: ReplayCache },
 ): VerifyResult[] {

@@ -6,7 +6,9 @@ import {
   generateEd25519KeyPair,
   parseSignatureInput,
   signRequest,
+  signResponse,
   verifyRequest,
+  verifyResponse,
   type RequestLike,
 } from "../src/index.js";
 
@@ -145,32 +147,23 @@ test(";sf combines with ;req: the associated request's field is strictly seriali
     url: "https://api.example.com/v1/charge",
     headers: { "x-quota": "limit=1500,   remaining=99" },
   };
-  const response: RequestLike = {
-    method: "GET",
-    url: "https://callbacks.example.com/v1/result",
-    headers: {},
-    status: 200,
-    request: associated,
-  };
   // Caller wrote ;sf before ;req; the canonical wire form is ;req;sf.
-  const signed = signRequest(response, {
-    keyId: "sf-1", alg: "ed25519", key: keys.privateKey, created: CREATED,
-    coveredComponents: ["@status", "x-quota;sf;req"],
-  });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "sf-1", alg: "ed25519", key: keys.privateKey, created: CREATED,
+      request: associated,
+      coveredComponents: ["@status", "x-quota;sf;req"],
+    },
+  );
   assert.match(signed.headers["signature-input"], /"x-quota";req;sf/);
-  assert.equal(verifyRequest(signed, { key: keys.publicKey, now: CREATED + 60 }).ok, true);
+  assert.equal(verifyResponse(signed, { key: keys.publicKey, now: CREATED + 60, request: associated }).ok, true);
   // Re-spacing the associated request's field still verifies…
-  const respaced = {
-    ...signed,
-    request: { ...associated, headers: { "x-quota": "limit=1500, remaining=99" } },
-  };
-  assert.equal(verifyRequest(respaced, { key: keys.publicKey, now: CREATED + 60 }).ok, true);
+  const respacedReq = { ...associated, headers: { "x-quota": "limit=1500, remaining=99" } };
+  assert.equal(verifyResponse(signed, { key: keys.publicKey, now: CREATED + 60, request: respacedReq }).ok, true);
   // …but changing a member value does not.
-  const tampered = {
-    ...signed,
-    request: { ...associated, headers: { "x-quota": "limit=1500, remaining=98" } },
-  };
-  const res = verifyRequest(tampered, { key: keys.publicKey, now: CREATED + 60 });
+  const tamperedReq = { ...associated, headers: { "x-quota": "limit=1500, remaining=98" } };
+  const res = verifyResponse(signed, { key: keys.publicKey, now: CREATED + 60, request: tamperedReq });
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_MISMATCH");
 });

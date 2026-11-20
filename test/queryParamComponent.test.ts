@@ -5,7 +5,9 @@ import {
   generateEd25519KeyPair,
   parseSignatureInput,
   signRequest,
+  signResponse,
   verifyRequest,
+  verifyResponse,
   type RequestLike,
 } from "../src/index.js";
 
@@ -219,28 +221,22 @@ test(";req combination: a response signature can bind one parameter of its reque
     url: "https://api.example.com/pay?order=42&amount=100",
     headers: {},
   };
-  const response: RequestLike = {
-    method: "GET",
-    url: "https://api.example.com/callback",
-    headers: {},
-    status: 200,
-    request,
-  };
-  const signed = signRequest(response, {
-    keyId: "qp-1",
-    alg: "ed25519",
-    key: privateKey,
-    created: CREATED,
-    coveredComponents: ["@status", '@query-param;req;name="order"'],
-  });
+  const signed = signResponse(
+    { status: 200, headers: {} },
+    {
+      keyId: "qp-1",
+      alg: "ed25519",
+      key: privateKey,
+      created: CREATED,
+      request,
+      coveredComponents: ["@status", '@query-param;req;name="order"'],
+    },
+  );
   // Canonical wire form puts ;req before ;name regardless of input order.
   assert.match(signed.headers["signature-input"], /"@query-param";req;name="order"/);
-  assert.equal(verifyRequest(signed, { key: publicKey, now: CREATED + 60 }).ok, true);
-  const transplanted = {
-    ...signed,
-    request: { ...request, url: "https://api.example.com/pay?order=99&amount=100" },
-  };
-  const res = verifyRequest(transplanted, { key: publicKey, now: CREATED + 60 });
+  assert.equal(verifyResponse(signed, { key: publicKey, now: CREATED + 60, request }).ok, true);
+  const transplantedReq = { ...request, url: "https://api.example.com/pay?order=99&amount=100" };
+  const res = verifyResponse(signed, { key: publicKey, now: CREATED + 60, request: transplantedReq });
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_MISMATCH");
 });

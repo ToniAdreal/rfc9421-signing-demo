@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  addSignature,
+  addResponseSignature,
   fromNodeResponse,
   generateEd25519KeyPair,
   ReplayCache,
-  signRequest,
+  signResponse,
   verifyAllLabels,
   type IncomingResponseLike,
   type RequestLike,
-  type SignedHttpRequest,
+  type SignedHttpResponse,
   type VerifyResult,
 } from "../src/index.js";
 
@@ -50,7 +50,7 @@ const URL = "https://api.example.com/v1/charge";
 
 /** Wire-style headers carrying a dual signature, as a server would send them. */
 function wireHeaders(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
 ): Record<string, string | undefined> {
   return {
     "Signature-Input": signed.headers["signature-input"] as string,
@@ -72,19 +72,20 @@ function dualSigned(
   nonceA: string,
   nonceB: string,
 ): {
-  signed: SignedHttpRequest;
+  signed: SignedHttpResponse;
   aPublicKey: ReturnType<typeof generateEd25519KeyPair>["publicKey"];
   bPublicKey: ReturnType<typeof generateEd25519KeyPair>["publicKey"];
 } {
   const a = generateEd25519KeyPair();
   const b = generateEd25519KeyPair();
-  const first = signRequest(
+  // Response-side entry points: `@status` is the response's own
+  // status, so it is minted with `signResponse`, never `signRequest`
+  // (RFC 9421 §2.2.9 forbids `@status` in a request message).
+  const first = signResponse(
     {
-      method: "GET",
-      url: URL,
+      status: 200,
       headers: {},
       body: BODY,
-      status: 200,
       trailers: {
         "x-checksum-a": TRAILER_A_VALUE,
         "x-checksum-b": TRAILER_B_VALUE,
@@ -100,10 +101,10 @@ function dualSigned(
       nonce: nonceA,
     },
   );
-  // `addSignature` preserves status and trailers from the first
-  // signed output, so the second label's base can resolve its own
-  // trailer without the caller re-attaching anything by hand.
-  const signed = addSignature(first, {
+  // `addResponseSignature` preserves status and trailers from the
+  // first signed output, so the second label's base can resolve its
+  // own trailer without the caller re-attaching anything by hand.
+  const signed = addResponseSignature(first, {
     keyId: "b-key",
     alg: "ed25519",
     key: b.privateKey,
@@ -126,7 +127,7 @@ function freshCaches(): Caches {
 }
 
 function adapted(
-  signed: SignedHttpRequest,
+  signed: SignedHttpResponse,
   trailers: Record<string, string> = {
     // Mixed-case names exercise the adapter's lowercasing, the same
     // convention it applies to headers.
