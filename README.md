@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2367 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2379 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1328,7 +1328,11 @@ transport framing, not HTTP fields, so they are stripped from the
 normalized headers map — a covered component never resolves against
 `:method` / `:path` / `:authority` / `:scheme` as a header. Missing
 `method`/`url`/`host` (and `:authority` as the HTTP/2 fallback) throws a
-configuration `Error` instead of silently defaulting. The adapter also
+configuration `Error` instead of silently defaulting. The effective
+scheme must be `http` or `https` (case-insensitive): an empty, `ftp`, or
+otherwise non-HTTP `{ scheme }` option or `:scheme` pseudo-header throws
+the same kind of configuration `Error` before the URL is assembled, so a
+signature is never built or verified over a non-HTTP scheme. The adapter also
 carries the message's trailers into `RequestLike.trailers` (from
 `req.rawTrailers` when present, else `req.trailers`; names lowercased,
 multi-values joined with `", "` — the header conventions), so covered
@@ -1368,7 +1372,10 @@ through untouched (a `Uint8Array` body is copied into a `Buffer`; a
 string or `Buffer` passes through as-is). A `Request` always carries an
 absolute URL, so there is no scheme inference — an absolute URL with
 no host, or one that does not parse, throws a configuration `Error`
-instead of silently defaulting. An origin-form path (`/v1/charge`, as a
+instead of silently defaulting. The absolute URL's scheme must be
+`http` or `https` (case-insensitive, so `HTTPS://…` is accepted and its
+`@scheme` resolves to `https`); any other scheme throws the same kind of
+configuration `Error` before verification. An origin-form path (`/v1/charge`, as a
 test double might carry) is rebuilt as `http://<host><path>` from the
 `host` header, the `fromNodeRequest` convention; without a `host`
 header that throws too. A fetch `Request` carries no trailers, so the
@@ -5294,7 +5301,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2367 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2379 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

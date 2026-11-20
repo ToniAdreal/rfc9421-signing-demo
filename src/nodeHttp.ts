@@ -81,6 +81,32 @@ const VERIFIED_HANDLER_OPTION_KEYS: readonly string[] = [
 ];
 
 /**
+ * Shared fail-fast scheme rule for both request adapters (backlog
+ * #1270): the effective scheme must be `http` or `https`,
+ * case-insensitively. Anything else — an empty string, `ftp`,
+ * `javascript:`, a non-string value from a JS caller — is a caller
+ * configuration mistake, rejected before any URL is assembled, so a
+ * signature is never built or verified over a non-HTTP scheme. The
+ * socket inference in `fromNodeRequest` can only yield `http` or
+ * `https`, so only the explicit option and the `:scheme` pseudo-header
+ * can trip this check there; `fromFetchRequest` passes the absolute
+ * URL's parsed protocol through the same rule. Returns the scheme
+ * lowercased, so an uppercase `HTTPS` pseudo-header or URL still
+ * rebuilds to the canonical `https` form.
+ */
+function assertHttpScheme(scheme: unknown, caller: string): "http" | "https" {
+  if (
+    typeof scheme !== "string" ||
+    (scheme.toLowerCase() !== "http" && scheme.toLowerCase() !== "https")
+  ) {
+    throw new Error(
+      `${caller} must be "http" or "https", got ${JSON.stringify(scheme) ?? String(scheme)}`,
+    );
+  }
+  return scheme.toLowerCase() as "http" | "https";
+}
+
+/**
  * The trailer fields an adapter actually reads, shared by the request
  * and response message shapes. `normalizeTrailers` is typed against this
  * minimal shape so both adapters reuse the exact same normalization
@@ -491,6 +517,11 @@ export function fromFetchRequest(
         `fromFetchRequest: req.url is not a valid absolute URL, got ${JSON.stringify(rawUrl)}`,
       );
     }
+    // The parsed protocol carries the trailing colon ("ftp:"); strip
+    // it before the shared http(s) check, so a non-HTTP scheme fails
+    // here with a configuration error instead of flowing into a
+    // signature base over `ftp://…`.
+    assertHttpScheme(parsed.protocol.slice(0, -1), "fromFetchRequest: req.url scheme");
     if (parsed.hostname === "")
       throw new Error(
         "fromFetchRequest: req.url has no host — @authority verification needs a host",
@@ -550,6 +581,12 @@ export interface FromNodeRequestOptions {
    * Scheme used when rebuilding the absolute request URL. Defaults to
    * the `:scheme` pseudo-header when present (HTTP/2), else "https"
    * when `req.socket` is a TLS socket, otherwise "http".
+   *
+   * Only `http` or `https` (case-insensitive) is accepted: any other
+   * value — an empty string, `ftp`, a non-string from a JS caller —
+   * throws `fromNodeRequest: scheme must be "http" or "https", got …`
+   * before the URL is assembled, so a signature is never built or
+   * verified over a non-HTTP scheme.
    *
    * Set this explicitly behind a TLS-terminating proxy, where the socket
    * seen by Node is plain HTTP but the public URL the signer signed is
@@ -674,9 +711,13 @@ export function fromNodeRequest(
     true;
   // An explicit option wins; then the `:scheme` pseudo-header (an h2c
   // socket is never `encrypted`, so without it the scheme would
-  // misread as http); then the socket inference as before.
-  const scheme =
-    opts?.scheme ?? headers[":scheme"] ?? (encrypted ? "https" : "http");
+  // misread as http); then the socket inference as before. The shared
+  // http(s) check rejects a non-HTTP effective scheme before the URL
+  // below is assembled.
+  const scheme = assertHttpScheme(
+    opts?.scheme ?? headers[":scheme"] ?? (encrypted ? "https" : "http"),
+    "fromNodeRequest: scheme",
+  );
 
   // Pseudo-headers are transport framing, not HTTP fields: strip them
   // from the normalized map so a covered component never resolves
