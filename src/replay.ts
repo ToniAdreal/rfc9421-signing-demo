@@ -64,7 +64,12 @@ export interface ReplayCacheOptions {
   ttlSec?: number;
   /**
    * Clock source (unix seconds). Defaults to the wall clock. Inject a fake
-   * clock for deterministic tests.
+   * clock for deterministic tests. The clock must return a finite number
+   * of seconds since the epoch: a clock returning `NaN`/`Infinity` (or a
+   * non-number) fails every clock read with a configuration `Error`
+   * (backlog #1288) instead of silently treating every nonce as expired
+   * (`t - prev < ttlSec` is always false for a `NaN` reading, which
+   * would reopen the replay window for nonces already seen).
    */
   now?: () => number;
 }
@@ -517,6 +522,34 @@ export class ReplayCache implements NonceStore {
   }
 
   /**
+   * Resolve the current time (unix seconds) for one clock read: an
+   * explicit `now` argument wins, otherwise the injected clock is read.
+   * Either way the value must be a finite number — a `NaN` reading
+   * would make every `t - prev < ttlSec` comparison false, so a seen
+   * nonce would look expired and the replay check would silently stop
+   * working (backlog #1288). A bad value throws a configuration
+   * `Error` before any cache state is read or changed, so a failed
+   * call leaves no residue (in particular no `NaN`-timestamped entry
+   * is ever recorded). The `size` getter, `exportSnapshot()`, and
+   * `restore()` read the clock through this same helper.
+   */
+  private resolveNow(now?: number): number {
+    if (now !== undefined) {
+      if (typeof now !== "number" || !Number.isFinite(now))
+        throw new Error(
+          `ReplayCache: now must be a finite number of seconds since the epoch, got ${typeof now === "number" ? String(now) : typeof now}`,
+        );
+      return now;
+    }
+    const t = this.clock();
+    if (typeof t !== "number" || !Number.isFinite(t))
+      throw new Error(
+        `ReplayCache: clock must return a finite number of seconds since the epoch, got ${typeof t === "number" ? String(t) : typeof t}`,
+      );
+    return t;
+  }
+
+  /**
    * Atomically check-and-record: returns `true` when the nonce was already
    * seen within the TTL (i.e. this is a replay); otherwise records the
    * nonce and returns `false`.
@@ -530,14 +563,17 @@ export class ReplayCache implements NonceStore {
    * An empty or non-string nonce throws a configuration `Error`, the
    * same caliber as `has()`/`release()` — a non-string nonce must never
    * be recorded under a coerced key, which would let `check(123)` and
-   * `check("123")` disagree about whether the nonce was seen.
+   * `check("123")` disagree about whether the nonce was seen. The
+   * `now` argument (and the injected clock it defaults to) must be a
+   * finite number of unix seconds: a non-finite reading throws a
+   * configuration `Error` before anything is recorded (backlog #1288).
    */
   check(nonce: string, now?: number): boolean {
     if (typeof nonce !== "string")
       throw new Error("ReplayCache: nonce must be a non-empty string");
     if (nonce === "")
       throw new Error("ReplayCache: nonce must be non-empty");
-    const t = now ?? this.clock();
+    const t = this.resolveNow(now);
     const prev = this.seenAt.get(nonce);
     if (prev !== undefined) {
       if (t - prev < this.ttlSec) {
@@ -577,11 +613,15 @@ export class ReplayCache implements NonceStore {
    * seen exactly `ttlSec` ago counts as expired. An empty or
    * non-string nonce throws a configuration `Error`, the same caliber
    * as `check()`.
+   *
+   * A non-finite `now` (explicit or from the injected clock) throws a
+   * configuration `Error` (backlog #1288) — a probe must never report
+   * a seen nonce as unseen because the clock read was `NaN`.
    */
   has(nonce: string, now?: number): boolean {
     if (typeof nonce !== "string" || nonce === "")
       throw new Error("ReplayCache: nonce must be a non-empty string");
-    const t = now ?? this.clock();
+    const t = this.resolveNow(now);
     const prev = this.seenAt.get(nonce);
     if (prev === undefined) return false;
     return t - prev < this.ttlSec;
@@ -622,12 +662,14 @@ export class ReplayCache implements NonceStore {
    * to the injected clock. The TTL boundary matches `check()`: a nonce
    * seen exactly `ttlSec` ago counts as expired and is not released.
    * An empty or non-string nonce throws a configuration `Error`, the
-   * same caliber as `has()`.
+   * same caliber as `has()`. A non-finite `now` (explicit or from the
+   * injected clock) throws a configuration `Error` (backlog #1288)
+   * before anything is released.
    */
   release(nonce: string, now?: number): boolean {
     if (typeof nonce !== "string" || nonce === "")
       throw new Error("ReplayCache: nonce must be a non-empty string");
-    const t = now ?? this.clock();
+    const t = this.resolveNow(now);
     const prev = this.seenAt.get(nonce);
     if (prev === undefined) return false;
     if (t - prev >= this.ttlSec) return false;
@@ -640,9 +682,11 @@ export class ReplayCache implements NonceStore {
    * cache's injected clock. If callers pass their own `now` to `check`
    * (as `verifyRequest` does with the verification time), give the cache
    * the same clock via `ReplayCacheOptions.now` for a consistent reading.
+   * A clock returning a non-finite value throws a configuration `Error`
+   * (backlog #1288) instead of reporting 0 live entries.
    */
   get size(): number {
-    const t = this.clock();
+    const t = this.resolveNow();
     let n = 0;
     for (const at of this.seenAt.values()) if (t - at < this.ttlSec) n++;
     return n;
@@ -673,10 +717,12 @@ export class ReplayCache implements NonceStore {
    *
    * Entries already expired against this cache's clock are excluded.
    * The returned object (including every entry pair) is a fresh copy —
-   * mutating it does not affect this cache.
+   * mutating it does not affect this cache. A clock returning a
+   * non-finite value throws a configuration `Error` (backlog #1288)
+   * instead of exporting an empty snapshot.
    */
   exportSnapshot(): ReplayCacheSnapshot {
-    const t = this.clock();
+    const t = this.resolveNow();
     const entries: Array<[string, number]> = [];
     for (const [nonce, at] of this.seenAt) {
       if (t - at < this.ttlSec) entries.push([nonce, at]);
@@ -783,7 +829,10 @@ export class ReplayCache implements NonceStore {
     }
 
     const cache = new ReplayCache(opts);
-    const t = cache.clock();
+    // The new cache's clock is read through the same finite-number
+    // guard as every other clock read (backlog #1288): a clock
+    // returning NaN would otherwise silently keep expired entries.
+    const t = cache.resolveNow();
     // Drop entries whose TTL already ran out against the new clock, and
     // collapse duplicate nonces to their last occurrence (position and
     // timestamp), mirroring the recency refresh in `check`.
