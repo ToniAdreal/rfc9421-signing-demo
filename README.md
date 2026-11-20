@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2379 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2392 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2104,7 +2104,12 @@ values. Without a request to bind to, keep using the request-side API
   §3).
 - **Body binding**: `Content-Digest: sha-512=:…:` is computed when the body
   is covered, and the verifier recomputes it — a swapped body fails even if
-  the signature itself is valid. The verifier prefers `sha-512` but falls
+  the signature itself is valid. The digest is computed whenever any covered
+  component binds this message's header: the bare `content-digest` form and
+  the value-parameter forms `content-digest;bs`, `;sf`, and `;key="…"` (backlog
+  #1271); a `;req` form binds the associated request's field and a `;tr` form
+  binds a trailer, so neither triggers the computation and a missing target
+  still fails fast. The verifier prefers `sha-512` but falls
   back to `sha-256` when the header carries no `sha-512` entry (for foreign
   signers that only send `sha-256`); signing emits `sha-512` by default and
   `sha-256` when `SignOptions.contentDigestAlg` is set to `"sha-256"` (for
@@ -5301,7 +5306,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2379 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2392 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

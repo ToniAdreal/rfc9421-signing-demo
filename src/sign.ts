@@ -217,7 +217,11 @@ export interface SignOptions {
   coveredComponents?: string[];
   /**
    * Content-Digest hash algorithm emitted when `content-digest` is
-   * covered and the request has a body. Defaults to `"sha-512"`; pass
+   * covered and the request has a body — bare or with a value parameter
+   * (`;bs`, `;sf`, `;key="…"`, which still bind this message's header,
+   * backlog #1271). A `;req` or `;tr` form does not trigger the
+   * computation: it binds the associated request's field or a trailer,
+   * not this message's header. Defaults to `"sha-512"`; pass
    * `"sha-256"` when the peer (e.g. a payment gateway webhook endpoint)
    * only accepts sha-256 digests. Any other value is a configuration
    * error, thrown before any crypto runs. The verifier already accepts
@@ -357,6 +361,36 @@ export function coveredComponentKey(entry: string): string {
     })
     .join(";");
   return `${base};${params}`;
+}
+
+/**
+ * Whether any covered component binds this message's own `content-digest`
+ * header, so `signRequest` must compute it before building the base
+ * (backlog #1271). Component ids arrive with their parameters attached
+ * (`content-digest;bs`, `content-digest;sf`, `content-digest;key="sha-512"`,
+ * … — see `parseComponentIds`), so the match is by base name, the part
+ * before the first `;`, case-insensitively — the same base-name idiom as
+ * the `requiredComponents` coverage check (backlog #1267). The value
+ * parameters (`;bs`, `;sf`, `;key="…"`) only change how the header value
+ * enters the signature base, so they still need the header computed;
+ * `;req` and `;tr` redirect the binding to the associated request and
+ * to the trailers respectively, so they never trigger the computation —
+ * a `;req`/`;tr` coverage without its target keeps its existing
+ * fail-fast error instead of silently minting a header the base ignores.
+ * Any other parameter (`;zz`, `;name`, …) never triggers it either:
+ * the parameter is not one the library knows binds this message's
+ * header, so the downstream parser still reports it as unsupported
+ * instead of the computation masking it with a no-body error.
+ */
+function coversOwnContentDigest(covered: readonly string[]): boolean {
+  return covered.some((entry) => {
+    const [base, ...params] = entry.toLowerCase().split(";");
+    if ((base ?? "").trim() !== "content-digest") return false;
+    return params.every((p) => {
+      const name = p.trim().split("=")[0]?.trim();
+      return name === "bs" || name === "sf" || name === "key";
+    });
+  });
 }
 
 /**
@@ -820,7 +854,7 @@ export function signRequest(
     if (v === undefined) continue;
     headers[k] = Array.isArray(v) ? joinHeaderValues(v) : v;
   }
-  if (covered.map((c) => c.toLowerCase()).includes("content-digest")) {
+  if (coversOwnContentDigest(covered)) {
     if (req.body === undefined)
       throw new Error('content-digest is covered but the request has no body');
     headers["content-digest"] = contentDigest(req.body, digestAlg);
