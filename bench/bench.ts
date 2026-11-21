@@ -945,7 +945,20 @@
  * wire order, each with its pinned alg / keyid / covered components),
  * with the same flipped gateway-signature byte pinned outside timing
  * to fail exactly the gateway label, so the row measures the one-call
- * wrapper cost against the two-call row above, plus the
+ * wrapper cost against the two-call row above, plus the throwing
+ * twins of the response-side verify paths: `verifyResponseOrThrow`
+ * over the same single-signed ed25519 response (the success path,
+ * result unwrapping, self-checked on every measured pass against
+ * the pinned identity, with the 200 -> 500 status tamper pinned
+ * outside timing to throw `SIGNATURE_MISMATCH`) and
+ * `verifyAllResponseLabelsOrThrow` over the same dual-signed
+ * fixture with `@status` flipped 200 -> 500 (the failure path,
+ * VerifyError construction with the full per-label `verifyResults`
+ * attached — both labels fail, because both cover `@status` —
+ * re-pinned on every measured call, with the throw count pinned
+ * to warmup + timed iterations), so the cost difference between
+ * the result-object and throwing response APIs is visible on both
+ * paths, plus the
  * response-side whitelist pair over the same ed25519 response
  * fixture: `verifyResponse` with `allowedAlgs` hitting the wire
  * algorithm (the full ed25519 verification cost) and with a
@@ -1075,9 +1088,11 @@ import {
   verifyAllLabels,
   verifyAllLabelsOrThrow,
   verifyAllResponseLabels,
+  verifyAllResponseLabelsOrThrow,
   verifyRequest,
   verifyRequestOrThrow,
   verifyResponse,
+  verifyResponseOrThrow,
   type ContentDigestAlg,
   type HttpResponseLike,
   type IncomingRequestLike,
@@ -1573,6 +1588,151 @@ function benchmarkVerifyAllResponseLabels(): number {
   return measure(() => {
     assertAccepted("measured pass");
   }, ITERATIONS);
+}
+
+/**
+ * The throwing single-label form of `benchmarkVerifyResponse`: the
+ * same ed25519-signed settlement response (same keys, same pinned
+ * `created`, same `@status` + content-digest coverage) verified
+ * with `verifyResponseOrThrow` — the throwing twin a
+ * settlement-webhook receiver calls to reject a bad gateway
+ * signature with one call instead of branching on `result.ok`.
+ * Measures the steady-state throughput of the success path (result
+ * unwrapping over `verifyResponse`), self-checked on every measured
+ * pass (label, keyid, alg, `created`, covered components
+ * re-pinned), with the 200 -> 500 status tamper pinned outside
+ * timing to throw the pinned `SIGNATURE_MISMATCH` VerifyError, so
+ * the row cannot be measuring an unsigned path.
+ */
+function benchmarkVerifyResponseOrThrow(): number {
+  const { signed, publicKey } = responseSigningFixture();
+  const verifyOpts = { key: publicKey, now: RESPONSE_BENCH_NOW };
+
+  // Outside timing: the fixture verifies to the pinned identity,
+  // and a status-code tamper (200 -> 500) throws the pinned
+  // VerifyError instead of returning a failure result.
+  assertVerifiedResponseIdentity(
+    "outside timing",
+    verifyResponseOrThrow(signed, verifyOpts),
+  );
+  assertResponseOrThrowTamperRejected(signed, publicKey);
+
+  return measure(() => {
+    assertVerifiedResponseIdentity(
+      "measured pass",
+      verifyResponseOrThrow(signed, verifyOpts),
+    );
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllResponseLabelsOrThrow` failure over
+ * the status-flipped dual-signed fixture: the throw is a
+ * `VerifyError` carrying the first failing label's
+ * `SIGNATURE_MISMATCH` code, with the full per-label array attached
+ * as `verifyResults` — both labels `ok: false` with the same code,
+ * because both signatures cover the flipped `@status`.
+ */
+function isPinnedDualResponseOrThrowError(thrown: unknown): boolean {
+  if (!isVerifyError(thrown)) return false;
+  if (thrown.code !== "SIGNATURE_MISMATCH" || thrown.label !== "merchant")
+    return false;
+  const attached = thrown.verifyResults;
+  return (
+    attached !== undefined &&
+    attached.length === 2 &&
+    attached[0]?.label === "merchant" &&
+    attached[0]?.ok === false &&
+    attached[0]?.code === "SIGNATURE_MISMATCH" &&
+    attached[1]?.label === "gateway" &&
+    attached[1]?.ok === false &&
+    attached[1]?.code === "SIGNATURE_MISMATCH"
+  );
+}
+
+/**
+ * The throwing multi-label form of
+ * `benchmarkVerifyAllResponseLabels`: the same dual-signed fixture
+ * (merchant ed25519 + gateway hmac, same keys, same pinned
+ * `created`, same `@status` + content-digest coverage) with
+ * `@status` flipped 200 -> 500 — both labels cover `@status`, so
+ * both fail with `SIGNATURE_MISMATCH` and the throw carries the
+ * full per-label array as `verifyResults`. Measures the
+ * steady-state throughput of the failure path (VerifyError
+ * construction plus the `verifyResults` attachment), self-checked
+ * on every measured call (the error code, the first failing label,
+ * and both attached results `ok: false` with `SIGNATURE_MISMATCH`
+ * re-pinned inside timing), with the throw count pinned to warmup
+ * + timed iterations exactly — the row is directly comparable with
+ * the non-throwing dual-label row above and shows what the
+ * throwing wrapper costs on the failure path.
+ */
+function benchmarkVerifyAllResponseLabelsOrThrowTampered(): number {
+  const { publicKey: merchantPublic, privateKey: merchantPrivate } =
+    generateEd25519KeyPair();
+  const gatewaySecret = secretKey("gateway-shared-secret-32-bytes-0!");
+
+  const merchantSigned = signResponse(
+    { status: 200, headers: {}, body: RESPONSE_BENCH_BODY },
+    {
+      keyId: RESPONSE_BENCH_KID,
+      alg: "ed25519",
+      key: merchantPrivate,
+      created: RESPONSE_BENCH_CREATED,
+      label: "merchant",
+    },
+  );
+  const dual = addResponseSignature(merchantSigned, {
+    keyId: RESPONSE_BENCH_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    created: RESPONSE_BENCH_CREATED,
+    label: "gateway",
+  });
+  const verifyOpts = {
+    key: merchantPublic,
+    keys: { gateway: gatewaySecret },
+    now: RESPONSE_BENCH_NOW,
+  };
+  const tampered: SignedHttpResponse = { ...dual, status: 500 };
+
+  // Outside timing: the dual-signed fixture verifies on both labels
+  // (the non-throwing twin), and the status flip throws the pinned
+  // VerifyError with both labels attached as failures — the measured
+  // row is not timing a path that lets either label through.
+  assertDualResponseLabelsOk(dual, merchantPublic, gatewaySecret, "outside timing");
+  let thrownOutside: unknown;
+  try {
+    verifyAllResponseLabelsOrThrow(tampered, verifyOpts);
+  } catch (e) {
+    thrownOutside = e;
+  }
+  if (!isPinnedDualResponseOrThrowError(thrownOutside))
+    throw new Error(
+      `benchmark self-check failed: verifyAllResponseLabelsOrThrow(tampered) gave ` +
+        `${thrownOutside instanceof Error ? `${thrownOutside.name}: ${thrownOutside.message}` : "no throw"} ` +
+        "(expected VerifyError SIGNATURE_MISMATCH for merchant with both labels attached as failures)",
+    );
+
+  let thrownCount = 0;
+  const ops = measure(() => {
+    let thrown: unknown;
+    try {
+      verifyAllResponseLabelsOrThrow(tampered, verifyOpts);
+    } catch (e) {
+      thrown = e;
+    }
+    if (!isPinnedDualResponseOrThrowError(thrown))
+      throw new Error(
+        "benchmark self-check failed: verifyAllResponseLabelsOrThrow(tampered) did not throw the pinned VerifyError in the measured loop",
+      );
+    thrownCount++;
+  }, ITERATIONS);
+  if (thrownCount !== WARMUP + ITERATIONS)
+    throw new Error(
+      `benchmark self-check failed: ${thrownCount} tampered throws (expected ${WARMUP + ITERATIONS})`,
+    );
+  return ops;
 }
 
 /**
@@ -10385,6 +10545,66 @@ function assertResponseTamperRejected(
     throw new Error(
       `benchmark self-check failed: tampered response status gave ${JSON.stringify(tampered)} ` +
         "(expected SIGNATURE_MISMATCH)",
+    );
+}
+
+/**
+ * Pinned shape of the `verifyResponseOrThrow` success identity over
+ * the same single-signed fixture as `benchmarkVerifyResponse`: the
+ * default `sig1` label, the pinned keyid / alg / `created`, and the
+ * `@status` + content-digest coverage.
+ */
+function assertVerifiedResponseIdentity(
+  where: string,
+  result: {
+    label: string;
+    keyId?: string | undefined;
+    alg?: string | undefined;
+    created?: number | undefined;
+    coveredComponents?: readonly string[] | undefined;
+  },
+): void {
+  if (
+    result.label !== "sig1" ||
+    result.keyId !== RESPONSE_BENCH_KID ||
+    result.alg !== "ed25519" ||
+    result.created !== RESPONSE_BENCH_CREATED ||
+    JSON.stringify(result.coveredComponents) !==
+      JSON.stringify(RESPONSE_BENCH_COVERED)
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyResponseOrThrow (${where}) gave ${JSON.stringify(result)}`,
+    );
+}
+
+/**
+ * Throwing twin of `assertResponseTamperRejected`: the same 200 ->
+ * 500 status flip must throw a `VerifyError` carrying the pinned
+ * `SIGNATURE_MISMATCH` code for the `sig1` label, never return a
+ * failure result.
+ */
+function assertResponseOrThrowTamperRejected(
+  signed: SignedHttpResponse,
+  publicKey: ReturnType<typeof generateEd25519KeyPair>["publicKey"],
+): void {
+  let thrown: unknown;
+  try {
+    verifyResponseOrThrow(
+      { ...signed, status: 500 },
+      { key: publicKey, now: RESPONSE_BENCH_NOW },
+    );
+  } catch (e) {
+    thrown = e;
+  }
+  if (
+    !isVerifyError(thrown) ||
+    thrown.code !== "SIGNATURE_MISMATCH" ||
+    thrown.label !== "sig1"
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyResponseOrThrow(tampered) gave ` +
+        `${thrown instanceof Error ? `${thrown.name}: ${thrown.message}` : "no throw"} ` +
+        "(expected VerifyError SIGNATURE_MISMATCH for sig1)",
     );
 }
 
@@ -19308,6 +19528,16 @@ results.push({
   alg: "verifyAllResponseLabels (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllResponseLabels(),
+});
+results.push({
+  alg: "verifyResponseOrThrow (signed response, @status)",
+  op: "verify",
+  ops: benchmarkVerifyResponseOrThrow(),
+});
+results.push({
+  alg: "verifyAllResponseLabelsOrThrow (tampered response, @status)",
+  op: "throw",
+  ops: benchmarkVerifyAllResponseLabelsOrThrowTampered(),
 });
 results.push({
   alg: "verifyResponse allowedAlgs (hit, ed25519)",
