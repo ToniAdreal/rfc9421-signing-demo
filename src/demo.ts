@@ -4843,6 +4843,30 @@ export const DEMO_FETCH_REQUEST_COVERED_COMPONENTS: string[] = [
  */
 export const DEMO_FETCH_REQUEST_TAMPER_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
+/**
+ * Absolute URL the scheme-guard segment hands `fromFetchRequest` to
+ * be refused — the same URL `test/adapterScheme.test.ts` pins for
+ * the `ftp://` rejection (backlog #1302).
+ */
+export const DEMO_FETCH_REQUEST_SCHEME_GUARD_FTP_URL =
+  "ftp://api.example.com:8443/v1/charge";
+/** The same path over `https://`, which adapts, signs and verifies. */
+export const DEMO_FETCH_REQUEST_SCHEME_GUARD_HTTPS_URL =
+  "https://api.example.com:8443/v1/charge";
+/** Key id the scheme-guard segment's `https://` signature carries. */
+export const DEMO_FETCH_REQUEST_SCHEME_GUARD_KEY_ID =
+  "demo-fetch-request-scheme-guard-1";
+/** Nonce the scheme-guard segment's `https://` signature carries. */
+export const DEMO_FETCH_REQUEST_SCHEME_GUARD_NONCE =
+  "demo-fetch-request-scheme-guard-nonce-1";
+/**
+ * Hand-pinned rejection for the scheme-guard segment's `ftp://`
+ * URL: `fromFetchRequest` fails fast on the scheme before any
+ * signature is built, with the exact message the adapters'
+ * shared `assertHttpScheme` (backlog #1270) throws.
+ */
+export const DEMO_FETCH_REQUEST_SCHEME_GUARD_ERROR =
+  'fromFetchRequest: req.url scheme must be "http" or "https", got "ftp"';
 /** Key id the verified-fetch segment's gateway signature carries. */
 export const DEMO_VERIFIED_FETCH_KEY_ID = "demo-verified-fetch-1";
 /** Key id the verified-fetch segment's client request signature carries. */
@@ -7239,6 +7263,18 @@ export interface DemoResult {
    * `DEMO_FETCH_REQUEST_TAMPER_CODE`.
    */
   fetchRequestTamperedVerification: VerifyResult;
+  /**
+   * The pinned configuration error `fromFetchRequest` throws for
+   * the scheme-guard segment's `ftp://` URL (backlog #1302) —
+   * the same message `test/adapterScheme.test.ts` pins.
+   */
+  fetchRequestSchemeGuardError: string;
+  /**
+   * Verification of the scheme-guard segment's `https://` request
+   * (ok): the same path, adapted, signed and verified after the
+   * `ftp://` twin was refused.
+   */
+  fetchRequestSchemeGuardVerification: VerifyResult;
   /** Status of the verified-fetch segment's GET round-trip (200). */
   verifiedFetchGetStatus: number;
   /**
@@ -15134,6 +15170,85 @@ export async function runDemo(): Promise<DemoResult> {
   // runs.
   const fetchRequest = await fetchFetchSignedRequest();
 
+  // Fetch-request scheme-guard segment (backlog #1302): the
+  // adapter-level twin of the `@scheme` coverage the signature
+  // segments show — `fromFetchRequest` refuses a non-HTTP scheme
+  // before any signature is built or verified, so a reader
+  // copying the demo cannot assume any scheme signs. An `ftp://`
+  // absolute URL is rejected with the pinned configuration error
+  // (the same URL `test/adapterScheme.test.ts` pins for the
+  // adapter's shared `assertHttpScheme` guard, backlog #1270),
+  // while the same path over `https://` adapts, signs and
+  // verifies. No network is involved: both `Request` objects are
+  // constructed locally and never fetched. Only the key pair is
+  // fresh per run and no key material is printed, so the
+  // segment's printed lines are byte-identical between runs.
+  const fetchRequestSchemeGuardPair = generateEd25519KeyPair();
+  let fetchRequestSchemeGuardError: unknown;
+  try {
+    fromFetchRequest(
+      new Request(DEMO_FETCH_REQUEST_SCHEME_GUARD_FTP_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      }),
+      DEMO_BODY,
+    );
+  } catch (err) {
+    fetchRequestSchemeGuardError = err;
+  }
+  if (
+    !(fetchRequestSchemeGuardError instanceof Error) ||
+    fetchRequestSchemeGuardError.message !==
+      DEMO_FETCH_REQUEST_SCHEME_GUARD_ERROR
+  ) {
+    throw new Error(
+      `demo fixture broken: fetch-request scheme guard gave ` +
+        `${fetchRequestSchemeGuardError instanceof Error ? JSON.stringify(fetchRequestSchemeGuardError.message) : String(fetchRequestSchemeGuardError)} instead of ` +
+        `${JSON.stringify(DEMO_FETCH_REQUEST_SCHEME_GUARD_ERROR)}`,
+    );
+  }
+  const fetchRequestSchemeGuardSigned = signRequest(
+    fromFetchRequest(
+      new Request(DEMO_FETCH_REQUEST_SCHEME_GUARD_HTTPS_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      }),
+      DEMO_BODY,
+    ),
+    {
+      keyId: DEMO_FETCH_REQUEST_SCHEME_GUARD_KEY_ID,
+      alg: "ed25519",
+      key: fetchRequestSchemeGuardPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_FETCH_REQUEST_SCHEME_GUARD_NONCE,
+      coveredComponents: [...DEMO_FETCH_REQUEST_COVERED_COMPONENTS],
+    },
+  );
+  const fetchRequestSchemeGuardVerification = verifyRequest(
+    fetchRequestSchemeGuardSigned,
+    {
+      key: fetchRequestSchemeGuardPair.publicKey,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  if (
+    !fetchRequestSchemeGuardVerification.ok ||
+    fetchRequestSchemeGuardVerification.label !== "sig1" ||
+    fetchRequestSchemeGuardVerification.keyId !==
+      DEMO_FETCH_REQUEST_SCHEME_GUARD_KEY_ID ||
+    fetchRequestSchemeGuardVerification.alg !== "ed25519" ||
+    fetchRequestSchemeGuardVerification.nonce !==
+      DEMO_FETCH_REQUEST_SCHEME_GUARD_NONCE
+  ) {
+    throw new Error(
+      `demo fixture broken: fetch-request scheme guard https verification gave ` +
+        `${JSON.stringify(fetchRequestSchemeGuardVerification)} instead of ok with the pinned ` +
+        `label/keyid/alg/nonce`,
+    );
+  }
+
   // Verified-fetch segment (client direction): the one-call twin
   // of the fetch-adapter segment above — the same loopback
   // settlement response, but the client makes a single
@@ -19023,6 +19138,12 @@ export async function runDemo(): Promise<DemoResult> {
       ? "Fetch request verification after body tampering (amount 100 -> 101): OK (unexpected — the tampered body was not detected)"
       : `Fetch request verification after body tampering (amount 100 -> 101): FAILED (code ${fetchRequest.tamperedVerification.code}: ${fetchRequest.tamperedVerification.reason})`,
     "",
+    "Fetch-request scheme guard: fromFetchRequest refuses a non-HTTP scheme before any signature is built — an ftp:// URL is rejected with the pinned configuration error, while the same path over https:// adapts, signs and verifies — the adapter-level guard behind the @scheme coverage the signature segments show",
+    `Fetch request scheme guard: ${DEMO_FETCH_REQUEST_SCHEME_GUARD_FTP_URL} rejected (${DEMO_FETCH_REQUEST_SCHEME_GUARD_ERROR})`,
+    fetchRequestSchemeGuardVerification.ok
+      ? `Fetch request scheme guard: ${DEMO_FETCH_REQUEST_SCHEME_GUARD_HTTPS_URL} verified OK (label ${fetchRequestSchemeGuardVerification.label}, keyid="${fetchRequestSchemeGuardVerification.keyId}", alg="${fetchRequestSchemeGuardVerification.alg}", nonce="${fetchRequestSchemeGuardVerification.nonce}")`
+      : `Fetch request scheme guard: ${DEMO_FETCH_REQUEST_SCHEME_GUARD_HTTPS_URL} verification FAILED (code ${fetchRequestSchemeGuardVerification.code}: ${fetchRequestSchemeGuardVerification.reason})`,
+    "",
     "Verified fetch client: one verifiedFetch call signs the request, fetches it, and verifies the signed response — the client twin of the createVerifiedHandler segment, shown for a GET with no body and a POST with a JSON settlement instruction against the same loopback settlement endpoint",
     `Verified fetch GET status: ${verifiedFetchRoundTrip.getStatus}`,
     verifiedFetchRoundTrip.getVerification.ok
@@ -19664,6 +19785,8 @@ export async function runDemo(): Promise<DemoResult> {
     fetchRequestRequest: fetchRequest.requestLike,
     fetchRequestVerification: fetchRequest.verification,
     fetchRequestTamperedVerification: fetchRequest.tamperedVerification,
+    fetchRequestSchemeGuardError: DEMO_FETCH_REQUEST_SCHEME_GUARD_ERROR,
+    fetchRequestSchemeGuardVerification,
     verifiedFetchGetStatus: verifiedFetchRoundTrip.getStatus,
     verifiedFetchGetBody: verifiedFetchRoundTrip.getBody,
     verifiedFetchGetVerification: verifiedFetchRoundTrip.getVerification,

@@ -31,6 +31,7 @@ import {
   exportPublicKeyJwkRsa,
   exportSignedSnapshotsByLabel,
   exportSymmetricKeyJwk,
+  fromFetchRequest,
   fromNodeRequest,
   generateEd25519KeyPair,
   generateHmacSecret,
@@ -127,6 +128,11 @@ import {
   DEMO_FETCH_REQUEST_KEY_ID,
   DEMO_FETCH_REQUEST_NONCE,
   DEMO_FETCH_REQUEST_PATH,
+  DEMO_FETCH_REQUEST_SCHEME_GUARD_ERROR,
+  DEMO_FETCH_REQUEST_SCHEME_GUARD_FTP_URL,
+  DEMO_FETCH_REQUEST_SCHEME_GUARD_HTTPS_URL,
+  DEMO_FETCH_REQUEST_SCHEME_GUARD_KEY_ID,
+  DEMO_FETCH_REQUEST_SCHEME_GUARD_NONCE,
   DEMO_FETCH_REQUEST_TAMPER_CODE,
   DEMO_VERIFIED_FETCH_GET_NONCE,
   DEMO_VERIFIED_FETCH_KEY_ID,
@@ -7312,7 +7318,7 @@ test("demo fetch-request segment verifies a signed fetch Request adapted with fr
   assert.equal(crossCheck.code, "SIGNATURE_MISMATCH");
 });
 
-test("demo lines contain the fetch-request segment (normalized shape, verified, tamper rejected, followed by the verified-fetch segment)", async () => {
+test("demo lines contain the fetch-request segment (normalized shape, verified, tamper rejected, followed by the scheme-guard segment)", async () => {
   const { lines, fetchRequestTamperedVerification } = await runDemo();
   const out = lines.join("\n");
   assert.match(
@@ -7328,9 +7334,9 @@ test("demo lines contain the fetch-request segment (normalized shape, verified, 
     `Fetch request verification: OK (label sig1, keyid="${DEMO_FETCH_REQUEST_KEY_ID}", alg="ed25519", nonce="${DEMO_FETCH_REQUEST_NONCE}")`,
     `Fetch request verification after body tampering (amount 100 -> 101): FAILED (code ${DEMO_FETCH_REQUEST_TAMPER_CODE}: ${fetchRequestTamperedVerification.reason})`,
   ]);
-  // The verified-fetch segment follows the fetch-request segment.
+  // The scheme-guard segment follows the fetch-request segment.
   assert.equal(lines[headerIdx + 4], "");
-  assert.ok(lines[headerIdx + 5]!.startsWith("Verified fetch client:"));
+  assert.ok(lines[headerIdx + 5]!.startsWith("Fetch-request scheme guard:"));
 });
 
 test("demo fetch-request segment prints byte-identical lines across runs", async () => {
@@ -7348,6 +7354,109 @@ test("demo fetch-request segment prints byte-identical lines across runs", async
   assert.deepEqual(
     second.lines.slice(start(second.lines), end(second.lines)),
     first.lines.slice(start(first.lines), end(first.lines)),
+  );
+});
+
+test("demo fetch-request scheme-guard segment refuses ftp:// and verifies the https:// twin", async () => {
+  const {
+    lines,
+    fetchRequestSchemeGuardError,
+    fetchRequestSchemeGuardVerification,
+  } = await runDemo();
+  // DemoResult fields: the pinned rejection and the https twin's
+  // verification identity.
+  assert.equal(
+    fetchRequestSchemeGuardError,
+    DEMO_FETCH_REQUEST_SCHEME_GUARD_ERROR,
+  );
+  assert.equal(fetchRequestSchemeGuardVerification.ok, true);
+  assert.equal(fetchRequestSchemeGuardVerification.label, "sig1");
+  assert.equal(
+    fetchRequestSchemeGuardVerification.keyId,
+    DEMO_FETCH_REQUEST_SCHEME_GUARD_KEY_ID,
+  );
+  assert.equal(fetchRequestSchemeGuardVerification.alg, "ed25519");
+  assert.equal(
+    fetchRequestSchemeGuardVerification.nonce,
+    DEMO_FETCH_REQUEST_SCHEME_GUARD_NONCE,
+  );
+
+  // Independent re-derivation outside the demo: the same ftp:// URL
+  // is refused by a direct fromFetchRequest call with the pinned
+  // message, and the https:// twin re-signed with a fresh key and
+  // verified through the same adapter path.
+  assert.throws(
+    () =>
+      fromFetchRequest(
+        new Request(DEMO_FETCH_REQUEST_SCHEME_GUARD_FTP_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: DEMO_BODY,
+        }),
+        DEMO_BODY,
+      ),
+    (err: unknown) =>
+      err instanceof Error &&
+      err.message === DEMO_FETCH_REQUEST_SCHEME_GUARD_ERROR,
+  );
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const reSigned = signRequest(
+    fromFetchRequest(
+      new Request(DEMO_FETCH_REQUEST_SCHEME_GUARD_HTTPS_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      }),
+      DEMO_BODY,
+    ),
+    {
+      keyId: DEMO_FETCH_REQUEST_SCHEME_GUARD_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_FETCH_REQUEST_SCHEME_GUARD_NONCE,
+      coveredComponents: [...DEMO_FETCH_REQUEST_COVERED_COMPONENTS],
+    },
+  );
+  const reVerified = verifyRequest(reSigned, {
+    key: publicKey,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(reVerified.ok, true);
+  assert.equal(reVerified.label, "sig1");
+  assert.equal(reVerified.keyId, DEMO_FETCH_REQUEST_SCHEME_GUARD_KEY_ID);
+  assert.equal(reVerified.alg, "ed25519");
+  assert.equal(reVerified.nonce, DEMO_FETCH_REQUEST_SCHEME_GUARD_NONCE);
+
+  // Printed lines, byte-exact: header, ftp rejection, https
+  // verification — between the fetch-request segment and the
+  // verified-fetch segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Fetch-request scheme guard:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), [
+    "Fetch-request scheme guard: fromFetchRequest refuses a non-HTTP scheme before any signature is built — an ftp:// URL is rejected with the pinned configuration error, while the same path over https:// adapts, signs and verifies — the adapter-level guard behind the @scheme coverage the signature segments show",
+    `Fetch request scheme guard: ${DEMO_FETCH_REQUEST_SCHEME_GUARD_FTP_URL} rejected (${DEMO_FETCH_REQUEST_SCHEME_GUARD_ERROR})`,
+    `Fetch request scheme guard: ${DEMO_FETCH_REQUEST_SCHEME_GUARD_HTTPS_URL} verified OK (label sig1, keyid="${DEMO_FETCH_REQUEST_SCHEME_GUARD_KEY_ID}", alg="ed25519", nonce="${DEMO_FETCH_REQUEST_SCHEME_GUARD_NONCE}")`,
+  ]);
+  assert.equal(lines[headerIdx + 3], "");
+  assert.ok(lines[headerIdx + 4]!.startsWith("Verified fetch client:"));
+  assert.equal(lines[headerIdx - 1], "");
+  assert.ok(
+    lines[headerIdx - 5]!.startsWith("Fetch-adapter request verification:"),
+  );
+
+  // Deterministic double run: the section's lines are pinned
+  // constants, identical between runs.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Fetch-request scheme guard:"),
+  );
+  assert.ok(againIdx !== -1);
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 3),
+    lines.slice(headerIdx, headerIdx + 3),
   );
 });
 
@@ -7466,13 +7575,13 @@ test("demo verifiedFetch segment prints the GET and POST round-trips between the
     `Verified fetch POST verification: OK (label sig1, keyid="${DEMO_VERIFIED_FETCH_KEY_ID}", alg="ed25519", nonce="${DEMO_VERIFIED_FETCH_POST_NONCE}")`,
     `Verified fetch POST body: ${DEMO_GATEWAY_RESPONSE_BODY}`,
   ]);
-  // The segment sits between the fetch-request and allowed-algs
+  // The segment sits between the scheme-guard and allowed-algs
   // segments: a blank line on each side.
   const fetchHeaderIdx = lines.findIndex((l) =>
     l.startsWith("Fetch-adapter response verification:"),
   );
   assert.ok(fetchHeaderIdx !== -1);
-  assert.equal(headerIdx, fetchHeaderIdx + 11);
+  assert.equal(headerIdx, fetchHeaderIdx + 15);
   assert.equal(lines[headerIdx - 1], "");
   assert.equal(lines[headerIdx + 7], "");
   assert.ok(
