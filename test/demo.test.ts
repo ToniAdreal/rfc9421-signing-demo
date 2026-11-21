@@ -7927,10 +7927,10 @@ test("demo verifyAllResponseLabels segment verifies both labels of the dual-sign
     `verifyAllResponseLabels required-label verification: merchant OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
     `verifyAllResponseLabels after gateway label stripped: gateway FAILED (code ${DEMO_VERIFY_ALL_RESPONSE_LABELS_REQUIRED_CODE}: ${verifyAllResponseLabelsRequiredStrippedVerification[1].reason}), merchant still OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519")`,
   ]);
-  // The fetch-adapter segment follows the verifyAllResponseLabels segment.
+  // The response OrThrow segment follows the verifyAllResponseLabels segment.
   assert.equal(lines[headerIdx + 7], "");
   assert.ok(
-    lines[headerIdx + 8]!.startsWith("Fetch-adapter response verification:"),
+    lines[headerIdx + 8]!.startsWith("Response throwing verification:"),
   );
 });
 
@@ -7953,8 +7953,8 @@ test("demo verifyAllResponseLabels segment prints byte-identical lines across ru
   // Only the merchant ed25519 key pair is fresh per run and the
   // signatures themselves are never printed, so the segment's
   // printed lines — header, status, both verifications, the
-  // both-fail tamper, and the required-labels pass — are
-  // byte-identical between runs.
+  // both-fail tamper, the required-labels pass, and the response
+  // OrThrow pass — are byte-identical between runs.
   assert.deepEqual(
     first.lines.slice(a, aEnd),
     second.lines.slice(b, bEnd),
@@ -8042,10 +8042,10 @@ test("demo verifyAllResponseLabels requiredLabels segment reports a stripped gat
     `verifyAllResponseLabels required-label verification: merchant OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519"), gateway OK (label ${DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
     `verifyAllResponseLabels after gateway label stripped: gateway FAILED (code ${DEMO_VERIFY_ALL_RESPONSE_LABELS_REQUIRED_CODE}: ${verifyAllResponseLabelsRequiredStrippedVerification[1].reason}), merchant still OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519")`,
   ]);
-  // The fetch-adapter segment follows the verifyAllResponseLabels segment.
+  // The response OrThrow segment follows the verifyAllResponseLabels segment.
   assert.equal(lines[headerIdx + 7], "");
   assert.ok(
-    lines[headerIdx + 8]!.startsWith("Fetch-adapter response verification:"),
+    lines[headerIdx + 8]!.startsWith("Response throwing verification:"),
   );
 
   // Deterministic double run: only the port (never printed) and the
@@ -8059,6 +8059,120 @@ test("demo verifyAllResponseLabels requiredLabels segment reports a stripped gat
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 7),
     lines.slice(headerIdx, headerIdx + 7),
+  );
+});
+
+test("demo response OrThrow segment returns the verified identity and throws a VerifyError carrying verifyResults on a status tamper", async () => {
+  const {
+    lines,
+    verifyResponseOrThrowVerification,
+    verifyAllResponseLabelsOrThrowTamperedError,
+    verifyAllResponseLabelsOrThrowTamperedIsVerifyError,
+    verifyAllResponseLabelsOrThrowTamperedVerification,
+  } = await runDemo();
+
+  // The throwing single-label call returns the merchant identity
+  // directly — no result object — with the pinned keyid/alg/nonce
+  // and the two covered components.
+  assert.equal(
+    verifyResponseOrThrowVerification.label,
+    DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+  );
+  assert.equal(
+    verifyResponseOrThrowVerification.keyId,
+    DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID,
+  );
+  assert.equal(verifyResponseOrThrowVerification.alg, "ed25519");
+  assert.equal(
+    verifyResponseOrThrowVerification.nonce,
+    DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE,
+  );
+  assert.equal(verifyResponseOrThrowVerification.created, DEMO_CREATED);
+  assert.equal(verifyResponseOrThrowVerification.tag, undefined);
+  assert.deepEqual(verifyResponseOrThrowVerification.coveredComponents, [
+    "@status",
+    "content-digest",
+  ]);
+
+  // The status flip throws the first failing label's VerifyError:
+  // merchant, SIGNATURE_MISMATCH, and the error passes the
+  // isVerifyError guard.
+  assert.equal(verifyAllResponseLabelsOrThrowTamperedIsVerifyError, true);
+  assert.equal(
+    verifyAllResponseLabelsOrThrowTamperedError.code,
+    DEMO_GATEWAY_RESPONSE_TAMPER_CODE,
+  );
+  assert.equal(
+    verifyAllResponseLabelsOrThrowTamperedError.label,
+    DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+  );
+
+  // The attached verifyResults carry both labels' verdicts: both
+  // fail with SIGNATURE_MISMATCH, because both signatures cover
+  // @status — the throwing call hides neither.
+  assert.deepEqual(
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults?.map((r) => [
+      r.label,
+      r.ok,
+      r.code,
+    ]),
+    [
+      [
+        DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+        false,
+        DEMO_GATEWAY_RESPONSE_TAMPER_CODE,
+      ],
+      [
+        DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL,
+        false,
+        DEMO_GATEWAY_RESPONSE_TAMPER_CODE,
+      ],
+    ],
+  );
+
+  // The contrast pass agrees with the attachment, label for label.
+  assert.deepEqual(
+    verifyAllResponseLabelsOrThrowTamperedVerification.map((r) => [
+      r.label,
+      r.ok,
+      r.code,
+    ]),
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults?.map((r) => [
+      r.label,
+      r.ok,
+      r.code,
+    ]),
+  );
+
+  // Printed lines: header + identity ok + tamper throw with the
+  // per-label ok values — byte-exact, between the
+  // verifyAllResponseLabels segment and the fetch-adapter segment.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Response throwing verification:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), [
+    "Response throwing verification: the same dual-signed loopback settlement response, now verified with the throwing response entry points — verifyResponseOrThrow returns the verified identity instead of a result object, and verifyAllResponseLabelsOrThrow throws the first failing label's VerifyError with the full per-label array attached as verifyResults — the exception-flow shape a settlement-webhook receiver uses to reject a bad gateway signature in one call",
+    `verifyResponseOrThrow on the dual-signed response: OK (label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}, keyid="${DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID}", alg="ed25519", nonce="${DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE}")`,
+    `verifyAllResponseLabelsOrThrow after status tampering (200 -> 500): FAILED (threw VerifyError for label "${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}", code ${DEMO_GATEWAY_RESPONSE_TAMPER_CODE}: ${verifyAllResponseLabelsOrThrowTamperedError.reason}; verifyResults: merchant ok=false, gateway ok=false)`,
+  ]);
+  // The fetch-adapter segment follows the response OrThrow segment.
+  assert.equal(lines[headerIdx + 3], "");
+  assert.ok(
+    lines[headerIdx + 4]!.startsWith("Fetch-adapter response verification:"),
+  );
+
+  // Deterministic double run: only the port (never printed) and the
+  // merchant key pair are fresh per run, so the segment's lines are
+  // byte-identical between runs.
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Response throwing verification:"),
+  );
+  assert.ok(againIdx !== -1);
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 3),
+    lines.slice(headerIdx, headerIdx + 3),
   );
 });
 

@@ -1512,9 +1512,11 @@ import {
   verifyAllLabels,
   verifyAllLabelsOrThrow,
   verifyAllResponseLabels,
+  verifyAllResponseLabelsOrThrow,
   verifyRequest,
   verifyRequestOrThrow,
   verifyResponse,
+  verifyResponseOrThrow,
   type ContentDigestAlg,
   type Ed25519PublicJwk,
   type HttpResponseLike,
@@ -7155,6 +7157,39 @@ export interface DemoResult {
    * silent absence.
    */
   verifyAllResponseLabelsRequiredStrippedVerification: VerifyResult[];
+  /**
+   * Identity returned by `verifyResponseOrThrow` for the same
+   * dual-signed response (label, keyid, alg, nonce, created —
+   * the merchant label, no result object).
+   */
+  verifyResponseOrThrowVerification: {
+    label: string;
+    keyId?: string | undefined;
+    alg?: string | undefined;
+    nonce?: string | undefined;
+    tag?: string | undefined;
+    created?: number | undefined;
+    expires?: number | undefined;
+    coveredComponents?: string[] | undefined;
+  };
+  /**
+   * The `VerifyError` thrown by `verifyAllResponseLabelsOrThrow`
+   * for the status-tampered dual-signed response (code
+   * `DEMO_GATEWAY_RESPONSE_TAMPER_CODE`, label `merchant` — the
+   * first failing label in wire order — with the full per-label
+   * array attached as `verifyResults`).
+   */
+  verifyAllResponseLabelsOrThrowTamperedError: VerifyError;
+  /** Whether the caught tamper error passed the `isVerifyError` guard. */
+  verifyAllResponseLabelsOrThrowTamperedIsVerifyError: boolean;
+  /**
+   * Per-label results for the status-tampered dual-signed response
+   * under `verifyAllResponseLabels` (both labels fail with
+   * `SIGNATURE_MISMATCH` — `@status` is covered by both
+   * signatures — the contrast the throwing variant's attached
+   * `verifyResults` must equal).
+   */
+  verifyAllResponseLabelsOrThrowTamperedVerification: VerifyResult[];
   /**
    * The client's adapted `RequestLike` for the fetch-adapter
    * segment's settlement response: the same
@@ -14858,6 +14893,181 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Response throwing verification segment (client direction):
+  // the throwing twin of the verifyAllResponseLabels segment
+  // above — the *same* dual-signed loopback settlement response,
+  // now verified with the exception-flow entry points a
+  // settlement-webhook receiver actually calls.
+  // `verifyResponseOrThrow` returns the verified identity
+  // directly instead of a result object; on the same response
+  // with `@status` flipped 200 -> 500,
+  // `verifyAllResponseLabelsOrThrow` throws the first failing
+  // label's `VerifyError` — `merchant`, the first label in wire
+  // order, with `SIGNATURE_MISMATCH` — with the full per-label
+  // array attached as `verifyResults` (backlog #1274 gave the
+  // request-side twin the same field; the response side mounts
+  // it here). Both labels cover `@status`, so both fail — a
+  // `verifyAllResponseLabels` contrast pass on the tampered
+  // response shows the same two failures the thrown error
+  // carries, so a bad gateway signature never hides the
+  // merchant result. Outside the printed lines the demo asserts
+  // the returned identity and the thrown code/label/`verifyResults`
+  // both equal the hand-pinned expectations (label `merchant`,
+  // `DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID`/`ed25519`,
+  // `DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE`,
+  // `DEMO_GATEWAY_RESPONSE_TAMPER_CODE`) and that the caught
+  // error passes the `isVerifyError` guard — a mismatch throws
+  // instead of printing a misleading segment. (The throw shape
+  // was confirmed by a live probe before this segment was
+  // written, backlog #1298.)
+  const verifyResponseOrThrowMerchantKey =
+    addResponseSignatureResponse.verifyOptions.keys?.[
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL
+    ];
+  if (verifyResponseOrThrowMerchantKey === undefined) {
+    throw new Error(
+      `demo fixture broken: response OrThrow segment has no merchant key ` +
+        `for label ${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}`,
+    );
+  }
+  const verifyResponseOrThrowVerification = verifyResponseOrThrow(
+    verifyAllResponseLabelsResponse,
+    {
+      label: DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL,
+      key: verifyResponseOrThrowMerchantKey,
+      now: DEMO_CREATED + 60,
+      requiredComponents: ["@status"],
+    },
+  );
+  if (
+    verifyResponseOrThrowVerification.label !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL ||
+    verifyResponseOrThrowVerification.keyId !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_KEY_ID ||
+    verifyResponseOrThrowVerification.alg !== "ed25519" ||
+    verifyResponseOrThrowVerification.nonce !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_NONCE ||
+    verifyResponseOrThrowVerification.created !== DEMO_CREATED ||
+    verifyResponseOrThrowVerification.tag !== undefined ||
+    verifyResponseOrThrowVerification.coveredComponents === undefined ||
+    verifyResponseOrThrowVerification.coveredComponents.length !== 2 ||
+    verifyResponseOrThrowVerification.coveredComponents[0] !== "@status" ||
+    verifyResponseOrThrowVerification.coveredComponents[1] !==
+      "content-digest"
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyResponseOrThrow on the dual-signed response ` +
+        `returned ${JSON.stringify(verifyResponseOrThrowVerification)} ` +
+        `instead of the pinned merchant identity`,
+    );
+  }
+  let verifyAllResponseLabelsOrThrowTamperedError: VerifyError | null = null;
+  let verifyAllResponseLabelsOrThrowTamperedIsVerifyError = false;
+  try {
+    verifyAllResponseLabelsOrThrow(
+      {
+        ...verifyAllResponseLabelsResponse,
+        status: DEMO_GATEWAY_RESPONSE_TAMPERED_STATUS,
+      },
+      addResponseSignatureResponse.verifyOptions,
+    );
+  } catch (err) {
+    verifyAllResponseLabelsOrThrowTamperedIsVerifyError = isVerifyError(err);
+    if (
+      verifyAllResponseLabelsOrThrowTamperedIsVerifyError &&
+      isVerifyError(err)
+    ) {
+      verifyAllResponseLabelsOrThrowTamperedError = err;
+    }
+  }
+  if (
+    !verifyAllResponseLabelsOrThrowTamperedIsVerifyError ||
+    verifyAllResponseLabelsOrThrowTamperedError === null ||
+    verifyAllResponseLabelsOrThrowTamperedError.code !==
+      DEMO_GATEWAY_RESPONSE_TAMPER_CODE ||
+    verifyAllResponseLabelsOrThrowTamperedError.label !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL ||
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults === undefined ||
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults.length !== 2 ||
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults[0].label !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL ||
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults[0].ok ||
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults[0].code !==
+      DEMO_GATEWAY_RESPONSE_TAMPER_CODE ||
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults[1].label !==
+      DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL ||
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults[1].ok ||
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults[1].code !==
+      DEMO_GATEWAY_RESPONSE_TAMPER_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllResponseLabelsOrThrow on the status-tampered dual-signed response ` +
+        `did not throw a VerifyError with the pinned code "${DEMO_GATEWAY_RESPONSE_TAMPER_CODE}" ` +
+        `for label "${DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL}" with both labels failing in verifyResults ` +
+        `(isVerifyError=${verifyAllResponseLabelsOrThrowTamperedIsVerifyError}, code=${verifyAllResponseLabelsOrThrowTamperedError?.code}, label=${verifyAllResponseLabelsOrThrowTamperedError?.label})`,
+    );
+  }
+  // The thrown error's attached verifyResults, captured while the
+  // fail-fast assert above still narrows it to a defined array —
+  // the printed line reads the error's own attachment, not a
+  // re-derived copy.
+  const verifyAllResponseLabelsOrThrowTamperedVerifyResults =
+    verifyAllResponseLabelsOrThrowTamperedError.verifyResults;
+  const verifyAllResponseLabelsOrThrowTamperedVerification =
+    verifyAllResponseLabels(
+      {
+        ...verifyAllResponseLabelsResponse,
+        status: DEMO_GATEWAY_RESPONSE_TAMPERED_STATUS,
+      },
+      addResponseSignatureResponse.verifyOptions,
+    );
+  if (
+    verifyAllResponseLabelsOrThrowTamperedVerification.length !== 2 ||
+    verifyAllResponseLabelsOrThrowTamperedVerification[0].label !==
+      DEMO_ADD_RESPONSE_SIG_MERCHANT_LABEL ||
+    verifyAllResponseLabelsOrThrowTamperedVerification[0].ok ||
+    verifyAllResponseLabelsOrThrowTamperedVerification[0].code !==
+      DEMO_GATEWAY_RESPONSE_TAMPER_CODE ||
+    verifyAllResponseLabelsOrThrowTamperedVerification[1].label !==
+      DEMO_ADD_RESPONSE_SIG_GATEWAY_LABEL ||
+    verifyAllResponseLabelsOrThrowTamperedVerification[1].ok ||
+    verifyAllResponseLabelsOrThrowTamperedVerification[1].code !==
+      DEMO_GATEWAY_RESPONSE_TAMPER_CODE
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllResponseLabels contrast on the status-tampered dual-signed response ` +
+        `returned ${JSON.stringify(verifyAllResponseLabelsOrThrowTamperedVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
+        `instead of both labels failing with ${DEMO_GATEWAY_RESPONSE_TAMPER_CODE}`,
+    );
+  }
+  // The thrown error's attached verifyResults must be the same
+  // per-label outcome the non-throwing call returns — a caller
+  // reading the attachment must see the real merchant and
+  // gateway verdicts, not a stub.
+  if (
+    JSON.stringify(
+      verifyAllResponseLabelsOrThrowTamperedVerifyResults.map((r) => [
+        r.label,
+        r.ok,
+        r.code,
+      ]),
+    ) !==
+    JSON.stringify(
+      verifyAllResponseLabelsOrThrowTamperedVerification.map((r) => [
+        r.label,
+        r.ok,
+        r.code,
+      ]),
+    )
+  ) {
+    throw new Error(
+      `demo fixture broken: verifyAllResponseLabelsOrThrow's attached verifyResults ` +
+        `${JSON.stringify(verifyAllResponseLabelsOrThrowTamperedVerifyResults.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
+        `differs from the verifyAllResponseLabels contrast ` +
+        `${JSON.stringify(verifyAllResponseLabelsOrThrowTamperedVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))}`,
+    );
+  }
+
   // Fetch-adapter segment (client direction): the fetch-API twin
   // of the gateway segment above — the same loopback settlement
   // response, now signed with `signResponse` and fetched with the
@@ -18636,6 +18846,10 @@ export async function runDemo(): Promise<DemoResult> {
       ? "verifyAllResponseLabels after gateway label stripped: gateway OK (unexpected — the stripped co-signature was not reported missing), merchant OK"
       : `verifyAllResponseLabels after gateway label stripped: gateway FAILED (code ${verifyAllResponseLabelsRequiredStrippedVerification[1].code}: ${verifyAllResponseLabelsRequiredStrippedVerification[1].reason}), merchant still OK (label ${verifyAllResponseLabelsRequiredStrippedVerification[0].label}, keyid="${verifyAllResponseLabelsRequiredStrippedVerification[0].keyId}", alg="${verifyAllResponseLabelsRequiredStrippedVerification[0].alg}")`,
     "",
+    "Response throwing verification: the same dual-signed loopback settlement response, now verified with the throwing response entry points — verifyResponseOrThrow returns the verified identity instead of a result object, and verifyAllResponseLabelsOrThrow throws the first failing label's VerifyError with the full per-label array attached as verifyResults — the exception-flow shape a settlement-webhook receiver uses to reject a bad gateway signature in one call",
+    `verifyResponseOrThrow on the dual-signed response: OK (label ${verifyResponseOrThrowVerification.label}, keyid="${verifyResponseOrThrowVerification.keyId}", alg="${verifyResponseOrThrowVerification.alg}", nonce="${verifyResponseOrThrowVerification.nonce}")`,
+    `verifyAllResponseLabelsOrThrow after status tampering (200 -> 500): FAILED (threw VerifyError for label "${verifyAllResponseLabelsOrThrowTamperedError.label}", code ${verifyAllResponseLabelsOrThrowTamperedError.code}: ${verifyAllResponseLabelsOrThrowTamperedError.message}; verifyResults: merchant ok=${verifyAllResponseLabelsOrThrowTamperedVerifyResults[0].ok}, gateway ok=${verifyAllResponseLabelsOrThrowTamperedVerifyResults[1].ok})`,
+    "",
     "Fetch-adapter response verification: the fetch-API twin of the gateway segment — the same loopback settlement response, now fetched with the global fetch(), read with arrayBuffer(), adapted with fromFetchResponse and verified with verifyResponse — the shape a webhook receiver sees when the callback arrives as a fetch Response",
     `Fetch response status: ${fetchResponse.requestLike.status}`,
     fetchResponse.verification.ok
@@ -19279,6 +19493,10 @@ export async function runDemo(): Promise<DemoResult> {
     verifyAllResponseLabelsTamperedVerification,
     verifyAllResponseLabelsRequiredVerification,
     verifyAllResponseLabelsRequiredStrippedVerification,
+    verifyResponseOrThrowVerification,
+    verifyAllResponseLabelsOrThrowTamperedError,
+    verifyAllResponseLabelsOrThrowTamperedIsVerifyError,
+    verifyAllResponseLabelsOrThrowTamperedVerification,
     fetchResponseRequest: fetchResponse.requestLike,
     fetchResponseVerification: fetchResponse.verification,
     fetchResponseTamperedVerification: fetchResponse.tamperedVerification,

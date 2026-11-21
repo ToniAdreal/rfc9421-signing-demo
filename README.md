@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2457 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2458 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -248,7 +248,15 @@ both signature headers still verifies the merchant label while
 the gateway label comes back as a synthetic
 `MISSING_REQUIRED_LABEL` failure — a downgrade that drops a
 co-signature is a fail-closed policy failure, not a silent
-absence.
+absence. The demo then verifies the same dual-signed response
+with the throwing response entry points: `verifyResponseOrThrow`
+returns the verified merchant identity directly instead of a
+result object, and flipping `@status` (`200` -> `500`) makes
+`verifyAllResponseLabelsOrThrow` throw the first failing label's
+`VerifyError` (`merchant`, `SIGNATURE_MISMATCH`) with the full
+per-label array attached as `verifyResults` — both labels fail,
+because both signatures cover `@status` — so a bad gateway
+signature never hides the merchant verdict.
 The demo then runs a fetch-adapter segment: the same loopback
 settlement response, now signed with `signResponse` and
 fetched with the global `fetch()`, read with `arrayBuffer()`,
@@ -5322,7 +5330,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2457 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2458 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
