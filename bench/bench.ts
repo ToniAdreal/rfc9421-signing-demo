@@ -640,6 +640,12 @@
  * below), self-checked on every measured pass (adapted `@status`
  * pinned 200, settlement trailer pinned, verification ok), with the
  * missing-status fail-fast and the transplanted-request
+ * `SIGNATURE_MISMATCH` asserted outside timing, plus the fetch-API
+ * twin of that row: `fromFetchResponse` over the same live-signed
+ * loopback response fetched with `fetch()` (loopback only, no
+ * external network; see FETCH_RESP_* below), self-checked on every
+ * measured pass (adapted `@status` pinned 200, verification ok),
+ * with the missing-status fail-fast and the tampered-status
  * `SIGNATURE_MISMATCH` asserted outside timing, plus the
  * key-distribution round trip a JWKS publisher /
  * verifier pays for every key: `exportPublicKeyJwk*` →
@@ -1028,6 +1034,7 @@ import {
   exportPublicKeyPem,
   exportSignedSnapshotsByLabel,
   exportSymmetricKeyJwk,
+  fromFetchResponse,
   fromNodeRequest,
   fromNodeResponse,
   generateEd25519KeyPair,
@@ -14257,15 +14264,12 @@ async function benchmarkFromNodeResponse(): Promise<number> {
       url: `http://127.0.0.1:${port}/settle`,
       headers: { host: `127.0.0.1:${port}` },
     };
-    const signed = signRequest(
+    const signed = signResponse(
       {
-        method: "GET",
-        url: `http://127.0.0.1:${port}/settle`,
+        status: RESP_STATUS,
         headers: {},
         trailers: { [RESP_TRAILER_NAME]: RESP_TRAILER_VALUE },
         body: RESP_BODY,
-        status: RESP_STATUS,
-        request,
       },
       {
         keyId: "gateway-key",
@@ -14273,6 +14277,11 @@ async function benchmarkFromNodeResponse(): Promise<number> {
         key: privateKey,
         created: RESP_CREATED,
         coveredComponents: RESP_COVERED_COMPONENTS,
+        // The bound request is what `@method;req` resolves against;
+        // it used to ride inside a signRequest message here until
+        // #1283 taught signRequest to refuse `@status` coverage —
+        // a response is signed with signResponse, not signRequest.
+        request,
       },
     );
     res.writeHead(RESP_STATUS, {
@@ -14374,6 +14383,152 @@ async function benchmarkFromNodeResponse(): Promise<number> {
 }
 
 /**
+ * Loopback-signed response for the `fromFetchResponse` path — the
+ * fetch-API twin of the `fromNodeResponse` row above, and the shape a
+ * `fetch()` client verifies on every gateway-signed settlement
+ * callback: a real `http` server (loopback only, no external network)
+ * signs a 200 response covering `@status` only, and the bench fetches
+ * it once with the global `fetch`, reads the body with `arrayBuffer`
+ * (the adapter never touches `res.body`, so the verified bytes are
+ * the exact wire bytes), and then re-measures only the client-side
+ * work (`fromFetchResponse` + `verifyRequest`) over that captured
+ * live `Response` — re-measuring the network per iteration would
+ * time TCP loopback, not the adapter, and the adapter builds a fresh
+ * `RequestLike` per call without mutating the `Response` or its
+ * `Headers`, so reusing it across passes is sound. No trailers are
+ * involved: a fetch `Response` carries none, so this row covers
+ * `@status` only, exactly as the `nodeHttpFetchResponse` test's
+ * loopback case does.
+ */
+const FETCH_RESP_CREATED = 1_700_000_000;
+const FETCH_RESP_NOW = FETCH_RESP_CREATED + 60;
+const FETCH_RESP_STATUS = 200;
+const FETCH_RESP_BODY = JSON.stringify({ settled: true, amount: 100 });
+
+/**
+ * `fromFetchResponse` + `verifyRequest` steady state: the
+ * response-side normalization and verification a `fetch()` client
+ * runs on every gateway-signed settlement callback. Self-checks on
+ * every measured pass pin the adapted `@status` (200) and a
+ * successful verification requiring `@status`. Asserted outside
+ * timing: a response without `status` fails fast with the adapter's
+ * pinned message, and the same signed headers on a 500 response
+ * break the `@status` binding with a pinned `SIGNATURE_MISMATCH`
+ * (the response cannot be replayed as a different status).
+ */
+async function benchmarkFromFetchResponse(): Promise<number> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const server = createServer((req, res) => {
+    const signed = signResponse(
+      {
+        status: FETCH_RESP_STATUS,
+        headers: {},
+        body: FETCH_RESP_BODY,
+      },
+      {
+        keyId: "gateway-key",
+        alg: "ed25519",
+        key: privateKey,
+        created: FETCH_RESP_CREATED,
+        coveredComponents: ["@status"],
+      },
+    );
+    res.writeHead(FETCH_RESP_STATUS, {
+      "content-type": "application/json",
+      "signature-input": signed.headers["signature-input"] as string,
+      signature: signed.headers["signature"] as string,
+    });
+    res.end(FETCH_RESP_BODY);
+  });
+  try {
+    const captured = await new Promise<{
+      res: Response;
+      body: Buffer;
+      request: RequestLike;
+    }>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", async () => {
+        const port = (server.address() as AddressInfo).port;
+        const url = `http://127.0.0.1:${port}/settle`;
+        const request: RequestLike = {
+          method: "GET",
+          url,
+          headers: { host: `127.0.0.1:${port}` },
+        };
+        try {
+          const res = await fetch(url);
+          const body = Buffer.from(await res.arrayBuffer());
+          resolve({ res, body, request });
+        } catch (e) {
+          reject(e);
+        }
+      });
+      server.on("error", reject);
+    });
+    const { res, body, request } = captured;
+    const adapted = fromFetchResponse(res, body, { request });
+    if (adapted.status !== FETCH_RESP_STATUS)
+      throw new Error(
+        `benchmark self-check failed: fromFetchResponse adapted status ${adapted.status}`,
+      );
+    const first = verifyRequest(adapted, {
+      key: publicKey,
+      now: FETCH_RESP_NOW,
+      requiredComponents: ["@status"],
+    });
+    if (!first.ok)
+      throw new Error(
+        `benchmark self-check failed: loopback fetch response did not verify (${first.code})`,
+      );
+    let missingStatusThrew = false;
+    try {
+      fromFetchResponse({ headers: new Headers() }, FETCH_RESP_BODY, {
+        request,
+      });
+    } catch (e) {
+      missingStatusThrew =
+        e instanceof Error &&
+        e.message.startsWith("fromFetchResponse: res.status is missing");
+    }
+    if (!missingStatusThrew)
+      throw new Error(
+        "benchmark self-check failed: missing status did not fail fast",
+      );
+    const tampered = verifyRequest(
+      fromFetchResponse(
+        // The Response object is only read for status/headers here;
+        // the verified bytes are the captured Buffer passed below.
+        new Response(FETCH_RESP_BODY, { status: 500, headers: res.headers }),
+        body,
+        { request },
+      ),
+      { key: publicKey, now: FETCH_RESP_NOW },
+    );
+    if (tampered.ok || tampered.code !== "SIGNATURE_MISMATCH")
+      throw new Error(
+        `benchmark self-check failed: tampered fetch response verified as ${JSON.stringify(tampered)}`,
+      );
+    return measure(() => {
+      const r = fromFetchResponse(res, body, { request });
+      if (r.status !== FETCH_RESP_STATUS)
+        throw new Error(
+          "benchmark self-check failed: fromFetchResponse adapted an unexpected status",
+        );
+      const result = verifyRequest(r, {
+        key: publicKey,
+        now: FETCH_RESP_NOW,
+        requiredComponents: ["@status"],
+      });
+      if (!result.ok)
+        throw new Error(
+          `benchmark self-check failed: loopback fetch response did not verify (${result.code})`,
+        );
+    }, ITERATIONS);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/**
  * Loopback dual-signed response for the `fromNodeResponse` x
  * `verifyAllLabels` path — the bench variant of the #737 test
  * combination, which the single-label `fromNodeResponse` row above
@@ -14422,8 +14577,8 @@ async function benchmarkFromNodeResponseVerifyAllLabels(): Promise<number> {
   const server = createServer((req, res) => {
     const port = (server.address() as AddressInfo).port;
     const url = `http://127.0.0.1:${port}/settle`;
-    const merchantSigned = signRequest(
-      { method: "GET", url, headers: {}, body: RESP_BODY, status: RESP_STATUS },
+    const merchantSigned = signResponse(
+      { status: RESP_STATUS, headers: {}, body: RESP_BODY },
       {
         keyId: DUAL_RESP_MERCHANT_KID,
         alg: "ed25519",
@@ -14433,7 +14588,10 @@ async function benchmarkFromNodeResponseVerifyAllLabels(): Promise<number> {
         coveredComponents: ["@status"],
       },
     );
-    const dual = addSignature(merchantSigned, {
+    // Signed with signResponse (not signRequest) since #1283: a
+    // response covering `@status` is minted on the response side,
+    // and the second label is appended with addResponseSignature.
+    const dual = addResponseSignature(merchantSigned, {
       keyId: DUAL_RESP_GATEWAY_KID,
       alg: "ed25519",
       key: gatewayPrivate,
@@ -14497,13 +14655,11 @@ async function benchmarkFromNodeResponseVerifyAllLabels(): Promise<number> {
         );
     };
     assertDualOk("outside timing");
-    const merchantOnly = signRequest(
+    const merchantOnly = signResponse(
       {
-        method: "GET",
-        url: "https://api.example.com/v1/charge",
+        status: RESP_STATUS,
         headers: {},
         body: RESP_BODY,
-        status: RESP_STATUS,
       },
       {
         keyId: DUAL_RESP_MERCHANT_KID,
@@ -14514,13 +14670,11 @@ async function benchmarkFromNodeResponseVerifyAllLabels(): Promise<number> {
         coveredComponents: ["@status"],
       },
     );
-    const gatewayDivergent = signRequest(
+    const gatewayDivergent = signResponse(
       {
-        method: "GET",
-        url: "https://api.example.com/v1/charge",
+        status: 500,
         headers: {},
         body: RESP_BODY,
-        status: 500,
       },
       {
         keyId: DUAL_RESP_GATEWAY_KID,
@@ -14986,14 +15140,15 @@ async function benchmarkFromNodeResponseVerifyAllLabelsTrailers(): Promise<numbe
   const server = createServer((req, res) => {
     const port = (server.address() as AddressInfo).port;
     const url = `http://127.0.0.1:${port}/settle`;
-    const trailerSigned = signRequest(
+    // Signed with signResponse (not signRequest) since #1283: a
+    // response covering `@status` is minted on the response side,
+    // and the second label is appended with addResponseSignature.
+    const trailerSigned = signResponse(
       {
-        method: "GET",
-        url,
+        status: RESP_STATUS,
         headers: {},
         trailers: { "x-checksum": DUAL_RESP_TR_TRAILER_VALUE },
         body: DUAL_RESP_TR_BODY,
-        status: RESP_STATUS,
       },
       {
         keyId: DUAL_RESP_TR_TRAILER_KID,
@@ -15004,7 +15159,7 @@ async function benchmarkFromNodeResponseVerifyAllLabelsTrailers(): Promise<numbe
         coveredComponents: ["@status", "x-checksum;tr"],
       },
     );
-    const dual = addSignature(trailerSigned, {
+    const dual = addResponseSignature(trailerSigned, {
       keyId: DUAL_RESP_TR_PLAIN_KID,
       alg: "ed25519",
       key: plainPrivate,
@@ -19279,6 +19434,11 @@ results.push({
   alg: "fromNodeResponse (@status, loopback)",
   op: "adapt+verify",
   ops: await benchmarkFromNodeResponse(),
+});
+results.push({
+  alg: "fromFetchResponse (@status, loopback)",
+  op: "adapt+verify",
+  ops: await benchmarkFromFetchResponse(),
 });
 results.push({
   alg: "fromNodeResponse + verifyAllLabels (@status, loopback, 2 labels)",
