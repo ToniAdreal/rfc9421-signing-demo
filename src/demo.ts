@@ -143,6 +143,21 @@
  * for every label whenever a `content-digest` header is
  * present, covered or not. Every input is a fixed demo
  * constant, so the segment is byte-identical between runs.
+ * The demo then runs a per-label header length limits segment:
+ * the same dual-signed request is verified three times with
+ * per-label limits — `maxSignatureInputLengthByLabel: { sig1: 50 }`
+ * rejects only `sig1` with `SIGNATURE_INPUT_TOO_LARGE` (the
+ * shared 245-byte `Signature-Input` header is over its own
+ * 50-byte limit) while the gateway label falls back to the 64 KiB
+ * default and still verifies, `maxSignatureLengthByLabel:
+ * { gateway: 100 }` rejects only the gateway label with
+ * `SIGNATURE_TOO_LARGE` (the shared 151-byte `Signature` header
+ * is over its own 100-byte limit) while the merchant `sig1`
+ * label still verifies, and limits exactly equal to the shared
+ * header lengths (245 and 151) let both labels verify — a limit
+ * rejects only a strictly-over header. The shared header lengths
+ * are hand-pinned constants, asserted before use, so the segment
+ * is byte-identical between runs.
  * The demo closes with a nonce-generation segment: every earlier
  * segment signs with a hand-written nonce constant, but a real
  * signer must not hand-roll its replay-protection nonce — a
@@ -2122,6 +2137,27 @@ export const DEMO_THROW_TAMPERED_CODE: VerifyFailureCode =
  */
 export const DEMO_THROW_ALL_TAMPERED_CODE: VerifyFailureCode =
   "BODY_DIGEST_MISMATCH";
+
+/**
+ * Hand-pinned per-label header length limits of the per-label
+ * limits segment, measured live against the dual-signed request
+ * before the segment was written: its shared `Signature-Input`
+ * header is 245 bytes and its shared `Signature` header is 151
+ * bytes (both fixed — the covered components, keyids, created and
+ * nonce are demo constants and the ed25519 / hmac-sha256
+ * signatures are fixed-length — so the lengths never vary between
+ * runs). A 50-byte `Signature-Input` limit for `sig1` is over the
+ * shared 245-byte header, and a 100-byte `Signature` limit for
+ * `gateway` is over the shared 151-byte header, so each limit
+ * rejects only its own label while the other falls back to the
+ * 64 KiB default. The boundary limits are exactly the shared
+ * header lengths: a limit rejects only a strictly-over header, so
+ * both labels verify at the boundary.
+ */
+export const DEMO_PER_LABEL_SIGNATURE_INPUT_LIMIT_SIG1 = 50;
+export const DEMO_PER_LABEL_SIGNATURE_LIMIT_GATEWAY = 100;
+export const DEMO_DUAL_SIGNATURE_INPUT_LENGTH = 245;
+export const DEMO_DUAL_SIGNATURE_LENGTH = 151;
 
 /**
  * Hand-pinned shapes of the closing nonce-generation segment:
@@ -5257,6 +5293,32 @@ export interface DemoResult {
    * surfacing only the first failure).
    */
   throwAllTamperedVerification: VerifyResult[];
+  /**
+   * Per-label results for the dual-signed request under
+   * `maxSignatureInputLengthByLabel: { sig1:
+   * DEMO_PER_LABEL_SIGNATURE_INPUT_LIMIT_SIG1 }` (50): the shared
+   * 245-byte `Signature-Input` header is over `sig1`'s own limit
+   * (`SIGNATURE_INPUT_TOO_LARGE`) while the `gateway` label falls
+   * back to the 64 KiB default and still verifies.
+   */
+  perLabelInputLimitVerification: VerifyResult[];
+  /**
+   * Per-label results for the dual-signed request under
+   * `maxSignatureLengthByLabel: { gateway:
+   * DEMO_PER_LABEL_SIGNATURE_LIMIT_GATEWAY }` (100): the shared
+   * 151-byte `Signature` header is over the `gateway` label's own
+   * limit (`SIGNATURE_TOO_LARGE`) while the merchant `sig1` label
+   * falls back to the 64 KiB default and still verifies.
+   */
+  perLabelSignatureLimitVerification: VerifyResult[];
+  /**
+   * Per-label results for the dual-signed request under boundary
+   * limits exactly equal to the shared header lengths
+   * (`maxSignatureInputLengthByLabel: { sig1: 245 }`,
+   * `maxSignatureLengthByLabel: { gateway: 151 }`) — both labels
+   * verify, because a limit rejects only a strictly-over header.
+   */
+  perLabelHeaderLimitBoundaryVerification: VerifyResult[];
   /** First verification of `signed` against the demo replay cache (ok). */
   replayFirstVerification: VerifyResult;
   /**
@@ -9946,6 +10008,120 @@ export async function runDemo(): Promise<DemoResult> {
       `demo fixture broken: verifyAllLabels contrast on the tampered-body dual-signed request ` +
         `returned ${JSON.stringify(throwAllTamperedVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
         `instead of both labels failing with ${DEMO_THROW_ALL_TAMPERED_CODE}`,
+    );
+  }
+
+  // Per-label header length limits segment: a gateway that
+  // tightens its own limit must not take the merchant's signature
+  // down with it. The dual-signed request's shared headers are
+  // 245 bytes (`Signature-Input`) and 151 bytes (`Signature`) —
+  // pinned as DEMO_DUAL_SIGNATURE_INPUT_LENGTH /
+  // DEMO_DUAL_SIGNATURE_LENGTH and asserted here, so a drift
+  // throws instead of printing a misleading boundary. First,
+  // `maxSignatureInputLengthByLabel: { sig1: 50 }` rejects only
+  // `sig1` with `SIGNATURE_INPUT_TOO_LARGE` (245 > 50) while the
+  // gateway label falls back to the 64 KiB default and still
+  // verifies. Then `maxSignatureLengthByLabel: { gateway: 100 }`
+  // rejects only the gateway label with `SIGNATURE_TOO_LARGE`
+  // (the shared 151-byte `Signature` header is over the gateway
+  // label's own 100-byte limit — the limit is enforced against
+  // the shared header, per label) while the merchant `sig1`
+  // label falls back to the default and still verifies. Finally
+  // the boundary: limits exactly equal to the shared header
+  // lengths (245 and 151) let both labels verify — a limit
+  // rejects only a strictly-over header. Outside the printed
+  // lines the demo asserts every label and code against the
+  // hand-pinned expectations — a mismatch throws instead of
+  // printing a misleading segment.
+  const dualSignatureInputLength = Buffer.byteLength(
+    dualSigned.headers["signature-input"],
+    "utf8",
+  );
+  const dualSignatureLength = Buffer.byteLength(
+    dualSigned.headers["signature"],
+    "utf8",
+  );
+  if (
+    dualSignatureInputLength !== DEMO_DUAL_SIGNATURE_INPUT_LENGTH ||
+    dualSignatureLength !== DEMO_DUAL_SIGNATURE_LENGTH
+  ) {
+    throw new Error(
+      `demo fixture broken: dual-signed request headers are ` +
+        `${dualSignatureInputLength} bytes (Signature-Input) and ` +
+        `${dualSignatureLength} bytes (Signature) instead of the pinned ` +
+        `${DEMO_DUAL_SIGNATURE_INPUT_LENGTH} and ${DEMO_DUAL_SIGNATURE_LENGTH}`,
+    );
+  }
+  const perLabelInputLimitVerification = verifyAllLabels(dualSigned, {
+    ...dualVerifyOptions,
+    maxSignatureInputLengthByLabel: {
+      sig1: DEMO_PER_LABEL_SIGNATURE_INPUT_LIMIT_SIG1,
+    },
+  });
+  if (
+    perLabelInputLimitVerification.length !==
+      DEMO_SIGNATURE_LABELS.length ||
+    perLabelInputLimitVerification[0].label !==
+      DEMO_SIGNATURE_LABELS[0] ||
+    perLabelInputLimitVerification[0].ok ||
+    perLabelInputLimitVerification[0].code !==
+      "SIGNATURE_INPUT_TOO_LARGE" ||
+    perLabelInputLimitVerification[1].label !== DEMO_GATEWAY_LABEL ||
+    !perLabelInputLimitVerification[1].ok
+  ) {
+    throw new Error(
+      `demo fixture broken: per-label Signature-Input limit verification ` +
+        `returned ${JSON.stringify(perLabelInputLimitVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
+        `instead of sig1 SIGNATURE_INPUT_TOO_LARGE plus gateway ok`,
+    );
+  }
+  const perLabelSignatureLimitVerification = verifyAllLabels(dualSigned, {
+    ...dualVerifyOptions,
+    maxSignatureLengthByLabel: {
+      gateway: DEMO_PER_LABEL_SIGNATURE_LIMIT_GATEWAY,
+    },
+  });
+  if (
+    perLabelSignatureLimitVerification.length !==
+      DEMO_SIGNATURE_LABELS.length ||
+    perLabelSignatureLimitVerification[0].label !==
+      DEMO_SIGNATURE_LABELS[0] ||
+    !perLabelSignatureLimitVerification[0].ok ||
+    perLabelSignatureLimitVerification[1].label !==
+      DEMO_GATEWAY_LABEL ||
+    perLabelSignatureLimitVerification[1].ok ||
+    perLabelSignatureLimitVerification[1].code !==
+      "SIGNATURE_TOO_LARGE"
+  ) {
+    throw new Error(
+      `demo fixture broken: per-label Signature limit verification ` +
+        `returned ${JSON.stringify(perLabelSignatureLimitVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
+        `instead of sig1 ok plus gateway SIGNATURE_TOO_LARGE`,
+    );
+  }
+  const perLabelHeaderLimitBoundaryVerification = verifyAllLabels(
+    dualSigned,
+    {
+      ...dualVerifyOptions,
+      maxSignatureInputLengthByLabel: {
+        sig1: DEMO_DUAL_SIGNATURE_INPUT_LENGTH,
+      },
+      maxSignatureLengthByLabel: {
+        gateway: DEMO_DUAL_SIGNATURE_LENGTH,
+      },
+    },
+  );
+  if (
+    perLabelHeaderLimitBoundaryVerification.length !==
+      DEMO_SIGNATURE_LABELS.length ||
+    perLabelHeaderLimitBoundaryVerification.some(
+      (r, i) => r.label !== DEMO_SIGNATURE_LABELS[i] || !r.ok,
+    )
+  ) {
+    throw new Error(
+      `demo fixture broken: per-label header-limit boundary verification ` +
+        `returned ${JSON.stringify(perLabelHeaderLimitBoundaryVerification.map((r) => ({ label: r.label, ok: r.ok, code: r.code })))} ` +
+        `instead of both labels ok at the exact-length boundary`,
     );
   }
 
@@ -18808,6 +18984,20 @@ export async function runDemo(): Promise<DemoResult> {
       formatLabelResult("After body tampering", r),
     ),
     "",
+    `Per-label header length limits: maxSignatureInputLengthByLabel / maxSignatureLengthByLabel give each label its own limit — a tight limit rejects only its own label, the other falls back to the 64 KiB default and still verifies (the dual-signed request's shared Signature-Input header is ${DEMO_DUAL_SIGNATURE_INPUT_LENGTH} bytes, its shared Signature header ${DEMO_DUAL_SIGNATURE_LENGTH} bytes)`,
+    `Per-label Signature-Input limit (sig1: ${DEMO_PER_LABEL_SIGNATURE_INPUT_LIMIT_SIG1} bytes — the ${DEMO_DUAL_SIGNATURE_INPUT_LENGTH}-byte shared header is over it)`,
+    ...perLabelInputLimitVerification.map((r) =>
+      formatLabelResult("Per-label input limit", r),
+    ),
+    `Per-label Signature limit (gateway: ${DEMO_PER_LABEL_SIGNATURE_LIMIT_GATEWAY} bytes — the ${DEMO_DUAL_SIGNATURE_LENGTH}-byte shared header is over it)`,
+    ...perLabelSignatureLimitVerification.map((r) =>
+      formatLabelResult("Per-label signature limit", r),
+    ),
+    `Per-label limits at the boundary (sig1: ${DEMO_DUAL_SIGNATURE_INPUT_LENGTH} bytes, gateway: ${DEMO_DUAL_SIGNATURE_LENGTH} bytes — exactly the shared header lengths, so both labels verify)`,
+    ...perLabelHeaderLimitBoundaryVerification.map((r) =>
+      formatLabelResult("Per-label limit boundary", r),
+    ),
+    "",
     `Replay protection: same request verified twice against a ReplayCache (capacity ${DEMO_REPLAY_CACHE_MAX_ENTRIES}, TTL ${DEMO_REPLAY_CACHE_TTL_SEC}s)`,
     replayFirstVerification.ok
       ? `Replay check, first presentation of nonce "${DEMO_NONCE}": OK`
@@ -19747,6 +19937,9 @@ export async function runDemo(): Promise<DemoResult> {
     throwAllTamperedError,
     throwAllTamperedIsVerifyError,
     throwAllTamperedVerification,
+    perLabelInputLimitVerification,
+    perLabelSignatureLimitVerification,
+    perLabelHeaderLimitBoundaryVerification,
     replayFirstVerification,
     replaySecondVerification,
     replayOtherNonceVerification,

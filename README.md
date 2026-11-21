@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2473 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2477 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -45,7 +45,16 @@ label's `VerifyError` (`BODY_DIGEST_MISMATCH` on `sig1`) when the
 body is tampered by one byte, and a `verifyAllLabels` contrast
 pass shows both labels failing that code — the body-digest check
 runs for every label whenever a `content-digest` header is
-present, covered or not. The demo then runs the
+present, covered or not. The demo then shows per-label header
+length limits: `maxSignatureInputLengthByLabel: { sig1: 50 }`
+rejects only `sig1` with `SIGNATURE_INPUT_TOO_LARGE` (the shared
+245-byte `Signature-Input` header is over its own 50-byte limit)
+while the gateway label still verifies, `maxSignatureLengthByLabel:
+{ gateway: 100 }` rejects only the gateway label with
+`SIGNATURE_TOO_LARGE` (the shared 151-byte `Signature` header is
+over its own 100-byte limit) while the merchant label still
+verifies, and limits exactly equal to the shared header lengths
+(245 and 151) let both labels verify. The demo then runs the
 replay segment: the same signed request is verified twice against an
 opt-in `ReplayCache` — the first presentation passes, the second is
 rejected with `NONCE_REPLAY` — and a request carrying a different
@@ -5387,7 +5396,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2473 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2477 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

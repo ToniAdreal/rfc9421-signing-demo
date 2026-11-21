@@ -171,6 +171,11 @@ import {
   DEMO_INBOUND_WRONG_SCHEME,
   DEMO_GATEWAY_LABEL,
   DEMO_GATEWAY_SECRET,
+  DEMO_GATEWAY_COVERED_COMPONENTS,
+  DEMO_PER_LABEL_SIGNATURE_INPUT_LIMIT_SIG1,
+  DEMO_PER_LABEL_SIGNATURE_LIMIT_GATEWAY,
+  DEMO_DUAL_SIGNATURE_INPUT_LENGTH,
+  DEMO_DUAL_SIGNATURE_LENGTH,
   DEMO_GENERATED_LONG_NONCE_BYTES,
   DEMO_GENERATED_LONG_NONCE_LENGTH,
   DEMO_GENERATED_NONCE_BYTES,
@@ -1145,6 +1150,270 @@ test("demo throwing multi-label segment returns both results on success and thro
   assert.deepEqual(
     lines.slice(a, aEnd),
     second.lines.slice(b, bEnd),
+  );
+});
+
+test("demo per-label header length limits segment rejects only the limited label and passes at the exact-length boundary", async () => {
+  const {
+    dualSigned,
+    perLabelInputLimitVerification,
+    perLabelSignatureLimitVerification,
+    perLabelHeaderLimitBoundaryVerification,
+  } = await runDemo();
+
+  // The limits and the shared header lengths are the literals
+  // pinned in src/demo.ts (probed live before the segment was
+  // written) — pinned again here so a drift in either place fails.
+  assert.equal(DEMO_PER_LABEL_SIGNATURE_INPUT_LIMIT_SIG1, 50);
+  assert.equal(DEMO_PER_LABEL_SIGNATURE_LIMIT_GATEWAY, 100);
+  assert.equal(DEMO_DUAL_SIGNATURE_INPUT_LENGTH, 245);
+  assert.equal(DEMO_DUAL_SIGNATURE_LENGTH, 151);
+  assert.equal(
+    Buffer.byteLength(dualSigned.headers["signature-input"], "utf8"),
+    DEMO_DUAL_SIGNATURE_INPUT_LENGTH,
+  );
+  assert.equal(
+    Buffer.byteLength(dualSigned.headers["signature"], "utf8"),
+    DEMO_DUAL_SIGNATURE_LENGTH,
+  );
+
+  // A 50-byte Signature-Input limit for sig1 rejects only sig1:
+  // the shared 245-byte header is over it, while the gateway label
+  // falls back to the 64 KiB default and still verifies.
+  assert.deepEqual(
+    perLabelInputLimitVerification.map((r) => r.label),
+    ["sig1", DEMO_GATEWAY_LABEL],
+  );
+  assert.equal(perLabelInputLimitVerification[0].ok, false);
+  assert.equal(
+    perLabelInputLimitVerification[0].code,
+    "SIGNATURE_INPUT_TOO_LARGE",
+  );
+  assert.equal(
+    perLabelInputLimitVerification[0].reason,
+    "signature-input header is 245 bytes, over the maxSignatureInputLength=50 byte limit",
+  );
+  assert.equal(perLabelInputLimitVerification[1].ok, true);
+
+  // A 100-byte Signature limit for the gateway rejects only the
+  // gateway label: the shared 151-byte header is over it, while
+  // the merchant sig1 label falls back to the default and still
+  // verifies.
+  assert.deepEqual(
+    perLabelSignatureLimitVerification.map((r) => r.label),
+    ["sig1", DEMO_GATEWAY_LABEL],
+  );
+  assert.equal(perLabelSignatureLimitVerification[0].ok, true);
+  assert.equal(perLabelSignatureLimitVerification[1].ok, false);
+  assert.equal(
+    perLabelSignatureLimitVerification[1].code,
+    "SIGNATURE_TOO_LARGE",
+  );
+  assert.equal(
+    perLabelSignatureLimitVerification[1].reason,
+    "signature header is 151 bytes, over the maxSignatureLength=100 byte limit",
+  );
+
+  // Limits exactly equal to the shared header lengths let both
+  // labels verify: a limit rejects only a strictly-over header.
+  assert.deepEqual(
+    perLabelHeaderLimitBoundaryVerification.map((r) => r.label),
+    ["sig1", DEMO_GATEWAY_LABEL],
+  );
+  assert.equal(perLabelHeaderLimitBoundaryVerification[0].ok, true);
+  assert.equal(perLabelHeaderLimitBoundaryVerification[1].ok, true);
+
+  // Re-derive every outcome independently, outside the demo: a
+  // fresh dual-signed fixture (fresh ed25519 key, same fixed
+  // constants) under the same three limit maps must give the same
+  // label/code pattern — the isolation is library behavior, not a
+  // demo print artifact.
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const freshSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_KEY_ID,
+      alg: "ed25519",
+      key: privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_NONCE,
+    },
+  );
+  const freshGatewaySecret = secretKey(DEMO_GATEWAY_SECRET);
+  const freshDual = addSignature(freshSigned, {
+    keyId: DEMO_GATEWAY_KEY_ID,
+    alg: "hmac-sha256",
+    key: freshGatewaySecret,
+    created: DEMO_CREATED,
+    label: DEMO_GATEWAY_LABEL,
+    coveredComponents: [...DEMO_GATEWAY_COVERED_COMPONENTS],
+  });
+  const freshOpts = {
+    key: publicKey,
+    keys: { [DEMO_GATEWAY_LABEL]: freshGatewaySecret },
+    now: DEMO_CREATED + 60,
+  };
+  const rederive = (
+    results: ReadonlyArray<{ label: string; ok: boolean; code?: string }>,
+    expected: ReadonlyArray<{
+      label: string;
+      ok: boolean;
+      code: string | undefined;
+    }>,
+  ) => {
+    assert.deepEqual(
+      results.map((r) => ({
+        label: r.label,
+        ok: r.ok,
+        code: r.code,
+      })),
+      expected.map((e) => ({
+        label: e.label,
+        ok: e.ok,
+        code: e.code,
+      })),
+    );
+  };
+  rederive(
+    verifyAllLabels(freshDual, {
+      ...freshOpts,
+      maxSignatureInputLengthByLabel: {
+        sig1: DEMO_PER_LABEL_SIGNATURE_INPUT_LIMIT_SIG1,
+      },
+    }),
+    [
+      { label: "sig1", ok: false, code: "SIGNATURE_INPUT_TOO_LARGE" },
+      { label: DEMO_GATEWAY_LABEL, ok: true, code: undefined },
+    ],
+  );
+  rederive(
+    verifyAllLabels(freshDual, {
+      ...freshOpts,
+      maxSignatureLengthByLabel: {
+        gateway: DEMO_PER_LABEL_SIGNATURE_LIMIT_GATEWAY,
+      },
+    }),
+    [
+      { label: "sig1", ok: true, code: undefined },
+      {
+        label: DEMO_GATEWAY_LABEL,
+        ok: false,
+        code: "SIGNATURE_TOO_LARGE",
+      },
+    ],
+  );
+  rederive(
+    verifyAllLabels(freshDual, {
+      ...freshOpts,
+      maxSignatureInputLengthByLabel: {
+        sig1: DEMO_DUAL_SIGNATURE_INPUT_LENGTH,
+      },
+      maxSignatureLengthByLabel: {
+        gateway: DEMO_DUAL_SIGNATURE_LENGTH,
+      },
+    }),
+    [
+      { label: "sig1", ok: true, code: undefined },
+      { label: DEMO_GATEWAY_LABEL, ok: true, code: undefined },
+    ],
+  );
+});
+
+test("demo lines contain the per-label header length limits segment (isolation per label, boundary pass)", async () => {
+  const first = await runDemo();
+  const { lines } = first;
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /Per-label header length limits: maxSignatureInputLengthByLabel \/ maxSignatureLengthByLabel give each label its own limit/,
+  );
+  assert.ok(
+    out.includes(
+      "Per-label Signature-Input limit (sig1: 50 bytes — the 245-byte shared header is over it)",
+    ),
+  );
+  assert.ok(
+    out.includes(
+      "Per-label input limit sig1: FAILED (code SIGNATURE_INPUT_TOO_LARGE: signature-input header is 245 bytes, over the maxSignatureInputLength=50 byte limit)",
+    ),
+  );
+  assert.ok(
+    out.includes(
+      `Per-label input limit gateway: OK (label gateway, keyid="${DEMO_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
+    ),
+  );
+  assert.ok(
+    out.includes(
+      "Per-label Signature limit (gateway: 100 bytes — the 151-byte shared header is over it)",
+    ),
+  );
+  assert.ok(
+    out.includes(
+      `Per-label signature limit sig1: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+    ),
+  );
+  assert.ok(
+    out.includes(
+      "Per-label signature limit gateway: FAILED (code SIGNATURE_TOO_LARGE: signature header is 151 bytes, over the maxSignatureLength=100 byte limit)",
+    ),
+  );
+  assert.ok(
+    out.includes(
+      "Per-label limits at the boundary (sig1: 245 bytes, gateway: 151 bytes — exactly the shared header lengths, so both labels verify)",
+    ),
+  );
+  assert.ok(
+    out.includes(
+      `Per-label limit boundary sig1: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+    ),
+  );
+  assert.ok(
+    out.includes(
+      `Per-label limit boundary gateway: OK (label gateway, keyid="${DEMO_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
+    ),
+  );
+  // The segment sits between the throwing multi-label segment and
+  // the replay segment.
+  const throwIdx = lines.findIndex((l) =>
+    l.startsWith("Throwing multi-label verification:"),
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-label header length limits:"),
+  );
+  const replayIdx = lines.findIndex((l) =>
+    l.startsWith("Replay protection:"),
+  );
+  assert.ok(throwIdx !== -1 && headerIdx !== -1 && replayIdx !== -1);
+  assert.ok(throwIdx < headerIdx && headerIdx < replayIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 10), [
+    "Per-label header length limits: maxSignatureInputLengthByLabel / maxSignatureLengthByLabel give each label its own limit — a tight limit rejects only its own label, the other falls back to the 64 KiB default and still verifies (the dual-signed request's shared Signature-Input header is 245 bytes, its shared Signature header 151 bytes)",
+    "Per-label Signature-Input limit (sig1: 50 bytes — the 245-byte shared header is over it)",
+    "Per-label input limit sig1: FAILED (code SIGNATURE_INPUT_TOO_LARGE: signature-input header is 245 bytes, over the maxSignatureInputLength=50 byte limit)",
+    `Per-label input limit gateway: OK (label gateway, keyid="${DEMO_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
+    "Per-label Signature limit (gateway: 100 bytes — the 151-byte shared header is over it)",
+    `Per-label signature limit sig1: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+    "Per-label signature limit gateway: FAILED (code SIGNATURE_TOO_LARGE: signature header is 151 bytes, over the maxSignatureLength=100 byte limit)",
+    "Per-label limits at the boundary (sig1: 245 bytes, gateway: 151 bytes — exactly the shared header lengths, so both labels verify)",
+    `Per-label limit boundary sig1: OK (label sig1, keyid="${DEMO_KEY_ID}", alg="ed25519")`,
+    `Per-label limit boundary gateway: OK (label gateway, keyid="${DEMO_GATEWAY_KEY_ID}", alg="hmac-sha256")`,
+  ]);
+  // The new lines are byte-identical between runs: only fixed
+  // constants, labels, keyids, algs, codes and byte counts appear,
+  // never fresh key material or a clock.
+  const second = await runDemo();
+  const start = (ls: ReadonlyArray<string>): number =>
+    ls.findIndex((l) => l.startsWith("Per-label header length limits:"));
+  const end = (ls: ReadonlyArray<string>): number =>
+    ls.findIndex((l) => l.startsWith("Replay protection:"));
+  assert.deepEqual(
+    first.lines.slice(start(first.lines), end(first.lines)),
+    second.lines.slice(start(second.lines), end(second.lines)),
   );
 });
 
@@ -2444,6 +2713,20 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
     out,
     /After content-type tampering gateway: FAILED \(code SIGNATURE_MISMATCH:/,
   );
+  assert.match(out, /Per-label header length limits: maxSignatureInputLengthByLabel \/ maxSignatureLengthByLabel give each label its own limit/);
+  assert.match(
+    out,
+    /Per-label input limit sig1: FAILED \(code SIGNATURE_INPUT_TOO_LARGE: signature-input header is 245 bytes, over the maxSignatureInputLength=50 byte limit\)/,
+  );
+  assert.match(out, /Per-label input limit gateway: OK /);
+  assert.match(
+    out,
+    /Per-label signature limit gateway: FAILED \(code SIGNATURE_TOO_LARGE: signature header is 151 bytes, over the maxSignatureLength=100 byte limit\)/,
+  );
+  assert.match(out, /Per-label signature limit sig1: OK /);
+  assert.match(out, /Per-label limits at the boundary \(sig1: 245 bytes, gateway: 151 bytes/);
+  assert.match(out, /Per-label limit boundary sig1: OK /);
+  assert.match(out, /Per-label limit boundary gateway: OK /);
   assert.match(
     out,
     /Replay check, second presentation of the same request: FAILED \(code NONCE_REPLAY:/,
