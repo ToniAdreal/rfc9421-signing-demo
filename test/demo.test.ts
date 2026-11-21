@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   addSignature,
+  algMatchesKeyShape,
   assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
@@ -48,6 +49,7 @@ import {
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
   importSymmetricKeyJwk,
+  inferAlgFromKeyShape,
   joinHeaderValues,
   JwksKeyStore,
   MAX_COVERED_COMPONENTS,
@@ -59,6 +61,7 @@ import {
   contentDigest,
   createVerifiedFetchHandler,
   createVerifiedHandler,
+  describeKey,
   resolveComponent,
   secretKey,
   signRequest,
@@ -375,6 +378,12 @@ import {
   DEMO_JOIN_WRONG_CODE,
   DEMO_JOIN_WRONG_VALUE,
   DEMO_KEY_ID,
+  DEMO_KEY_INTROSPECTION_ED25519_ALG,
+  DEMO_KEY_INTROSPECTION_ED25519_DESCRIPTION,
+  DEMO_KEY_INTROSPECTION_HMAC_ALG,
+  DEMO_KEY_INTROSPECTION_HMAC_DESCRIPTION,
+  DEMO_KEY_INTROSPECTION_P256_ALG,
+  DEMO_KEY_INTROSPECTION_P256_DESCRIPTION,
   DEMO_MAIN_DIGEST_ALG,
   DEMO_MEMOIZED_CALLS_AFTER_REPEAT,
   DEMO_MEMOIZED_CALLS_AFTER_SECOND_KEY,
@@ -8776,8 +8785,8 @@ test("demo HMAC secret generation segment mints, signs, verifies and rotates sec
   );
 
   // Ordering: the segment follows the HMAC oct JWK segment and is
-  // followed by the private-key JWK segment (blank separator, then
-  // its header) — byte-exact lines.
+  // followed by the key-introspection segment (blank separator,
+  // then its header) — byte-exact lines.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("HMAC secret generation and rotation:"),
   );
@@ -8796,9 +8805,7 @@ test("demo HMAC secret generation segment mints, signs, verifies and rotates sec
     `Old secret verifying the rotated signature: FAILED (code ${hmacSecretRotationOldSecretVerification.code}: ${hmacSecretRotationOldSecretVerification.reason}) — the old secret no longer verifies a signature made after rotation`,
   ]);
   assert.equal(lines[headerIdx + 7], "");
-  assert.ok(
-    lines[headerIdx + 8]!.startsWith("Private-key JWK import:"),
-  );
+  assert.ok(lines[headerIdx + 8]!.startsWith("Key introspection:"));
 
   // Double-run determinism: only lengths, algs and verdicts are
   // printed — the secret bytes never appear — so the segment is
@@ -8806,6 +8813,135 @@ test("demo HMAC secret generation segment mints, signs, verifies and rotates sec
   const second = await runDemo();
   const start = (ls: string[]) =>
     ls.findIndex((l) => l.startsWith("HMAC secret generation and rotation:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Private-key JWK import:"));
+  assert.ok(start(lines) !== -1 && end(lines) !== -1);
+  assert.ok(start(second.lines) !== -1 && end(second.lines) !== -1);
+  assert.deepEqual(
+    lines.slice(start(lines), end(lines)),
+    second.lines.slice(start(second.lines), end(second.lines)),
+  );
+});
+
+test("demo key-introspection segment describes each signing key's shape, infers its alg, and refuses a mismatched pairing", async () => {
+  const {
+    lines,
+    keyIntrospectionEd25519Description,
+    keyIntrospectionEd25519Alg,
+    keyIntrospectionP256Description,
+    keyIntrospectionP256Alg,
+    keyIntrospectionHmacDescription,
+    keyIntrospectionHmacAlg,
+    keyIntrospectionHmacAsEd25519,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // DemoResult fields: the pinned shape wording and inferred alg
+  // per key, and the mismatched pairing refused.
+  assert.equal(
+    keyIntrospectionEd25519Description,
+    DEMO_KEY_INTROSPECTION_ED25519_DESCRIPTION,
+  );
+  assert.equal(
+    keyIntrospectionEd25519Alg,
+    DEMO_KEY_INTROSPECTION_ED25519_ALG,
+  );
+  assert.equal(
+    keyIntrospectionP256Description,
+    DEMO_KEY_INTROSPECTION_P256_DESCRIPTION,
+  );
+  assert.equal(keyIntrospectionP256Alg, DEMO_KEY_INTROSPECTION_P256_ALG);
+  assert.equal(
+    keyIntrospectionHmacDescription,
+    DEMO_KEY_INTROSPECTION_HMAC_DESCRIPTION,
+  );
+  assert.equal(keyIntrospectionHmacAlg, DEMO_KEY_INTROSPECTION_HMAC_ALG);
+  assert.equal(keyIntrospectionHmacAsEd25519, false);
+
+  // Independent re-derivation: fresh keys of each shape describe
+  // and infer identically outside the demo, and the mismatched
+  // pairing is false there too — the segment reports the
+  // library's behavior, not a fixture echo.
+  const { privateKey: freshEd } = generateEd25519KeyPair();
+  const freshP256 = generateP256KeyPair();
+  const freshHmac = secretKey(generateHmacSecret());
+  assert.equal(
+    describeKey(freshEd),
+    DEMO_KEY_INTROSPECTION_ED25519_DESCRIPTION,
+  );
+  assert.equal(
+    inferAlgFromKeyShape(freshEd),
+    DEMO_KEY_INTROSPECTION_ED25519_ALG,
+  );
+  assert.equal(
+    describeKey(freshP256.privateKey),
+    DEMO_KEY_INTROSPECTION_P256_DESCRIPTION,
+  );
+  assert.equal(
+    inferAlgFromKeyShape(freshP256.privateKey),
+    DEMO_KEY_INTROSPECTION_P256_ALG,
+  );
+  assert.equal(
+    describeKey(freshHmac),
+    DEMO_KEY_INTROSPECTION_HMAC_DESCRIPTION,
+  );
+  assert.equal(
+    inferAlgFromKeyShape(freshHmac),
+    DEMO_KEY_INTROSPECTION_HMAC_ALG,
+  );
+  assert.equal(algMatchesKeyShape("ed25519", freshHmac), false);
+  assert.equal(algMatchesKeyShape("ed25519", freshEd), true);
+  assert.equal(
+    algMatchesKeyShape("ecdsa-p256-sha256", freshP256.privateKey),
+    true,
+  );
+  assert.equal(algMatchesKeyShape("hmac-sha256", freshHmac), true);
+
+  // Printed lines: header, one line per key, the mismatch line.
+  assert.match(
+    out,
+    /Key introspection: describeKey names each signing key by shape/,
+  );
+  assert.match(out, /ed25519 key: an asymmetric ed25519 key -> alg "ed25519"/);
+  assert.match(
+    out,
+    /P-256 key: an asymmetric ec key \(prime256v1\) -> alg "ecdsa-p256-sha256"/,
+  );
+  assert.match(
+    out,
+    /HMAC secret: a secret \(symmetric\) key -> alg "hmac-sha256"/,
+  );
+  assert.match(
+    out,
+    /Mismatched pairing: algMatchesKeyShape\("ed25519", HMAC secret\) is false/,
+  );
+
+  // Ordering: the segment follows the HMAC secret generation
+  // segment and is followed by the private-key JWK segment
+  // (blank separator, then its header) — byte-exact lines.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Key introspection:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 5), [
+    `Key introspection: describeKey names each signing key by shape and inferAlgFromKeyShape maps the shape to its algorithm — the pairing check a caller runs before signing, so a wrong alg is caught before any crypto runs; only shapes are printed, never key bytes`,
+    `ed25519 key: ${DEMO_KEY_INTROSPECTION_ED25519_DESCRIPTION} -> alg "${DEMO_KEY_INTROSPECTION_ED25519_ALG}"`,
+    `P-256 key: ${DEMO_KEY_INTROSPECTION_P256_DESCRIPTION} -> alg "${DEMO_KEY_INTROSPECTION_P256_ALG}"`,
+    `HMAC secret: ${DEMO_KEY_INTROSPECTION_HMAC_DESCRIPTION} -> alg "${DEMO_KEY_INTROSPECTION_HMAC_ALG}"`,
+    `Mismatched pairing: algMatchesKeyShape("ed25519", HMAC secret) is false — an HMAC secret is not an ed25519 key, so the pairing is refused before signing`,
+  ]);
+  assert.equal(lines[headerIdx + 5], "");
+  assert.ok(lines[headerIdx + 6]!.startsWith("Private-key JWK import:"));
+  assert.equal(lines[headerIdx - 1], "");
+  assert.ok(
+    lines[headerIdx - 8]!.startsWith("HMAC secret generation and rotation:"),
+  );
+
+  // Double-run determinism: only shapes, algs and the verdict are
+  // printed — no key bytes — so the segment is identical across runs.
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Key introspection:"));
   const end = (ls: string[]) =>
     ls.findIndex((l) => l.startsWith("Private-key JWK import:"));
   assert.ok(start(lines) !== -1 && end(lines) !== -1);

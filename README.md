@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2472 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2473 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -311,7 +311,14 @@ secret fails the same signature with `SIGNATURE_MISMATCH`, and
 an explicit 16-byte generation is shown rejected with the same
 `assertHmacSecretLength` wording the sign/verify side uses for
 a weak key; only the secrets' lengths and algorithms are printed,
-never the secret bytes. The demo then closes with a private-key JWK
+never the secret bytes. A key-introspection segment follows it:
+`describeKey` names each of the demo's three signing keys by shape —
+the main ed25519 key, the P-256 key and the generated HMAC secret —
+`inferAlgFromKeyShape` maps each shape to its algorithm, and a
+mismatched pairing (the HMAC secret checked against `ed25519`) is
+shown refused by `algMatchesKeyShape`, so a caller checks the pairing
+before signing instead of learning it from a crypto failure; only
+shapes are printed, never key bytes. The demo then closes with a private-key JWK
 import segment: a fixed ed25519 private JWK is read back
 through a JSON wire round-trip with `importPrivateKeyJwk` and
 completes an ed25519 sign -> verify round-trip — the asymmetric
@@ -5372,7 +5379,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2472 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2473 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

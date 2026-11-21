@@ -1463,6 +1463,7 @@ import {
 import {
   addResponseSignature,
   addSignature,
+  algMatchesKeyShape,
   assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
@@ -1473,6 +1474,7 @@ import {
   contentDigestAlgOf,
   createVerifiedFetchHandler,
   createVerifiedHandler,
+  describeKey,
   exportPrivateKeyJwk,
   exportPrivateKeyJwkP256,
   exportPrivateKeyJwkP384,
@@ -1510,6 +1512,7 @@ import {
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
   importSymmetricKeyJwk,
+  inferAlgFromKeyShape,
   isVerifyError,
   jwkThumbprint,
   JwksKeyStore,
@@ -1672,6 +1675,31 @@ export const DEMO_HMAC_SECRET_GEN_FLOOR_ERROR =
  */
 export const DEMO_HMAC_SECRET_GEN_ROTATION_MISMATCH_CODE: VerifyFailureCode =
   "SIGNATURE_MISMATCH";
+/**
+ * Pinned `describeKey` wording for the demo's ed25519 signing
+ * key (backlog #1303): the helper names the key by shape only,
+ * never by bytes.
+ */
+export const DEMO_KEY_INTROSPECTION_ED25519_DESCRIPTION =
+  "an asymmetric ed25519 key";
+/** Pinned `inferAlgFromKeyShape` result for the ed25519 key. */
+export const DEMO_KEY_INTROSPECTION_ED25519_ALG = "ed25519";
+/**
+ * Pinned `describeKey` wording for the demo's P-256 signing key
+ * (backlog #1303): an EC key on the prime256v1 curve.
+ */
+export const DEMO_KEY_INTROSPECTION_P256_DESCRIPTION =
+  "an asymmetric ec key (prime256v1)";
+/** Pinned `inferAlgFromKeyShape` result for the P-256 key. */
+export const DEMO_KEY_INTROSPECTION_P256_ALG = "ecdsa-p256-sha256";
+/**
+ * Pinned `describeKey` wording for the generated HMAC secret
+ * (backlog #1303): a symmetric key, whatever its bytes.
+ */
+export const DEMO_KEY_INTROSPECTION_HMAC_DESCRIPTION =
+  "a secret (symmetric) key";
+/** Pinned `inferAlgFromKeyShape` result for the HMAC secret. */
+export const DEMO_KEY_INTROSPECTION_HMAC_ALG = "hmac-sha256";
 /**
  * Key id the private-key JWK segment signs under.
  */
@@ -7402,6 +7430,35 @@ export interface DemoResult {
    * `DEMO_HMAC_SECRET_GEN_ROTATION_MISMATCH_CODE`.
    */
   hmacSecretRotationOldSecretVerification: VerifyResult;
+  /**
+   * Key introspection (backlog #1303): `describeKey` names the
+   * demo's ed25519 signing key by shape only — no key bytes are
+   * recorded here.
+   */
+  keyIntrospectionEd25519Description: string;
+  /** `inferAlgFromKeyShape` result for the ed25519 key. */
+  keyIntrospectionEd25519Alg: string;
+  /**
+   * `describeKey` wording for the demo's P-256 signing key —
+   * shape only, no key bytes.
+   */
+  keyIntrospectionP256Description: string;
+  /** `inferAlgFromKeyShape` result for the P-256 key. */
+  keyIntrospectionP256Alg: string;
+  /**
+   * `describeKey` wording for the generated HMAC secret —
+   * shape only, never the secret bytes.
+   */
+  keyIntrospectionHmacDescription: string;
+  /** `inferAlgFromKeyShape` result for the HMAC secret. */
+  keyIntrospectionHmacAlg: string;
+  /**
+   * The mismatched pairing check: `algMatchesKeyShape("ed25519",
+   * hmacSecretGenKey)` is false — an HMAC secret is not an
+   * ed25519 key, so the caller learns the pairing is wrong
+   * before any crypto runs.
+   */
+  keyIntrospectionHmacAsEd25519: boolean;
   /**
    * The fixed ed25519 private JWK imported in the private-JWK
    * segment: only its shape is recorded here (kty/crv/kid) — the
@@ -17618,6 +17675,58 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Key introspection segment (backlog #1303): the key-generation
+  // segment mints keys and signs with them, but never says what
+  // kind of key each one is — a caller that picks the wrong alg
+  // for a key learns it only from the sign-side fail-fast. The
+  // three signing keys the demo already holds — the main ed25519
+  // private key, the P-256 private key, and the freshly generated
+  // HMAC secret — each describe themselves with `describeKey`
+  // (shape only, never key bytes) and map to their algorithm
+  // with `inferAlgFromKeyShape`; a mismatched pairing (the HMAC
+  // secret checked against `ed25519`) is shown as
+  // `algMatchesKeyShape` returning false, so the pairing is
+  // checked before signing instead of after a crypto failure.
+  // Every value is asserted against the hand-pinned
+  // `DEMO_KEY_INTROSPECTION_*` expectations — a mismatch throws
+  // instead of printing a misleading segment.
+  const keyIntrospectionEd25519Description = describeKey(privateKey);
+  const keyIntrospectionEd25519Alg = inferAlgFromKeyShape(privateKey);
+  const keyIntrospectionP256Description = describeKey(
+    p256KeyPair.privateKey,
+  );
+  const keyIntrospectionP256Alg = inferAlgFromKeyShape(
+    p256KeyPair.privateKey,
+  );
+  const keyIntrospectionHmacDescription = describeKey(hmacSecretGenKey);
+  const keyIntrospectionHmacAlg = inferAlgFromKeyShape(hmacSecretGenKey);
+  const keyIntrospectionHmacAsEd25519 = algMatchesKeyShape(
+    "ed25519",
+    hmacSecretGenKey,
+  );
+  if (
+    keyIntrospectionEd25519Description !==
+      DEMO_KEY_INTROSPECTION_ED25519_DESCRIPTION ||
+    keyIntrospectionEd25519Alg !== DEMO_KEY_INTROSPECTION_ED25519_ALG ||
+    keyIntrospectionP256Description !==
+      DEMO_KEY_INTROSPECTION_P256_DESCRIPTION ||
+    keyIntrospectionP256Alg !== DEMO_KEY_INTROSPECTION_P256_ALG ||
+    keyIntrospectionHmacDescription !==
+      DEMO_KEY_INTROSPECTION_HMAC_DESCRIPTION ||
+    keyIntrospectionHmacAlg !== DEMO_KEY_INTROSPECTION_HMAC_ALG ||
+    keyIntrospectionHmacAsEd25519 !== false
+  ) {
+    throw new Error(
+      `demo fixture broken: key introspection gave ed25519=${keyIntrospectionEd25519Description}/${keyIntrospectionEd25519Alg}, ` +
+        `P-256=${keyIntrospectionP256Description}/${keyIntrospectionP256Alg}, ` +
+        `HMAC=${keyIntrospectionHmacDescription}/${keyIntrospectionHmacAlg} ` +
+        `and HMAC-as-ed25519=${keyIntrospectionHmacAsEd25519}, instead of the pinned ` +
+        `${DEMO_KEY_INTROSPECTION_ED25519_DESCRIPTION}/${DEMO_KEY_INTROSPECTION_ED25519_ALG}, ` +
+        `${DEMO_KEY_INTROSPECTION_P256_DESCRIPTION}/${DEMO_KEY_INTROSPECTION_P256_ALG}, ` +
+        `${DEMO_KEY_INTROSPECTION_HMAC_DESCRIPTION}/${DEMO_KEY_INTROSPECTION_HMAC_ALG} and false`,
+    );
+  }
+
   // Private-key JWK import segment (backlog #1005): the JWK
   // segments above cover a public key (`importPublicKeyJwk`) and a
   // symmetric secret (`importSymmetricKeyJwk`), but a signing key
@@ -19397,6 +19506,12 @@ export async function runDemo(): Promise<DemoResult> {
       ? "Old secret verifying the rotated signature: OK (unexpected — the superseded secret was not supposed to verify a signature made after rotation)"
       : `Old secret verifying the rotated signature: FAILED (code ${hmacSecretRotationOldSecretVerification.code}: ${hmacSecretRotationOldSecretVerification.reason}) — the old secret no longer verifies a signature made after rotation`,
     "",
+    `Key introspection: describeKey names each signing key by shape and inferAlgFromKeyShape maps the shape to its algorithm — the pairing check a caller runs before signing, so a wrong alg is caught before any crypto runs; only shapes are printed, never key bytes`,
+    `ed25519 key: ${keyIntrospectionEd25519Description} -> alg "${keyIntrospectionEd25519Alg}"`,
+    `P-256 key: ${keyIntrospectionP256Description} -> alg "${keyIntrospectionP256Alg}"`,
+    `HMAC secret: ${keyIntrospectionHmacDescription} -> alg "${keyIntrospectionHmacAlg}"`,
+    `Mismatched pairing: algMatchesKeyShape("ed25519", HMAC secret) is ${keyIntrospectionHmacAsEd25519} — an HMAC secret is not an ed25519 key, so the pairing is refused before signing`,
+    "",
     `Private-key JWK import: a fixed ed25519 private JWK is read back through a JSON wire round-trip with importPrivateKeyJwk — the asymmetric half of JWK key distribution, for KMS-exported signing keys; the private key material itself is never printed`,
     `Private JWK: kty="OKP" crv="Ed25519" kid="${DEMO_PRIVATE_JWK_KEY_ID}" (d and x are never printed)`,
     privateJwkVerification.ok
@@ -19881,6 +19996,13 @@ export async function runDemo(): Promise<DemoResult> {
     hmacSecretGenFloorError,
     hmacSecretRotationVerification,
     hmacSecretRotationOldSecretVerification,
+    keyIntrospectionEd25519Description,
+    keyIntrospectionEd25519Alg,
+    keyIntrospectionP256Description,
+    keyIntrospectionP256Alg,
+    keyIntrospectionHmacDescription,
+    keyIntrospectionHmacAlg,
+    keyIntrospectionHmacAsEd25519,
     privateJwkKty: DEMO_PRIVATE_JWK.kty,
     privateJwkCrv: DEMO_PRIVATE_JWK.crv,
     privateJwkKid: DEMO_PRIVATE_JWK.kid,
