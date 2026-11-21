@@ -84,7 +84,15 @@ with a Decimal member, an Integer Item with leading zeros, a
 Dictionary Byte Sequence member) are run through
 `canonicalizeStructuredFieldValue` and printed as raw -> canonical
 pairs — the canonical form is what a verifier actually compares
-for a `;sf` covered component. The demo closes with a
+for a `;sf` covered component. The demo closes with an
+explicit-type canonicalization segment: two fixed field values are
+each canonicalized once per pinned type with
+`canonicalizeStructuredFieldValueAs` — `"a=1, b=2"` is a Dictionary
+but fails closed as a List and as an Item, while `"007"` is not a
+Dictionary but canonicalizes to `7` as a List and as an Item — and
+each is cross-checked against the trial-order
+`canonicalizeStructuredFieldValue` result, with an empty value
+shown refused for every pinned type. The demo closes with a
 dictionary-member extraction segment: one fixed multi-member
 Dictionary value is run through `serializeDictionaryMemberValue`
 once per fixed key (an Integer member, a member with parameters, a

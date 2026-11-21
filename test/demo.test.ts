@@ -58,6 +58,8 @@ import {
   parseSignatureInput,
   ReplayCache,
   buildSignatureBase,
+  canonicalizeStructuredFieldValue,
+  canonicalizeStructuredFieldValueAs,
   contentDigest,
   createVerifiedFetchHandler,
   createVerifiedHandler,
@@ -188,6 +190,8 @@ import {
   DEMO_KEY_REGISTRY_COMPONENT,
   DEMO_KEY_REGISTRY_LIST_SIGN_ERROR,
   DEMO_SF_CANONICALIZATION,
+  DEMO_SF_EXPLICIT_TYPE,
+  DEMO_SF_EXPLICIT_TYPE_EMPTY_ERROR,
   DEMO_SF_TYPES_BY_LABEL_COVERED,
   DEMO_SF_TYPES_BY_LABEL_CREATED,
   DEMO_SF_TYPES_BY_LABEL_DICT_VALUE,
@@ -1634,15 +1638,131 @@ test("demo lines contain the canonicalization segment (raw -> canonical pairs)",
   assert.ok(out.includes("Canonicalize dictionary-decimal: limit=1500, remaining=1.5 -> limit=1500, remaining=1.500"));
   assert.ok(out.includes("Canonicalize item-leading-zero-integer: 007 -> 7"));
   assert.ok(out.includes("Canonicalize dictionary-byte-sequence: sig=:aGVsbG8=:;x=?0 -> sig=:aGVsbG8=:;x=?0"));
-  // The canonicalization segment is followed by the member-extraction
+  // The canonicalization segment is followed by the explicit-type
   // segment: its header comes after the last canonicalization pair.
   const canonIdx = lines.findIndex((l) =>
     l.startsWith("Canonicalize dictionary-byte-sequence:"),
   );
+  const explicitIdx = lines.findIndex((l) =>
+    l.startsWith("Explicit-type canonicalization (;sf):"),
+  );
+  assert.ok(canonIdx !== -1 && explicitIdx !== -1 && canonIdx < explicitIdx);
+});
+
+test("demo explicit-type canonicalization segment pins each fixed value per type and cross-checks the trial order", async () => {
+  const { sfExplicitTypeCanonicalization, sfExplicitTypeEmptyError } =
+    await runDemo();
+
+  // Expectations are the literal values pinned in
+  // DEMO_SF_EXPLICIT_TYPE (hand-derived from the live behavior
+  // probed before the segment was written) — the test pins them
+  // again here so a drift in either place fails loudly.
+  assert.deepEqual(sfExplicitTypeCanonicalization, [
+    {
+      input: "a=1, b=2",
+      dictionary: { ok: true, value: "a=1, b=2" },
+      list: {
+        ok: false,
+        value:
+          'not a valid List Structured Field value: expected "," between list members (at offset 1)',
+      },
+      item: {
+        ok: false,
+        value:
+          "not a valid Item Structured Field value: trailing characters after item",
+      },
+      auto: "a=1, b=2",
+    },
+    {
+      input: "007",
+      dictionary: {
+        ok: false,
+        value:
+          'not a valid Dictionary Structured Field value: expected a key (lowercase letter or "*") (at offset 0)',
+      },
+      list: { ok: true, value: "7" },
+      item: { ok: true, value: "7" },
+      auto: "7",
+    },
+  ]);
+  assert.deepEqual(
+    DEMO_SF_EXPLICIT_TYPE.map((c) => c.auto),
+    sfExplicitTypeCanonicalization.map((c) => c.auto),
+  );
+
+  // Re-derive every outcome independently, outside the demo: the
+  // same value under the same pinned type must give the same
+  // canonical form or the same fail-closed message, and the trial
+  // order must agree with the pinned `auto` value.
+  for (const c of DEMO_SF_EXPLICIT_TYPE) {
+    for (const type of ["dictionary", "list", "item"] as const) {
+      let outcome: { ok: boolean; value: string };
+      try {
+        outcome = {
+          ok: true,
+          value: canonicalizeStructuredFieldValueAs(c.input, type),
+        };
+      } catch (err) {
+        outcome = {
+          ok: false,
+          value: err instanceof Error ? err.message : String(err),
+        };
+      }
+      assert.deepEqual(outcome, c[type]);
+    }
+    assert.equal(canonicalizeStructuredFieldValue(c.input), c.auto);
+  }
+
+  // An empty value fails closed for every pinned type with the
+  // same message the demo prints.
+  assert.equal(
+    DEMO_SF_EXPLICIT_TYPE_EMPTY_ERROR,
+    "empty value is not a valid Structured Field",
+  );
+  assert.equal(sfExplicitTypeEmptyError, DEMO_SF_EXPLICIT_TYPE_EMPTY_ERROR);
+  for (const type of ["dictionary", "list", "item"] as const) {
+    assert.throws(
+      () => canonicalizeStructuredFieldValueAs("", type),
+      { message: DEMO_SF_EXPLICIT_TYPE_EMPTY_ERROR },
+    );
+  }
+});
+
+test("demo lines contain the explicit-type canonicalization segment (per-type outcomes, trial-order cross-check, empty refusal)", async () => {
+  const first = await runDemo();
+  const { lines } = first;
+  const out = lines.join("\n");
+
+  assert.match(out, /Explicit-type canonicalization \(;sf\): the same field value canonicalizes differently/);
+  assert.ok(out.includes('Explicit type for "a=1, b=2" as dictionary: a=1, b=2'));
+  assert.ok(out.includes('Explicit type for "a=1, b=2" as list: FAILED (not a valid List Structured Field value: expected "," between list members (at offset 1))'));
+  assert.ok(out.includes('Explicit type for "a=1, b=2" as item: FAILED (not a valid Item Structured Field value: trailing characters after item)'));
+  assert.ok(out.includes('Explicit type for "a=1, b=2" with no pinned type (trial order): a=1, b=2'));
+  assert.ok(out.includes('Explicit type for "007" as dictionary: FAILED (not a valid Dictionary Structured Field value: expected a key (lowercase letter or "*") (at offset 0))'));
+  assert.ok(out.includes('Explicit type for "007" as list: 7'));
+  assert.ok(out.includes('Explicit type for "007" as item: 7'));
+  assert.ok(out.includes('Explicit type for "007" with no pinned type (trial order): 7'));
+  assert.ok(out.includes("Explicit type for an empty value: FAILED (empty value is not a valid Structured Field)"));
+  // The explicit-type segment sits between the canonicalization
+  // segment and the member-extraction segment.
+  const explicitIdx = lines.findIndex((l) =>
+    l.startsWith("Explicit-type canonicalization (;sf):"),
+  );
   const extractIdx = lines.findIndex((l) =>
     l.startsWith("Dictionary-member extraction (;key):"),
   );
-  assert.ok(canonIdx !== -1 && extractIdx !== -1 && canonIdx < extractIdx);
+  assert.ok(explicitIdx !== -1 && extractIdx !== -1 && explicitIdx < extractIdx);
+  // The new lines are byte-identical between runs: only fixed
+  // constants are printed, never fresh key material or a clock.
+  const second = await runDemo();
+  const start = (ls: ReadonlyArray<string>): number =>
+    ls.findIndex((l) => l.startsWith("Explicit-type canonicalization (;sf):"));
+  const end = (ls: ReadonlyArray<string>): number =>
+    ls.findIndex((l) => l.startsWith("Dictionary-member extraction (;key):"));
+  assert.deepEqual(
+    first.lines.slice(start(first.lines), end(first.lines)),
+    second.lines.slice(start(second.lines), end(second.lines)),
+  );
 });
 
 test("demo member-extraction segment extracts the fixed keys to the hand-pinned values", async () => {
@@ -2354,6 +2474,13 @@ test("compiled demo script exits 0 and prints success plus tamper rejection", ()
   assert.match(out, /Structured-field canonicalization \(;sf\):/);
   assert.match(out, /Canonicalize dictionary-decimal: limit=1500, remaining=1\.5 -> limit=1500, remaining=1\.500/);
   assert.match(out, /Canonicalize item-leading-zero-integer: 007 -> 7/);
+  assert.match(out, /Explicit-type canonicalization \(;sf\):/);
+  assert.match(out, /Explicit type for "a=1, b=2" as dictionary: a=1, b=2/);
+  assert.match(out, /Explicit type for "a=1, b=2" as list: FAILED \(not a valid List Structured Field value: expected "," between list members \(at offset 1\)\)/);
+  assert.match(out, /Explicit type for "a=1, b=2" as item: FAILED \(not a valid Item Structured Field value: trailing characters after item\)/);
+  assert.match(out, /Explicit type for "007" as dictionary: FAILED \(not a valid Dictionary Structured Field value: expected a key \(lowercase letter or "\*"\) \(at offset 0\)\)/);
+  assert.match(out, /Explicit type for "007" as list: 7/);
+  assert.match(out, /Explicit type for an empty value: FAILED \(empty value is not a valid Structured Field\)/);
   assert.match(out, /Dictionary-member extraction \(;key\):/);
   assert.match(out, /Extract member a: 1/);
   assert.match(out, /Extract member b: 2;x=1;y=2/);

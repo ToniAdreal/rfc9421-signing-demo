@@ -61,6 +61,18 @@
  * fractional digits, leading-zero Integers collapse, Byte Sequences
  * are re-encoded). Every input and expectation is a fixed constant,
  * so the segment is byte-identical between runs.
+ * The demo closes with an explicit-type canonicalization segment:
+ * two fixed field values are each canonicalized once per pinned
+ * type with `canonicalizeStructuredFieldValueAs` — `"a=1, b=2"` is
+ * a Dictionary but fails closed as a List and as an Item, while
+ * `"007"` is not a Dictionary but canonicalizes to `7` as a List
+ * and as an Item — and each is cross-checked against the
+ * trial-order `canonicalizeStructuredFieldValue` result, so the
+ * reader sees both that a pinned type removes the trial order's
+ * ambiguity and that a wrong type is a refusal, not a silent
+ * re-parse. An empty value is shown refused for every pinned type.
+ * Every input and expectation is a fixed constant, so the segment
+ * is byte-identical between runs.
  * The demo closes with a dictionary-member extraction segment:
  * one fixed multi-member Dictionary value is run through
  * `serializeDictionaryMemberValue` once per fixed key (an Integer
@@ -1470,6 +1482,7 @@ import {
   buildJwksDocument,
   buildSignatureBase,
   canonicalizeStructuredFieldValue,
+  canonicalizeStructuredFieldValueAs,
   contentDigest,
   contentDigestAlgOf,
   createVerifiedFetchHandler,
@@ -1858,6 +1871,67 @@ export const DEMO_SF_CANONICALIZATION: ReadonlyArray<{
     expected: "sig=:aGVsbG8=:;x=?0",
   },
 ];
+/**
+ * Fixed corpus of the explicit-type canonicalization segment: each
+ * value is canonicalized once per pinned type with
+ * `canonicalizeStructuredFieldValueAs`, plus the trial-order
+ * `canonicalizeStructuredFieldValue` result it must agree with.
+ * Every expected outcome is hand-pinned from the live behavior
+ * probed before this segment was written (backlog #1308) — the demo
+ * never derives an expectation from the function it demonstrates:
+ * - `"a=1, b=2"` is a Dictionary (`a=1, b=2`); as a List it fails
+ *   closed (`expected "," between list members (at offset 1)`)
+ *   and as an Item it fails closed (`trailing characters after
+ *   item`), so the three explicit types give three different
+ *   outcomes for the same value. The trial order agrees with the
+ *   Dictionary result (Dictionary is tried first).
+ * - `"007"` is not a Dictionary (a key must start with a lowercase
+ *   letter or `"*"`); as a List and as an Item it canonicalizes to
+ *   the Integer `7`. The trial order agrees (`7`), because the
+ *   Dictionary attempt fails and the List attempt succeeds.
+ */
+export const DEMO_SF_EXPLICIT_TYPE: ReadonlyArray<{
+  input: string;
+  dictionary: { ok: boolean; value: string };
+  list: { ok: boolean; value: string };
+  item: { ok: boolean; value: string };
+  auto: string;
+}> = [
+  {
+    input: "a=1, b=2",
+    dictionary: { ok: true, value: "a=1, b=2" },
+    list: {
+      ok: false,
+      value:
+        'not a valid List Structured Field value: expected "," between list members (at offset 1)',
+    },
+    item: {
+      ok: false,
+      value:
+        "not a valid Item Structured Field value: trailing characters after item",
+    },
+    auto: "a=1, b=2",
+  },
+  {
+    input: "007",
+    dictionary: {
+      ok: false,
+      value:
+        'not a valid Dictionary Structured Field value: expected a key (lowercase letter or "*") (at offset 0)',
+    },
+    list: { ok: true, value: "7" },
+    item: { ok: true, value: "7" },
+    auto: "7",
+  },
+];
+/**
+ * Exact refusal when the explicit-type segment canonicalizes an
+ * empty value: every pinned type fails closed with the same message,
+ * so an empty field value never silently canonicalizes to an empty
+ * signature base component.
+ */
+export const DEMO_SF_EXPLICIT_TYPE_EMPTY_ERROR =
+  "empty value is not a valid Structured Field";
 /**
  * Fixed Dictionary value of the closing member-extraction segment:
  * the same multi-member value pinned in the bench corpus for
@@ -5285,6 +5359,27 @@ export interface DemoResult {
     input: string;
     canonical: string;
   }>;
+  /**
+   * The explicit-type canonicalization segment's results: each fixed
+   * input canonicalized once per pinned type
+   * (`canonicalizeStructuredFieldValueAs`), plus the trial-order
+   * `canonicalizeStructuredFieldValue` result it must agree with.
+   * A type outcome is `{ ok: true, value }` with the canonical form,
+   * or `{ ok: false, value }` with the fail-closed error message.
+   */
+  sfExplicitTypeCanonicalization: ReadonlyArray<{
+    input: string;
+    dictionary: { ok: boolean; value: string };
+    list: { ok: boolean; value: string };
+    item: { ok: boolean; value: string };
+    auto: string;
+  }>;
+  /**
+   * Error message thrown when the explicit-type segment
+   * canonicalizes an empty value (empty only if the call
+   * unexpectedly did not throw, which the demo tests reject).
+   */
+  sfExplicitTypeEmptyError: string;
   /**
    * The closing member-extraction segment's results: each fixed
    * key paired with its `serializeDictionaryMemberValue` output
@@ -10132,6 +10227,58 @@ export async function runDemo(): Promise<DemoResult> {
     input: c.input,
     canonical: canonicalizeStructuredFieldValue(c.input),
   }));
+
+  // Explicit-type canonicalization segment: the same field value
+  // canonicalizes differently — or fails closed — depending on the
+  // type the caller pins with `canonicalizeStructuredFieldValueAs`,
+  // which is the only way to remove the trial order's ambiguity:
+  // a gateway that knows a field is a Dictionary never silently
+  // signs it as a List. Each outcome is asserted here against the
+  // hand-pinned `DEMO_SF_EXPLICIT_TYPE` expectations, and the
+  // trial-order result against the pinned `auto` value — a mismatch
+  // throws instead of printing a misleading segment. An empty value
+  // fails closed for every pinned type; only the Dictionary
+  // refusal is printed, as one line.
+  const explicitTypeAs = (
+    input: string,
+    type: "dictionary" | "list" | "item",
+  ): { ok: boolean; value: string } => {
+    try {
+      return { ok: true, value: canonicalizeStructuredFieldValueAs(input, type) };
+    } catch (err) {
+      return { ok: false, value: err instanceof Error ? err.message : String(err) };
+    }
+  };
+  const sfExplicitTypeCanonicalization = DEMO_SF_EXPLICIT_TYPE.map((c) => {
+    const dictionary = explicitTypeAs(c.input, "dictionary");
+    const list = explicitTypeAs(c.input, "list");
+    const item = explicitTypeAs(c.input, "item");
+    const auto = canonicalizeStructuredFieldValue(c.input);
+    if (
+      dictionary.ok !== c.dictionary.ok ||
+      dictionary.value !== c.dictionary.value ||
+      list.ok !== c.list.ok ||
+      list.value !== c.list.value ||
+      item.ok !== c.item.ok ||
+      item.value !== c.item.value ||
+      auto !== c.auto
+    ) {
+      throw new Error(
+        `explicit-type canonicalization mismatch for ${JSON.stringify(c.input)}`,
+      );
+    }
+    return { input: c.input, dictionary, list, item, auto };
+  });
+  let sfExplicitTypeEmptyError = "";
+  try {
+    canonicalizeStructuredFieldValueAs("", "dictionary");
+  } catch (err) {
+    sfExplicitTypeEmptyError =
+      err instanceof Error ? err.message : String(err);
+  }
+  if (sfExplicitTypeEmptyError !== DEMO_SF_EXPLICIT_TYPE_EMPTY_ERROR) {
+    throw new Error("explicit-type empty-value canonicalization mismatch");
+  }
 
   // Member-extraction segment: a `;key` covered component does not
   // contribute the whole Dictionary field — it contributes only the
@@ -18721,6 +18868,15 @@ export async function runDemo(): Promise<DemoResult> {
       (c) => `Canonicalize ${c.name}: ${c.input} -> ${c.canonical}`,
     ),
     "",
+    "Explicit-type canonicalization (;sf): the same field value canonicalizes differently — or fails closed — depending on the type the caller pins, so a gateway that knows a field is a Dictionary never silently signs it as a List",
+    ...sfExplicitTypeCanonicalization.flatMap((c) => [
+      `Explicit type for "${c.input}" as dictionary: ${c.dictionary.ok ? c.dictionary.value : `FAILED (${c.dictionary.value})`}`,
+      `Explicit type for "${c.input}" as list: ${c.list.ok ? c.list.value : `FAILED (${c.list.value})`}`,
+      `Explicit type for "${c.input}" as item: ${c.item.ok ? c.item.value : `FAILED (${c.item.value})`}`,
+      `Explicit type for "${c.input}" with no pinned type (trial order): ${c.auto}`,
+    ]),
+    `Explicit type for an empty value: FAILED (${sfExplicitTypeEmptyError})`,
+    "",
     "Dictionary-member extraction (;key): a ;key covered component contributes only the named member, re-serialized without its Dictionary key",
     `Dictionary: ${DEMO_DICT_MEMBER_VALUE}`,
     ...dictMemberExtraction.map(
@@ -19617,6 +19773,8 @@ export async function runDemo(): Promise<DemoResult> {
     thumbprintSigned,
     thumbprintVerification,
     sfCanonicalization,
+    sfExplicitTypeCanonicalization,
+    sfExplicitTypeEmptyError,
     dictMemberExtraction,
     dictMemberMissingKeyError,
     keyRegistryUnregisteredVerification,
