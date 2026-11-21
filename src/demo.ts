@@ -1355,6 +1355,20 @@
  * printed rejected with the pinned caller-configuration error.
  * Only the JWK's shape (kty/crv) is printed, never the `d` or
  * `x` bytes, so the segment is byte-identical between runs.
+ * A per-curve private-key JWK export segment follows it: the
+ * ed25519 segment shows the generic exporter, but P-256, P-384,
+ * P-521 and RSA keys each have their own exporter
+ * (`exportPrivateKeyJwkP256` / `exportPrivateKeyJwkP384` /
+ * `exportPrivateKeyJwkP521` / `exportPrivateKeyJwkRsa`), and this
+ * segment exports one fresh key pair per curve, carries each
+ * through a JSON wire round-trip, reads it back with the shared
+ * `importPrivateKeyJwk` — there are no per-curve importers, the
+ * one importer dispatches on `kty`/`crv`, as the exporters'
+ * docstrings state — and asserts the re-export byte-identical
+ * member for member outside the print path. Only each JWK's shape
+ * is printed (kty/crv for the EC curves, kty plus the `n` length
+ * for RSA), never any key material, so the segment is
+ * byte-identical between runs.
  * Right after the main line's verification, the demo also prints a
  * signature-base segment: the RFC 9421 §2.5 signature base of the
  * main signed request — the exact string that was signed — rebuilt
@@ -1460,6 +1474,10 @@ import {
   createVerifiedFetchHandler,
   createVerifiedHandler,
   exportPrivateKeyJwk,
+  exportPrivateKeyJwkP256,
+  exportPrivateKeyJwkP384,
+  exportPrivateKeyJwkP521,
+  exportPrivateKeyJwkRsa,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -7386,6 +7404,27 @@ export interface DemoResult {
    * `DEMO_PRIVATE_JWK_EXPORT_PUBLIC_KEY_ERROR`.
    */
   privateJwkExportPublicKeyError: string;
+  /**
+   * The per-curve private JWK shapes from the per-curve export
+   * segment, in curve order P-256, P-384, P-521, RSA: kty per
+   * curve (`EC`, `EC`, `EC`, `RSA`) and crv per curve (`P-256`,
+   * `P-384`, `P-521`, `RSA` — RSA carries no `crv`, so its own
+   * `kty` stands in). The key material itself never leaves this
+   * file's locals.
+   */
+  perCurvePrivateJwkKty: string[];
+  perCurvePrivateJwkCrv: string[];
+  /**
+   * Length in base64url characters of the RSA private JWK's `n`
+   * (342 for a 2048-bit modulus) — the only RSA member whose size
+   * is printed; the modulus bytes themselves are never printed.
+   */
+  perCurvePrivateJwkRsaNLength: number;
+  /**
+   * Whether all four per-curve round-trips re-exported
+   * byte-identical (true — the segment throws otherwise).
+   */
+  perCurvePrivateJwkRoundTripsOk: boolean;
   /**
    * Status the verified-handler loopback answered for the signed
    * request (200 — the business handler ran).
@@ -17617,6 +17656,121 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Per-curve private-key JWK export segment (backlog #1300): the
+  // ed25519 export segment above shows the generic exporter; this
+  // one shows the per-curve exporters — one fresh key pair per
+  // curve, each carried through a JSON wire round-trip and read
+  // back with the shared `importPrivateKeyJwk` (there are no
+  // per-curve importers: the one importer dispatches on
+  // `kty`/`crv`, as the exporters' docstrings state), then
+  // re-exported and asserted byte-identical member for member
+  // outside the print path. Only each JWK's shape is printed —
+  // kty/crv for the EC curves, kty plus the `n` length for RSA —
+  // never any key material, so the segment is byte-identical
+  // between runs.
+  const perCurvePrivateJwkP256Pair = generateP256KeyPair();
+  const perCurvePrivateJwkP256Exported = exportPrivateKeyJwkP256(
+    perCurvePrivateJwkP256Pair.privateKey,
+  );
+  const perCurvePrivateJwkP256Reimported = importPrivateKeyJwk(
+    JSON.parse(JSON.stringify(perCurvePrivateJwkP256Exported)) as unknown,
+  );
+  const perCurvePrivateJwkP256Reexported = exportPrivateKeyJwkP256(
+    perCurvePrivateJwkP256Reimported,
+  );
+  const perCurvePrivateJwkP384Pair = generateP384KeyPair();
+  const perCurvePrivateJwkP384Exported = exportPrivateKeyJwkP384(
+    perCurvePrivateJwkP384Pair.privateKey,
+  );
+  const perCurvePrivateJwkP384Reimported = importPrivateKeyJwk(
+    JSON.parse(JSON.stringify(perCurvePrivateJwkP384Exported)) as unknown,
+  );
+  const perCurvePrivateJwkP384Reexported = exportPrivateKeyJwkP384(
+    perCurvePrivateJwkP384Reimported,
+  );
+  const perCurvePrivateJwkP521Pair = generateP521KeyPair();
+  const perCurvePrivateJwkP521Exported = exportPrivateKeyJwkP521(
+    perCurvePrivateJwkP521Pair.privateKey,
+  );
+  const perCurvePrivateJwkP521Reimported = importPrivateKeyJwk(
+    JSON.parse(JSON.stringify(perCurvePrivateJwkP521Exported)) as unknown,
+  );
+  const perCurvePrivateJwkP521Reexported = exportPrivateKeyJwkP521(
+    perCurvePrivateJwkP521Reimported,
+  );
+  const perCurvePrivateJwkRsaPair = generateRsaPssKeyPair();
+  const perCurvePrivateJwkRsaExported = exportPrivateKeyJwkRsa(
+    perCurvePrivateJwkRsaPair.privateKey,
+  );
+  const perCurvePrivateJwkRsaReimported = importPrivateKeyJwk(
+    JSON.parse(JSON.stringify(perCurvePrivateJwkRsaExported)) as unknown,
+  );
+  const perCurvePrivateJwkRsaReexported = exportPrivateKeyJwkRsa(
+    perCurvePrivateJwkRsaReimported,
+  );
+  const perCurvePrivateJwkP256Match =
+    perCurvePrivateJwkP256Reexported.kty === "EC" &&
+    perCurvePrivateJwkP256Reexported.crv === "P-256" &&
+    perCurvePrivateJwkP256Reexported.x ===
+      perCurvePrivateJwkP256Exported.x &&
+    perCurvePrivateJwkP256Reexported.y ===
+      perCurvePrivateJwkP256Exported.y &&
+    perCurvePrivateJwkP256Reexported.d ===
+      perCurvePrivateJwkP256Exported.d &&
+    perCurvePrivateJwkP256Reimported.type === "private" &&
+    perCurvePrivateJwkP256Reimported.asymmetricKeyType === "ec";
+  const perCurvePrivateJwkP384Match =
+    perCurvePrivateJwkP384Reexported.kty === "EC" &&
+    perCurvePrivateJwkP384Reexported.crv === "P-384" &&
+    perCurvePrivateJwkP384Reexported.x ===
+      perCurvePrivateJwkP384Exported.x &&
+    perCurvePrivateJwkP384Reexported.y ===
+      perCurvePrivateJwkP384Exported.y &&
+    perCurvePrivateJwkP384Reexported.d ===
+      perCurvePrivateJwkP384Exported.d &&
+    perCurvePrivateJwkP384Reimported.type === "private" &&
+    perCurvePrivateJwkP384Reimported.asymmetricKeyType === "ec";
+  const perCurvePrivateJwkP521Match =
+    perCurvePrivateJwkP521Reexported.kty === "EC" &&
+    perCurvePrivateJwkP521Reexported.crv === "P-521" &&
+    perCurvePrivateJwkP521Reexported.x ===
+      perCurvePrivateJwkP521Exported.x &&
+    perCurvePrivateJwkP521Reexported.y ===
+      perCurvePrivateJwkP521Exported.y &&
+    perCurvePrivateJwkP521Reexported.d ===
+      perCurvePrivateJwkP521Exported.d &&
+    perCurvePrivateJwkP521Reimported.type === "private" &&
+    perCurvePrivateJwkP521Reimported.asymmetricKeyType === "ec";
+  const perCurvePrivateJwkRsaMatch =
+    perCurvePrivateJwkRsaReexported.kty === "RSA" &&
+    perCurvePrivateJwkRsaReexported.n === perCurvePrivateJwkRsaExported.n &&
+    perCurvePrivateJwkRsaReexported.e === perCurvePrivateJwkRsaExported.e &&
+    perCurvePrivateJwkRsaReexported.d === perCurvePrivateJwkRsaExported.d &&
+    perCurvePrivateJwkRsaReexported.p === perCurvePrivateJwkRsaExported.p &&
+    perCurvePrivateJwkRsaReexported.q === perCurvePrivateJwkRsaExported.q &&
+    perCurvePrivateJwkRsaReexported.dp ===
+      perCurvePrivateJwkRsaExported.dp &&
+    perCurvePrivateJwkRsaReexported.dq ===
+      perCurvePrivateJwkRsaExported.dq &&
+    perCurvePrivateJwkRsaReexported.qi ===
+      perCurvePrivateJwkRsaExported.qi &&
+    perCurvePrivateJwkRsaReimported.type === "private" &&
+    perCurvePrivateJwkRsaReimported.asymmetricKeyType === "rsa";
+  const perCurvePrivateJwkRoundTripsOk =
+    perCurvePrivateJwkP256Match &&
+    perCurvePrivateJwkP384Match &&
+    perCurvePrivateJwkP521Match &&
+    perCurvePrivateJwkRsaMatch;
+  if (!perCurvePrivateJwkRoundTripsOk) {
+    throw new Error(
+      `demo fixture broken: per-curve private JWK export segment gave P-256 match=${perCurvePrivateJwkP256Match} (exported ${perCurvePrivateJwkP256Exported.kty}/${perCurvePrivateJwkP256Exported.crv}), ` +
+        `P-384 match=${perCurvePrivateJwkP384Match} (exported ${perCurvePrivateJwkP384Exported.kty}/${perCurvePrivateJwkP384Exported.crv}), ` +
+        `P-521 match=${perCurvePrivateJwkP521Match} (exported ${perCurvePrivateJwkP521Exported.kty}/${perCurvePrivateJwkP521Exported.crv}), ` +
+        `RSA match=${perCurvePrivateJwkRsaMatch} (exported ${perCurvePrivateJwkRsaExported.kty}, n length ${perCurvePrivateJwkRsaExported.n.length}), ` +
+        `instead of four wire round-trips whose re-exports are byte-identical member for member`,
+    );
+  }
+
   // Verified-handler segment (backlog #1047): the last loopback
   // segment, and the server-side twin of the request-side sign -> verify
   // story the demo opened with. A real loopback server runs
@@ -19136,6 +19290,13 @@ export async function runDemo(): Promise<DemoResult> {
       : `Private JWK export round-trip verification: FAILED (code ${privateJwkExportVerification.code}: ${privateJwkExportVerification.reason})`,
     `Public key rejected at private export: ${privateJwkExportPublicKeyError}`,
     "",
+    `Per-curve private-key JWK export: P-256, P-384, P-521 and RSA keys are exported with exportPrivateKeyJwkP256/P384/P521/Rsa, carried through a JSON wire round-trip and read back with the shared importPrivateKeyJwk — the same generate -> export -> wire -> import loop as the ed25519 segment, per curve; only the JWK shapes are printed, never the key material`,
+    `P-256 private JWK: kty="EC" crv="P-256" (x, y and d are never printed)`,
+    `P-384 private JWK: kty="EC" crv="P-384" (x, y and d are never printed)`,
+    `P-521 private JWK: kty="EC" crv="P-521" (x, y and d are never printed)`,
+    `RSA private JWK: kty="RSA" n length ${perCurvePrivateJwkRsaExported.n.length} chars (2048-bit modulus; d, p, q, dp, dq and qi are never printed)`,
+    `Per-curve private JWK round-trips: 4/4 re-exports byte-identical (P-256, P-384, P-521, RSA)`,
+    "",
     `Verified handler: a real loopback server runs createVerifiedHandler — it verifies each request before the business handler runs, so a signed request reaches the handler while a bad or missing signature never does`,
     `Signed request to the verified handler: ${verifiedHandler.signedStatus} (verified, business handler ran)`,
     `Tampered signature to the verified handler: ${verifiedHandler.tamperedStatus} (code ${verifiedHandler.tamperedCode})`,
@@ -19606,6 +19767,20 @@ export async function runDemo(): Promise<DemoResult> {
     privateJwkExportCrv: privateJwkExported.crv,
     privateJwkExportVerification,
     privateJwkExportPublicKeyError,
+    perCurvePrivateJwkKty: [
+      perCurvePrivateJwkP256Exported.kty,
+      perCurvePrivateJwkP384Exported.kty,
+      perCurvePrivateJwkP521Exported.kty,
+      perCurvePrivateJwkRsaExported.kty,
+    ],
+    perCurvePrivateJwkCrv: [
+      perCurvePrivateJwkP256Exported.crv,
+      perCurvePrivateJwkP384Exported.crv,
+      perCurvePrivateJwkP521Exported.crv,
+      perCurvePrivateJwkRsaExported.kty,
+    ],
+    perCurvePrivateJwkRsaNLength: perCurvePrivateJwkRsaExported.n.length,
+    perCurvePrivateJwkRoundTripsOk,
     verifiedHandlerSignedStatus: verifiedHandler.signedStatus,
     verifiedHandlerTamperedStatus: verifiedHandler.tamperedStatus,
     verifiedHandlerTamperedCode: verifiedHandler.tamperedCode,

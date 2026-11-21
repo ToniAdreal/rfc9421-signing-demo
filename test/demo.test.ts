@@ -20,6 +20,10 @@ import {
   assertHmacSecretLength,
   assertRsaModulusLength,
   exportPrivateKeyJwk,
+  exportPrivateKeyJwkP256,
+  exportPrivateKeyJwkP384,
+  exportPrivateKeyJwkP521,
+  exportPrivateKeyJwkRsa,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
   exportPublicKeyJwkP384,
@@ -8915,8 +8919,8 @@ test("demo private-key JWK export round-trip segment exports a fresh key, re-imp
   );
 
   // Ordering: the segment follows the private-key JWK import
-  // segment and is followed by the verified-handler segment
-  // (blank separator, then its header) — byte-exact lines.
+  // segment and is followed by the per-curve private-key JWK
+  // export segment (backlog #1300) — byte-exact lines.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("Private-key JWK export round-trip:"),
   );
@@ -8933,7 +8937,9 @@ test("demo private-key JWK export round-trip segment exports a fresh key, re-imp
   ]);
   assert.equal(lines[headerIdx + 4], "");
   assert.ok(
-    lines[headerIdx + 5]!.startsWith("Verified handler:"),
+    lines[headerIdx + 5]!.startsWith(
+      "Per-curve private-key JWK export:",
+    ),
   );
 
   // Double-run determinism: only the JWK shape, verdicts and the
@@ -8943,6 +8949,160 @@ test("demo private-key JWK export round-trip segment exports a fresh key, re-imp
   const second = await runDemo();
   const start = (ls: string[]) =>
     ls.findIndex((l) => l.startsWith("Private-key JWK export round-trip:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Verified handler:"));
+  assert.ok(start(lines) !== -1 && end(lines) !== -1);
+  assert.ok(start(second.lines) !== -1 && end(second.lines) !== -1);
+  assert.deepEqual(
+    lines.slice(start(lines), end(lines)),
+    second.lines.slice(start(second.lines), end(second.lines)),
+  );
+});
+
+test("demo per-curve private-key JWK export segment exports P-256/P-384/P-521/RSA keys, re-imports them with the shared importer, and re-exports byte-identical", async () => {
+  const {
+    lines,
+    perCurvePrivateJwkKty,
+    perCurvePrivateJwkCrv,
+    perCurvePrivateJwkRsaNLength,
+    perCurvePrivateJwkRoundTripsOk,
+  } = await runDemo();
+  const out = lines.join("\n");
+
+  // The exported JWKs' shapes: EC per curve, RSA with no crv —
+  // the key material itself never appears in the result.
+  assert.deepEqual(perCurvePrivateJwkKty, ["EC", "EC", "EC", "RSA"]);
+  assert.deepEqual(perCurvePrivateJwkCrv, [
+    "P-256",
+    "P-384",
+    "P-521",
+    "RSA",
+  ]);
+  assert.equal(perCurvePrivateJwkRsaNLength, 342);
+  assert.equal(perCurvePrivateJwkRoundTripsOk, true);
+
+  // Independent re-derivation: one fresh key pair per curve,
+  // exported with its per-curve exporter, carried through a JSON
+  // wire round-trip and read back with the shared
+  // importPrivateKeyJwk, re-exports byte-identical member for
+  // member — the loop preserves the key — and the re-imported key
+  // is a private key of the right family. The round-trip is the
+  // library's behavior, not a fixture echo. (There are no
+  // per-curve importers: the one importer dispatches on kty/crv.)
+  const p256Pair = generateP256KeyPair();
+  const p256Exported = exportPrivateKeyJwkP256(p256Pair.privateKey);
+  const p256Reimported = importPrivateKeyJwk(
+    JSON.parse(JSON.stringify(p256Exported)) as unknown,
+  );
+  assert.equal(p256Reimported.type, "private");
+  assert.equal(p256Reimported.asymmetricKeyType, "ec");
+  const p256Reexported = exportPrivateKeyJwkP256(p256Reimported);
+  assert.equal(p256Reexported.kty, "EC");
+  assert.equal(p256Reexported.crv, "P-256");
+  assert.equal(p256Reexported.x, p256Exported.x);
+  assert.equal(p256Reexported.y, p256Exported.y);
+  assert.equal(p256Reexported.d, p256Exported.d);
+  const p384Pair = generateP384KeyPair();
+  const p384Exported = exportPrivateKeyJwkP384(p384Pair.privateKey);
+  const p384Reimported = importPrivateKeyJwk(
+    JSON.parse(JSON.stringify(p384Exported)) as unknown,
+  );
+  assert.equal(p384Reimported.type, "private");
+  assert.equal(p384Reimported.asymmetricKeyType, "ec");
+  const p384Reexported = exportPrivateKeyJwkP384(p384Reimported);
+  assert.equal(p384Reexported.kty, "EC");
+  assert.equal(p384Reexported.crv, "P-384");
+  assert.equal(p384Reexported.x, p384Exported.x);
+  assert.equal(p384Reexported.y, p384Exported.y);
+  assert.equal(p384Reexported.d, p384Exported.d);
+  const p521Pair = generateP521KeyPair();
+  const p521Exported = exportPrivateKeyJwkP521(p521Pair.privateKey);
+  const p521Reimported = importPrivateKeyJwk(
+    JSON.parse(JSON.stringify(p521Exported)) as unknown,
+  );
+  assert.equal(p521Reimported.type, "private");
+  assert.equal(p521Reimported.asymmetricKeyType, "ec");
+  const p521Reexported = exportPrivateKeyJwkP521(p521Reimported);
+  assert.equal(p521Reexported.kty, "EC");
+  assert.equal(p521Reexported.crv, "P-521");
+  assert.equal(p521Reexported.x, p521Exported.x);
+  assert.equal(p521Reexported.y, p521Exported.y);
+  assert.equal(p521Reexported.d, p521Exported.d);
+  const rsaPair = generateRsaPssKeyPair();
+  const rsaExported = exportPrivateKeyJwkRsa(rsaPair.privateKey);
+  const rsaReimported = importPrivateKeyJwk(
+    JSON.parse(JSON.stringify(rsaExported)) as unknown,
+  );
+  assert.equal(rsaReimported.type, "private");
+  assert.equal(rsaReimported.asymmetricKeyType, "rsa");
+  const rsaReexported = exportPrivateKeyJwkRsa(rsaReimported);
+  assert.equal(rsaReexported.kty, "RSA");
+  assert.equal(rsaReexported.n, rsaExported.n);
+  assert.equal(rsaReexported.e, rsaExported.e);
+  assert.equal(rsaReexported.d, rsaExported.d);
+  assert.equal(rsaReexported.p, rsaExported.p);
+  assert.equal(rsaReexported.q, rsaExported.q);
+  assert.equal(rsaReexported.dp, rsaExported.dp);
+  assert.equal(rsaReexported.dq, rsaExported.dq);
+  assert.equal(rsaReexported.qi, rsaExported.qi);
+  assert.equal(rsaExported.n.length, 342);
+
+  // Printed lines: header, one shape line per curve, the 4/4
+  // verdict — and no key material anywhere in the output.
+  assert.match(
+    out,
+    /Per-curve private-key JWK export: P-256, P-384, P-521 and RSA keys are exported with exportPrivateKeyJwkP256\/P384\/P521\/Rsa/,
+  );
+  assert.match(
+    out,
+    /P-256 private JWK: kty="EC" crv="P-256" \(x, y and d are never printed\)/,
+  );
+  assert.match(
+    out,
+    /P-384 private JWK: kty="EC" crv="P-384" \(x, y and d are never printed\)/,
+  );
+  assert.match(
+    out,
+    /P-521 private JWK: kty="EC" crv="P-521" \(x, y and d are never printed\)/,
+  );
+  assert.match(
+    out,
+    /RSA private JWK: kty="RSA" n length 342 chars \(2048-bit modulus; d, p, q, dp, dq and qi are never printed\)/,
+  );
+  assert.match(
+    out,
+    /Per-curve private JWK round-trips: 4\/4 re-exports byte-identical \(P-256, P-384, P-521, RSA\)/,
+  );
+
+  // Ordering: the segment follows the ed25519 private-key JWK
+  // export round-trip segment and is followed by the
+  // verified-handler segment (blank separator, then its header) —
+  // byte-exact lines.
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Per-curve private-key JWK export:"),
+  );
+  assert.ok(headerIdx !== -1);
+  const exportIdx = lines.findIndex((l) =>
+    l.startsWith("Private-key JWK export round-trip:"),
+  );
+  assert.ok(exportIdx !== -1 && exportIdx < headerIdx);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), [
+    `Per-curve private-key JWK export: P-256, P-384, P-521 and RSA keys are exported with exportPrivateKeyJwkP256/P384/P521/Rsa, carried through a JSON wire round-trip and read back with the shared importPrivateKeyJwk — the same generate -> export -> wire -> import loop as the ed25519 segment, per curve; only the JWK shapes are printed, never the key material`,
+    `P-256 private JWK: kty="EC" crv="P-256" (x, y and d are never printed)`,
+    `P-384 private JWK: kty="EC" crv="P-384" (x, y and d are never printed)`,
+    `P-521 private JWK: kty="EC" crv="P-521" (x, y and d are never printed)`,
+    `RSA private JWK: kty="RSA" n length 342 chars (2048-bit modulus; d, p, q, dp, dq and qi are never printed)`,
+    `Per-curve private JWK round-trips: 4/4 re-exports byte-identical (P-256, P-384, P-521, RSA)`,
+  ]);
+  assert.equal(lines[headerIdx + 6], "");
+  assert.ok(lines[headerIdx + 7]!.startsWith("Verified handler:"));
+
+  // Double-run determinism: only the JWK shapes and the verdict
+  // are printed — the key bytes never appear — so the segment is
+  // identical across runs.
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Per-curve private-key JWK export:"));
   const end = (ls: string[]) =>
     ls.findIndex((l) => l.startsWith("Verified handler:"));
   assert.ok(start(lines) !== -1 && end(lines) !== -1);
