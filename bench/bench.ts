@@ -3747,6 +3747,122 @@ function benchmarkVerifySignatureInputWithinLimit(): number {
 }
 
 /**
+ * Pinned shape of the per-label `signature` length-limit
+ * benchmark: the mirror of the per-label half pinned inside
+ * `benchmarkVerifyOversizedSignatureInput`, promoted to its own
+ * measured row — the `maxSignatureInputLengthByLabel` twin only
+ * ever ran as an outside-timing self-check, so the per-label
+ * `signature` value limit had no measured cost of its own. One
+ * ed25519 merchant key pair plus one HMAC gateway secret
+ * (generated once, outside timing), the shared fixture signed
+ * by the merchant with `created` pinned and the gateway label
+ * appended, and the same dual-signed request verified per
+ * measured call under `verifyAllLabels` with
+ * `maxSignatureLengthByLabel: { gateway: 100 }`. The limit is
+ * enforced against the shared `Signature` header per label, so
+ * the gateway label is rejected with `SIGNATURE_TOO_LARGE`
+ * (the shared header is over its own 100-byte limit) while the
+ * merchant label falls back to the 64 KiB default and still
+ * verifies — every measured call re-pins both labels, their
+ * codes and the pinned reason carrying the shared header's
+ * byte count, so the row cannot be measuring a path that skips
+ * the limit check or the merchant verification. The limit check
+ * runs after parsing and before any cryptography for the
+ * rejected label, so the measured call pays one ed25519
+ * verification (merchant) plus the parse and the gate. Outside
+ * timing, the boundary is pinned once: a limit exactly equal
+ * to the shared header's byte count lets both labels verify —
+ * a limit rejects only a strictly-over header. Zero network,
+ * zero randomness in the measured assertions, no wall clock
+ * (every verify instant is injected).
+ */
+const MAX_SIG_LEN_NOW = 1_700_000_000;
+const MAX_SIG_LEN_MERCHANT_KID = "bench-max-sig-length-merchant-1";
+const MAX_SIG_LEN_GATEWAY_KID = "bench-max-sig-length-gateway-1";
+const MAX_SIG_LEN_GATEWAY_LIMIT = 100;
+const MAX_SIG_LEN_CODE = "SIGNATURE_TOO_LARGE";
+
+function benchmarkVerifyAllLabelsMaxSignatureLengthByLabel(): number {
+  const { publicKey: merchantPublic, privateKey: merchantPrivate } =
+    generateEd25519KeyPair();
+  const gatewaySecret = secretKey("gateway-shared-secret-32-bytes-0!");
+
+  const merchantSigned = signRequest(fixture, {
+    keyId: MAX_SIG_LEN_MERCHANT_KID,
+    alg: "ed25519",
+    key: merchantPrivate,
+    created: MAX_SIG_LEN_NOW,
+    label: "merchant",
+  });
+  const dual = addSignature(merchantSigned, {
+    keyId: MAX_SIG_LEN_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    label: "gateway",
+    created: MAX_SIG_LEN_NOW,
+  });
+  const dualSignature = dual.headers["signature"];
+  if (typeof dualSignature !== "string")
+    throw new Error(
+      "benchmark setup failed: dual-signed fixture carries no string signature header",
+    );
+  const dualSignatureBytes = Buffer.byteLength(dualSignature, "utf8");
+  if (dualSignatureBytes <= MAX_SIG_LEN_GATEWAY_LIMIT)
+    throw new Error(
+      `benchmark setup failed: shared signature header is ${dualSignatureBytes} bytes, not over the ${MAX_SIG_LEN_GATEWAY_LIMIT} byte gateway limit`,
+    );
+  const expectedReason =
+    `signature header is ${dualSignatureBytes} bytes, ` +
+    `over the maxSignatureLength=${MAX_SIG_LEN_GATEWAY_LIMIT} byte limit`;
+  const verifyOpts = {
+    key: merchantPublic,
+    keys: { gateway: gatewaySecret },
+    now: MAX_SIG_LEN_NOW,
+    maxSignatureLengthByLabel: { gateway: MAX_SIG_LEN_GATEWAY_LIMIT },
+  };
+  const assertMixed = (where: string): void => {
+    const results = verifyAllLabels(dual, verifyOpts);
+    if (
+      results.length !== 2 ||
+      results[0]?.label !== "merchant" ||
+      !results[0]?.ok ||
+      results[1]?.label !== "gateway" ||
+      results[1]?.ok ||
+      results[1]?.code !== MAX_SIG_LEN_CODE ||
+      results[1]?.reason !== expectedReason
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllLabels with maxSignatureLengthByLabel (${where}) gave ${JSON.stringify(results)} ` +
+          `(expected merchant ok plus gateway SIGNATURE_TOO_LARGE)`,
+      );
+  };
+
+  // Outside timing: the gateway label is rejected with the pinned
+  // code and reason while the merchant label still verifies.
+  assertMixed("outside timing");
+
+  // Outside timing: the boundary — a limit exactly equal to the
+  // shared header's byte count lets both labels verify.
+  const boundary = verifyAllLabels(dual, {
+    key: merchantPublic,
+    keys: { gateway: gatewaySecret },
+    now: MAX_SIG_LEN_NOW,
+    maxSignatureLengthByLabel: { gateway: dualSignatureBytes },
+  });
+  if (
+    boundary.length !== 2 ||
+    boundary.some((r, i) => r.label !== ["merchant", "gateway"][i] || !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyAllLabels at the per-label signature length boundary gave ${JSON.stringify(boundary)} (expected both labels ok)`,
+    );
+
+  return measure(() => {
+    assertMixed("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `verifyRequest` requireTag
  * benchmark: one ed25519 key pair (generated once, outside
  * timing), a fixture signed outside timing carrying the
@@ -19438,6 +19554,11 @@ results.push({
   alg: "verifyAllLabels maxSignatureAgeSecByLabel (2 labels)",
   op: "verify",
   ops: benchmarkVerifyAllMaxSignatureAgeSecByLabel(),
+});
+results.push({
+  alg: "verifyAllLabels maxSignatureLengthByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllLabelsMaxSignatureLengthByLabel(),
 });
 results.push({
   alg: "verifyAllLabels requireNonceByLabel maxSignatureAgeSecByLabel (2 labels)",

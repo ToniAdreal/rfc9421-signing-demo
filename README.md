@@ -2961,7 +2961,7 @@ see [SECURITY.md](SECURITY.md).
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
-algorithm plus the key-resolution, JWKS snapshot-export, JWKS document-build, JWKS snapshot-restore, JWKS signed snapshot-export, JWKS signed snapshot-restore, JWKS key retirement, resolver-based verification, maximum-signature-age verification, expiry-presence verification, created-presence verification, clock-skew verification, expiry-grace verification, key-id binding verification, per-label key-id binding verification, per-label key-resolution verification, per-label nonce-presence verification, per-label candidate-keys verification, per-label candidate-keys plus key-id-pinning verification, per-label tag-presence verification, key-id-binding plus global tag-presence verification, per-label required-freshness verification, per-label dual-required freshness-existence verification, per-label tag-pinning verification, per-label freshness-window verification, per-label nonce-presence plus freshness-window verification, per-label candidate-keys plus tag-presence verification, per-label clock-skew verification, per-label expiry-grace verification, per-label component-coverage verification, per-label algorithm-inference verification, per-label replay-cache verification, per-label key-id binding plus nonce-presence verification, per-label candidate-keys plus freshness-window verification, per-label JWKS key-resolution verification, per-label JWKS key-resolution plus dictionary-member verification, per-label JWKS key-resolution plus replay-cache verification, per-label content-digest verification, per-label structured-field-types verification, algorithm-inference verification, application-tag-pinning verification, component-coverage verification, replay-cache verification, nonce-presence verification, tag-presence verification, JWKS refresh, JWKS concurrent single-flight refresh, JWKS fetch-retry refresh, JWKS Retry-After refresh, JWKS loopback refresh, JWKS Cache-Control max-age refresh, JWKS maxBodyBytes rejection refresh, JWKS refresh-if-stale fresh check, JWKS https-only endpoint enforcement, thumbprint-derivation, replay-check, replay snapshot-export, replay stats, JWKS stats, memoized key resolver stats, replay snapshot-restore, replay signed snapshot sealing by label, replay release,
+algorithm plus the key-resolution, JWKS snapshot-export, JWKS document-build, JWKS snapshot-restore, JWKS signed snapshot-export, JWKS signed snapshot-restore, JWKS key retirement, resolver-based verification, maximum-signature-age verification, expiry-presence verification, created-presence verification, clock-skew verification, expiry-grace verification, key-id binding verification, per-label key-id binding verification, per-label key-resolution verification, per-label nonce-presence verification, per-label candidate-keys verification, per-label candidate-keys plus key-id-pinning verification, per-label tag-presence verification, key-id-binding plus global tag-presence verification, per-label required-freshness verification, per-label dual-required freshness-existence verification, per-label tag-pinning verification, per-label freshness-window verification, per-label signature-length verification, per-label nonce-presence plus freshness-window verification, per-label candidate-keys plus tag-presence verification, per-label clock-skew verification, per-label expiry-grace verification, per-label component-coverage verification, per-label algorithm-inference verification, per-label replay-cache verification, per-label key-id binding plus nonce-presence verification, per-label candidate-keys plus freshness-window verification, per-label JWKS key-resolution verification, per-label JWKS key-resolution plus dictionary-member verification, per-label JWKS key-resolution plus replay-cache verification, per-label content-digest verification, per-label structured-field-types verification, algorithm-inference verification, application-tag-pinning verification, component-coverage verification, replay-cache verification, nonce-presence verification, tag-presence verification, JWKS refresh, JWKS concurrent single-flight refresh, JWKS fetch-retry refresh, JWKS Retry-After refresh, JWKS loopback refresh, JWKS Cache-Control max-age refresh, JWKS maxBodyBytes rejection refresh, JWKS refresh-if-stale fresh check, JWKS https-only endpoint enforcement, thumbprint-derivation, replay-check, replay snapshot-export, replay stats, JWKS stats, memoized key resolver stats, replay snapshot-restore, replay signed snapshot sealing by label, replay release,
 malformed-input rejection, oversized signature-input rejection,
 within-limit signature-input verification, standalone content-digest,
 inbound-normalization, inbound trailer-bound verification,
@@ -2975,147 +2975,148 @@ All rows below are from one real run on 2026-11-21:
 
 | alg | op | throughput |
 |-----|--------|------------|
-| ed25519                                | sign | 8,175 ops/sec (122.33 µs/op) |
-| ed25519                                | verify | 3,411 ops/sec (293.19 µs/op) |
-| hmac-sha256                            | sign | 16,797 ops/sec (59.53 µs/op) |
-| hmac-sha256                            | verify | 23,209 ops/sec (43.09 µs/op) |
-| hmac-sha512                            | sign | 44,032 ops/sec (22.71 µs/op) |
-| hmac-sha512                            | verify | 34,526 ops/sec (28.96 µs/op) |
-| ecdsa-p256-sha256                      | sign | 14,029 ops/sec (71.28 µs/op) |
-| ecdsa-p256-sha256                      | verify | 2,793 ops/sec (358.05 µs/op) |
-| ecdsa-p384-sha384                      | sign | 707.3 ops/sec (1413.80 µs/op) |
-| ecdsa-p384-sha384                      | verify | 752.3 ops/sec (1329.25 µs/op) |
-| ecdsa-p521-sha512                      | sign | 289.0 ops/sec (3460.30 µs/op) |
-| ecdsa-p521-sha512                      | verify | 355.5 ops/sec (2813.20 µs/op) |
-| rsa-pss-sha512                         | sign | 1,770 ops/sec (565.04 µs/op) |
-| rsa-pss-sha512                         | verify | 13,996 ops/sec (71.45 µs/op) |
-| rsa-v1_5-sha256                        | sign | 1,446 ops/sec (691.53 µs/op) |
-| rsa-v1_5-sha256                        | verify | 10,945 ops/sec (91.37 µs/op) |
-| verifyAllLabels (2 labels)             | verify | 3,252 ops/sec (307.50 µs/op) |
-| verifyAllLabelsOrThrow (2 labels)      | verify | 4,095 ops/sec (244.21 µs/op) |
-| JwksKeyStore.resolve (hit)             | resolve | 4,118,888 ops/sec (0.24 µs/op) |
-| JwksKeyStore.requireHttps (resolve)    | resolve | 19,236,442 ops/sec (0.05 µs/op) |
-| memoizeKeyResolver (hit)               | resolve | 5,127,697 ops/sec (0.20 µs/op) |
-| memoizeKeyResolver (miss)              | resolve | 6,192,500 ops/sec (0.16 µs/op) |
-| JwksKeyStore.exportSnapshot (3 keys)   | export | 29,494 ops/sec (33.91 µs/op) |
-| buildJwksDocument (3 keys)             | build | 10,583 ops/sec (94.49 µs/op) |
-| JwksKeyStore.restoreSnapshot (3 keys)  | restore | 15,225 ops/sec (65.68 µs/op) |
-| JwksKeyStore.exportSignedSnapshot (3 keys) | export | 16,943 ops/sec (59.02 µs/op) |
-| JwksKeyStore.restoreSignedSnapshot (3 keys) | restore | 8,474 ops/sec (118.01 µs/op) |
-| JwksKeyStore.clear + keyIds (3 keys)   | clear | 706,562 ops/sec (1.42 µs/op) |
-| verifyRequest keyResolver (2 keyids)   | verify | 2,265 ops/sec (441.56 µs/op) |
-| verifyRequest maxSignatureAgeSec (300s cap) | verify | 6,043 ops/sec (165.48 µs/op) |
-| verifyRequest requireExpires           | verify | 4,874 ops/sec (205.17 µs/op) |
-| verifyRequest requireCreated           | verify | 5,599 ops/sec (178.59 µs/op) |
-| verifyRequest expectedTag              | verify | 5,996 ops/sec (166.79 µs/op) |
-| verifyRequest replayCache              | verify | 3,026 ops/sec (330.50 µs/op) |
-| verifyRequest requireNonce             | verify | 5,926 ops/sec (168.76 µs/op) |
-| verifyRequest oversized signature-input (rejected) | reject | 51,739 ops/sec (19.33 µs/op) |
-| verifyRequest signature-input within limit | verify | 5,741 ops/sec (174.18 µs/op) |
-| verifyRequest requireTag               | verify | 5,698 ops/sec (175.50 µs/op) |
-| verifyRequest clockSkewToleranceSec (120s) | verify | 4,627 ops/sec (216.14 µs/op) |
-| verifyRequest expiredToleranceSec (120s grace) | verify | 3,706 ops/sec (269.82 µs/op) |
-| verifyRequest expectedKeyId            | verify | 6,089 ops/sec (164.22 µs/op) |
-| verifyAllLabels expectedKeyIds (2 labels) | verify | 2,769 ops/sec (361.15 µs/op) |
-| verifyAllLabels keyResolvers (2 labels) | verify | 2,990 ops/sec (334.43 µs/op) |
-| verifyAllLabels JwksKeyStore (2 labels) | verify | 1,054 ops/sec (948.85 µs/op) |
-| verifyAllLabels JwksKeyStore ;key (2 labels) | verify | 2,031 ops/sec (492.32 µs/op) |
-| verifyAllLabels content-digest (2 labels) | verify | 2,393 ops/sec (417.85 µs/op) |
-| verifyAllLabels structuredFieldTypesByLabel (2 labels) | verify | 2,804 ops/sec (356.57 µs/op) |
-| verifyAllLabels requireNonceByLabel (2 labels) | verify | 1,340 ops/sec (746.49 µs/op) |
-| verifyAllLabels candidateKeysByLabel (2 labels) | verify | 1,619 ops/sec (617.69 µs/op) |
-| verifyAllLabels candidateKeysByLabel expectedKeyIds (2 labels) | verify | 530.6 ops/sec (1884.68 µs/op) |
-| verifyAllLabels requireTagByLabel (2 labels) | verify | 1,231 ops/sec (812.26 µs/op) |
-| verifyAllLabels expectedKeyIds requireTag (2 labels) | verify | 865.1 ops/sec (1155.93 µs/op) |
-| verifyAllLabels requireFreshnessByLabel (2 labels) | verify | 911.2 ops/sec (1097.49 µs/op) |
-| verifyAllLabels requireCreatedExpiresByLabel (2 labels) | verify | 731.0 ops/sec (1368.00 µs/op) |
-| verifyAllLabels expectedTags (2 labels) | verify | 1,364 ops/sec (733.05 µs/op) |
-| verifyAllLabels maxSignatureAgeSecByLabel (2 labels) | verify | 2,719 ops/sec (367.79 µs/op) |
-| verifyAllLabels requireNonceByLabel maxSignatureAgeSecByLabel (2 labels) | verify | 695.3 ops/sec (1438.32 µs/op) |
-| verifyAllLabels candidateKeysByLabel requireTagByLabel (2 labels) | verify | 517.3 ops/sec (1932.96 µs/op) |
-| verifyAllLabels clockSkewToleranceSecByLabel (2 labels) | verify | 3,027 ops/sec (330.37 µs/op) |
-| verifyAllLabels expiredToleranceSecByLabel (2 labels) | verify | 2,891 ops/sec (345.86 µs/op) |
-| verifyAllLabels requiredComponentsByLabel (2 labels) | verify | 5,208 ops/sec (192.02 µs/op) |
-| verifyAllLabels algFallbackByLabel (2 labels) | verify | 5,390 ops/sec (185.54 µs/op) |
-| verifyAllLabels replayCacheByLabel (2 labels) | verify | 1,370 ops/sec (730.00 µs/op) |
-| verifyAllLabels JwksKeyStore replayCacheByLabel (2 labels) | verify | 1,474 ops/sec (678.57 µs/op) |
-| verifyAllLabels expectedKeyIds requireNonceByLabel (2 labels) | verify | 920.3 ops/sec (1086.57 µs/op) |
-| verifyAllLabels candidateKeysByLabel maxSignatureAgeSecByLabel (2 labels) | verify | 615.4 ops/sec (1624.93 µs/op) |
-| verifyRequest algFallback (infer)      | verify | 50,411 ops/sec (19.84 µs/op) |
-| verifyRequest requiredComponents       | verify | 6,026 ops/sec (165.96 µs/op) |
-| verifyRequest allowedAlgs (hit, rsa-pss-sha512) | verify | 15,276 ops/sec (65.46 µs/op) |
-| verifyRequest allowedAlgs (miss, rsa-pss-sha512) | reject | 136,178 ops/sec (7.34 µs/op) |
-| signResponse (ed25519, @status)        | sign | 15,396 ops/sec (64.95 µs/op) |
-| verifyResponse (ed25519, @status)      | verify | 4,868 ops/sec (205.42 µs/op) |
-| addResponseSignature + verifyResponse (2 labels) | verify | 5,114 ops/sec (195.55 µs/op) |
-| verifyAllResponseLabels (2 labels)     | verify | 4,522 ops/sec (221.12 µs/op) |
-| verifyResponseOrThrow (signed response, @status) | verify | 5,573 ops/sec (179.43 µs/op) |
-| verifyAllResponseLabelsOrThrow (tampered response, @status) | throw | 4,794 ops/sec (208.59 µs/op) |
-| verifyResponse allowedAlgs (hit, ed25519) | verify | 5,754 ops/sec (173.80 µs/op) |
-| verifyResponse allowedAlgs (miss, ed25519) | reject | 86,610 ops/sec (11.55 µs/op) |
-| JwksKeyStore.refreshIfStale (stale)    | refresh | 156,281 ops/sec (6.40 µs/op) |
-| JwksKeyStore.refresh (8-way single-flight) | refresh | 98,833 ops/sec (10.12 µs/op) |
-| JwksKeyStore.refresh (fetchRetries 2, 500/500/200) | refresh | 139,159 ops/sec (7.19 µs/op) |
-| JwksKeyStore.refresh (Retry-After 2s, 429/200) | refresh | 2,324 ops/sec (430.26 µs/op) |
-| JwksKeyStore.refresh (loopback, 3 keys) | refresh | 1,874 ops/sec (533.68 µs/op) |
-| JwksKeyStore.refresh (Cache-Control max-age=60) | refresh | 3,371 ops/sec (296.62 µs/op) |
-| JwksKeyStore.refresh (maxBodyBytes 128, loopback reject) | refresh | 5,227 ops/sec (191.32 µs/op) |
-| JwksKeyStore.refreshIfStale (fresh)    | refresh | 2,569,965 ops/sec (0.39 µs/op) |
-| jwkThumbprint (3 JWK shapes)           | derive | 86,989 ops/sec (11.50 µs/op) |
-| ReplayCache.check (hit, 1k)            | check | 2,516,213 ops/sec (0.40 µs/op) |
-| ReplayCache.exportSnapshot (3 live)    | export | 1,428,190 ops/sec (0.70 µs/op) |
-| ReplayCache.stats (5 live)             | stats | 3,982,583 ops/sec (0.25 µs/op) |
-| JwksKeyStore.stats (3 keys)            | stats | 6,107,044 ops/sec (0.16 µs/op) |
-| memoizeKeyResolver stats (3 keys)      | stats | 5,082,540 ops/sec (0.20 µs/op) |
-| ReplayCache.fromSnapshot (4 live)      | restore | 352,161 ops/sec (2.84 µs/op) |
-| ReplayCache.exportSignedSnapshotsByLabel (2 labels, 8 nonces each) | export+restore | 11,978 ops/sec (83.48 µs/op) |
-| ReplayCache.release (check+release+has, 8 nonces) | release | 440,832 ops/sec (2.27 µs/op) |
-| verifyRequest (malformed, 566 cases)   | reject | 16,009 ops/sec (62.46 µs/op) |
-| contentDigest sha-512 (31-byte body)   | digest | 572,072 ops/sec (1.75 µs/op) |
-| contentDigest sha-256 (31-byte body)   | digest | 732,600 ops/sec (1.37 µs/op) |
-| fromNodeRequest (inbound, trailers)    | normalize | 231,029 ops/sec (4.33 µs/op) |
-| fromNodeRequest + verifyRequest (;tr trailer) | adapt+verify | 6,166 ops/sec (162.19 µs/op) |
-| fromNodeResponse (@status, loopback)   | adapt+verify | 5,466 ops/sec (182.96 µs/op) |
-| fromFetchResponse (@status, loopback)  | adapt+verify | 6,067 ops/sec (164.83 µs/op) |
-| fromNodeResponse + verifyAllLabels (@status, loopback, 2 labels) | adapt+verify | 3,212 ops/sec (311.36 µs/op) |
-| fromNodeRequest + verifyAllLabels (loopback, 2 labels) | adapt+verify | 2,508 ops/sec (398.79 µs/op) |
-| fromNodeRequest + verifyAllLabels (;tr trailer, loopback, 2 labels) | adapt+verify | 2,782 ops/sec (359.49 µs/op) |
-| fromNodeResponse + verifyAllLabels (;tr trailer, loopback, 2 labels) | adapt+verify | 2,982 ops/sec (335.32 µs/op) |
-| createVerifiedHandler (signed POST, loopback) | verify | 2,506 ops/sec (399.06 µs/op) |
-| createVerifiedHandler (unsigned POST, loopback) | verify | 8,546 ops/sec (117.01 µs/op) |
-| verifiedFetch (signed POST, loopback)  | sign+fetch+verify | 833.5 ops/sec (1199.75 µs/op) |
-| verifiedFetch multi-label (signed POST, loopback, 2 labels) | sign+fetch+verify | 680.3 ops/sec (1470.02 µs/op) |
-| createVerifiedFetchHandler (signed POST, in-process) | verify+sign | 3,415 ops/sec (292.80 µs/op) |
-| JWK round-trip P-256                   | roundtrip | 25,964 ops/sec (38.51 µs/op) |
-| JWK round-trip P-384                   | roundtrip | 16,602 ops/sec (60.23 µs/op) |
-| JWK round-trip P-521                   | roundtrip | 15,430 ops/sec (64.81 µs/op) |
-| JWK round-trip RSA-2048                | roundtrip | 8,646 ops/sec (115.66 µs/op) |
-| JWK round-trip ed25519                 | roundtrip | 141,497 ops/sec (7.07 µs/op) |
-| JWK round-trip HMAC oct (HS256 + HS512) | roundtrip | 84,105 ops/sec (11.89 µs/op) |
-| PEM round-trip ed25519                 | roundtrip | 6,211 ops/sec (161.00 µs/op) |
-| buildSignatureBase (4 components)      | build | 65,026 ops/sec (15.38 µs/op) |
-| signRequest (ed25519, end-to-end)      | sign | 10,967 ops/sec (91.19 µs/op) |
-| listSignatureLabels (2 labels)         | parse | 329,911 ops/sec (3.03 µs/op) |
-| parseSignatureInput (merchant)         | parse | 142,906 ops/sec (7.00 µs/op) |
-| parseSignatureField (merchant)         | parse | 290,141 ops/sec (3.45 µs/op) |
-| canonicalizeStructuredFieldValue (6 values) | canon | 14,563 ops/sec (68.67 µs/op) |
-| canonicalizeStructuredFieldValue (8 values, registry corpus) | canon | 12,940 ops/sec (77.28 µs/op) |
-| canonicalizeStructuredFieldValueAs (8 values, registry) | canon | 26,031 ops/sec (38.42 µs/op) |
-| serializeDictionaryMemberValue (6 keys) | extract | 35,495 ops/sec (28.17 µs/op) |
-| serializeSignatureParams (5 cases)     | serialize | 42,661 ops/sec (23.44 µs/op) |
-| generateNonce (16 + 32 bytes)          | generate | 49,415 ops/sec (20.24 µs/op) |
-| generateHmacSecret (32 + 64 bytes)     | generate | 86,775 ops/sec (11.52 µs/op) |
-| generateKeyPairs (ed25519 + P-256)     | generate | 8,886 ops/sec (112.54 µs/op) |
-| verifyRequestOrThrow (valid)           | verify | 5,387 ops/sec (185.65 µs/op) |
-| verifyRequestOrThrow (tampered)        | throw | 4,956 ops/sec (201.77 µs/op) |
-| getHeader/getHeaderRaw (9 names ×2)    | lookup | 187,707 ops/sec (5.33 µs/op) |
-| joinHeaderValues (9 cases)             | join | 590,746 ops/sec (1.69 µs/op) |
-| contentDigestAlgOf (10 cases)          | identify | 1,244,527 ops/sec (0.80 µs/op) |
-| assertHmacSecretLength (10 cases)      | guard | 19,759 ops/sec (50.61 µs/op) |
-| assertRsaModulusLength (7 cases)       | guard | 22,451 ops/sec (44.54 µs/op) |
-| signatureInputValue (4 cases)          | serialize | 102,433 ops/sec (9.76 µs/op) |
-| assertContentDigestAlg (10 cases)      | guard | 17,153 ops/sec (58.30 µs/op) |
-| resolveComponent (18 cases)            | resolve | 21,053 ops/sec (47.50 µs/op) |
+| ed25519                                | sign | 10,921 ops/sec (91.57 µs/op) |
+| ed25519                                | verify | 3,610 ops/sec (277.01 µs/op) |
+| hmac-sha256                            | sign | 43,994 ops/sec (22.73 µs/op) |
+| hmac-sha256                            | verify | 25,219 ops/sec (39.65 µs/op) |
+| hmac-sha512                            | sign | 29,784 ops/sec (33.58 µs/op) |
+| hmac-sha512                            | verify | 33,414 ops/sec (29.93 µs/op) |
+| ecdsa-p256-sha256                      | sign | 16,040 ops/sec (62.35 µs/op) |
+| ecdsa-p256-sha256                      | verify | 6,831 ops/sec (146.40 µs/op) |
+| ecdsa-p384-sha384                      | sign | 682.9 ops/sec (1464.39 µs/op) |
+| ecdsa-p384-sha384                      | verify | 865.1 ops/sec (1155.97 µs/op) |
+| ecdsa-p521-sha512                      | sign | 281.9 ops/sec (3546.73 µs/op) |
+| ecdsa-p521-sha512                      | verify | 372.8 ops/sec (2682.64 µs/op) |
+| rsa-pss-sha512                         | sign | 1,840 ops/sec (543.38 µs/op) |
+| rsa-pss-sha512                         | verify | 12,309 ops/sec (81.24 µs/op) |
+| rsa-v1_5-sha256                        | sign | 1,680 ops/sec (595.14 µs/op) |
+| rsa-v1_5-sha256                        | verify | 15,800 ops/sec (63.29 µs/op) |
+| verifyAllLabels (2 labels)             | verify | 4,013 ops/sec (249.18 µs/op) |
+| verifyAllLabelsOrThrow (2 labels)      | verify | 3,059 ops/sec (326.88 µs/op) |
+| JwksKeyStore.resolve (hit)             | resolve | 3,520,680 ops/sec (0.28 µs/op) |
+| JwksKeyStore.requireHttps (resolve)    | resolve | 9,466,261 ops/sec (0.11 µs/op) |
+| memoizeKeyResolver (hit)               | resolve | 770,481 ops/sec (1.30 µs/op) |
+| memoizeKeyResolver (miss)              | resolve | 11,545,122 ops/sec (0.09 µs/op) |
+| JwksKeyStore.exportSnapshot (3 keys)   | export | 27,033 ops/sec (36.99 µs/op) |
+| buildJwksDocument (3 keys)             | build | 10,167 ops/sec (98.36 µs/op) |
+| JwksKeyStore.restoreSnapshot (3 keys)  | restore | 11,201 ops/sec (89.28 µs/op) |
+| JwksKeyStore.exportSignedSnapshot (3 keys) | export | 18,847 ops/sec (53.06 µs/op) |
+| JwksKeyStore.restoreSignedSnapshot (3 keys) | restore | 8,127 ops/sec (123.05 µs/op) |
+| JwksKeyStore.clear + keyIds (3 keys)   | clear | 618,856 ops/sec (1.62 µs/op) |
+| verifyRequest keyResolver (2 keyids)   | verify | 2,445 ops/sec (409.02 µs/op) |
+| verifyRequest maxSignatureAgeSec (300s cap) | verify | 5,192 ops/sec (192.59 µs/op) |
+| verifyRequest requireExpires           | verify | 3,761 ops/sec (265.89 µs/op) |
+| verifyRequest requireCreated           | verify | 4,575 ops/sec (218.57 µs/op) |
+| verifyRequest expectedTag              | verify | 5,217 ops/sec (191.69 µs/op) |
+| verifyRequest replayCache              | verify | 2,924 ops/sec (342.00 µs/op) |
+| verifyRequest requireNonce             | verify | 4,156 ops/sec (240.64 µs/op) |
+| verifyRequest oversized signature-input (rejected) | reject | 49,544 ops/sec (20.18 µs/op) |
+| verifyRequest signature-input within limit | verify | 5,899 ops/sec (169.53 µs/op) |
+| verifyRequest requireTag               | verify | 5,604 ops/sec (178.43 µs/op) |
+| verifyRequest clockSkewToleranceSec (120s) | verify | 4,537 ops/sec (220.43 µs/op) |
+| verifyRequest expiredToleranceSec (120s grace) | verify | 4,187 ops/sec (238.81 µs/op) |
+| verifyRequest expectedKeyId            | verify | 3,762 ops/sec (265.82 µs/op) |
+| verifyAllLabels expectedKeyIds (2 labels) | verify | 2,632 ops/sec (379.92 µs/op) |
+| verifyAllLabels keyResolvers (2 labels) | verify | 2,407 ops/sec (415.47 µs/op) |
+| verifyAllLabels JwksKeyStore (2 labels) | verify | 920.3 ops/sec (1086.62 µs/op) |
+| verifyAllLabels JwksKeyStore ;key (2 labels) | verify | 2,484 ops/sec (402.50 µs/op) |
+| verifyAllLabels content-digest (2 labels) | verify | 2,844 ops/sec (351.61 µs/op) |
+| verifyAllLabels structuredFieldTypesByLabel (2 labels) | verify | 2,356 ops/sec (424.42 µs/op) |
+| verifyAllLabels requireNonceByLabel (2 labels) | verify | 1,414 ops/sec (707.23 µs/op) |
+| verifyAllLabels candidateKeysByLabel (2 labels) | verify | 853.5 ops/sec (1171.58 µs/op) |
+| verifyAllLabels candidateKeysByLabel expectedKeyIds (2 labels) | verify | 500.0 ops/sec (1999.85 µs/op) |
+| verifyAllLabels requireTagByLabel (2 labels) | verify | 1,307 ops/sec (765.25 µs/op) |
+| verifyAllLabels expectedKeyIds requireTag (2 labels) | verify | 846.0 ops/sec (1182.07 µs/op) |
+| verifyAllLabels requireFreshnessByLabel (2 labels) | verify | 933.2 ops/sec (1071.55 µs/op) |
+| verifyAllLabels requireCreatedExpiresByLabel (2 labels) | verify | 688.0 ops/sec (1453.53 µs/op) |
+| verifyAllLabels expectedTags (2 labels) | verify | 1,481 ops/sec (675.04 µs/op) |
+| verifyAllLabels maxSignatureAgeSecByLabel (2 labels) | verify | 2,970 ops/sec (336.66 µs/op) |
+| verifyAllLabels maxSignatureLengthByLabel (2 labels) | verify | 5,991 ops/sec (166.93 µs/op) |
+| verifyAllLabels requireNonceByLabel maxSignatureAgeSecByLabel (2 labels) | verify | 624.5 ops/sec (1601.20 µs/op) |
+| verifyAllLabels candidateKeysByLabel requireTagByLabel (2 labels) | verify | 487.3 ops/sec (2052.07 µs/op) |
+| verifyAllLabels clockSkewToleranceSecByLabel (2 labels) | verify | 2,293 ops/sec (436.17 µs/op) |
+| verifyAllLabels expiredToleranceSecByLabel (2 labels) | verify | 2,469 ops/sec (405.04 µs/op) |
+| verifyAllLabels requiredComponentsByLabel (2 labels) | verify | 5,119 ops/sec (195.36 µs/op) |
+| verifyAllLabels algFallbackByLabel (2 labels) | verify | 5,204 ops/sec (192.16 µs/op) |
+| verifyAllLabels replayCacheByLabel (2 labels) | verify | 1,282 ops/sec (780.04 µs/op) |
+| verifyAllLabels JwksKeyStore replayCacheByLabel (2 labels) | verify | 1,237 ops/sec (808.09 µs/op) |
+| verifyAllLabels expectedKeyIds requireNonceByLabel (2 labels) | verify | 781.1 ops/sec (1280.28 µs/op) |
+| verifyAllLabels candidateKeysByLabel maxSignatureAgeSecByLabel (2 labels) | verify | 521.4 ops/sec (1917.85 µs/op) |
+| verifyRequest algFallback (infer)      | verify | 26,686 ops/sec (37.47 µs/op) |
+| verifyRequest requiredComponents       | verify | 4,987 ops/sec (200.53 µs/op) |
+| verifyRequest allowedAlgs (hit, rsa-pss-sha512) | verify | 11,136 ops/sec (89.80 µs/op) |
+| verifyRequest allowedAlgs (miss, rsa-pss-sha512) | reject | 123,900 ops/sec (8.07 µs/op) |
+| signResponse (ed25519, @status)        | sign | 11,691 ops/sec (85.53 µs/op) |
+| verifyResponse (ed25519, @status)      | verify | 4,993 ops/sec (200.27 µs/op) |
+| addResponseSignature + verifyResponse (2 labels) | verify | 4,569 ops/sec (218.88 µs/op) |
+| verifyAllResponseLabels (2 labels)     | verify | 3,801 ops/sec (263.11 µs/op) |
+| verifyResponseOrThrow (signed response, @status) | verify | 5,841 ops/sec (171.20 µs/op) |
+| verifyAllResponseLabelsOrThrow (tampered response, @status) | throw | 4,338 ops/sec (230.50 µs/op) |
+| verifyResponse allowedAlgs (hit, ed25519) | verify | 5,088 ops/sec (196.56 µs/op) |
+| verifyResponse allowedAlgs (miss, ed25519) | reject | 78,522 ops/sec (12.74 µs/op) |
+| JwksKeyStore.refreshIfStale (stale)    | refresh | 107,338 ops/sec (9.32 µs/op) |
+| JwksKeyStore.refresh (8-way single-flight) | refresh | 89,837 ops/sec (11.13 µs/op) |
+| JwksKeyStore.refresh (fetchRetries 2, 500/500/200) | refresh | 112,684 ops/sec (8.87 µs/op) |
+| JwksKeyStore.refresh (Retry-After 2s, 429/200) | refresh | 1,746 ops/sec (572.78 µs/op) |
+| JwksKeyStore.refresh (loopback, 3 keys) | refresh | 2,198 ops/sec (454.94 µs/op) |
+| JwksKeyStore.refresh (Cache-Control max-age=60) | refresh | 3,481 ops/sec (287.25 µs/op) |
+| JwksKeyStore.refresh (maxBodyBytes 128, loopback reject) | refresh | 3,221 ops/sec (310.42 µs/op) |
+| JwksKeyStore.refreshIfStale (fresh)    | refresh | 3,137,275 ops/sec (0.32 µs/op) |
+| jwkThumbprint (3 JWK shapes)           | derive | 73,697 ops/sec (13.57 µs/op) |
+| ReplayCache.check (hit, 1k)            | check | 692,580 ops/sec (1.44 µs/op) |
+| ReplayCache.exportSnapshot (3 live)    | export | 378,938 ops/sec (2.64 µs/op) |
+| ReplayCache.stats (5 live)             | stats | 1,844,406 ops/sec (0.54 µs/op) |
+| JwksKeyStore.stats (3 keys)            | stats | 6,320,433 ops/sec (0.16 µs/op) |
+| memoizeKeyResolver stats (3 keys)      | stats | 4,587,570 ops/sec (0.22 µs/op) |
+| ReplayCache.fromSnapshot (4 live)      | restore | 345,210 ops/sec (2.90 µs/op) |
+| ReplayCache.exportSignedSnapshotsByLabel (2 labels, 8 nonces each) | export+restore | 13,387 ops/sec (74.70 µs/op) |
+| ReplayCache.release (check+release+has, 8 nonces) | release | 2,572,945 ops/sec (0.39 µs/op) |
+| verifyRequest (malformed, 566 cases)   | reject | 17,882 ops/sec (55.92 µs/op) |
+| contentDigest sha-512 (31-byte body)   | digest | 531,606 ops/sec (1.88 µs/op) |
+| contentDigest sha-256 (31-byte body)   | digest | 630,273 ops/sec (1.59 µs/op) |
+| fromNodeRequest (inbound, trailers)    | normalize | 77,276 ops/sec (12.94 µs/op) |
+| fromNodeRequest + verifyRequest (;tr trailer) | adapt+verify | 5,874 ops/sec (170.24 µs/op) |
+| fromNodeResponse (@status, loopback)   | adapt+verify | 6,167 ops/sec (162.14 µs/op) |
+| fromFetchResponse (@status, loopback)  | adapt+verify | 5,019 ops/sec (199.25 µs/op) |
+| fromNodeResponse + verifyAllLabels (@status, loopback, 2 labels) | adapt+verify | 1,591 ops/sec (628.73 µs/op) |
+| fromNodeRequest + verifyAllLabels (loopback, 2 labels) | adapt+verify | 2,616 ops/sec (382.23 µs/op) |
+| fromNodeRequest + verifyAllLabels (;tr trailer, loopback, 2 labels) | adapt+verify | 2,354 ops/sec (424.73 µs/op) |
+| fromNodeResponse + verifyAllLabels (;tr trailer, loopback, 2 labels) | adapt+verify | 2,549 ops/sec (392.31 µs/op) |
+| createVerifiedHandler (signed POST, loopback) | verify | 1,927 ops/sec (519.01 µs/op) |
+| createVerifiedHandler (unsigned POST, loopback) | verify | 6,871 ops/sec (145.54 µs/op) |
+| verifiedFetch (signed POST, loopback)  | sign+fetch+verify | 733.9 ops/sec (1362.63 µs/op) |
+| verifiedFetch multi-label (signed POST, loopback, 2 labels) | sign+fetch+verify | 552.9 ops/sec (1808.69 µs/op) |
+| createVerifiedFetchHandler (signed POST, in-process) | verify+sign | 2,057 ops/sec (486.12 µs/op) |
+| JWK round-trip P-256                   | roundtrip | 19,578 ops/sec (51.08 µs/op) |
+| JWK round-trip P-384                   | roundtrip | 15,688 ops/sec (63.74 µs/op) |
+| JWK round-trip P-521                   | roundtrip | 9,158 ops/sec (109.20 µs/op) |
+| JWK round-trip RSA-2048                | roundtrip | 11,377 ops/sec (87.89 µs/op) |
+| JWK round-trip ed25519                 | roundtrip | 140,739 ops/sec (7.11 µs/op) |
+| JWK round-trip HMAC oct (HS256 + HS512) | roundtrip | 87,745 ops/sec (11.40 µs/op) |
+| PEM round-trip ed25519                 | roundtrip | 5,867 ops/sec (170.45 µs/op) |
+| buildSignatureBase (4 components)      | build | 31,070 ops/sec (32.19 µs/op) |
+| signRequest (ed25519, end-to-end)      | sign | 9,726 ops/sec (102.82 µs/op) |
+| listSignatureLabels (2 labels)         | parse | 348,555 ops/sec (2.87 µs/op) |
+| parseSignatureInput (merchant)         | parse | 139,148 ops/sec (7.19 µs/op) |
+| parseSignatureField (merchant)         | parse | 155,452 ops/sec (6.43 µs/op) |
+| canonicalizeStructuredFieldValue (6 values) | canon | 13,341 ops/sec (74.96 µs/op) |
+| canonicalizeStructuredFieldValue (8 values, registry corpus) | canon | 18,143 ops/sec (55.12 µs/op) |
+| canonicalizeStructuredFieldValueAs (8 values, registry) | canon | 43,148 ops/sec (23.18 µs/op) |
+| serializeDictionaryMemberValue (6 keys) | extract | 33,104 ops/sec (30.21 µs/op) |
+| serializeSignatureParams (5 cases)     | serialize | 62,231 ops/sec (16.07 µs/op) |
+| generateNonce (16 + 32 bytes)          | generate | 57,812 ops/sec (17.30 µs/op) |
+| generateHmacSecret (32 + 64 bytes)     | generate | 112,484 ops/sec (8.89 µs/op) |
+| generateKeyPairs (ed25519 + P-256)     | generate | 9,886 ops/sec (101.16 µs/op) |
+| verifyRequestOrThrow (valid)           | verify | 4,967 ops/sec (201.34 µs/op) |
+| verifyRequestOrThrow (tampered)        | throw | 3,253 ops/sec (307.42 µs/op) |
+| getHeader/getHeaderRaw (9 names ×2)    | lookup | 170,929 ops/sec (5.85 µs/op) |
+| joinHeaderValues (9 cases)             | join | 624,033 ops/sec (1.60 µs/op) |
+| contentDigestAlgOf (10 cases)          | identify | 1,528,878 ops/sec (0.65 µs/op) |
+| assertHmacSecretLength (10 cases)      | guard | 23,335 ops/sec (42.85 µs/op) |
+| assertRsaModulusLength (7 cases)       | guard | 19,806 ops/sec (50.49 µs/op) |
+| signatureInputValue (4 cases)          | serialize | 94,118 ops/sec (10.62 µs/op) |
+| assertContentDigestAlg (10 cases)      | guard | 14,343 ops/sec (69.72 µs/op) |
+| resolveComponent (18 cases)            | resolve | 10,835 ops/sec (92.29 µs/op) |
 
 Load note for this run: it was taken on a shared host, so the
 absolute throughputs above vary from quieter runs of the same
@@ -5316,6 +5317,8 @@ The bench performs zero network I/O and makes no wall-clock assertions
 (every verify instant is injected).
 
 The `verifyResponseOrThrow (signed response, @status)` and `verifyAllResponseLabelsOrThrow (tampered response, @status)` rows are new: they measure the throwing twins of the response-side verify paths. The single-label row verifies the same ed25519-signed settlement response as the `verifyResponse` row above through `verifyResponseOrThrow`, returning the verified identity (label, keyid, alg, `created`, covered components) instead of a result object, with the 200 -> 500 status tamper pinned outside timing to throw the pinned `SIGNATURE_MISMATCH` VerifyError. The dual-label row runs the same dual-signed fixture (merchant ed25519 + gateway hmac) with `@status` flipped 200 -> 500 through `verifyAllResponseLabelsOrThrow`, so every call throws a `VerifyError` carrying the first failing label's `SIGNATURE_MISMATCH` code with the full per-label array attached as `verifyResults` (both labels fail, because both cover `@status`), re-pinned on every measured call with the throw count pinned to warmup + timed iterations. In this run the success row measured 5,573 ops/sec (179.43 µs/op) against 4,868 ops/sec for the same run's non-throwing `verifyResponse` row, and the tampered row measured 4,794 ops/sec (208.59 µs/op) against 4,522 ops/sec for the same run's non-throwing `verifyAllResponseLabels` row — both throwing rows land in the same band as their non-throwing twins, with the gaps either way within the shared host's run-to-run noise (see the load note above), so the throwing wrappers add no visible steady-state cost beyond the verification they wrap. The bench performs zero network I/O and makes no wall-clock assertions (every verify instant is injected).
+
+The `verifyAllLabels maxSignatureLengthByLabel` row is new: it promotes the per-label `signature`-value limit from an outside-timing self-check inside the oversized signature-input row to its own measured path — the `maxSignatureInputLengthByLabel` twin had a measured row only for the input header, so the value header's per-label gate had no measured cost of its own. One measured op verifies the same dual-signed fixture (merchant ed25519 + gateway hmac, `created` pinned, verifier `now` injected) under `verifyAllLabels` with `maxSignatureLengthByLabel: { gateway: 100 }`, re-pinning on every pass that the merchant label still verifies while the gateway label is rejected with exactly `SIGNATURE_TOO_LARGE` and the pinned reason carrying the shared 155-byte `Signature` header's byte count. Outside timing the boundary is pinned: a limit exactly equal to the shared header length lets both labels verify, because a limit rejects only a strictly-over header. In this run it measured 5,991 ops/sec (166.93 µs/op) — about 1.5x faster than the same run's plain dual-label row (4,013 ops/sec), which is the expected shape: the rejected gateway label never pays its HMAC verification, so the call does one ed25519 verification plus the parse and the gate instead of two verifications, landing in the same band as the same run's single-label within-limit row (5,899 ops/sec), and about 8.3x slower than the same run's pre-parse oversized gate (49,544 ops/sec), which rejects before any parsing runs while this gate runs after parsing. The bench performs zero network I/O and makes no wall-clock assertions (every verify instant is injected).
 
 Environment: Node v24.22.1, linux/x64, AMD EPYC 9D25 (virtualized; shared
 host, so numbers vary run to run). Request fixture: POST with a 31-byte JSON
