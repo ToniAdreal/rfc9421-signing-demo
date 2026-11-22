@@ -526,14 +526,15 @@ export function assertNoUnknownOptions(
 
 /**
  * `created`/`expires` are Unix seconds on the wire, and the verifier's
- * `signature-input` parser only recognizes the `-?\d+` integer shape.
- * Reject anything else here so the signer can never emit a timestamp the
- * verifier would silently truncate (e.g. `1759.5` → `1759`). Negative
- * values are rejected too: a `created` before the Unix epoch can never
- * be fresh, so without an `expires` it would verify as a signature that
- * never expires, and an `expires` before the epoch is expired at birth
- * in disguise (the `expires < created` check alone cannot catch
- * `created: -5, expires: -5`, which it passes as equal).
+ * `signature-input` parser rejects any non-integer timestamp as
+ * MALFORMED_SIGNATURE_INPUT (it no longer silently truncates `1759.5`
+ * to `1759`). Reject anything else here so the signer can never emit a
+ * timestamp the verifier would refuse. Negative values are rejected too:
+ * a `created` before the Unix epoch can never be fresh, so without an
+ * `expires` it would verify as a signature that never expires, and an
+ * `expires` before the epoch is expired at birth in disguise (the
+ * `expires < created` check alone cannot catch `created: -5,
+ * expires: -5`, which it passes as equal).
  */
 function assertTimestamp(name: "created" | "expires", value: number): void {
   if (!Number.isInteger(value))

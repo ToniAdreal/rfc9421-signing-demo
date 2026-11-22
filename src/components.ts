@@ -913,6 +913,25 @@ function parseComponentIds(inner: string): string[] {
   return ids;
 }
 
+/**
+ * Known signature parameters and the wire shape each one requires
+ * (RFC 9421 §2.4): `created`/`expires` are bare integers (Unix seconds);
+ * `keyid`/`alg`/`nonce`/`tag` are quoted strings. Any other parameter is
+ * unknown and ignored per §2.4 — but it must still be a well-formed
+ * `;name=value` pair, so a malformed segment cannot hide behind an
+ * unknown name.
+ */
+const INTEGER_SIGNATURE_PARAMS: ReadonlySet<string> = new Set([
+  "created",
+  "expires",
+]);
+const STRING_SIGNATURE_PARAMS: ReadonlySet<string> = new Set([
+  "keyid",
+  "alg",
+  "nonce",
+  "tag",
+]);
+
 function parseParamList(segment: string): SignatureParams {
   const params: SignatureParams = {};
   // A repeated parameter is ambiguous authenticated input: a verifier must
@@ -922,23 +941,97 @@ function parseParamList(segment: string): SignatureParams {
   // matched case-insensitively per RFC 9421 §2.4) — is a hard parse error
   // that verifyRequest converges to MALFORMED_SIGNATURE_INPUT.
   const seen = new Set<string>();
-  const re = /;\s*([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|(-?\d+))/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(segment)) !== null) {
-    const key = m[1].toLowerCase();
+  // Anchored scan: the old global-regex loop only recognized well-formed
+  // values and silently skipped the rest, so `created=1700000000.5` was
+  // truncated to `created: 1700000000`, `created=abc` / `keyid=123`
+  // vanished, and trailing garbage after the last parameter was ignored.
+  // Every character of the segment must now be accounted for by a
+  // `;name=value` pair (or surrounding whitespace); anything else is a
+  // hard parse error, raised before any crypto runs.
+  let i = 0;
+  const n = segment.length;
+  const skipWs = (): void => {
+    while (i < n && /\s/.test(segment[i])) i++;
+  };
+  while (true) {
+    skipWs();
+    if (i >= n) break;
+    if (segment[i] !== ";")
+      throw new Error(
+        `malformed signature-input parameter at offset ${i}: expected ";"`,
+      );
+    i++; // consume ";"
+    skipWs();
+    const nameMatch = /^[A-Za-z][A-Za-z0-9_-]*/.exec(segment.slice(i));
+    if (!nameMatch)
+      throw new Error(
+        `malformed signature-input parameter at offset ${i}: expected a parameter name`,
+      );
+    const key = nameMatch[0].toLowerCase();
+    i += nameMatch[0].length;
+    skipWs();
+    if (i >= n || segment[i] !== "=")
+      throw new Error(
+        `malformed signature-input parameter ";${key}": expected "="`,
+      );
+    i++; // consume "="
+    skipWs();
+    if (i >= n)
+      throw new Error(
+        `malformed signature-input parameter ";${key}": missing value`,
+      );
     if (seen.has(key))
       throw new Error(`duplicate signature-input parameter ";${key}"`);
     seen.add(key);
-    if (m[2] !== undefined) {
-      const s = unquoteString(m[2]);
+    if (INTEGER_SIGNATURE_PARAMS.has(key)) {
+      const intMatch = /^-?\d+/.exec(segment.slice(i));
+      if (!intMatch)
+        throw new Error(
+          `malformed signature-input parameter ";${key}": expected a bare integer`,
+        );
+      const after = segment[i + intMatch[0].length];
+      if (after !== undefined && !/[\s;,]/.test(after))
+        throw new Error(
+          `malformed signature-input parameter ";${key}": integer value must not be followed by "${after}"`,
+        );
+      const value = parseInt(intMatch[0], 10);
+      if (key === "created") params.created = value;
+      else params.expires = value;
+      i += intMatch[0].length;
+    } else if (STRING_SIGNATURE_PARAMS.has(key)) {
+      if (segment[i] !== '"')
+        throw new Error(
+          `malformed signature-input parameter ";${key}": expected a quoted string`,
+        );
+      const strMatch = /^"((?:[^"\\]|\\.)*)"/.exec(segment.slice(i));
+      if (!strMatch)
+        throw new Error(
+          `malformed signature-input parameter ";${key}": unterminated quoted string`,
+        );
+      const s = unquoteString(strMatch[1]);
       if (key === "keyid") params.keyid = s;
       else if (key === "alg") params.alg = s;
       else if (key === "nonce") params.nonce = s;
-      else if (key === "tag") params.tag = s;
-    } else if (m[3] !== undefined) {
-      const n = parseInt(m[3], 10);
-      if (key === "created") params.created = n;
-      else if (key === "expires") params.expires = n;
+      else params.tag = s;
+      i += strMatch[0].length;
+    } else {
+      // Unknown parameter: ignored per RFC 9421 §2.4, but its value must
+      // still be consumed as one well-formed token so nothing is skipped.
+      if (segment[i] === '"') {
+        const strMatch = /^"((?:[^"\\]|\\.)*)"/.exec(segment.slice(i));
+        if (!strMatch)
+          throw new Error(
+            `malformed signature-input parameter ";${key}": unterminated quoted string`,
+          );
+        i += strMatch[0].length;
+      } else {
+        const tokMatch = /^[^\s;,]+/.exec(segment.slice(i));
+        if (!tokMatch)
+          throw new Error(
+            `malformed signature-input parameter ";${key}": missing value`,
+          );
+        i += tokMatch[0].length;
+      }
     }
   }
   return params;

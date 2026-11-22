@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2502 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2518 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2490,7 +2490,15 @@ values. Without a request to bind to, keep using the request-side API
   A repeated signature-input parameter (e.g. two `created=` values, case
   variants included) is ambiguous authenticated input and is rejected as
   `MALFORMED_SIGNATURE_INPUT` before any crypto runs — the parser never
-  silently lets the later value win. The response side has the same
+  silently lets the later value win. The same fail-closed rule covers
+  malformed values of known parameters: a `created`/`expires` that is not
+  a bare integer (`1700000000.5`, `abc`, `"1700000000"`), a `keyid`/`alg`/
+  `nonce`/`tag` that is not a quoted string (`keyid=123`), a parameter
+  without a value, or trailing garbage after the last parameter are all
+  rejected as `MALFORMED_SIGNATURE_INPUT` before any crypto runs — the
+  parser never silently truncates a timestamp, drops a parameter, or
+  skips leftover text. Unknown parameters are still ignored per RFC 9421
+  §2.4, but only as well-formed `;name=value` pairs. The response side has the same
   entry point: `verifyAllResponseLabels(res, opts)` verifies every
   label on a signed response with the same per-label semantics
   (`keys`, `keyResolvers`, `expectedKeyIds`, `requiredLabels`, …)
@@ -5446,7 +5454,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2502 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2518 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
