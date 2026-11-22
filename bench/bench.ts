@@ -691,7 +691,29 @@
  * re-imported keys asserted outside timing (see PEM_* below), so
  * the serialization-plus-reparse cost of the PEM form is visible
  * apart from the JWK round-trip rows above that cover the JSON
- * form, plus the pure string-building step every sign/verify pays
+ * form, plus the private-key side of JWK key loading a gateway pays
+ * before it can verify with a rotated key: `importPrivateKeyJwk` over
+ * two fixed private JWKs (ed25519 via `exportPrivateKeyJwk`, P-256 via
+ * `exportPrivateKeyJwkP256`, each pushed through the JSON wire form),
+ * self-checked on every measured pass (both re-imported keys are
+ * private keys of the pinned type and curve) with the full PKCS#8 DER
+ * round-trip equality and the wrong-curve export/import rejections
+ * asserted outside timing (see the private JWK import section below),
+ * plus the private JWK export a signer pays when handing a P-256
+ * signing key over as JSON: `exportPrivateKeyJwkP256` over one fixed
+ * P-256 private key, self-checked on every measured pass against the
+ * pinned exported JWK (the export is deterministic), with the
+ * wrong-curve export rejections asserted outside timing, plus the
+ * key-shape self-description helpers a gateway calls when it names a
+ * key in a configuration error or picks an algorithm from a key's
+ * shape: `describeKey`, `inferAlgFromKeyShape` and
+ * `algMatchesKeyShape` over one fixed key of each of the six supported
+ * shapes (ed25519, P-256, P-384, P-521, RSA-2048, a 32-byte HMAC
+ * secret), self-checked on every measured pass against hand-pinned
+ * descriptions, algorithms and a true/false match matrix, with the
+ * unmappable-shape inference rejection and the unknown-algorithm
+ * non-match asserted outside timing (see the key-shape
+ * self-description section below), plus the pure string-building step every sign/verify pays
  * before any cryptography runs: `buildSignatureBase` over the
  * shared fixture request with the fixed covered set
  * `@method @authority @path content-digest`, self-checked outside
@@ -1026,6 +1048,7 @@ import type { AddressInfo } from "node:net";
 import {
   addResponseSignature,
   addSignature,
+  algMatchesKeyShape,
   assertContentDigestAlg,
   assertHmacSecretLength,
   assertRsaModulusLength,
@@ -1038,6 +1061,12 @@ import {
   createVerifiedFetchHandler,
   createVerifiedHandler,
   DEFAULT_MAX_SIGNATURE_INPUT_LENGTH,
+  describeKey,
+  exportPrivateKeyJwk,
+  exportPrivateKeyJwkP256,
+  exportPrivateKeyJwkP384,
+  exportPrivateKeyJwkP521,
+  exportPrivateKeyJwkRsa,
   exportPrivateKeyPem,
   exportPublicKeyJwk,
   exportPublicKeyJwkP256,
@@ -1061,6 +1090,7 @@ import {
   getHeader,
   getHeaderRaw,
   importPrivateKey,
+  importPrivateKeyJwk,
   importPublicKey,
   importPublicKeyJwk,
   importPublicKeyJwkP256,
@@ -1068,6 +1098,7 @@ import {
   importPublicKeyJwkP521,
   importPublicKeyJwkRsa,
   importSymmetricKeyJwk,
+  inferAlgFromKeyShape,
   isVerifyError,
   JwksKeyStore,
   joinHeaderValues,
@@ -16846,6 +16877,393 @@ function benchmarkPemRoundTrip(): number {
 }
 
 /**
+ * Private JWK import steady state: the key-loading work a gateway
+ * pays when a rotated signing key arrives as a private JWK — the
+ * import side the public-key JWK round-trip rows never time (they
+ * move public keys only; the demo's private-JWK segment #1300 shows
+ * the export without timing the import).
+ *
+ * Fixture caliber (fixed, stated here as the backlog requires): one
+ * ed25519 key pair and one P-256 key pair, generated ONCE before
+ * timing with the library's own generators; the private JWKs are
+ * exported once outside timing (`exportPrivateKeyJwk` for ed25519,
+ * `exportPrivateKeyJwkP256` for P-256) and pinned as JSON strings —
+ * the wire form a key arrives in. The keys are random per bench run,
+ * but nothing measured depends on their values — no wall clock, no
+ * network.
+ *
+ * Self-check (outside timing): each re-imported private key's PKCS#8
+ * DER encoding — produced by node:crypto directly, independently of
+ * the JWK helpers — must equal the original private key's DER
+ * byte-for-byte, for both shapes. The wrong-curve rejections are
+ * pinned outside timing too: `exportPrivateKeyJwkP384` on the P-256
+ * key, `exportPrivateKeyJwk` on the P-256 key (ed25519-only), and
+ * `importPrivateKeyJwk` on the ed25519 JWK with its `crv` retargeted
+ * to P-256 must all throw with their pinned message substrings.
+ */
+function benchmarkImportPrivateKeyJwk(): number {
+  const ed = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const edPrivateJwk = exportPrivateKeyJwk(ed.privateKey);
+  const edPrivateJwkJson = JSON.stringify(edPrivateJwk);
+  const p256PrivateJwkJson = JSON.stringify(
+    exportPrivateKeyJwkP256(p256.privateKey),
+  );
+  const assertImported = (where: string): void => {
+    const edRevived = importPrivateKeyJwk(JSON.parse(edPrivateJwkJson));
+    const p256Revived = importPrivateKeyJwk(JSON.parse(p256PrivateJwkJson));
+    if (
+      edRevived.type !== "private" ||
+      edRevived.asymmetricKeyType !== "ed25519"
+    )
+      throw new Error(
+        `benchmark self-check failed: importPrivateKeyJwk ed25519 (${where}) gave ` +
+          `type=${String(edRevived.type)} asymmetricKeyType=${String(edRevived.asymmetricKeyType)}`,
+      );
+    if (
+      p256Revived.type !== "private" ||
+      p256Revived.asymmetricKeyType !== "ec" ||
+      p256Revived.asymmetricKeyDetails?.namedCurve !== "prime256v1"
+    )
+      throw new Error(
+        `benchmark self-check failed: importPrivateKeyJwk P-256 (${where}) gave ` +
+          `type=${String(p256Revived.type)} asymmetricKeyType=${String(p256Revived.asymmetricKeyType)} ` +
+          `curve=${String(p256Revived.asymmetricKeyDetails?.namedCurve)}`,
+      );
+  };
+
+  // Outside timing: the full round trip — each re-imported private
+  // key's PKCS#8 DER equals the original's byte-for-byte.
+  assertImported("outside timing");
+  const edDer = ed.privateKey.export({ format: "der", type: "pkcs8" });
+  const p256Der = p256.privateKey.export({ format: "der", type: "pkcs8" });
+  if (
+    !edDer.equals(
+      importPrivateKeyJwk(JSON.parse(edPrivateJwkJson)).export({
+        format: "der",
+        type: "pkcs8",
+      }),
+    ) ||
+    !p256Der.equals(
+      importPrivateKeyJwk(JSON.parse(p256PrivateJwkJson)).export({
+        format: "der",
+        type: "pkcs8",
+      }),
+    )
+  )
+    throw new Error(
+      "benchmark self-check failed: importPrivateKeyJwk round trip changed a private key",
+    );
+
+  // Outside timing: wrong-curve export/import rejections.
+  const wrongCurve: ReadonlyArray<{
+    name: string;
+    run: () => unknown;
+    message: string;
+  }> = [
+    {
+      name: "exportPrivateKeyJwkP384 on a P-256 key",
+      run: () => exportPrivateKeyJwkP384(p256.privateKey),
+      message: "expected a P-384 private KeyObject",
+    },
+    {
+      name: "exportPrivateKeyJwk on a P-256 key",
+      run: () => exportPrivateKeyJwk(p256.privateKey),
+      message: "expected an ed25519 private KeyObject",
+    },
+    {
+      name: "importPrivateKeyJwk with retargeted crv",
+      run: () => importPrivateKeyJwk({ ...edPrivateJwk, crv: "P-256" }),
+      message: 'expected crv "Ed25519"',
+    },
+  ];
+  for (const bad of wrongCurve) {
+    let thrown: unknown;
+    try {
+      bad.run();
+    } catch (e) {
+      thrown = e;
+    }
+    if (!(thrown instanceof Error) || !thrown.message.includes(bad.message))
+      throw new Error(
+        `benchmark self-check failed: ${bad.name} did not throw "${bad.message}" ` +
+          `(got ${thrown instanceof Error ? JSON.stringify(thrown.message) : "no throw"})`,
+      );
+  }
+
+  return measure(() => {
+    assertImported("measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * P-256 private JWK export steady state: the key-handing-over work a
+ * signer pays when a P-256 signing key leaves as JSON — the export
+ * side the private-JWK import row never times (it only re-imports
+ * JWKs exported outside timing; the demo's private-JWK segment #1300
+ * shows the export without timing it either).
+ *
+ * Fixture caliber (fixed, stated here as the backlog requires): one
+ * P-256 key pair generated ONCE before timing with the library's own
+ * generator; the exported JWK is pinned once outside timing as a JSON
+ * string — the export is deterministic for a fixed key, so the pinned
+ * string is a real expectation, not a snapshot of a random value. No
+ * wall clock, no network.
+ *
+ * Self-check (outside timing): the wrong-curve rejections —
+ * `exportPrivateKeyJwkP256` on the ed25519 key and
+ * `exportPrivateKeyJwkP384` on the P-256 key must both throw with
+ * their pinned message substrings.
+ */
+function benchmarkExportPrivateKeyJwkP256(): number {
+  const { privateKey } = generateP256KeyPair();
+  const expectedJwkJson = JSON.stringify(exportPrivateKeyJwkP256(privateKey));
+  const edPrivate = generateEd25519KeyPair().privateKey;
+  const wrongCurve: ReadonlyArray<{
+    name: string;
+    run: () => unknown;
+    message: string;
+  }> = [
+    {
+      name: "exportPrivateKeyJwkP256 on an ed25519 key",
+      run: () => exportPrivateKeyJwkP256(edPrivate),
+      message: "expected a P-256 private KeyObject",
+    },
+    {
+      name: "exportPrivateKeyJwkP384 on a P-256 key",
+      run: () => exportPrivateKeyJwkP384(privateKey),
+      message: "expected a P-384 private KeyObject",
+    },
+  ];
+  for (const bad of wrongCurve) {
+    let thrown: unknown;
+    try {
+      bad.run();
+    } catch (e) {
+      thrown = e;
+    }
+    if (!(thrown instanceof Error) || !thrown.message.includes(bad.message))
+      throw new Error(
+        `benchmark self-check failed: ${bad.name} did not throw "${bad.message}" ` +
+          `(got ${thrown instanceof Error ? JSON.stringify(thrown.message) : "no throw"})`,
+      );
+  }
+  return measure(() => {
+    const exported = exportPrivateKeyJwkP256(privateKey);
+    if (JSON.stringify(exported) !== expectedJwkJson)
+      throw new Error(
+        "benchmark self-check failed: exportPrivateKeyJwkP256 diverged from the pinned JWK",
+      );
+  }, ITERATIONS);
+}
+
+/**
+ * Fixed key-shape fixture set for the key self-description paths:
+ * one key of each of the six shapes the helpers support — a 32-byte
+ * HMAC secret, ed25519, P-256, P-384, P-521 and RSA-2048 — generated
+ * ONCE per calling benchmark with the library's own generators. The
+ * keys are random per bench run, but nothing measured depends on their
+ * values — no wall clock, no network.
+ */
+function keyShapeFixtures(): {
+  secret: KeyObject;
+  ed25519: KeyObject;
+  p256: KeyObject;
+  p384: KeyObject;
+  p521: KeyObject;
+  rsa: KeyObject;
+} {
+  return {
+    secret: secretKey(Buffer.alloc(32, 0x2a)),
+    ed25519: generateEd25519KeyPair().privateKey,
+    p256: generateP256KeyPair().privateKey,
+    p384: generateP384KeyPair().privateKey,
+    p521: generateP521KeyPair().privateKey,
+    rsa: generateRsaPssKeyPair().privateKey,
+  };
+}
+
+/**
+ * Hand-pinned expectations for the key self-description paths, one
+ * entry per supported key shape — written out literally from the
+ * helpers' documented contracts (`describeKey` in src/keys.ts names a
+ * secret "a secret (symmetric) key" and each asymmetric shape by type
+ * and curve; `inferAlgFromKeyShape` maps a secret to hmac-sha256, the
+ * lowest HMAC floor, and each asymmetric shape to its matching
+ * algorithm; `algMatchesKeyShape` accepts exactly the matching pair
+ * and rejects the cross-shape pair listed as `mismatchAlg`), never
+ * derived from the helpers at bench time.
+ */
+function keyShapeExpectations(
+  keys: ReturnType<typeof keyShapeFixtures>,
+): ReadonlyArray<{
+  name: string;
+  key: KeyObject;
+  description: string;
+  alg: SignAlg;
+  mismatchAlg: string;
+}> {
+  return [
+    {
+      name: "secret",
+      key: keys.secret,
+      description: "a secret (symmetric) key",
+      alg: "hmac-sha256",
+      mismatchAlg: "ed25519",
+    },
+    {
+      name: "ed25519",
+      key: keys.ed25519,
+      description: "an asymmetric ed25519 key",
+      alg: "ed25519",
+      mismatchAlg: "hmac-sha256",
+    },
+    {
+      name: "P-256",
+      key: keys.p256,
+      description: "an asymmetric ec key (prime256v1)",
+      alg: "ecdsa-p256-sha256",
+      mismatchAlg: "ecdsa-p384-sha384",
+    },
+    {
+      name: "P-384",
+      key: keys.p384,
+      description: "an asymmetric ec key (secp384r1)",
+      alg: "ecdsa-p384-sha384",
+      mismatchAlg: "ecdsa-p521-sha512",
+    },
+    {
+      name: "P-521",
+      key: keys.p521,
+      description: "an asymmetric ec key (secp521r1)",
+      alg: "ecdsa-p521-sha512",
+      mismatchAlg: "rsa-pss-sha512",
+    },
+    {
+      name: "RSA",
+      key: keys.rsa,
+      description: "an asymmetric rsa key",
+      alg: "rsa-pss-sha512",
+      mismatchAlg: "ecdsa-p256-sha256",
+    },
+  ];
+}
+
+/**
+ * `describeKey` steady state: the key-naming work a gateway pays
+ * whenever it writes a key's shape into a configuration error — the
+ * human-readable description the sign and verify sides share, timed
+ * here over one fixed key of each of the six supported shapes so the
+ * per-shape string-building cost is visible apart from the JWK
+ * round-trip rows that move keys as JSON.
+ *
+ * Fixture caliber: the shared six-shape set from
+ * {@link keyShapeFixtures}, generated once outside timing; the
+ * expected descriptions are hand-pinned in
+ * {@link keyShapeExpectations} and re-checked on every measured pass.
+ * Zero network, zero randomness, no wall-clock assertions.
+ */
+function benchmarkDescribeKey(): number {
+  const expected = keyShapeExpectations(keyShapeFixtures());
+  return measure(() => {
+    for (const e of expected) {
+      const actual = describeKey(e.key);
+      if (actual !== e.description)
+        throw new Error(
+          `benchmark self-check failed: describeKey(${e.name}) gave ${JSON.stringify(actual)} ` +
+            `(expected ${JSON.stringify(e.description)})`,
+        );
+    }
+  }, ITERATIONS);
+}
+
+/**
+ * `inferAlgFromKeyShape` steady state: the algorithm-inference work a
+ * gateway pays when a signature arrives with no `alg` and the key's
+ * shape is the only signal — the single key-shape→alg mapping both
+ * sides share, timed here over one fixed key of each of the six
+ * supported shapes so the per-shape dispatch cost is visible apart
+ * from the `algFallback: "infer"` verify rows that bundle it with
+ * base building and crypto.
+ *
+ * Fixture caliber: the shared six-shape set from
+ * {@link keyShapeFixtures}, generated once outside timing; the
+ * expected algorithms are hand-pinned in
+ * {@link keyShapeExpectations} and re-checked on every measured pass.
+ * Outside timing, an unmappable shape (a secp256k1 EC key) must throw
+ * a configuration error naming this helper. Zero network, zero
+ * randomness, no wall-clock assertions.
+ */
+function benchmarkInferAlgFromKeyShape(): number {
+  const expected = keyShapeExpectations(keyShapeFixtures());
+  const secp256k1 = generateKeyPairSync("ec", { namedCurve: "secp256k1" });
+  let thrown: unknown;
+  try {
+    inferAlgFromKeyShape(secp256k1.privateKey);
+  } catch (e) {
+    thrown = e;
+  }
+  if (
+    !(thrown instanceof Error) ||
+    !thrown.message.includes(
+      "inferAlgFromKeyShape: cannot infer an algorithm",
+    )
+  )
+    throw new Error(
+      `benchmark self-check failed: inferAlgFromKeyShape on a secp256k1 key did not throw ` +
+        `"inferAlgFromKeyShape: cannot infer an algorithm" ` +
+        `(got ${thrown instanceof Error ? JSON.stringify(thrown.message) : "no throw"})`,
+    );
+  return measure(() => {
+    for (const e of expected) {
+      const actual = inferAlgFromKeyShape(e.key);
+      if (actual !== e.alg)
+        throw new Error(
+          `benchmark self-check failed: inferAlgFromKeyShape(${e.name}) gave ${JSON.stringify(actual)} ` +
+            `(expected ${JSON.stringify(e.alg)})`,
+        );
+    }
+  }, ITERATIONS);
+}
+
+/**
+ * `algMatchesKeyShape` steady state: the algorithm-to-key-shape
+ * compatibility check the sign side runs fail-fast before any crypto
+ * and the verify side runs under the `algFallback: "infer"` opt-in —
+ * the shared predicate that keeps the two sides from ever drifting
+ * apart, timed here over one fixed key of each of the six supported
+ * shapes with both a matching and a cross-shape algorithm per key, so
+ * the true/false dispatch cost is visible apart from the verify rows
+ * that bundle it with base building and crypto.
+ *
+ * Fixture caliber: the shared six-shape set from
+ * {@link keyShapeFixtures}, generated once outside timing; the match
+ * matrix is hand-pinned in {@link keyShapeExpectations} and re-checked
+ * on every measured pass. Outside timing, an unknown algorithm matches
+ * no key. Zero network, zero randomness, no wall-clock assertions.
+ */
+function benchmarkAlgMatchesKeyShape(): number {
+  const keys = keyShapeFixtures();
+  const expected = keyShapeExpectations(keys);
+  if (algMatchesKeyShape("ed448", keys.ed25519))
+    throw new Error(
+      "benchmark self-check failed: unknown alg ed448 matched an ed25519 key",
+    );
+  return measure(() => {
+    for (const e of expected) {
+      if (!algMatchesKeyShape(e.alg, e.key))
+        throw new Error(
+          `benchmark self-check failed: algMatchesKeyShape(${e.alg}, ${e.name}) was false (expected true)`,
+        );
+      if (algMatchesKeyShape(e.mismatchAlg, e.key))
+        throw new Error(
+          `benchmark self-check failed: algMatchesKeyShape(${e.mismatchAlg}, ${e.name}) was true (expected false)`,
+        );
+    }
+  }, ITERATIONS);
+}
+
+/**
  * Fixed covered set for the `buildSignatureBase` path — the same
  * set the bench header names for the sign/verify scenarios
  * (`@method @authority @path content-digest`).
@@ -19890,6 +20308,31 @@ results.push({
   alg: "PEM round-trip ed25519",
   op: "roundtrip",
   ops: benchmarkPemRoundTrip(),
+});
+results.push({
+  alg: "importPrivateKeyJwk (ed25519 + P-256)",
+  op: "import",
+  ops: benchmarkImportPrivateKeyJwk(),
+});
+results.push({
+  alg: "exportPrivateKeyJwkP256 (P-256)",
+  op: "export",
+  ops: benchmarkExportPrivateKeyJwkP256(),
+});
+results.push({
+  alg: "describeKey (6 key shapes)",
+  op: "describe",
+  ops: benchmarkDescribeKey(),
+});
+results.push({
+  alg: "inferAlgFromKeyShape (6 key shapes)",
+  op: "infer",
+  ops: benchmarkInferAlgFromKeyShape(),
+});
+results.push({
+  alg: "algMatchesKeyShape (6 shapes ×2)",
+  op: "match",
+  ops: benchmarkAlgMatchesKeyShape(),
 });
 results.push({
   alg: "buildSignatureBase (4 components)",
