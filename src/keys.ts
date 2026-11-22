@@ -2082,7 +2082,11 @@ export interface MemoizeKeyResolverOptions {
   /**
    * Injected clock returning unix seconds — the same convention as
    * `ReplayCacheOptions.now` — so tests can pin time deterministically.
-   * Defaults to the wall clock.
+   * Defaults to the wall clock. Must return a finite number of seconds
+   * since the epoch: a `NaN` / `Infinity` / non-number reading throws a
+   * configuration `Error` before any cache state is read or changed
+   * (backlog #1328) — the same contract as `ReplayCacheOptions.now`
+   * and `JwksKeyStoreOptions.now`.
    */
   now?: () => number;
 }
@@ -2118,6 +2122,10 @@ export interface MemoizeKeyResolverStats {
  *   the cache.
  * - `clear()` empties the cache and resets every counter to zero, so a
  *   key rotation (or a test) can start from a known-empty state.
+ * - Both read the injected clock through the same validated helper as
+ *   lookups, so under a broken clock they throw a configuration
+ *   `Error` instead of reporting stale or zero counters (backlog
+ *   #1328) — the same shape as `ReplayCache`'s clock-reading `size`.
  */
 export interface MemoizedKeyResolver {
   (keyId: string): KeyObject | undefined;
@@ -2162,6 +2170,17 @@ export interface MemoizedKeyResolver {
  * and whether a stream of one-off `keyid`s is driving LRU evictions —
  * the same counters `ReplayCache` and `JwksKeyStore` already expose.
  *
+ * Clock contract: the injected `now` must return a finite number of
+ * unix seconds. A `NaN` / `Infinity` / non-number reading throws a
+ * configuration `Error` (`memoizeKeyResolver: clock must return a
+ * finite number of seconds since the epoch, got …`) before any cache
+ * state is read or changed, so a failed lookup leaves the cached
+ * entries and the counters exactly as they were — no `NaN`-timestamped
+ * entry is ever stored, and the memoizer never silently degrades to a
+ * pass-through that hammers the keystore. `stats()` and `clear()` read
+ * the clock through the same helper, so they throw under a bad clock
+ * instead of reporting zero.
+ *
  * @example
  * ```ts
  * import { memoizeKeyResolver } from "./dist/src/index.js";
@@ -2200,6 +2219,24 @@ export function memoizeKeyResolver(
       "memoizeKeyResolver: `now` must be a function returning unix seconds",
     );
   }
+  // Read the injected clock, rejecting a non-finite reading before any
+  // cache state is read or changed — a `NaN` reading would make every
+  // `t < hit.expiresAt` comparison false, so every lookup would look
+  // expired and the memoizer would silently degrade to a pass-through
+  // that hammers the keystore and inflates `evictions` (backlog #1328).
+  // Lookups, `stats()`, and `clear()` all read through this helper, so
+  // a bad clock throws a configuration `Error` instead of reporting
+  // stale or zero counters — the same shape as `ReplayCache`'s
+  // `resolveNow` (backlog #1288) and `JwksKeyStore`'s `readClock`
+  // (backlog #1291).
+  const readClock = (): number => {
+    const t = now();
+    if (typeof t !== "number" || !Number.isFinite(t))
+      throw new Error(
+        `memoizeKeyResolver: clock must return a finite number of seconds since the epoch, got ${typeof t === "number" ? String(t) : typeof t}`,
+      );
+    return t;
+  };
   // Insertion order = LRU order: hits re-insert their entry at the tail.
   const cache = new Map<string, { key: KeyObject; expiresAt: number }>();
   let hits = 0;
@@ -2225,7 +2262,7 @@ export function memoizeKeyResolver(
     }
   };
   const memoized = ((keyId: string): KeyObject | undefined => {
-    const t = now();
+    const t = readClock();
     const hit = cache.get(keyId);
     if (hit !== undefined) {
       if (t < hit.expiresAt) {
@@ -2249,13 +2286,17 @@ export function memoizeKeyResolver(
     }
     return resolved;
   }) as MemoizedKeyResolver;
-  memoized.stats = (): MemoizeKeyResolverStats => ({
-    size: cache.size,
-    hits,
-    misses,
-    evictions,
-  });
+  memoized.stats = (): MemoizeKeyResolverStats => {
+    readClock();
+    return {
+      size: cache.size,
+      hits,
+      misses,
+      evictions,
+    };
+  };
   memoized.clear = (): void => {
+    readClock();
     cache.clear();
     hits = 0;
     misses = 0;
