@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { assertObjectParam } from "./components.js";
 
 /**
  * In-memory nonce replay cache (zero dependencies).
@@ -51,6 +52,11 @@ export interface NonceStore {
   check(nonce: string, now?: number): boolean;
 }
 
+/** Options for {@link ReplayCache} and its restore entry points.
+ * `opts` itself must be an object: `null`, a string, or a number is
+ * rejected with `ReplayCache: opts must be an object` before any
+ * field is read (backlog #1349) — the `= {}` default only covers
+ * `undefined`. */
 export interface ReplayCacheOptions {
   /**
    * Maximum number of nonces tracked. When exceeded, the least recently
@@ -510,6 +516,13 @@ export class ReplayCache implements NonceStore {
   private evictions = 0;
 
   constructor(opts: ReplayCacheOptions = {}) {
+    // A non-object opts (null, a string, a number, ...) must fail with
+    // a named configuration Error, not a bare TypeError from the first
+    // property read below — `opts = {}` only covers `undefined`
+    // (backlog #1349). The same guard is repeated at the top of the
+    // signed-restore entry points, which read `opts` before they
+    // reach this constructor.
+    assertObjectParam("ReplayCache", "opts", opts);
     const maxEntries = opts.maxEntries ?? 10_000;
     const ttlSec = opts.ttlSec ?? 3600;
     if (!Number.isInteger(maxEntries) || maxEntries < 1)
@@ -907,6 +920,10 @@ export class ReplayCache implements NonceStore {
     secret: string | Buffer,
     opts: ReplayCacheOptions = {},
   ): ReplayCache {
+    // The expiry check below reads `opts.now` before the unsigned
+    // restore (and its constructor guard) runs, so a non-object opts
+    // would otherwise die as a bare TypeError here (backlog #1349).
+    assertObjectParam("ReplayCache", "opts", opts);
     const secretBytes = signedSnapshotSecretBytes(secret);
     const fail = (detail: string): never => {
       throw new Error(`ReplayCache: invalid signed snapshot envelope: ${detail}`);
@@ -1000,6 +1017,10 @@ export class ReplayCache implements NonceStore {
     secret: string | Buffer,
     opts: ReplayCacheSignedSnapshotsByLabelOptions = {},
   ): Record<string, ReplayCache> {
+    // `opts.expectedLabels` is read below before any per-label
+    // restore (and its constructor guard) runs, so a non-object opts
+    // would otherwise die as a bare TypeError here (backlog #1349).
+    assertObjectParam("ReplayCache", "opts", opts);
     const secretBytes = signedSnapshotSecretBytes(secret);
     const fail = (detail: string): never => {
       throw new Error(
