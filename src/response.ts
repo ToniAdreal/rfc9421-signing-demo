@@ -529,7 +529,10 @@ export function verifyResponseOrThrow(
  * `verifyResponse`: a missing, non-integer, or out-of-range (100-599) `status`, and a wire
  * signature whose covered components derive from the request without
  * `;req`, or carry `;req` with no `request` attached — checked for
- * every label, not just the first. Per-label option maps (`keys`,
+ * every label, not just the first. A `null` / non-object `res` or
+ * `opts` is a third caller bug: it throws a named `Error`
+ * (`verifyAllResponseLabels: res/opts must be an object`) before any
+ * of those checks (backlog #1351). Per-label option maps (`keys`,
  * `keyResolvers`, `expectedKeyIds`, …) behave exactly as in
  * `verifyAllLabels`: the delegation below is the same function, so a
  * label's own key, resolver, freshness window, or replay store is
@@ -539,6 +542,8 @@ export function verifyAllResponseLabels(
   res: HttpResponseLike,
   opts: VerifyAllResponseOptions,
 ): VerifyResult[] {
+  assertObjectParam("verifyAllResponseLabels", "res", res);
+  assertObjectParam("verifyAllResponseLabels", "opts", opts);
   assertNoUnknownOptions(opts, VERIFY_ALL_RESPONSE_OPTION_KEYS, "verifyAllResponseLabels");
   assertStatus("verifyAllResponseLabels", res.status);
   // Header length limits (fail-closed, before the guard below parses
@@ -633,7 +638,8 @@ export function verifyAllResponseLabels(
  * function throws a `VerifyError` carrying that code). Caller
  * configuration errors (a missing, non-integer, or out-of-range
  * `status`; a wire signature whose covered components derive from the
- * request without `;req`, or carry `;req` with no `request` attached)
+ * request without `;req`, or carry `;req` with no `request` attached;
+ * a `null` / non-object `res` or `opts`)
  * still throw a plain `Error`, never a `VerifyError`.
  */
 export function verifyAllResponseLabelsOrThrow(
