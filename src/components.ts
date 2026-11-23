@@ -254,6 +254,30 @@ export function assertObjectParam(
 }
 
 /**
+ * Shared shape guard for the public entry points that take a raw field
+ * value or label: a `null` or non-string argument is a caller bug, and
+ * it must fail as a plain named `Error` (`"<fn>: "<param>" must be a
+ * string, got <typeof>"`) instead of a bare `TypeError` from the first
+ * dereference (`reading 'length'` in `listSignatureLabels`, `reading
+ * 'replace'` in `escapeRegExp` for `parseSignatureInput` / the
+ * misleading `"not present"` a `null` field value used to produce there
+ * via `RegExp.exec` coercing it to `"null"`). The wording follows the
+ * `contentDigest` / `digest` `"body" must be a string or a Buffer, got
+ * …` family, with `null` named explicitly instead of reporting
+ * `typeof null` (`"object"`). (Backlog #1354.)
+ */
+export function assertStringParam(
+  caller: string,
+  param: string,
+  value: unknown,
+): asserts value is string {
+  if (typeof value !== "string")
+    throw new Error(
+      `${caller}: "${param}" must be a string, got ${value === null ? "null" : typeof value}`,
+    );
+}
+
+/**
  * Case-insensitive header lookup. Multi-value headers are joined with
  * ", " per RFC 9421 §2.5 (see `joinHeaderValues` — including its
  * warning: a multi-value `set-cookie` covered bare is ambiguous,
@@ -1061,11 +1085,21 @@ function parseParamList(segment: string): SignatureParams {
   return params;
 }
 
-/** Parse one signature's covered components + parameters from Signature-Input. */
+/** Parse one signature's covered components + parameters from Signature-Input.
+ *
+ * A `null` / non-string `fieldValue` or `label` is a caller bug and throws
+ * a named `Error` (`"parseSignatureInput: "<param>" must be a string"`,
+ * via the shared `assertStringParam`) here, before `escapeRegExp` /
+ * `RegExp.exec` run — `escapeRegExp(null)` used to escape as a bare
+ * `TypeError`, and a `null` field value used to be coerced to `"null"`
+ * and misreported as `"not present"`. (Backlog #1354.)
+ */
 export function parseSignatureInput(
   fieldValue: string,
   label: string,
 ): ParsedSignatureInput {
+  assertStringParam("parseSignatureInput", "fieldValue", fieldValue);
+  assertStringParam("parseSignatureInput", "label", label);
   const labelRe = new RegExp(`(?:^|,)\\s*${escapeRegExp(label)}\\s*=`);
   const m = labelRe.exec(fieldValue);
   if (!m) throw new Error(`signature "${label}" not present in Signature-Input`);
@@ -1124,8 +1158,15 @@ export function parseSignatureField(fieldValue: string, label: string): Buffer {
  * `parseSignatureInput`'s first-match behavior.
  *
  * Throws on a member that is not `label=(...)…` shaped.
+ *
+ * A `null` / non-string `fieldValue` is a caller bug and throws a named
+ * `Error` (`"listSignatureLabels: "fieldValue" must be a string"`, via
+ * the shared `assertStringParam`) here, before the scan reads
+ * `fieldValue.length` — a `null` used to escape as a bare `TypeError`.
+ * (Backlog #1354.)
  */
 export function listSignatureLabels(fieldValue: string): string[] {
+  assertStringParam("listSignatureLabels", "fieldValue", fieldValue);
   const members: string[] = [];
   let depth = 0;
   let inString = false;

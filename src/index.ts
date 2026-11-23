@@ -112,6 +112,7 @@ export type {
 } from "./keys.js";
 export {
   assertObjectParam,
+  assertStringParam,
   buildSignatureBase,
   getHeader,
   getHeaderRaw,
