@@ -12967,6 +12967,7 @@ const JWKS_STATS_EXPECTED = {
   misses: 2,
   conditionalRefreshes: 2,
   notModified: 1,
+  duplicateKids: 0,
 };
 
 /**
@@ -13035,8 +13036,9 @@ function assertJwksStatsFetchCount(
  *   kept and only the freshness timestamp advances.
  *
  * Each pinned kid is then resolved once (three hits) and two
- * unknown kids are resolved (two misses), so all six counters hold
- * the non-trivial values in {@link JWKS_STATS_EXPECTED}.
+ * unknown kids are resolved (two misses), so six counters hold
+ * non-trivial values and duplicateKids stays 0 (no repeated kid
+ * in the fixture), as pinned in {@link JWKS_STATS_EXPECTED}.
  */
 async function jwksStatsFixture(): Promise<JwksKeyStore> {
   const ed25519 = generateEd25519KeyPair();
@@ -13129,7 +13131,8 @@ function assertJwksStats(store: JwksKeyStore): void {
     stats.hits !== JWKS_STATS_EXPECTED.hits ||
     stats.misses !== JWKS_STATS_EXPECTED.misses ||
     stats.conditionalRefreshes !== JWKS_STATS_EXPECTED.conditionalRefreshes ||
-    stats.notModified !== JWKS_STATS_EXPECTED.notModified
+    stats.notModified !== JWKS_STATS_EXPECTED.notModified ||
+    stats.duplicateKids !== JWKS_STATS_EXPECTED.duplicateKids
   )
     throw new Error(
       `benchmark self-check failed: jwks stats ${JSON.stringify(stats)} ` +
@@ -13140,13 +13143,13 @@ function assertJwksStats(store: JwksKeyStore): void {
 /**
  * `JwksKeyStore.stats` steady state: every measured call re-reads
  * the observability snapshot of the fixed store and re-pins it (see
- * {@link assertJwksStats}) — the six-counter detached copy a
+ * {@link assertJwksStats}) — the seven-counter detached copy a
  * gateway's monitoring pays on every polling tick. `stats()` is a
  * pure read, so the timed loop reuses this one fixture. Outside
  * timing, the detached-copy semantics are asserted (mutating a
  * returned snapshot — every field rewritten to 999 — leaves a
  * re-read unchanged), an empty store must report all-zero stats,
- * and clearing a second primed store must reset all six counters
+ * and clearing a second primed store must reset all seven counters
  * (with `size` 0 and `lastRefreshedAt` null).
  */
 async function benchmarkJwksKeyStoreStats(): Promise<number> {
@@ -13159,6 +13162,7 @@ async function benchmarkJwksKeyStoreStats(): Promise<number> {
   detached.misses = 999;
   detached.conditionalRefreshes = 999;
   detached.notModified = 999;
+  detached.duplicateKids = 999;
   assertJwksStats(store);
   const empty = new JwksKeyStore(JWKS_STATS_URL, {
     fetchImpl: async () => {
@@ -13172,13 +13176,14 @@ async function benchmarkJwksKeyStoreStats(): Promise<number> {
     empty.hits !== 0 ||
     empty.misses !== 0 ||
     empty.conditionalRefreshes !== 0 ||
-    empty.notModified !== 0
+    empty.notModified !== 0 ||
+    empty.duplicateKids !== 0
   )
     throw new Error(
       `benchmark self-check failed: empty jwks stats ${JSON.stringify(empty)} ` +
         `(expected all-zero stats)`,
     );
-  // Outside timing: clearing a primed store resets all six
+  // Outside timing: clearing a primed store resets all seven
   // counters, so a post-clear stats() reads as a fresh store
   // (the same rule the jwksClear tests pin). A second fixture is
   // primed for this probe so the measured store stays intact.
@@ -13192,6 +13197,7 @@ async function benchmarkJwksKeyStoreStats(): Promise<number> {
     clearedStats.misses !== 0 ||
     clearedStats.conditionalRefreshes !== 0 ||
     clearedStats.notModified !== 0 ||
+    clearedStats.duplicateKids !== 0 ||
     cleared.size !== 0 ||
     cleared.lastRefreshedAt !== null
   )

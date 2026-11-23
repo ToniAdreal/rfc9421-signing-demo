@@ -376,6 +376,16 @@ export interface JwksKeyStoreOptions {
  *   (a 304 can only arrive on a conditional request), so
  *   `conditionalRefreshes - notModified` is the count of conditional
  *   fetches that actually re-downloaded the key set.
+ * - `duplicateKids`: repeated `kid`s inside one fetched JWKS document
+ *   or one restored snapshot — the same `kid` listed twice counts 1,
+ *   three times counts 2. It counts repeats, not discarded keys: the
+ *   later entry wins and is the key served, so a publisher that
+ *   re-issues one `kid` for two key versions during rotation silently
+ *   retires the first key. Rotation must give each key version its
+ *   own `kid`; this counter is the signal when it does not. Only
+ *   successfully installed documents and restores count — a refresh
+ *   or restore that fails before the swap leaves the counter
+ *   untouched, exactly like the other counters.
  *
  * Counters start at zero, run for the lifetime of the store, and are
  * deliberately NOT part of a snapshot: `exportSnapshot()` does not
@@ -385,7 +395,7 @@ export interface JwksKeyStoreOptions {
  * `JwksKeyStore.restore()` is a new store and starts at zero, like
  * any freshly constructed store.) The one exception is
  * {@link JwksKeyStore.clear}: discarding the cached snapshot also
- * resets all six counters to zero, so a post-clear `stats()` reads
+ * resets all seven counters to zero, so a post-clear `stats()` reads
  * as a fresh store until new activity accrues.
  */
 export interface JwksKeyStoreStats {
@@ -395,6 +405,7 @@ export interface JwksKeyStoreStats {
   misses: number;
   conditionalRefreshes: number;
   notModified: number;
+  duplicateKids: number;
 }
 
 /**
@@ -961,10 +972,18 @@ function defaultSetInterval(
  * own export format, so a kid-less entry means corrupt or tampered
  * data, not a foreign key — silently dropping it could retire a key
  * the operator believes is still being served.
+ *
+ * Also counts repeated `kid`s in the snapshot (see
+ * {@link JwksKeyStoreStats}): the returned `duplicateKids` is the
+ * number of repeats — the same `kid` twice counts 1 — and the later
+ * entry still wins, exactly like `refresh()`. Callers add it to the
+ * store's counter only after this function returns, so a snapshot
+ * that fails validation never counts.
  */
 function parseJwksSnapshot(snapshot: unknown): {
   fetchedAtSec: number;
   keysByKid: Map<string, KeyObject>;
+  duplicateKids: number;
 } {
   const fail = (detail: string): never => {
     throw new Error(`JwksKeyStore: invalid snapshot: ${detail}`);
@@ -991,6 +1010,7 @@ function parseJwksSnapshot(snapshot: unknown): {
   if (!Array.isArray(rawKeysUnknown)) fail(`"keys" must be an array`);
   const rawKeys = rawKeysUnknown as unknown[];
   const keysByKid = new Map<string, KeyObject>();
+  let duplicateKids = 0;
   for (let i = 0; i < rawKeys.length; i++) {
     const entry: unknown = rawKeys[i];
     if (typeof entry !== "object" || entry === null || Array.isArray(entry))
@@ -1013,9 +1033,13 @@ function parseJwksSnapshot(snapshot: unknown): {
       );
     }
     // Duplicate kids: the later entry wins, matching refresh().
+    // A repeat is counted once per re-listing (the same kid twice
+    // counts 1, three times counts 2); the count is returned, not
+    // committed here, so a snapshot that fails below never counts.
+    if (keysByKid.has(kid as string)) duplicateKids++;
     keysByKid.set(kid as string, key);
   }
-  return { fetchedAtSec: fetchedAtSec as number, keysByKid };
+  return { fetchedAtSec: fetchedAtSec as number, keysByKid, duplicateKids };
 }
 
 /**
@@ -1091,7 +1115,11 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   restore does not re-check `alg` — a snapshot is this store's own
  *   export format and carries no `alg`.
  * - **Duplicate `kid`s** within one document: the later entry wins
- *   (ordinary dictionary semantics).
+ *   (ordinary dictionary semantics). The repeats are observable:
+ *   `stats().duplicateKids` counts them (the same `kid` twice
+ *   counts 1), so an operator can see when a publisher re-issued
+ *   one `kid` for two key versions — the first key is silently
+ *   retired, and rotation must give each version its own `kid`.
  * - **Refreshes are single-flight.** Concurrent `refresh()` calls —
  *   and stale `refreshIfStale()` calls — share one in-flight fetch
  *   and its single atomic snapshot replacement, so a burst of
@@ -1263,6 +1291,11 @@ export class JwksKeyStore {
   private conditionalRefreshCount = 0;
   /** Successful refreshes answered `304 Not Modified`. */
   private notModifiedCount = 0;
+  /**
+   * Repeated `kid`s seen inside successfully installed documents
+   * and restored snapshots (see {@link JwksKeyStoreStats}).
+   */
+  private duplicateKidCount = 0;
   /**
    * Whether the fetch of the refresh currently running in
    * `fetchAndSwap` carried an `If-None-Match` header. Reset at the
@@ -1463,7 +1496,7 @@ export class JwksKeyStore {
 
   /**
    * Point-in-time observability snapshot `{ refreshes, refreshFailures,
-   * hits, misses, conditionalRefreshes, notModified }` (see
+   * hits, misses, conditionalRefreshes, notModified, duplicateKids }` (see
    * {@link JwksKeyStoreStats} for the exact counting rules). The
    * returned object is a fresh copy — mutating it does not affect
    * the store's counters.
@@ -1476,6 +1509,7 @@ export class JwksKeyStore {
       misses: this.missCount,
       conditionalRefreshes: this.conditionalRefreshCount,
       notModified: this.notModifiedCount,
+      duplicateKids: this.duplicateKidCount,
     };
   }
 
@@ -1545,6 +1579,7 @@ export class JwksKeyStore {
     this.missCount = 0;
     this.conditionalRefreshCount = 0;
     this.notModifiedCount = 0;
+    this.duplicateKidCount = 0;
   }
 
   /**
@@ -2026,6 +2061,11 @@ export class JwksKeyStore {
     // Build the next snapshot fully before swapping it in: any failure
     // below must leave the previous snapshot untouched.
     const next = new Map<string, KeyObject>();
+    // Repeated kids inside this document, counted locally and
+    // committed at the swap point below, so a refresh that fails
+    // anywhere above leaves the counter untouched, like the
+    // snapshot and the other counters (see `JwksKeyStoreStats`).
+    let duplicateKids = 0;
     if (typeof doc !== "object" || doc === null || Array.isArray(doc))
       throw new Error(
         `JwksKeyStore: invalid JWKS from ${this.url}: expected an object with a "keys" array`,
@@ -2055,6 +2095,10 @@ export class JwksKeyStore {
           }`,
         );
       }
+      // Duplicate kids: the later entry wins (ordinary dictionary
+      // semantics). A repeat counts once per re-listing (the same
+      // kid twice counts 1, three times counts 2).
+      if (next.has(kid)) duplicateKids++;
       next.set(kid, key);
     }
     // Effective TTL for the snapshot being installed: the fetched
@@ -2078,6 +2122,7 @@ export class JwksKeyStore {
     // effective TTL exactly as they were (backlog #1291).
     const nowSec = this.readClock();
     this.keysByKid = next;
+    this.duplicateKidCount += duplicateKids;
     this.lastRefreshAtSec = nowSec;
     this.snapshotTtlSec = effectiveTtlSec;
     // Remember the validator for this snapshot (see the class
@@ -2228,8 +2273,10 @@ export class JwksKeyStore {
    * (see {@link JwksKeyStoreSnapshot}).
    */
   restoreSnapshot(snapshot: unknown): void {
-    const { fetchedAtSec, keysByKid } = parseJwksSnapshot(snapshot);
+    const { fetchedAtSec, keysByKid, duplicateKids } =
+      parseJwksSnapshot(snapshot);
     this.keysByKid = keysByKid;
+    this.duplicateKidCount += duplicateKids;
     this.lastRefreshAtSec = fetchedAtSec;
     // A restored snapshot carries no Cache-Control header (it is
     // this store's own export format), so its effective TTL falls
@@ -2387,8 +2434,10 @@ export class JwksKeyStore {
       expiresAt,
       signedSnapshotRestoreNowSec(opts.now, () => this.readClock()),
     );
-    const { fetchedAtSec, keysByKid } = parseJwksSnapshot(snapshot);
+    const { fetchedAtSec, keysByKid, duplicateKids } =
+      parseJwksSnapshot(snapshot);
     this.keysByKid = keysByKid;
+    this.duplicateKidCount += duplicateKids;
     this.lastRefreshAtSec = fetchedAtSec;
     // Like restoreSnapshot(): a signed envelope's snapshot carries
     // no Cache-Control header, so the effective TTL falls back to

@@ -3243,6 +3243,7 @@ export const DEMO_JWKS_OBSERVABILITY_STATS: JwksKeyStoreStats = {
   misses: 1,
   conditionalRefreshes: 0,
   notModified: 0,
+  duplicateKids: 0,
 };
 
 /** Key id of the JWKS conditional refresh segment's pinned key. */
@@ -3281,6 +3282,7 @@ export const DEMO_JWKS_CONDITIONAL_REFRESH_STATS: JwksKeyStoreStats = {
   misses: 0,
   conditionalRefreshes: 1,
   notModified: 1,
+  duplicateKids: 0,
 };
 
 /** Key id of the JWKS clear segment's pinned key. */
@@ -3310,6 +3312,7 @@ export const DEMO_JWKS_CLEAR_STATS_BEFORE: JwksKeyStoreStats = {
   misses: 0,
   conditionalRefreshes: 0,
   notModified: 0,
+  duplicateKids: 0,
 };
 /** Hand-pinned `size` of the JWKS clear segment after `clear()`: every key dropped. */
 export const DEMO_JWKS_CLEAR_SIZE_AFTER_CLEAR = 0;
@@ -3324,6 +3327,7 @@ export const DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR: JwksKeyStoreStats = {
   misses: 0,
   conditionalRefreshes: 0,
   notModified: 0,
+  duplicateKids: 0,
 };
 /** Rejection code of the JWKS clear segment's verification after `clear()`. */
 export const DEMO_JWKS_CLEAR_CODE_AFTER_CLEAR = "KEY_RESOLUTION_FAILED";
@@ -3343,6 +3347,7 @@ export const DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH: JwksKeyStoreStats = {
   misses: 1,
   conditionalRefreshes: 0,
   notModified: 0,
+  duplicateKids: 0,
 };
 
 /** Key id of the closing JWKS fetch retries segment's scripted key. */
@@ -3421,6 +3426,7 @@ export const DEMO_JWKS_FETCH_TIMEOUT_STATS: JwksKeyStoreStats = {
   misses: 0,
   conditionalRefreshes: 0,
   notModified: 0,
+  duplicateKids: 0,
 };
 /** Key id of the JWKS fetch timeout segment's control key. */
 export const DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID =
@@ -4469,6 +4475,7 @@ export const DEMO_JWKS_SINGLE_FLIGHT_STATS: JwksKeyStoreStats = {
   misses: 0,
   conditionalRefreshes: 0,
   notModified: 0,
+  duplicateKids: 0,
 };
 /** Fetch count after the serial `refresh()` that follows the batch (only overlapping calls merge — a settled refresh fetches again). */
 export const DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS_AFTER_SERIAL = 2;
@@ -4482,6 +4489,7 @@ export const DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL: JwksKeyStoreStats = {
   misses: 0,
   conditionalRefreshes: 0,
   notModified: 0,
+  duplicateKids: 0,
 };
 
 /** Absolute URL the `@query-param` segment signs (`a` bound, `b` unbound). */
@@ -12956,7 +12964,9 @@ export async function runDemo(): Promise<DemoResult> {
     jwksObservabilityStats.conditionalRefreshes !==
       DEMO_JWKS_OBSERVABILITY_STATS.conditionalRefreshes ||
     jwksObservabilityStats.notModified !==
-      DEMO_JWKS_OBSERVABILITY_STATS.notModified
+      DEMO_JWKS_OBSERVABILITY_STATS.notModified ||
+    jwksObservabilityStats.duplicateKids !==
+      DEMO_JWKS_OBSERVABILITY_STATS.duplicateKids
   ) {
     throw new Error(
       `demo fixture broken: JWKS observability gave before ` +
@@ -13018,6 +13028,7 @@ export async function runDemo(): Promise<DemoResult> {
     misses: 0,
     conditionalRefreshes: 0,
     notModified: 0,
+    duplicateKids: 0,
   };
   const jwksConditionalRefreshSockets = new Set<Socket>();
   const jwksConditionalRefreshServer = createServer((req, res) => {
@@ -13147,7 +13158,9 @@ export async function runDemo(): Promise<DemoResult> {
       jwksConditionalRefreshStats.conditionalRefreshes !==
         DEMO_JWKS_CONDITIONAL_REFRESH_STATS.conditionalRefreshes ||
       jwksConditionalRefreshStats.notModified !==
-        DEMO_JWKS_CONDITIONAL_REFRESH_STATS.notModified
+        DEMO_JWKS_CONDITIONAL_REFRESH_STATS.notModified ||
+      jwksConditionalRefreshStats.duplicateKids !==
+        DEMO_JWKS_CONDITIONAL_REFRESH_STATS.duplicateKids
     ) {
       throw new Error(
         `demo fixture broken: JWKS conditional refresh gave fetch count ` +
@@ -13518,6 +13531,7 @@ export async function runDemo(): Promise<DemoResult> {
     misses: 0,
     conditionalRefreshes: 0,
     notModified: 0,
+    duplicateKids: 0,
   };
   let jwksFetchTimeoutControlSize = 0;
   let jwksFetchTimeoutControlResolved = false;
@@ -13620,6 +13634,8 @@ export async function runDemo(): Promise<DemoResult> {
         DEMO_JWKS_FETCH_TIMEOUT_STATS.conditionalRefreshes ||
       jwksFetchTimeoutStats.notModified !==
         DEMO_JWKS_FETCH_TIMEOUT_STATS.notModified ||
+      jwksFetchTimeoutStats.duplicateKids !==
+        DEMO_JWKS_FETCH_TIMEOUT_STATS.duplicateKids ||
       jwksFetchTimeoutControlFetchCalls !==
         DEMO_JWKS_FETCH_TIMEOUT_CONTROL_FETCH_CALLS ||
       jwksFetchTimeoutControlSize !==
@@ -18905,6 +18921,8 @@ export async function runDemo(): Promise<DemoResult> {
       DEMO_JWKS_SINGLE_FLIGHT_STATS.conditionalRefreshes ||
     jwksSingleFlightStats.notModified !==
       DEMO_JWKS_SINGLE_FLIGHT_STATS.notModified ||
+    jwksSingleFlightStats.duplicateKids !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS.duplicateKids ||
     jwksSingleFlightStatsAfterSerial.refreshes !==
       DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.refreshes ||
     jwksSingleFlightStatsAfterSerial.refreshFailures !==
@@ -18916,7 +18934,9 @@ export async function runDemo(): Promise<DemoResult> {
     jwksSingleFlightStatsAfterSerial.conditionalRefreshes !==
       DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.conditionalRefreshes ||
     jwksSingleFlightStatsAfterSerial.notModified !==
-      DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.notModified
+      DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.notModified ||
+    jwksSingleFlightStatsAfterSerial.duplicateKids !==
+      DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL.duplicateKids
   ) {
     throw new Error(
       `demo fixture broken: JWKS single-flight refresh gave ${jwksSingleFlightFetchCallsAfterBatch} fetches ` +
@@ -19323,25 +19343,25 @@ export async function runDemo(): Promise<DemoResult> {
       ? `JWKS verification at the TTL boundary through the stale snapshot: OK (label ${jwksObservabilityVerification.label}, keyid="${jwksObservabilityVerification.keyId}", alg="${jwksObservabilityVerification.alg}", nonce="${jwksObservabilityVerification.nonce}")`
       : `JWKS verification at the TTL boundary through the stale snapshot: FAILED (code ${jwksObservabilityVerification.code}: ${jwksObservabilityVerification.reason})`,
     `JWKS observability resolves at the boundary: resolve("${DEMO_JWKS_OBSERVABILITY_KEY_ID}") returned a key (hit), resolve("${DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID}") returned undefined (miss)`,
-    `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${jwksObservabilityStats.refreshes}, refreshFailures: ${jwksObservabilityStats.refreshFailures}, hits: ${jwksObservabilityStats.hits}, misses: ${jwksObservabilityStats.misses}, conditionalRefreshes: ${jwksObservabilityStats.conditionalRefreshes}, notModified: ${jwksObservabilityStats.notModified} } (hits + misses equals the total resolve() calls)`,
+    `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${jwksObservabilityStats.refreshes}, refreshFailures: ${jwksObservabilityStats.refreshFailures}, hits: ${jwksObservabilityStats.hits}, misses: ${jwksObservabilityStats.misses}, conditionalRefreshes: ${jwksObservabilityStats.conditionalRefreshes}, notModified: ${jwksObservabilityStats.notModified}, duplicateKids: ${jwksObservabilityStats.duplicateKids} } (hits + misses equals the total resolve() calls)`,
     "",
     "JWKS conditional refresh: a JWKS endpoint that answers 304 Not Modified lets the store skip re-downloading an unchanged key set — the second refresh revalidates the remembered ETag instead of swapping in a new snapshot",
     `JWKS conditional refresh first refresh over the loopback endpoint: refresh() fetched the JWKS document (ETag ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG}), the snapshot holds ${jwksConditionalRefreshKeyIdsAfterFirst.length} key and resolve("${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}") returned a key (fetch count ${jwksConditionalRefreshFetchCallsAfterFirst})`,
-    `JWKS conditional refresh second refresh sent If-None-Match: ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG} and the endpoint answered 304 Not Modified: the snapshot still holds ${jwksConditionalRefreshKeyIdsAfterNotModified.length} key ("${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}"), lastRefreshedAt stayed ${jwksConditionalRefreshLastRefreshedAfterNotModified}, stats() = { refreshes: ${jwksConditionalRefreshStats.refreshes}, refreshFailures: ${jwksConditionalRefreshStats.refreshFailures}, hits: ${jwksConditionalRefreshStats.hits}, misses: ${jwksConditionalRefreshStats.misses}, conditionalRefreshes: ${jwksConditionalRefreshStats.conditionalRefreshes}, notModified: ${jwksConditionalRefreshStats.notModified} } (the 304 revalidated the remembered ETag — no key was re-downloaded)`,
+    `JWKS conditional refresh second refresh sent If-None-Match: ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG} and the endpoint answered 304 Not Modified: the snapshot still holds ${jwksConditionalRefreshKeyIdsAfterNotModified.length} key ("${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}"), lastRefreshedAt stayed ${jwksConditionalRefreshLastRefreshedAfterNotModified}, stats() = { refreshes: ${jwksConditionalRefreshStats.refreshes}, refreshFailures: ${jwksConditionalRefreshStats.refreshFailures}, hits: ${jwksConditionalRefreshStats.hits}, misses: ${jwksConditionalRefreshStats.misses}, conditionalRefreshes: ${jwksConditionalRefreshStats.conditionalRefreshes}, notModified: ${jwksConditionalRefreshStats.notModified}, duplicateKids: ${jwksConditionalRefreshStats.duplicateKids} } (the 304 revalidated the remembered ETag — no key was re-downloaded)`,
     jwksConditionalRefreshVerificationOk
       ? `JWKS conditional refresh verification after the 304 through the kept snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_CONDITIONAL_REFRESH_NONCE}")`
       : `JWKS conditional refresh verification after the 304 through the kept snapshot: FAILED (code ${jwksConditionalRefreshVerificationCode}: ${jwksConditionalRefreshVerificationReason})`,
     "",
     "JWKS clear: JwksKeyStore.clear() drops the cached keys and zeroes the stats() counters at once — the explicit reset a gateway runs when an endpoint stops being trusted or a key is known compromised, instead of waiting for the TTL to expire or for a refresh to succeed",
     jwksClearVerificationBefore.ok
-      ? `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" verifies through the fetched snapshot: OK (label ${jwksClearVerificationBefore.label}, keyid="${jwksClearVerificationBefore.keyId}", alg="${jwksClearVerificationBefore.alg}", nonce="${jwksClearVerificationBefore.nonce}"), stats() = { refreshes: ${jwksClearStatsBefore.refreshes}, refreshFailures: ${jwksClearStatsBefore.refreshFailures}, hits: ${jwksClearStatsBefore.hits}, misses: ${jwksClearStatsBefore.misses}, conditionalRefreshes: ${jwksClearStatsBefore.conditionalRefreshes}, notModified: ${jwksClearStatsBefore.notModified} }`
+      ? `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" verifies through the fetched snapshot: OK (label ${jwksClearVerificationBefore.label}, keyid="${jwksClearVerificationBefore.keyId}", alg="${jwksClearVerificationBefore.alg}", nonce="${jwksClearVerificationBefore.nonce}"), stats() = { refreshes: ${jwksClearStatsBefore.refreshes}, refreshFailures: ${jwksClearStatsBefore.refreshFailures}, hits: ${jwksClearStatsBefore.hits}, misses: ${jwksClearStatsBefore.misses}, conditionalRefreshes: ${jwksClearStatsBefore.conditionalRefreshes}, notModified: ${jwksClearStatsBefore.notModified}, duplicateKids: ${jwksClearStatsBefore.duplicateKids} }`
       : `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" through the fetched snapshot: FAILED (code ${jwksClearVerificationBefore.code}: ${jwksClearVerificationBefore.reason})`,
-    `JWKS clear after clear(): size = ${jwksClearSizeAfterClear}, lastRefreshedAt=${jwksClearLastRefreshedAfterClear}, isStale()=${jwksClearStaleAfterClear}, stats() = { refreshes: ${jwksClearStatsAfterClear.refreshes}, refreshFailures: ${jwksClearStatsAfterClear.refreshFailures}, hits: ${jwksClearStatsAfterClear.hits}, misses: ${jwksClearStatsAfterClear.misses}, conditionalRefreshes: ${jwksClearStatsAfterClear.conditionalRefreshes}, notModified: ${jwksClearStatsAfterClear.notModified} } (every cached key dropped, every counter back at zero)`,
+    `JWKS clear after clear(): size = ${jwksClearSizeAfterClear}, lastRefreshedAt=${jwksClearLastRefreshedAfterClear}, isStale()=${jwksClearStaleAfterClear}, stats() = { refreshes: ${jwksClearStatsAfterClear.refreshes}, refreshFailures: ${jwksClearStatsAfterClear.refreshFailures}, hits: ${jwksClearStatsAfterClear.hits}, misses: ${jwksClearStatsAfterClear.misses}, conditionalRefreshes: ${jwksClearStatsAfterClear.conditionalRefreshes}, notModified: ${jwksClearStatsAfterClear.notModified}, duplicateKids: ${jwksClearStatsAfterClear.duplicateKids} } (every cached key dropped, every counter back at zero)`,
     jwksClearVerificationAfterClear.ok
       ? `JWKS clear verification after clear(): the same signed request: OK (unexpected — the cleared store still resolved the retired key)`
       : `JWKS clear verification after clear(): the same signed request: FAILED (code ${jwksClearVerificationAfterClear.code}: ${jwksClearVerificationAfterClear.reason}) — the retired key no longer resolves`,
     jwksClearVerificationAfterRefetch.ok
-      ? `JWKS clear after a fresh refresh() (fetch count ${jwksClearFetchCallsAfterRefetch}): the same signed request verifies again: OK (label ${jwksClearVerificationAfterRefetch.label}, keyid="${jwksClearVerificationAfterRefetch.keyId}", alg="${jwksClearVerificationAfterRefetch.alg}", nonce="${jwksClearVerificationAfterRefetch.nonce}"), stats() = { refreshes: ${jwksClearStatsAfterRefetch.refreshes}, refreshFailures: ${jwksClearStatsAfterRefetch.refreshFailures}, hits: ${jwksClearStatsAfterRefetch.hits}, misses: ${jwksClearStatsAfterRefetch.misses}, conditionalRefreshes: ${jwksClearStatsAfterRefetch.conditionalRefreshes}, notModified: ${jwksClearStatsAfterRefetch.notModified} } (the post-clear miss from the rejected verification stays visible in the counters)`
+      ? `JWKS clear after a fresh refresh() (fetch count ${jwksClearFetchCallsAfterRefetch}): the same signed request verifies again: OK (label ${jwksClearVerificationAfterRefetch.label}, keyid="${jwksClearVerificationAfterRefetch.keyId}", alg="${jwksClearVerificationAfterRefetch.alg}", nonce="${jwksClearVerificationAfterRefetch.nonce}"), stats() = { refreshes: ${jwksClearStatsAfterRefetch.refreshes}, refreshFailures: ${jwksClearStatsAfterRefetch.refreshFailures}, hits: ${jwksClearStatsAfterRefetch.hits}, misses: ${jwksClearStatsAfterRefetch.misses}, conditionalRefreshes: ${jwksClearStatsAfterRefetch.conditionalRefreshes}, notModified: ${jwksClearStatsAfterRefetch.notModified}, duplicateKids: ${jwksClearStatsAfterRefetch.duplicateKids} } (the post-clear miss from the rejected verification stays visible in the counters)`
       : `JWKS clear after a fresh refresh() (fetch count ${jwksClearFetchCallsAfterRefetch}): the same signed request: FAILED (code ${jwksClearVerificationAfterRefetch.code}: ${jwksClearVerificationAfterRefetch.reason})`,
     "",
     "JWKS fetch retries: JwksKeyStore fetchRetries retries only transient JWKS failures — a briefly sick endpoint heals on retry, a wrong request never does",
@@ -19351,7 +19371,7 @@ export async function runDemo(): Promise<DemoResult> {
     "JWKS fetch timeout: JwksKeyStore fetchTimeoutMs caps how long a JWKS refresh may wait — a hung endpoint aborts instead of stalling key rotation forever, and the last good snapshot keeps serving",
     `JWKS fetch timeout over a loopback endpoint that answers once and then hangs (fetchTimeoutMs ${DEMO_JWKS_FETCH_TIMEOUT_MS}ms): the first refresh() seeded the snapshot (size ${DEMO_JWKS_FETCH_TIMEOUT_SIZE}), the second refresh() FAILED (${jwksFetchTimeoutError}) after ${jwksFetchTimeoutFetchCalls} fetches — lastRefreshedAt stayed ${jwksFetchTimeoutLastRefreshedAfterTimeout} and size stayed ${jwksFetchTimeoutSizeAfterTimeout}`,
     jwksFetchTimeoutVerificationOk
-      ? `JWKS fetch timeout verification after the timed-out refresh: the request signed under "${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}" still verifies through the kept snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_FETCH_TIMEOUT_NONCE}"), stats() = { refreshes: ${jwksFetchTimeoutStats.refreshes}, refreshFailures: ${jwksFetchTimeoutStats.refreshFailures}, hits: ${jwksFetchTimeoutStats.hits}, misses: ${jwksFetchTimeoutStats.misses}, conditionalRefreshes: ${jwksFetchTimeoutStats.conditionalRefreshes}, notModified: ${jwksFetchTimeoutStats.notModified} } (the timeout counted one refresh failure, the verification one hit)`
+      ? `JWKS fetch timeout verification after the timed-out refresh: the request signed under "${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}" still verifies through the kept snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_FETCH_TIMEOUT_NONCE}"), stats() = { refreshes: ${jwksFetchTimeoutStats.refreshes}, refreshFailures: ${jwksFetchTimeoutStats.refreshFailures}, hits: ${jwksFetchTimeoutStats.hits}, misses: ${jwksFetchTimeoutStats.misses}, conditionalRefreshes: ${jwksFetchTimeoutStats.conditionalRefreshes}, notModified: ${jwksFetchTimeoutStats.notModified}, duplicateKids: ${jwksFetchTimeoutStats.duplicateKids} } (the timeout counted one refresh failure, the verification one hit)`
       : `JWKS fetch timeout verification after the timed-out refresh: the request signed under "${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}": FAILED (the kept snapshot stopped serving — the timeout must not take the old keys down with it)`,
     `JWKS fetch timeout control store (fetchTimeoutMs ${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_MS}ms) against an endpoint that answers inside the deadline: refresh() succeeded (fetch count ${jwksFetchTimeoutControlFetchCalls}), the snapshot holds ${jwksFetchTimeoutControlSize} key and resolve("${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID}") returned a key`,
     "",

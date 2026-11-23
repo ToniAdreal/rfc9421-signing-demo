@@ -59,6 +59,7 @@ test("jwks requireHttps: https-to-http redirect is rejected and the snapshot sta
     misses: 1,
     conditionalRefreshes: 0,
     notModified: 0,
+    duplicateKids: 0,
   });
 });
 

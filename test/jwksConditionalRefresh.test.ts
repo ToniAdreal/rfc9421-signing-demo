@@ -142,6 +142,7 @@ test("JwksKeyStore: a changed ETag with a 200 swaps in the new snapshot", async 
     misses: 1,
     conditionalRefreshes: 1,
     notModified: 0,
+    duplicateKids: 0,
   });
 });
 
@@ -210,6 +211,7 @@ test("JwksKeyStore: clear() drops the remembered ETag", async () => {
     misses: 0,
     conditionalRefreshes: 0,
     notModified: 0,
+    duplicateKids: 0,
   });
   await store.refresh();
   assert.deepEqual(calls[1]?.init, undefined);
@@ -301,6 +303,7 @@ test("JwksKeyStore: stats() counts conditionalRefreshes and notModified", async 
     misses: 0,
     conditionalRefreshes: 0,
     notModified: 0,
+    duplicateKids: 0,
   });
   await store.refresh(); // 304
   assert.deepEqual(store.stats(), {
@@ -310,6 +313,7 @@ test("JwksKeyStore: stats() counts conditionalRefreshes and notModified", async 
     misses: 0,
     conditionalRefreshes: 1,
     notModified: 1,
+    duplicateKids: 0,
   });
   await store.refresh(); // 200 with a new ETag
   assert.deepEqual(store.stats(), {
@@ -319,6 +323,7 @@ test("JwksKeyStore: stats() counts conditionalRefreshes and notModified", async 
     misses: 0,
     conditionalRefreshes: 2,
     notModified: 1,
+    duplicateKids: 0,
   });
 });
 
@@ -466,6 +471,7 @@ test("JwksKeyStore: the default fetch sends If-None-Match and a loopback 304 kee
       misses: 0,
       conditionalRefreshes: 1,
       notModified: 1,
+      duplicateKids: 0,
     });
   } finally {
     for (const socket of sockets) socket.destroy();

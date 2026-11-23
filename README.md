@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2540 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2551 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1107,14 +1107,22 @@ a store that later grows a second key silently stops falling back.
 `verifyAllLabels` applies the same rule per label.
 
 Observability: `store.stats()` returns a detached `{ refreshes,
-refreshFailures, hits, misses, conditionalRefreshes, notModified }`
+refreshFailures, hits, misses, conditionalRefreshes, notModified,
+duplicateKids }`
 snapshot (mirroring `ReplayCache.stats()`).
 Refresh counts are once per `refresh()` call — a single-flight refresh shared by
 many waiters counts once, as a success or as a failure, and retry attempts
 inside one `refresh()` do not multiply the count — and every `resolve()`
 call counts as exactly one hit (returned a key) or miss (returned `undefined`:
 an unknown keyid, any keyid before the first successful refresh, or an invalid
-keyid), so `hits + misses` is the total number of resolutions. The counters
+keyid), so `hits + misses` is the total number of resolutions. `duplicateKids`
+counts repeated `kid`s inside one fetched document or one restored snapshot —
+the same `kid` listed twice counts 1, three times counts 2. A publisher that
+re-issues one `kid` for two key versions during rotation silently retires the
+first key (the later entry wins), so rotation must give each key version its
+own `kid`; this counter is the signal when it does not. Only successfully
+installed documents and restores count, and `clear()` resets the counter with
+the others. The counters
 run for the store's lifetime and are not part of a snapshot: exporting or
 restoring one does not reset them. `store.keyIds()` returns the cached kids in
 snapshot order as a fresh array (empty before the first refresh and after
@@ -4060,8 +4068,9 @@ and one 304, three pinned kids (ed25519 / P-256 / RSA)
 resolving and two unknown kids missing. Every measured pass
 re-pins the whole snapshot against the hand-written expectation
 `{ refreshes: 3, refreshFailures: 1, hits: 3, misses: 2,
-conditionalRefreshes: 2, notModified: 1 }` — every counter
-non-zero, so the row cannot be measuring an empty or
+conditionalRefreshes: 2, notModified: 1, duplicateKids: 0 }` — six
+counters non-zero and duplicateKids 0 (no repeated kid in the
+fixture), so the row cannot be measuring an empty or
 never-refreshed store. Outside timing the bench also asserts
 the detached-copy semantics (a returned snapshot overwritten
 with 999s leaves a re-read unchanged), that an empty store
@@ -5461,7 +5470,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2540 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2551 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

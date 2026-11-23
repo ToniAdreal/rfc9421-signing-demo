@@ -146,6 +146,7 @@ test("jwks fetchTimeoutMs: a timeout failure counts in stats().refreshFailures",
       misses: 0,
       conditionalRefreshes: 0,
       notModified: 0,
+      duplicateKids: 0,
     });
   } finally {
     stub.restore();
@@ -170,6 +171,7 @@ test("jwks fetchTimeoutMs: a fetch that finishes within the deadline is unaffect
       misses: 0,
       conditionalRefreshes: 0,
       notModified: 0,
+      duplicateKids: 0,
     });
   } finally {
     stub.restore();

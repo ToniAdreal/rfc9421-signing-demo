@@ -410,7 +410,7 @@ test("signed snapshot: export before any refresh throws, and a failed signed res
   const original = await refreshedStore(keys, () => 1_700_000_500);
   const envelope = original.exportSignedSnapshot(SECRET);
   const target = new JwksKeyStore(URL, { fetchImpl: noFetch, ttlSec: 300, now: () => 1_700_000_500 });
-  assert.deepEqual(target.stats(), { refreshes: 0, refreshFailures: 0, hits: 0, misses: 0, conditionalRefreshes: 0, notModified: 0 });
+  assert.deepEqual(target.stats(), { refreshes: 0, refreshFailures: 0, hits: 0, misses: 0, conditionalRefreshes: 0, notModified: 0, duplicateKids: 0 });
   assert.throws(
     () =>
       target.restoreSignedSnapshot(JSON.parse(JSON.stringify(envelope)), "wrong-secret-long-enough"),
@@ -418,7 +418,7 @@ test("signed snapshot: export before any refresh throws, and a failed signed res
   );
   // A rejected signed restore is not a refresh, so it must not move
   // the refresh counters (unlike a failed refresh()).
-  assert.deepEqual(target.stats(), { refreshes: 0, refreshFailures: 0, hits: 0, misses: 0, conditionalRefreshes: 0, notModified: 0 });
+  assert.deepEqual(target.stats(), { refreshes: 0, refreshFailures: 0, hits: 0, misses: 0, conditionalRefreshes: 0, notModified: 0, duplicateKids: 0 });
   // And a subsequent good restore still works.
   target.restoreSignedSnapshot(JSON.parse(JSON.stringify(envelope)), SECRET);
   assert.equal(target.size, 3);
