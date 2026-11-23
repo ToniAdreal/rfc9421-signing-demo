@@ -47,7 +47,7 @@
 
 import { KeyObject } from "node:crypto";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
-import { joinHeaderValues, type RequestLike } from "./components.js";
+import { joinHeaderValues, assertObjectParam, type RequestLike } from "./components.js";
 import {
   addResponseSignature,
   signResponse,
@@ -291,6 +291,17 @@ export interface FetchRequestLike {
  * `"200"` would verify as status 200, so the adapter is the boundary
  * where the integer rule is enforced.
  *
+ * Shape guards (backlog #1352, same `assertObjectParam` as the
+ * sign/verify entries in #1344): a `null` / non-object / array `res`
+ * or `headers` map, or a `null` / non-object `opts.request`, throws
+ * a named `Error` (`"fromNodeResponse: res must be an object"`,
+ * …) instead of a bare `TypeError` from the first dereference. The
+ * guards run before the status checks, and `opts.request` is checked
+ * before its `method` / `url` are read. `opts` itself is left
+ * unguarded on purpose: every `opts` read is optional-chained, so a
+ * `null` options object behaves exactly like an omitted one — there
+ * is no dereference gap to close there.
+ *
  * Multi-value headers are combined with `joinHeaderValues` — see its
  * warning before covering `set-cookie`: two cookies join into one
  * string that cannot be split back into the original cookies.
@@ -300,6 +311,8 @@ export function fromNodeResponse(
   body?: string | Buffer,
   opts?: FromNodeResponseOptions,
 ): RequestLike {
+  assertObjectParam("fromNodeResponse", "res", res);
+  assertObjectParam("fromNodeResponse", "headers", res.headers);
   const status = res.statusCode;
   if (status === undefined)
     throw new Error(
@@ -319,6 +332,7 @@ export function fromNodeResponse(
   let url: string | undefined;
   let boundRequest: RequestLike | undefined;
   if (opts?.request !== undefined) {
+    assertObjectParam("fromNodeResponse", "opts.request", opts.request);
     boundRequest = opts.request;
     method = boundRequest.method;
     url = boundRequest.url;
@@ -345,7 +359,7 @@ export function fromNodeResponse(
   // Trailers are only attached when the message actually carries them;
   // on a real client they are complete only after the response's `end`
   // event, which is when the caller has the buffered body anyway.
-  const trailers = normalizeTrailers(res);
+  const trailers = normalizeTrailers(res, "fromNodeResponse");
   return trailers === undefined ? requestLike : { ...requestLike, trailers };
 }
 
@@ -635,6 +649,7 @@ function normalizeHeaders(
  */
 function normalizeTrailers(
   req: IncomingTrailersLike,
+  caller: string,
 ): Record<string, string> | undefined {
   if (Array.isArray(req.rawTrailers) && req.rawTrailers.length > 0) {
     const grouped = new Map<string, string[]>();
@@ -653,6 +668,11 @@ function normalizeTrailers(
     return out;
   }
   if (req.trailers === undefined) return undefined;
+  // A `null` / non-object trailers map is a caller bug, not an empty
+  // trailers set: fail with the entry's named error (backlog #1352)
+  // instead of the bare `TypeError` `normalizeHeaders` would throw
+  // on `Object.entries(null)`.
+  assertObjectParam(caller, "trailers", req.trailers);
   const normalized = normalizeHeaders(req.trailers);
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
@@ -669,6 +689,16 @@ function normalizeTrailers(
  * `RequestLike` after this call. Throws a
  * descriptive `Error` on missing `method`, `url`, or `host` header —
  * those are caller configuration mistakes, never silently defaulted.
+ *
+ * Shape guards (backlog #1352, same `assertObjectParam` as the
+ * sign/verify entries in #1344): a `null` / non-object / array `req`
+ * or `headers` map, or a `null` / non-object `trailers` map, throws
+ * a named `Error` (`"fromNodeRequest: req must be an object"`, …)
+ * instead of a bare `TypeError` from the first dereference. The
+ * guards run before the `method` / `url` / `host` checks. `opts`
+ * itself is left unguarded on purpose: every `opts` read is
+ * optional-chained, so a `null` options object behaves exactly like
+ * an omitted one — there is no dereference gap to close there.
  *
  * HTTP/2 (Node's `http2` compatibility API) carries no `host` header:
  * the request only has the `:authority` pseudo-header, and the
@@ -689,6 +719,8 @@ export function fromNodeRequest(
   body?: string | Buffer,
   opts?: FromNodeRequestOptions,
 ): RequestLike {
+  assertObjectParam("fromNodeRequest", "req", req);
+  assertObjectParam("fromNodeRequest", "headers", req.headers);
   const method = req.method;
   if (method === undefined || method === "")
     throw new Error("fromNodeRequest: req.method is missing");
@@ -735,7 +767,7 @@ export function fromNodeRequest(
   // Trailers are only attached when the message actually carries
   // them; on a real server they are complete only after the `end`
   // event, which is when the caller has the buffered body anyway.
-  const trailers = normalizeTrailers(req);
+  const trailers = normalizeTrailers(req, "fromNodeRequest");
   return trailers === undefined
     ? { method, url, headers, body }
     : { method, url, headers, body, trailers };
