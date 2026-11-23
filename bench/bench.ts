@@ -988,7 +988,21 @@
  * `ALG_NOT_ALLOWED` rejection cost) — with the opposite half
  * pinned outside timing in each row and the no-whitelist
  * default pinned verifying in both rows, so neither row can be
- * measuring a path that ignores the whitelist. Zero
+ * measuring a path that ignores the whitelist, plus the
+ * response-side replay-defense pair the settlement-webhook
+ * receiver runs against its shared nonce store:
+ * `verifyResponse` with `replayCache` over the same ed25519
+ * response fixture with a pinned nonce (first presentation ok,
+ * second `NONCE_REPLAY`, with the nonce-less bypass, the
+ * `requireNonce` + cache rejection, and the tampered-status
+ * non-pollution pinned outside timing) and
+ * `verifyAllResponseLabels` with `replayCacheByLabel` over the
+ * same dual-signed fixture with the same bare nonce in both
+ * labels (first presentation ok in each label's own store,
+ * second `NONCE_REPLAY` in both, with the shared-store
+ * contrast and the unmapped-label fallback pinned outside
+ * timing) — so the response replay cost the request-side rows
+ * never pay is priced on both paths. Zero
  * network here: the loopback `fromNodeResponse` rows already
  * cover HTTP adaptation, these rows isolate the wrapper cost, plus
  * the end-to-end receive path a webhook endpoint runs on every
@@ -10937,6 +10951,390 @@ function benchmarkVerifyResponseAllowedAlgsMiss(): number {
 }
 
 /**
+ * Pinned shape of the `verifyResponse` replayCache
+ * benchmark: the same ed25519 response fixture as
+ * `benchmarkVerifyResponse` (see RESPONSE_BENCH_* above),
+ * signed outside timing with `created` pinned and a pinned
+ * `nonce` — the measured steady state is the
+ * replay-rejecting path a settlement-webhook receiver runs
+ * against its shared nonce store.
+ */
+const RESPONSE_REPLAY_CACHE_NONCE = "bench-response-replay-1";
+const RESPONSE_REPLAY_CACHE_CODE = "NONCE_REPLAY";
+const RESPONSE_REPLAY_CACHE_REASON =
+  `nonce replay detected: "${RESPONSE_REPLAY_CACHE_NONCE}" was already seen`;
+const RESPONSE_REPLAY_CACHE_REQUIRE_NONCE_CODE = "MISSING_NONCE";
+const RESPONSE_REPLAY_CACHE_REQUIRE_NONCE_REASON =
+  "signature carries no `nonce` but requireNonce is set";
+
+/**
+ * `verifyResponse` with `replayCache` steady state: the
+ * response-side mirror of `benchmarkVerifyReplayCache` —
+ * every measured op consults the cache the plain response
+ * verify rows above never pay, because they pass no cache.
+ * One measured op verifies the one pinned nonced response
+ * fixture twice against a fresh `ReplayCache` sharing the
+ * verifier's injected clock: the first verify records the
+ * nonce and is ok (with the pinned nonce echoed), the
+ * second is rejected with exactly the pinned `NONCE_REPLAY`
+ * code and reason. Outside timing, the bypassing and
+ * non-polluting halves are pinned once: without a cache the
+ * same fixture verifies twice (both ok), a nonce-less
+ * response verifies twice under a cache (nonce-less
+ * responses bypass the cache entirely, size stays 0), a
+ * forged response (status 200 -> 500) with a cache returns
+ * `SIGNATURE_MISMATCH` — the cryptographic check runs
+ * before the cache consultation, so a forgery never
+ * pollutes the cache, and the unmodified fixture still
+ * verifies (and is then replay-rejected) afterwards — and
+ * a nonce-less response under `requireNonce` plus a cache
+ * is rejected with exactly the pinned `MISSING_NONCE`
+ * code and reason, so the measured path cannot be an empty
+ * one. Zero network, zero randomness in the measured
+ * assertions, no wall clock (every verify instant is
+ * injected; the cache's own clock is that same pinned
+ * instant).
+ */
+function benchmarkVerifyResponseReplayCache(): number {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  const signed = signResponse(
+    { status: 200, headers: {}, body: RESPONSE_BENCH_BODY },
+    {
+      keyId: RESPONSE_BENCH_KID,
+      alg: "ed25519",
+      key: privateKey,
+      created: RESPONSE_BENCH_CREATED,
+      nonce: RESPONSE_REPLAY_CACHE_NONCE,
+    },
+  );
+
+  const verifyWithCache = (cache: ReplayCache) =>
+    verifyResponse(signed, {
+      key: publicKey,
+      now: RESPONSE_BENCH_NOW,
+      replayCache: cache,
+    });
+
+  const assertReplayed = (cache: ReplayCache, where: string): void => {
+    const r = verifyWithCache(cache);
+    if (
+      r.ok ||
+      r.code !== RESPONSE_REPLAY_CACHE_CODE ||
+      r.reason !== RESPONSE_REPLAY_CACHE_REASON ||
+      r.nonce !== RESPONSE_REPLAY_CACHE_NONCE
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyResponse with replayCache (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: without a cache the same fixture
+  // verifies twice — replay defense is opt-in and the
+  // default behaviour is unchanged.
+  const uncachedFirst = verifyResponse(signed, {
+    key: publicKey,
+    now: RESPONSE_BENCH_NOW,
+  });
+  const uncachedSecond = verifyResponse(signed, {
+    key: publicKey,
+    now: RESPONSE_BENCH_NOW,
+  });
+  if (!uncachedFirst.ok || !uncachedSecond.ok)
+    throw new Error(
+      `benchmark self-check failed: uncached response fixture gave ${JSON.stringify(uncachedFirst)} / ${JSON.stringify(uncachedSecond)}`,
+    );
+
+  // Outside timing: a nonce-less response verifies
+  // twice under a cache — nonce-less responses
+  // bypass the replay cache entirely.
+  const nonceLess = signResponse(
+    { status: 200, headers: {}, body: RESPONSE_BENCH_BODY },
+    {
+      keyId: RESPONSE_BENCH_KID,
+      alg: "ed25519",
+      key: privateKey,
+      created: RESPONSE_BENCH_CREATED,
+    },
+  );
+  const nonceLessCache = new ReplayCache({ now: () => RESPONSE_BENCH_NOW });
+  const verifyNonceLess = () =>
+    verifyResponse(nonceLess, {
+      key: publicKey,
+      now: RESPONSE_BENCH_NOW,
+      replayCache: nonceLessCache,
+    });
+  if (!verifyNonceLess().ok || !verifyNonceLess().ok || nonceLessCache.size !== 0)
+    throw new Error(
+      `benchmark self-check failed: nonce-less response under cache did not verify twice with an empty cache`,
+    );
+
+  // Outside timing: a nonce-less response under
+  // `requireNonce` plus a cache is rejected with
+  // MISSING_NONCE — the requirement and the cache
+  // compose, and the rejection happens before any
+  // cache record.
+  const required = verifyResponse(nonceLess, {
+    key: publicKey,
+    now: RESPONSE_BENCH_NOW,
+    requireNonce: true,
+    replayCache: nonceLessCache,
+  });
+  if (
+    required.ok ||
+    required.code !== RESPONSE_REPLAY_CACHE_REQUIRE_NONCE_CODE ||
+    required.reason !== RESPONSE_REPLAY_CACHE_REQUIRE_NONCE_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: nonce-less response under requireNonce + cache gave ${JSON.stringify(required)}`,
+    );
+
+  // Outside timing: a forged response (status 200 ->
+  // 500) with a cache returns SIGNATURE_MISMATCH —
+  // the cryptographic check runs before the cache
+  // consultation, so a forgery never pollutes the
+  // cache; the unmodified fixture still verifies and
+  // is then replay-rejected afterwards.
+  const poisonedCache = new ReplayCache({ now: () => RESPONSE_BENCH_NOW });
+  const tampered = verifyResponse(
+    { ...signed, status: 500 },
+    {
+      key: publicKey,
+      now: RESPONSE_BENCH_NOW,
+      replayCache: poisonedCache,
+    },
+  );
+  if (
+    tampered.ok ||
+    tampered.code !== "SIGNATURE_MISMATCH" ||
+    poisonedCache.size !== 0
+  )
+    throw new Error(
+      `benchmark self-check failed: tampered response gave ${JSON.stringify(tampered)} ` +
+        `(expected SIGNATURE_MISMATCH with an empty cache)`,
+    );
+  if (!verifyWithCache(poisonedCache).ok)
+    throw new Error(
+      `benchmark self-check failed: response fixture after forgery was rejected (cache was polluted)`,
+    );
+  assertReplayed(poisonedCache, "replay after unpolluted first verify");
+
+  return measure(() => {
+    const cache = new ReplayCache({ now: () => RESPONSE_BENCH_NOW });
+    const first = verifyWithCache(cache);
+    if (!first.ok || first.nonce !== RESPONSE_REPLAY_CACHE_NONCE)
+      throw new Error(
+        `benchmark self-check failed: verifyResponse with replayCache (measured first pass) gave ${JSON.stringify(first)}`,
+      );
+    assertReplayed(cache, "measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyAllResponseLabels`
+ * replayCacheByLabel benchmark: the same dual-signed
+ * settlement response as `benchmarkVerifyAllResponseLabels`
+ * (merchant ed25519, gateway hmac-sha256, same `created`
+ * pinned), with the same bare nonce in both labels — the
+ * measured steady state is the per-label replay-defense
+ * form a multi-party receiver runs when each signer mints
+ * nonces in its own namespace.
+ */
+const RESPONSE_REPLAY_CACHE_BY_LABEL_NONCE = "bench-response-replay-shared-1";
+const RESPONSE_REPLAY_CACHE_BY_LABEL_CODE = "NONCE_REPLAY";
+const RESPONSE_REPLAY_CACHE_BY_LABEL_REASON =
+  `nonce replay detected: "${RESPONSE_REPLAY_CACHE_BY_LABEL_NONCE}" was already seen`;
+
+/**
+ * `verifyAllResponseLabels` with `replayCacheByLabel`
+ * steady state: the response-side mirror of
+ * `benchmarkVerifyAllReplayCacheByLabel` — the same bare
+ * nonce string in both labels must pass on first
+ * presentation and replay-reject on second presentation in
+ * each label's own store, which the single shared
+ * `replayCache` row above never pays, because it consults
+ * one store for every label. One measured op verifies the
+ * dual twice against fresh per-label caches: the first call
+ * records the nonce in each store (both labels ok, each
+ * echoing the pinned nonce), the second call is
+ * replay-rejected in both stores with exactly the pinned
+ * `NONCE_REPLAY` code and reason — the cryptographic check
+ * runs before the cache consultation, so the second call
+ * still pays full verification per label plus the cache
+ * lookup, exactly the path a receiver runs to refuse a
+ * replayed multi-party response. Outside timing, the
+ * shared-store contrast is pinned once: the same dual
+ * under one global `replayCache` passes the merchant label
+ * and replay-rejects the gateway label on its very first
+ * call (the #643 contract — one bare-nonce namespace
+ * cannot serve two signers); the unmapped-label fallback
+ * is pinned once (a merchant-only map over a global cache
+ * passes both labels first and replay-rejects both second,
+ * the gateway via the global store); and the no-cache
+ * default is pinned once (both labels verify twice,
+ * replay defense is opt-in). Zero network, zero
+ * randomness in the measured assertions, no wall clock
+ * (every verify instant is injected; each cache's own
+ * clock is that same pinned instant).
+ */
+function benchmarkVerifyAllResponseLabelsReplayCacheByLabel(): number {
+  const {
+    publicKey: merchantPublic,
+    privateKey: merchantPrivate,
+  } = generateEd25519KeyPair();
+  const gatewaySecret = secretKey("gateway-shared-secret-32-bytes-0!");
+
+  const merchantSigned = signResponse(
+    { status: 200, headers: {}, body: RESPONSE_BENCH_BODY },
+    {
+      keyId: RESPONSE_BENCH_KID,
+      alg: "ed25519",
+      key: merchantPrivate,
+      created: RESPONSE_BENCH_CREATED,
+      label: "merchant",
+      nonce: RESPONSE_REPLAY_CACHE_BY_LABEL_NONCE,
+    },
+  );
+  const dual = addResponseSignature(merchantSigned, {
+    keyId: RESPONSE_BENCH_GATEWAY_KID,
+    alg: "hmac-sha256",
+    key: gatewaySecret,
+    created: RESPONSE_BENCH_CREATED,
+    label: "gateway",
+    nonce: RESPONSE_REPLAY_CACHE_BY_LABEL_NONCE,
+  });
+  const verifyOpts = {
+    key: merchantPublic,
+    keys: { gateway: gatewaySecret },
+    now: RESPONSE_BENCH_NOW,
+  };
+  const assertPair = (where: string): void => {
+    const merchantCache = new ReplayCache({
+      now: () => RESPONSE_BENCH_NOW,
+    });
+    const gatewayCache = new ReplayCache({
+      now: () => RESPONSE_BENCH_NOW,
+    });
+    const first = verifyAllResponseLabels(dual, {
+      ...verifyOpts,
+      replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
+    });
+    if (
+      first.length !== 2 ||
+      first[0].label !== "merchant" ||
+      !first[0].ok ||
+      first[0].nonce !== RESPONSE_REPLAY_CACHE_BY_LABEL_NONCE ||
+      first[1].label !== "gateway" ||
+      !first[1].ok ||
+      first[1].nonce !== RESPONSE_REPLAY_CACHE_BY_LABEL_NONCE
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllResponseLabels with replayCacheByLabel (${where}, first presentation) gave ${JSON.stringify(first)}`,
+      );
+    const second = verifyAllResponseLabels(dual, {
+      ...verifyOpts,
+      replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
+    });
+    if (
+      second.length !== 2 ||
+      second[0].label !== "merchant" ||
+      second[0].ok ||
+      second[0].code !== RESPONSE_REPLAY_CACHE_BY_LABEL_CODE ||
+      second[0].reason !== RESPONSE_REPLAY_CACHE_BY_LABEL_REASON ||
+      second[1].label !== "gateway" ||
+      second[1].ok ||
+      second[1].code !== RESPONSE_REPLAY_CACHE_BY_LABEL_CODE ||
+      second[1].reason !== RESPONSE_REPLAY_CACHE_BY_LABEL_REASON
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyAllResponseLabels with replayCacheByLabel (${where}, second presentation) gave ${JSON.stringify(second)}`,
+      );
+  };
+
+  // Outside timing: the per-label pair self-checks
+  // before any timing starts.
+  assertPair("outside timing");
+
+  // Outside timing: the shared-store contrast — one
+  // global cache cannot serve two signers sharing a
+  // bare nonce: the merchant passes, the gateway
+  // replay-rejects on the very first call.
+  const sharedCache = new ReplayCache({
+    now: () => RESPONSE_BENCH_NOW,
+  });
+  const shared = verifyAllResponseLabels(dual, {
+    ...verifyOpts,
+    replayCache: sharedCache,
+  });
+  if (
+    shared.length !== 2 ||
+    shared[0].label !== "merchant" ||
+    !shared[0].ok ||
+    shared[1].label !== "gateway" ||
+    shared[1].ok ||
+    shared[1].code !== RESPONSE_REPLAY_CACHE_BY_LABEL_CODE ||
+    shared[1].reason !== RESPONSE_REPLAY_CACHE_BY_LABEL_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: shared-cache contrast gave ${JSON.stringify(shared)}`,
+    );
+
+  // Outside timing: an unmapped label falls back to
+  // the global cache — a merchant-only map over a
+  // global store passes both labels first and
+  // replay-rejects both second (the gateway via the
+  // global store).
+  const merchantOnlyCache = new ReplayCache({
+    now: () => RESPONSE_BENCH_NOW,
+  });
+  const globalCache = new ReplayCache({
+    now: () => RESPONSE_BENCH_NOW,
+  });
+  const fallbackFirst = verifyAllResponseLabels(dual, {
+    ...verifyOpts,
+    replayCache: globalCache,
+    replayCacheByLabel: { merchant: merchantOnlyCache },
+  });
+  const fallbackSecond = verifyAllResponseLabels(dual, {
+    ...verifyOpts,
+    replayCache: globalCache,
+    replayCacheByLabel: { merchant: merchantOnlyCache },
+  });
+  if (
+    fallbackFirst.length !== 2 ||
+    fallbackFirst.some((r) => !r.ok) ||
+    fallbackSecond.length !== 2 ||
+    fallbackSecond.some(
+      (r) =>
+        r.ok ||
+        r.code !== RESPONSE_REPLAY_CACHE_BY_LABEL_CODE ||
+        r.reason !== RESPONSE_REPLAY_CACHE_BY_LABEL_REASON,
+    )
+  )
+    throw new Error(
+      `benchmark self-check failed: unmapped-label global fallback gave ${JSON.stringify(fallbackFirst)} / ${JSON.stringify(fallbackSecond)}`,
+    );
+
+  // Outside timing: with no cache the same dual
+  // verifies twice — replay defense is opt-in and the
+  // default behaviour is unchanged.
+  const defaultFirst = verifyAllResponseLabels(dual, verifyOpts);
+  const defaultSecond = verifyAllResponseLabels(dual, verifyOpts);
+  if (
+    defaultFirst.length !== 2 ||
+    defaultFirst.some((r) => !r.ok) ||
+    defaultSecond.length !== 2 ||
+    defaultSecond.some((r) => !r.ok)
+  )
+    throw new Error(
+      `benchmark self-check failed: no-cache default gave ${JSON.stringify(defaultFirst)} / ${JSON.stringify(defaultSecond)}`,
+    );
+
+  return measure(() => {
+    assertPair("measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `JwksKeyStore.refreshIfStale` benchmark store:
  * one ed25519 key (generated once, outside timing) published under
  * this kid by the counting fake fetch, a 120-second TTL, and an
@@ -20093,6 +20491,16 @@ results.push({
   alg: "verifyResponse allowedAlgs (miss, ed25519)",
   op: "reject",
   ops: benchmarkVerifyResponseAllowedAlgsMiss(),
+});
+results.push({
+  alg: "verifyResponse replayCache",
+  op: "verify",
+  ops: benchmarkVerifyResponseReplayCache(),
+});
+results.push({
+  alg: "verifyAllResponseLabels replayCacheByLabel (2 labels)",
+  op: "verify",
+  ops: benchmarkVerifyAllResponseLabelsReplayCacheByLabel(),
 });
 results.push({
   alg: "JwksKeyStore.refreshIfStale (stale)",
