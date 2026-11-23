@@ -750,7 +750,11 @@ async function readResponseBodyCapped(
  * attached to the error as `verifyResults`.
  *
  * Fail-fast configuration errors (thrown, before any network):
- * everything `signRequest` already rejects, plus an unknown option
+ * a non-string/non-`URL` `input` (`verifiedFetch: input must be a
+ * string or URL, got …` — checked first, before the `opts` guards,
+ * so a caller bug in the first argument is reported first and never
+ * escapes as the bare `TypeError` `input.toString()` used to throw),
+ * plus everything `signRequest` already rejects, plus an unknown option
  * key on `opts` itself (`invalid verifiedFetch options: unknown
  * option "…"` — the nested `sign` / `verify` objects are scanned by
  * their own entry points, in the pre-flight dry runs below, before
@@ -784,6 +788,14 @@ export async function verifiedFetch(
   init: VerifiedFetchInit | undefined,
   opts: VerifiedFetchOptions,
 ): Promise<VerifiedFetchResult<string | Buffer>> {
+  // A non-string/non-URL input is a caller bug, and it must fail as
+  // a plain named Error here — `input.toString()` below used to let
+  // a `null` escape as a bare `TypeError`. Checked first, before the
+  // `opts` guards, because it is the first argument. (Backlog #1355.)
+  if (typeof input !== "string" && !(input instanceof URL))
+    throw new Error(
+      `verifiedFetch: input must be a string or URL, got ${input === null ? "null" : typeof input}`,
+    );
   if (opts === null || typeof opts !== "object")
     throw new Error(
       `verifiedFetch: opts must be an object, got ${opts === null ? "null" : typeof opts}`,
