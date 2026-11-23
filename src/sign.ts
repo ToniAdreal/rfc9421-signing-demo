@@ -1101,11 +1101,24 @@ export function signRequest(
  *
  * The input request is not mutated; a new `SignedHttpRequest` is
  * returned.
+ *
+ * A `null` / non-object `signedReq` or `opts` is a caller bug and throws
+ * a named `Error` (`addSignature: signedReq/opts must be an object`)
+ * here, before any option check runs — `assertNoUnknownOptions` would
+ * otherwise dereference a `null` `opts` into a bare `TypeError`, and
+ * the header scan below would dereference a `null` message the same
+ * way. The headers map carries its own guard for the same reason: the
+ * scan copies it with `Object.entries` before anything else touches
+ * it. (Backlog #1353, same `assertObjectParam` as the #1344 entry
+ * points.)
  */
 export function addSignature(
   signedReq: SignedHttpRequest,
   opts: SignOptions,
 ): SignedHttpRequest {
+  assertObjectParam("addSignature", "signedReq", signedReq);
+  assertObjectParam("addSignature", "opts", opts);
+  assertObjectParam("addSignature", "headers", signedReq.headers);
   assertNoUnknownOptions(opts, SIGN_OPTION_KEYS, "addSignature");
   const label = opts.label ?? "sig1";
   if (label.length === 0)

@@ -711,11 +711,24 @@ export function verifyAllResponseLabelsOrThrow(
  * signature's own list (from the fresh sign), not a merge with the
  * first signature's: each label's audit record stays attributable
  * to the party that minted it.
+ *
+ * A `null` / non-object `signedRes` or `opts` is a caller bug and throws
+ * a named `Error` (`addResponseSignature: signedRes/opts must be an
+ * object`) here, before any option check runs — `assertNoUnknownOptions`
+ * would otherwise dereference a `null` `opts` into a bare `TypeError`,
+ * and the header scan below would dereference a `null` message the same
+ * way. The headers map carries its own guard for the same reason: the
+ * scan copies it with `Object.entries` before anything else touches
+ * it. (Backlog #1353, same `assertObjectParam` as the #1344 entry
+ * points.)
  */
 export function addResponseSignature(
   signedRes: SignedHttpResponse,
   opts: SignResponseOptions,
 ): SignedHttpResponse {
+  assertObjectParam("addResponseSignature", "signedRes", signedRes);
+  assertObjectParam("addResponseSignature", "opts", opts);
+  assertObjectParam("addResponseSignature", "headers", signedRes.headers);
   assertNoUnknownOptions(opts, SIGN_RESPONSE_OPTION_KEYS, "addResponseSignature");
   const label = opts.label ?? "sig1";
   if (label.length === 0)

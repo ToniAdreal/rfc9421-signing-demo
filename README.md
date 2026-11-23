@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2625 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2646 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2144,9 +2144,12 @@ values. Without a request to bind to, keep using the request-side API
   A `null` / non-object request, response, or options object is a caller
   bug in the same class: the six sign/verify entry points
   (`signRequest`, `verifyRequest`, `verifyAllLabels`, `signResponse`,
-  `verifyResponse`, `verifyAllResponseLabels`) and the exported `getHeader` / `getHeaderRaw`
+  `verifyResponse`, `verifyAllResponseLabels`), the two multi-party
+  append entry points (`addSignature`, `addResponseSignature`), and the
+  exported `getHeader` / `getHeaderRaw`
   helpers reject it with a named `Error` (`"<fn>: req/res/opts/headers
-  must be an object"`) before any option check runs — previously the
+  must be an object"` — the append entry points name their
+  `signedReq` / `signedRes` parameter) before any option check runs — previously the
   first dereference escaped as a bare `TypeError` (`reading 'headers'`,
   `reading 'body'`, `reading 'status'`). The guard runs first because
   the option checks dereference `opts` themselves; the throwing
@@ -5495,7 +5498,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2625 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2646 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
