@@ -111,6 +111,7 @@ export type {
   RsaPublicJwk,
 } from "./keys.js";
 export {
+  assertObjectParam,
   buildSignatureBase,
   getHeader,
   getHeaderRaw,

@@ -43,6 +43,7 @@
  */
 
 import {
+  assertObjectParam,
   getHeader,
   listSignatureLabels,
   parseSignatureInput,
@@ -326,12 +327,20 @@ function responseToRequestLike(
  * is the `@status` guard: RFC 9421 §2.2.9 forbids `@status` in a
  * request message but it is exactly what a response signature binds,
  * so `signResponse` passes `allowStatus: true` into the shared
- * signing core (`signRequestCore`).
+ * signing core (`signRequestCore`). A `null` / non-object `res` or
+ * `opts` throws a named `Error` (`signResponse: res/opts must be an
+ * object`) before any option check (backlog #1344).
  */
 export function signResponse(
   res: HttpResponseLike,
   opts: SignResponseOptions,
 ): SignedHttpResponse {
+  assertObjectParam("signResponse", "res", res);
+  assertObjectParam("signResponse", "opts", opts);
+  // Same reason as `signRequest`: the shared signing core copies the
+  // headers map with `Object.entries` before any component resolution
+  // touches `getHeader` (backlog #1344).
+  assertObjectParam("signResponse", "headers", res.headers);
   assertNoUnknownOptions(opts, SIGN_RESPONSE_OPTION_KEYS, "signResponse");
   assertStatus("signResponse", res.status);
   // `undefined` means "use the default list"; an explicit `null`
@@ -406,12 +415,17 @@ export function signResponse(
  * on a `RequestLike` carrying it). A missing or malformed
  * `signature-input` header is NOT thrown here — it is delegated to
  * `verifyRequest`, which reports it as `MISSING_SIGNATURE_INPUT` /
- * `MALFORMED_SIGNATURE_INPUT` like any other wire failure.
+ * `MALFORMED_SIGNATURE_INPUT` like any other wire failure. A `null` /
+ * non-object `res` or `opts` is a third caller bug: it throws a named
+ * `Error` (`verifyResponse: res/opts must be an object`) before any
+ * of those checks (backlog #1344).
  */
 export function verifyResponse(
   res: HttpResponseLike,
   opts: VerifyResponseOptions,
 ): VerifyResult {
+  assertObjectParam("verifyResponse", "res", res);
+  assertObjectParam("verifyResponse", "opts", opts);
   assertNoUnknownOptions(opts, VERIFY_RESPONSE_OPTION_KEYS, "verifyResponse");
   assertStatus("verifyResponse", res.status);
   // Header length limits (fail-closed, before the guard below parses

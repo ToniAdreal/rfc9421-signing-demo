@@ -7,6 +7,7 @@ import {
   type KeyObject,
 } from "node:crypto";
 import {
+  assertObjectParam,
   buildSignatureBase,
   joinHeaderValues,
   listSignatureLabels,
@@ -1044,11 +1045,23 @@ export function signRequestCore(
  * is refused here, because RFC 9421 §2.2.9 forbids it in a request
  * message — sign the response with `signResponse` instead. The full
  * fail-fast contract lives on `signRequestCore` above.
+ *
+ * A `null` / non-object `req` or `opts` is a caller bug and throws a
+ * named `Error` (`signRequest: req/opts must be an object`) here,
+ * before any option check runs — `assertNoUnknownOptions` would
+ * otherwise dereference a `null` `opts` into a bare `TypeError`.
  */
 export function signRequest(
   req: RequestLike,
   opts: SignOptions,
 ): SignedHttpRequest {
+  assertObjectParam("signRequest", "req", req);
+  assertObjectParam("signRequest", "opts", opts);
+  // The signing core copies `req.headers` with `Object.entries`
+  // before any component resolution touches `getHeader`, so a `null`
+  // headers map needs its own guard here — otherwise it would still
+  // escape as a bare `TypeError` (backlog #1344).
+  assertObjectParam("signRequest", "headers", req.headers);
   return signRequestCore(req, opts, false);
 }
 

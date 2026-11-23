@@ -8,6 +8,7 @@ import {
   type KeyObject,
 } from "node:crypto";
 import {
+  assertObjectParam,
   buildSignatureBase,
   getHeader,
   listSignatureLabels,
@@ -1004,14 +1005,21 @@ export const VERIFY_ALL_OPTION_KEYS: readonly string[] = [
  * than the per-algorithm floor (≥ 32 bytes for `hmac-sha256`, ≥ 64 bytes
  * for `hmac-sha512`), which is rejected loudly on both the sign and verify
  * sides). An unknown option key is likewise a configuration error:
- * `assertNoUnknownOptions` runs first, so a misspelled freshness or
- * pinning key (`maxSignatureAge`, `requireNonces`) throws instead of
- * silently disabling the check it names (backlog #1251).
+ * `assertNoUnknownOptions` runs first among the option checks, so a
+ * misspelled freshness or pinning key (`maxSignatureAge`,
+ * `requireNonces`) throws instead of silently disabling the check it
+ * names (backlog #1251). A `null` / non-object `req` or `opts` is the
+ * same class of caller bug and throws a named `Error`
+ * (`verifyRequest: req/opts must be an object`) before any of those
+ * checks — the shape guard runs first because the option checks
+ * dereference `opts` themselves (backlog #1344).
  */
 export function verifyRequest(
   req: RequestLike,
   opts: VerifyOptions,
 ): VerifyResult {
+  assertObjectParam("verifyRequest", "req", req);
+  assertObjectParam("verifyRequest", "opts", opts);
   assertNoUnknownOptions(opts, VERIFY_OPTION_KEYS, "verifyRequest");
   assertKeyConfig(opts);
   assertSingleKeyFallback(opts, "verifyRequest");
@@ -2698,12 +2706,17 @@ function assertRequireFlagByLabel(
  * there. Like `verifyRequest`, this function never throws on malformed
  * input. Duplicate labels are verified once (first occurrence). An
  * unknown option key is a caller configuration error, thrown by
- * `assertNoUnknownOptions` before anything else (backlog #1251).
+ * `assertNoUnknownOptions` before anything else except the
+ * entry-shape guard: a `null` / non-object `req` or `opts` throws a
+ * named `Error` (`verifyAllLabels: req/opts must be an object`) first
+ * (backlog #1344).
  */
 export function verifyAllLabels(
   req: RequestLike,
   opts: VerifyAllOptions,
 ): VerifyResult[] {
+  assertObjectParam("verifyAllLabels", "req", req);
+  assertObjectParam("verifyAllLabels", "opts", opts);
   assertNoUnknownOptions(opts, VERIFY_ALL_OPTION_KEYS, "verifyAllLabels");
   // `requiredLabels` is validated first, before the unsigned-request
   // early return below: a misconfigured policy must throw even for an

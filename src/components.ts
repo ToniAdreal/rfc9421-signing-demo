@@ -232,6 +232,28 @@ export function joinHeaderValues(values: string[]): string {
 }
 
 /**
+ * Shared shape guard for the public entry points: a `null`, non-object,
+ * or array argument is a caller bug, and it must fail as a plain named
+ * `Error` (`"<fn>: <param> must be an object"`) instead of a bare
+ * `TypeError` from the first dereference (`reading 'headers'`,
+ * `reading 'body'`, `reading 'status'`, …). The guard runs first —
+ * before `assertNoUnknownOptions` and every other option check —
+ * because those checks dereference `opts` themselves
+ * (`Object.keys(opts)`), so a `null` options object would otherwise
+ * still escape as a bare `TypeError`. Arrays are rejected too: an
+ * array is an object by `typeof`, but never a valid request, response,
+ * options record, or headers map. (Backlog #1344.)
+ */
+export function assertObjectParam(
+  caller: string,
+  param: string,
+  value: unknown,
+): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error(`${caller}: ${param} must be an object`);
+}
+
+/**
  * Case-insensitive header lookup. Multi-value headers are joined with
  * ", " per RFC 9421 §2.5 (see `joinHeaderValues` — including its
  * warning: a multi-value `set-cookie` covered bare is ambiguous,
@@ -241,6 +263,7 @@ export function getHeader(
   headers: Record<string, string | string[] | undefined>,
   name: string,
 ): string | undefined {
+  assertObjectParam("getHeader", "headers", headers);
   const want = name.toLowerCase();
   for (const k of Object.keys(headers)) {
     if (k.toLowerCase() === want) {
@@ -270,6 +293,7 @@ export function getHeaderRaw(
   headers: Record<string, string | string[] | undefined>,
   name: string,
 ): string | undefined {
+  assertObjectParam("getHeaderRaw", "headers", headers);
   const want = name.toLowerCase();
   for (const k of Object.keys(headers)) {
     if (k.toLowerCase() === want) {
