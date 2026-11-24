@@ -392,6 +392,23 @@ export function fromNodeResponse(
  * and when neither `opts.request` nor the `opts.method` + `opts.url`
  * pair supplies the triggering request.
  *
+ * Shape guards (backlog #1375, same `assertObjectParam` as the
+ * Node adapters in #1352): a `null` / non-object / array `res`, or a
+ * `null` / non-object `opts.request`, throws a named `Error`
+ * (`"fromFetchResponse: res must be an object"`, …) instead of a bare
+ * `TypeError` from the first dereference. The guards run before the
+ * status checks, and `opts.request` is checked before its `method` /
+ * `url` are read. `opts` itself is left unguarded on purpose: every
+ * `opts` read is optional-chained, so a `null` options object behaves
+ * exactly like an omitted one — there is no dereference gap to close
+ * there. The `headers` guard is the fetch-flavoured twin of the Node
+ * side's `"headers must be an object"`: a fetch headers value must be
+ * an iterable of `[name, value]` pairs (a real `Headers`, an array of
+ * pairs, any iterable) — a `null` / missing / record headers value
+ * throws `"fromFetchResponse: headers must be an iterable of [name,
+ * value] pairs"` instead of the bare `TypeError` (`"headers is not
+ * iterable"`) `normalizeFetchHeaders` would throw on `for...of`.
+ *
  * Multi-value headers are combined with `joinHeaderValues` — see its
  * warning before covering `set-cookie`: two cookies join into one
  * string that cannot be split back into the original cookies.
@@ -401,6 +418,8 @@ export function fromFetchResponse(
   body?: string | Buffer | Uint8Array,
   opts?: FromFetchResponseOptions,
 ): RequestLike {
+  assertObjectParam("fromFetchResponse", "res", res);
+  assertHeadersIterable("fromFetchResponse", res.headers);
   const status = res.status;
   if (status === undefined)
     throw new Error(
@@ -420,6 +439,7 @@ export function fromFetchResponse(
   let url: string | undefined;
   let boundRequest: RequestLike | undefined;
   if (opts?.request !== undefined) {
+    assertObjectParam("fromFetchResponse", "opts.request", opts.request);
     boundRequest = opts.request;
     method = boundRequest.method;
     url = boundRequest.url;
@@ -493,6 +513,19 @@ export function fromFetchResponse(
  * `req.url` — those are caller configuration mistakes, never
  * silently defaulted.
  *
+ * Shape guards (backlog #1375, same `assertObjectParam` as the
+ * Node adapters in #1352): a `null` / non-object / array `req`
+ * throws a named `Error` (`"fromFetchRequest: req must be an
+ * object"`) instead of a bare `TypeError` from the first dereference,
+ * and the guards run before the `method` / `url` checks. The
+ * `headers` guard is the fetch-flavoured twin of the Node side's
+ * `"headers must be an object"`: a fetch headers value must be an
+ * iterable of `[name, value]` pairs (a real `Headers`, an array of
+ * pairs, any iterable) — a `null` / missing / record headers value
+ * throws `"fromFetchRequest: headers must be an iterable of [name,
+ * value] pairs"` instead of the bare `TypeError` (`"headers is not
+ * iterable"`) `normalizeFetchHeaders` would throw on `for...of`.
+ *
  * Multi-value headers are combined with `joinHeaderValues` — see its
  * warning before covering `set-cookie`: two cookies join into one
  * string that cannot be split back into the original cookies.
@@ -501,6 +534,8 @@ export function fromFetchRequest(
   req: FetchRequestLike,
   body?: string | Buffer | Uint8Array,
 ): RequestLike {
+  assertObjectParam("fromFetchRequest", "req", req);
+  assertHeadersIterable("fromFetchRequest", req.headers);
   const method = req.method;
   if (method === undefined || method === "")
     throw new Error("fromFetchRequest: req.method is missing");
@@ -563,6 +598,32 @@ export function fromFetchRequest(
           ? body
           : Buffer.from(body),
   };
+}
+
+/**
+ * Shape guard for the fetch adapters' headers (backlog #1375): a
+ * fetch headers value is an iterable of `[name, value]` pairs — a
+ * real `Headers`, a literal array of pairs, any iterable — so the
+ * Node side's `assertObjectParam` ("headers must be an object") does
+ * not fit here: it rejects arrays, which are valid fetch headers.
+ * A `null` / missing / non-iterable headers value (including a plain
+ * record, which is iterable nowhere) throws a plain named `Error`
+ * instead of the bare `TypeError` (`"headers is not iterable"`) the
+ * `for...of` in `normalizeFetchHeaders` would throw. A string is
+ * rejected too: it is iterable, but its entries are characters, not
+ * pairs, and would only fail later as a bare `TypeError` inside
+ * `joinHeaderValues`.
+ */
+function assertHeadersIterable(caller: string, headers: unknown): void {
+  if (
+    typeof headers !== "object" ||
+    headers === null ||
+    typeof (headers as Iterable<[string, string]>)[Symbol.iterator] !==
+      "function"
+  )
+    throw new Error(
+      `${caller}: headers must be an iterable of [name, value] pairs`,
+    );
 }
 
 /**
