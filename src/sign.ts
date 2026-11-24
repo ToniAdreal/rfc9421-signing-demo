@@ -124,6 +124,10 @@ export interface SignOptions {
    * hmac-sha512: a secret KeyObject of ≥ 64 bytes (RFC 2104 §3 pairs the
    * floor with the hash output length; a 32–63 byte secret is rejected on
    * both the sign and verify sides).
+   *
+   * A `null` key is rejected with a named configuration error
+   * (`signRequest: \`key\` must be a KeyObject, got null`) rather than
+   * a bare `TypeError` (backlog #1382).
    */
   key: KeyObject;
   /** Unix seconds, must be >= 0 (a negative value is rejected). Defaults to now. */
@@ -753,6 +757,18 @@ export function signRequestCore(
   // error. (Backlog #1380.)
   const label = opts.label === undefined ? "sig1" : opts.label;
   assertLabelShape(label);
+  // A `null` key is a caller mistake, not a missing key: without this
+  // guard the alg/key-shape checks below would reject it in a helper's
+  // words (`algMatchesKeyShape: expected a KeyObject, got null`) — or,
+  // for an explicit alg, the key would reach the crypto dispatch —
+  // instead of this entry point rejecting it in its own words. The
+  // guard runs before any key use, so a `null` key never reaches the
+  // signature base. `signResponse` inherits it through delegation.
+  // (Backlog #1382.)
+  if (opts.key === null)
+    throw new Error(
+      "signRequest: `key` must be a KeyObject, got null",
+    );
   const created = opts.created ?? Math.floor(Date.now() / 1000);
   assertTimestamp("created", created);
   // `expires` and `expiresInSec` name the same wire parameter two

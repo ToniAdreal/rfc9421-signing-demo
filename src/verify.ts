@@ -69,7 +69,9 @@ export interface VerifyOptions {
    * hmac-sha512: the shared secret KeyObject (≥ 64 bytes).
    *
    * Required unless `keyResolver` or `candidateKeys` is set; mutually
-   * exclusive with both.
+   * exclusive with both. A `null` key is rejected with a named
+   * configuration error (`verifyRequest: \`key\` must be a KeyObject,
+   * got null`) rather than a bare `TypeError` (backlog #1382).
    */
   key?: KeyObject;
   /**
@@ -548,6 +550,17 @@ export interface VerifyResult {
 function assertKeyConfig(
   opts: Pick<VerifyOptions, "key" | "keyResolver" | "candidateKeys">,
 ): void {
+  // A `null` key is a caller mistake, not a missing key: without this
+  // guard the `key === undefined` check below misses it and
+  // `verifyWithKey` dereferences it in `assertHmacSecretLength`
+  // (`key.symmetricKeySize`), throwing a bare TypeError instead of a
+  // configuration error in this entry point's own words. Runs before
+  // the mutual-exclusion count, so a `null` key is named as `key`
+  // even alongside a resolver. (Backlog #1382.)
+  if (opts.key === null)
+    throw new Error(
+      "verifyRequest: `key` must be a KeyObject, got null",
+    );
   const set =
     (opts.key !== undefined ? 1 : 0) +
     (opts.keyResolver !== undefined ? 1 : 0) +
