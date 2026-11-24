@@ -411,11 +411,41 @@ export function secretKey(secret: string | Buffer): KeyObject {
   return createSecretKey(bytes);
 }
 
+/**
+ * Import a private key from a PKCS#8 PEM string (or `Buffer`).
+ *
+ * The input must be a `string` or a `Buffer`: anything else throws a named
+ * caller-configuration `Error` (`importPrivateKey: pem must be a string
+ * or a Buffer, got …`) before `node:crypto` is reached, so a mistyped
+ * input is never reported as a bare `TypeError` that does not name this
+ * function. An empty or malformed PEM still fails in `node:crypto` /
+ * OpenSSL with its own error, unchanged.
+ */
 export function importPrivateKey(pem: string | Buffer): KeyObject {
+  if (typeof pem !== "string" && !Buffer.isBuffer(pem))
+    throw new Error(
+      `importPrivateKey: pem must be a string or a Buffer, got ` +
+        `${pem === null ? "null" : typeof pem}`,
+    );
   return createPrivateKey(pem);
 }
 
+/**
+ * Import a public key from a SubjectPublicKeyInfo PEM string (or `Buffer`).
+ *
+ * The input must be a `string` or a `Buffer`: anything else throws a named
+ * caller-configuration `Error` (`importPublicKey: pem must be a string
+ * or a Buffer, got …`) before `node:crypto` is reached, so a mistyped
+ * input is never reported as a bare `TypeError` that does not name this
+ * function. An empty or malformed PEM still fails in `node:crypto` /
+ * OpenSSL with its own error, unchanged.
+ */
 export function importPublicKey(pem: string | Buffer): KeyObject {
+  if (typeof pem !== "string" && !Buffer.isBuffer(pem))
+    throw new Error(
+      `importPublicKey: pem must be a string or a Buffer, got ` +
+        `${pem === null ? "null" : typeof pem}`,
+    );
   return createPublicKey(pem);
 }
 
