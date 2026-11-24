@@ -591,8 +591,18 @@ export interface P256PublicJwk {
  * Throws a caller-configuration `Error` for anything that is not a P-256
  * public KeyObject (private keys, symmetric secrets, other curves or
  * algorithms); this helper is the public-key-distribution case only.
+ * A `null` / `undefined` key is refused with the same named `Error`
+ * shape (naming the received value) instead of a bare `TypeError`
+ * from reading `key.asymmetricKeyDetails` — the import side
+ * ({@link importPublicKeyJwkP256}) already rejects a `null` JWK this way,
+ * and the export side now matches it.
  */
 export function exportPublicKeyJwkP256(key: KeyObject): P256PublicJwk {
+  if (key === null || key === undefined)
+    throw new Error(
+      `exportPublicKeyJwkP256: expected a P-256 public KeyObject, got ` +
+        `${key === null ? "null" : "undefined"}`,
+    );
   const namedCurve = key.asymmetricKeyDetails?.namedCurve;
   if (
     key.type !== "public" ||
@@ -788,8 +798,18 @@ export interface P384PublicJwk {
  * Throws a caller-configuration `Error` for anything that is not a P-384
  * public KeyObject (private keys, symmetric secrets, other curves or
  * algorithms); this helper is the public-key-distribution case only.
+ * A `null` / `undefined` key is refused with the same named `Error`
+ * shape (naming the received value) instead of a bare `TypeError`
+ * from reading `key.asymmetricKeyDetails` — the import side
+ * ({@link importPublicKeyJwkP384}) already rejects a `null` JWK this way,
+ * and the export side now matches it.
  */
 export function exportPublicKeyJwkP384(key: KeyObject): P384PublicJwk {
+  if (key === null || key === undefined)
+    throw new Error(
+      `exportPublicKeyJwkP384: expected a P-384 public KeyObject, got ` +
+        `${key === null ? "null" : "undefined"}`,
+    );
   const namedCurve = key.asymmetricKeyDetails?.namedCurve;
   if (
     key.type !== "public" ||
@@ -987,8 +1007,18 @@ export interface P521PublicJwk {
  * Throws a caller-configuration `Error` for anything that is not a P-521
  * public KeyObject (private keys, symmetric secrets, other curves or
  * algorithms); this helper is the public-key-distribution case only.
+ * A `null` / `undefined` key is refused with the same named `Error`
+ * shape (naming the received value) instead of a bare `TypeError`
+ * from reading `key.asymmetricKeyDetails` — the import side
+ * ({@link importPublicKeyJwkP521}) already rejects a `null` JWK this way,
+ * and the export side now matches it.
  */
 export function exportPublicKeyJwkP521(key: KeyObject): P521PublicJwk {
+  if (key === null || key === undefined)
+    throw new Error(
+      `exportPublicKeyJwkP521: expected a P-521 public KeyObject, got ` +
+        `${key === null ? "null" : "undefined"}`,
+    );
   const namedCurve = key.asymmetricKeyDetails?.namedCurve;
   if (
     key.type !== "public" ||
@@ -1199,8 +1229,18 @@ export interface RsaPublicJwk {
  * Throws a caller-configuration `Error` for anything that is not an RSA
  * public KeyObject (private keys, symmetric secrets, other algorithms);
  * this helper is the public-key-distribution case only.
+ * A `null` / `undefined` key is refused with the same named `Error`
+ * shape (naming the received value) instead of a bare `TypeError`
+ * from reading `key.type` — the import side
+ * ({@link importPublicKeyJwkRsa}) already rejects a `null` JWK this way,
+ * and the export side now matches it.
  */
 export function exportPublicKeyJwkRsa(key: KeyObject): RsaPublicJwk {
+  if (key === null || key === undefined)
+    throw new Error(
+      `exportPublicKeyJwkRsa: expected an RSA public KeyObject, got ` +
+        `${key === null ? "null" : "undefined"}`,
+    );
   if (key.type !== "public" || key.asymmetricKeyType !== "rsa")
     throw new Error(
       `exportPublicKeyJwkRsa: expected an RSA public KeyObject, got ` +
