@@ -349,8 +349,19 @@ export function inferAlgFromKeyShape(key: KeyObject): SignAlg {
  * ({@link MIN_HMAC_SHA512_SECRET_BYTES}). For `hmac-sha512` with a secret
  * between 32 and 63 bytes, the sign/verify paths throw — the floor is
  * paired with the algorithm, never silently relaxed.
+ *
+ * The input must be a `string` or a `Buffer`: anything else throws a named
+ * caller-configuration `Error` (`secretKey: hmac secret must be a string
+ * or a Buffer, got …`) before any byte is read, so a mistyped secret is
+ * never reported as a bare `TypeError` from `node:crypto` or from reading
+ * `.length` off `null`.
  */
 export function secretKey(secret: string | Buffer): KeyObject {
+  if (typeof secret !== "string" && !Buffer.isBuffer(secret))
+    throw new Error(
+      `secretKey: hmac secret must be a string or a Buffer, got ` +
+        `${secret === null ? "null" : typeof secret}`,
+    );
   const bytes =
     typeof secret === "string" ? Buffer.from(secret, "utf8") : secret;
   if (bytes.length < MIN_HMAC_SECRET_BYTES)
