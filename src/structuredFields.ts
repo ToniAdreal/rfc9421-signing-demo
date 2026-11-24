@@ -467,7 +467,30 @@ function serializeDictionary(entries: SfDictEntry[]): string {
  * Throws a descriptive `Error` when the value is empty or is not a
  * valid Structured Field of any supported type; see the module header
  * for the Dictionary → List → Item selection rule and its limits.
+ * A non-string `value` is rejected with a named error up front.
  */
+
+/**
+ * Reject a non-string Structured Field value with a named configuration
+ * error (`"<fn>: \"value\" must be a string, got …"`, `null` named
+ * explicitly) instead of a bare `TypeError` from the first dereference
+ * (`reading 'replace'`). The wording follows the `contentDigest` /
+ * `digest` `"body" must be a string or a Buffer, got …` family, and
+ * matches the shared `assertStringParam` in components.ts — which this
+ * module cannot import, because components.ts imports this module.
+ * (Backlog #1379.)
+ */
+function assertStructuredFieldValueString(
+  caller: string,
+  value: unknown,
+): asserts value is string {
+  if (typeof value !== "string") {
+    throw new Error(
+      `${caller}: "value" must be a string, got ${value === null ? "null" : typeof value}`,
+    );
+  }
+}
+
 /**
  * Parse `value` as a Dictionary Structured Field and return the strict
  * serialization of the single member named `key` — the component value
@@ -481,8 +504,13 @@ function serializeDictionary(entries: SfDictEntry[]): string {
  * Throws a descriptive `Error` when the value is not a Dictionary or
  * the named member is absent — the caller (sign/verify) fails closed
  * rather than signing an empty or whole-field value by mistake.
+ * A non-string `value` is rejected with a named error up front.
  */
 export function serializeDictionaryMemberValue(value: string, key: string): string {
+  assertStructuredFieldValueString(
+    "serializeDictionaryMemberValue",
+    value,
+  );
   const input = value.replace(/^[ \t]+|[ \t]+$/g, "");
   if (input.length === 0) {
     throw new Error("empty value is not a valid Dictionary Structured Field");
@@ -547,11 +575,16 @@ function parseItemValue(input: string): string {
  *
  * Throws a descriptive `Error` when `type` is not a supported type,
  * when the value is empty, or when it does not parse as `type`.
+ * A non-string `value` is rejected with a named error up front.
  */
 export function canonicalizeStructuredFieldValueAs(
   value: string,
   type: StructuredFieldType,
 ): string {
+  assertStructuredFieldValueString(
+    "canonicalizeStructuredFieldValueAs",
+    value,
+  );
   const input = value.replace(/^[ \t]+|[ \t]+$/g, "");
   if (input.length === 0) {
     throw new Error("empty value is not a valid Structured Field");
@@ -579,6 +612,10 @@ export function canonicalizeStructuredFieldValueAs(
 }
 
 export function canonicalizeStructuredFieldValue(value: string): string {
+  assertStructuredFieldValueString(
+    "canonicalizeStructuredFieldValue",
+    value,
+  );
   const input = value.replace(/^[ \t]+|[ \t]+$/g, "");
   if (input.length === 0) {
     throw new Error("empty value is not a valid Structured Field");
