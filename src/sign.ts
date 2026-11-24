@@ -148,7 +148,11 @@ export interface SignOptions {
    * plus the attached request).
    */
   expiresInSec?: number;
-  /** Signature label. Defaults to "sig1". */
+  /**
+   * Signature label. Defaults to "sig1". A `null` label is rejected
+   * with a named configuration error rather than silently signing
+   * under the default (backlog #1380).
+   */
   label?: string;
   /**
    * Optional nonce (RFC 9421 §2.3): emitted as a `nonce` signature-input
@@ -569,13 +573,20 @@ function assertTimestamp(name: "created" | "expires", value: number): void {
  * delegation), or the append entry points `addSignature` /
  * `addResponseSignature`, which check the shape themselves before
  * delegating so the error never names the inner `signRequest`.
+ *
+ * A non-string label is rejected with the same named token error,
+ * never coerced: `LABEL_TOKEN_RE.test(null)` would coerce `null` to
+ * the string `"null"`, which matches the token shape, so without the
+ * type check a caller passing `null` (typically an unassigned
+ * variable) would silently sign under the default `sig1` label.
+ * (Backlog #1380.)
  */
 const LABEL_TOKEN_RE = /^[A-Za-z][A-Za-z0-9!#$%&'*+\-.^_`|~]*$/;
 export function assertLabelShape(
-  label: string,
+  label: unknown,
   caller: "signRequest" | "addSignature" | "addResponseSignature" = "signRequest",
-): void {
-  if (!LABEL_TOKEN_RE.test(label))
+): asserts label is string {
+  if (typeof label !== "string" || !LABEL_TOKEN_RE.test(label))
     throw new Error(
       `${caller}: "label" must be an RFC 9421 token (start with a letter, then letters, digits, or one of !#$%&'*+-.^_\`|~ — no commas, spaces, colons, or slashes), got "${label}"`,
     );
@@ -585,12 +596,22 @@ export function assertLabelShape(
  * Fail fast on an over-long sign-side identifier (see
  * `MAX_TAG_LENGTH` / `MAX_NONCE_LENGTH` / `MAX_KEY_ID_LENGTH`).
  * The name in the message is the `SignOptions` field name.
+ *
+ * A non-string value is rejected with a named configuration error
+ * first, never dereferenced: reading `.length` off `null` would throw
+ * a bare `TypeError` (`Cannot read properties of null`). The wording
+ * follows the length error below, with the field named.
+ * (Backlog #1380.)
  */
 function assertSignParamLength(
   name: "tag" | "nonce" | "keyId",
-  value: string,
+  value: unknown,
   max: number,
-): void {
+): asserts value is string {
+  if (typeof value !== "string")
+    throw new Error(
+      `signRequest: "${name}" must be a string, got ${value === null ? "null" : typeof value}`,
+    );
   if (value.length > max)
     throw new Error(
       `signRequest: "${name}" must be at most ${max} characters, got ${value.length}`,
@@ -714,7 +735,11 @@ export function signRequestCore(
   allowStatus: boolean,
 ): SignedHttpRequest {
   assertNoUnknownOptions(opts, SIGN_OPTION_KEYS, "signRequest");
-  const label = opts.label ?? "sig1";
+  // Only `undefined` falls back to "sig1": `??` would also swallow a
+  // `null` label and sign silently under the default, so `null` is
+  // passed through for `assertLabelShape` to reject with a named
+  // error. (Backlog #1380.)
+  const label = opts.label === undefined ? "sig1" : opts.label;
   assertLabelShape(label);
   const created = opts.created ?? Math.floor(Date.now() / 1000);
   assertTimestamp("created", created);
@@ -1120,8 +1145,13 @@ export function addSignature(
   assertObjectParam("addSignature", "opts", opts);
   assertObjectParam("addSignature", "headers", signedReq.headers);
   assertNoUnknownOptions(opts, SIGN_OPTION_KEYS, "addSignature");
-  const label = opts.label ?? "sig1";
-  if (label.length === 0)
+  // Only `undefined` falls back to "sig1" (see `signRequestCore`):
+  // a `null` label must reach `assertLabelShape` and be rejected with
+  // a named error, not silently sign under the default. The empty
+  // check only runs on strings, so a non-string label never throws a
+  // bare `TypeError` reading `.length`. (Backlog #1380.)
+  const label = opts.label === undefined ? "sig1" : opts.label;
+  if (typeof label === "string" && label.length === 0)
     throw new Error('addSignature: "label" must be a non-empty string');
   assertLabelShape(label, "addSignature");
 

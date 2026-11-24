@@ -730,8 +730,13 @@ export function addResponseSignature(
   assertObjectParam("addResponseSignature", "opts", opts);
   assertObjectParam("addResponseSignature", "headers", signedRes.headers);
   assertNoUnknownOptions(opts, SIGN_RESPONSE_OPTION_KEYS, "addResponseSignature");
-  const label = opts.label ?? "sig1";
-  if (label.length === 0)
+  // Only `undefined` falls back to "sig1" (see `signRequestCore`):
+  // a `null` label must reach `assertLabelShape` and be rejected with
+  // a named error, not silently sign under the default. The empty
+  // check only runs on strings, so a non-string label never throws a
+  // bare `TypeError` reading `.length`. (Backlog #1380.)
+  const label = opts.label === undefined ? "sig1" : opts.label;
+  if (typeof label === "string" && label.length === 0)
     throw new Error(
       'addResponseSignature: "label" must be a non-empty string',
     );
