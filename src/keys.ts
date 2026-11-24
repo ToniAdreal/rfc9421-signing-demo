@@ -85,9 +85,18 @@ export const MIN_RSA_MODULUS_BITS = 2048;
  * failure — when `key` is not an RSA key at all (e.g. a P-256 key paired
  * with `alg: "rsa-v1_5-sha256"`) or when its modulus is shorter than
  * {@link MIN_RSA_MODULUS_BITS}. Shared by the sign and verify paths so
- * both sides reject the same bad configuration identically.
+ * both sides reject the same bad configuration identically. A `null` /
+ * non-`KeyObject` key is refused with the same named `Error` shape
+ * (naming the received value) instead of a bare `TypeError` from
+ * reading `key.asymmetricKeyType` — the guard is an
+ * `instanceof KeyObject` check, the same shape the key exporters use.
  */
 export function assertRsaModulusLength(key: KeyObject, context: string): void {
+  if (!(key instanceof KeyObject))
+    throw new Error(
+      `${context}: expected an RSA KeyObject, got ` +
+        `${key === null ? "null" : typeof key}`,
+    );
   if (key.asymmetricKeyType !== "rsa")
     throw new Error(
       `${context}: expected an RSA key, got ${
@@ -256,9 +265,21 @@ export function generateHmacSecret(
 
 /**
  * Human-readable description of a KeyObject's shape, used in caller
- * configuration error messages on both the sign and verify sides.
+ * configuration error messages on both the sign and verify sides. Only
+ * `null` / `undefined` is refused, with a named `Error` (naming the
+ * received value) instead of a bare `TypeError` from reading
+ * `key.type`. Any other input stays descriptive on purpose: this
+ * helper formats the error message *about* a bad key, so it must not
+ * itself throw on a key-like object — the `?? "unknown"` fallback is
+ * pinned by the stub case in `test/algKeyShape.test.ts`, and a number
+ * or plain object simply describes as an unknown asymmetric key.
  */
 export function describeKey(key: KeyObject): string {
+  if (key === null || key === undefined)
+    throw new Error(
+      `describeKey: expected a KeyObject, got ` +
+        `${key === null ? "null" : "undefined"}`,
+    );
   if (key.type === "secret") return "a secret (symmetric) key";
   const curve = key.asymmetricKeyDetails?.namedCurve;
   return `an asymmetric ${key.asymmetricKeyType ?? "unknown"} key${
@@ -279,9 +300,18 @@ export function describeKey(key: KeyObject): string {
  * so callers must reject unknown values first with their own
  * `unsupported alg` wording: the sign side does that in
  * `signRequest` (backlog #1058), the verify side fails unknown wire
- * values with `UNSUPPORTED_ALG` in its crypto dispatch.
+ * values with `UNSUPPORTED_ALG` in its crypto dispatch. A `null` /
+ * non-`KeyObject` key is refused with a named `Error` (naming the
+ * received value) instead of a bare `TypeError` from reading
+ * `key.asymmetricKeyType` — the guard is an `instanceof KeyObject`
+ * check, the same shape the key exporters use.
  */
 export function algMatchesKeyShape(alg: string, key: KeyObject): boolean {
+  if (!(key instanceof KeyObject))
+    throw new Error(
+      `algMatchesKeyShape: expected a KeyObject, got ` +
+        `${key === null ? "null" : typeof key}`,
+    );
   return (
     (alg === "ed25519" && key.asymmetricKeyType === "ed25519") ||
     (alg === "hmac-sha256" && key.type === "secret") ||
@@ -316,9 +346,17 @@ export function algMatchesKeyShape(alg: string, key: KeyObject): boolean {
  * a configuration error naming this helper — both callers catch it and
  * rethrow with their own entry-point prefix (`signRequest: ...` /
  * `verifyRequest: ...`), so the message a caller sees always names
- * the function it called.
+ * the function it called. A `null` / non-`KeyObject` key is refused
+ * with a named `Error` (naming the received value) instead of a bare
+ * `TypeError` from reading `key.type` — the guard is an
+ * `instanceof KeyObject` check, the same shape the key exporters use.
  */
 export function inferAlgFromKeyShape(key: KeyObject): SignAlg {
+  if (!(key instanceof KeyObject))
+    throw new Error(
+      `inferAlgFromKeyShape: expected a KeyObject, got ` +
+        `${key === null ? "null" : typeof key}`,
+    );
   if (key.type === "secret") return "hmac-sha256";
   if (key.asymmetricKeyType === "ed25519") return "ed25519";
   if (
