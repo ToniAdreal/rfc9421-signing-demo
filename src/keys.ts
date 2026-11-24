@@ -411,8 +411,18 @@ export interface Ed25519PublicJwk {
  * Throws a caller-configuration `Error` for anything that is not an
  * ed25519 public KeyObject (private keys, symmetric secrets, other
  * algorithms); this helper is the public-key-distribution case only.
+ * A `null` / `undefined` key is refused with the same named `Error`
+ * shape (naming the received value) instead of a bare `TypeError`
+ * from reading `key.type` — the import side
+ * ({@link importPublicKeyJwk}) already rejects a `null` JWK this way,
+ * and the export side now matches it.
  */
 export function exportPublicKeyJwk(key: KeyObject): Ed25519PublicJwk {
+  if (key === null || key === undefined)
+    throw new Error(
+      `exportPublicKeyJwk: expected an ed25519 public KeyObject, got ` +
+        `${key === null ? "null" : "undefined"}`,
+    );
   if (key.type !== "public" || key.asymmetricKeyType !== "ed25519")
     throw new Error(
       `exportPublicKeyJwk: expected an ed25519 public KeyObject, got ` +
