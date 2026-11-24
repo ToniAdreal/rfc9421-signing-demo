@@ -107,6 +107,35 @@ function assertHttpScheme(scheme: unknown, caller: string): "http" | "https" {
 }
 
 /**
+ * Shared type guard for the explicit `opts.method` / `opts.url` pair
+ * on the response adapters (backlog #1376): a provided value that is
+ * not a string used to slip silently into `RequestLike.method` /
+ * `.url` (e.g. `method: 42`), where the sign/verify side would only
+ * fail later with an unrelated message — so the adapter is the
+ * boundary where the string rule is enforced, mirroring the integer
+ * rule it already enforces on `status` / `statusCode` (#1352).
+ * `undefined` is allowed (the pair is optional — a missing value
+ * falls through to the "cannot determine the request" check below),
+ * and an empty string is left to that same check, which already
+ * rejects it with a named error (pinned by
+ * `test/nodeHttpFetchResponse.test.ts` "an empty method or url fails
+ * fast"). A bound `opts.request` is deliberately NOT re-checked: its
+ * method/url walk the `RequestLike` contract of the caller-supplied
+ * request, and the explicit pair is ignored entirely when a request
+ * is bound.
+ */
+function assertMethodOrUrlString(
+  caller: string,
+  param: "method" | "url",
+  value: unknown,
+): void {
+  if (value !== undefined && typeof value !== "string")
+    throw new Error(
+      `${caller}: opts.${param} must be a non-empty string, got ${String(value)}`,
+    );
+}
+
+/**
  * The trailer fields an adapter actually reads, shared by the request
  * and response message shapes. `normalizeTrailers` is typed against this
  * minimal shape so both adapters reuse the exact same normalization
@@ -175,12 +204,16 @@ export interface FromNodeResponseOptions {
   request?: RequestLike;
   /**
    * Explicit request method, used only when `request` is absent. Must be
-   * paired with `url`.
+   * paired with `url`. A provided value must be a non-empty string —
+   * a non-string (e.g. `42`) throws a named error instead of slipping
+   * silently into the adapted `RequestLike` (backlog #1376); an empty
+   * string is rejected by the "cannot determine the request" check.
    */
   method?: string;
   /**
    * Explicit request URL, used only when `request` is absent. Must be
-   * paired with `method`.
+   * paired with `method`. Same non-empty-string rule as `method`
+   * (backlog #1376).
    */
   url?: string;
 }
@@ -223,12 +256,16 @@ export interface FromFetchResponseOptions {
   request?: RequestLike;
   /**
    * Explicit request method, used only when `request` is absent. Must be
-   * paired with `url`.
+   * paired with `url`. A provided value must be a non-empty string —
+   * a non-string (e.g. `42`) throws a named error instead of slipping
+   * silently into the adapted `RequestLike` (backlog #1376); an empty
+   * string is rejected by the "cannot determine the request" check.
    */
   method?: string;
   /**
    * Explicit request URL, used only when `request` is absent. Must be
-   * paired with `method`.
+   * paired with `method`. Same non-empty-string rule as `method`
+   * (backlog #1376).
    */
   url?: string;
 }
@@ -300,7 +337,12 @@ export interface FetchRequestLike {
  * before its `method` / `url` are read. `opts` itself is left
  * unguarded on purpose: every `opts` read is optional-chained, so a
  * `null` options object behaves exactly like an omitted one — there
- * is no dereference gap to close there.
+ * is no dereference gap to close there. Backlog #1376 adds the
+ * explicit-pair type guard: a non-string `opts.method` / `opts.url`
+ * (e.g. `42`) throws `\"fromNodeResponse: opts.method must be a
+ * non-empty string, got 42\"` instead of landing silently in the
+ * adapted `RequestLike`; a bound `opts.request` is not re-checked
+ * (its method/url walk the `RequestLike` contract).
  *
  * Multi-value headers are combined with `joinHeaderValues` — see its
  * warning before covering `set-cookie`: two cookies join into one
@@ -337,6 +379,8 @@ export function fromNodeResponse(
     method = boundRequest.method;
     url = boundRequest.url;
   } else {
+    assertMethodOrUrlString("fromNodeResponse", "method", opts?.method);
+    assertMethodOrUrlString("fromNodeResponse", "url", opts?.url);
     method = opts?.method;
     url = opts?.url;
   }
@@ -408,6 +452,11 @@ export function fromNodeResponse(
  * throws `"fromFetchResponse: headers must be an iterable of [name,
  * value] pairs"` instead of the bare `TypeError` (`"headers is not
  * iterable"`) `normalizeFetchHeaders` would throw on `for...of`.
+ * Backlog #1376 adds the explicit-pair type guard, the fetch twin of
+ * `fromNodeResponse`'s: a non-string `opts.method` / `opts.url`
+ * (e.g. `42`) throws `"fromFetchResponse: opts.method must be a
+ * non-empty string, got 42"` instead of landing silently in the
+ * adapted `RequestLike`; a bound `opts.request` is not re-checked.
  *
  * Multi-value headers are combined with `joinHeaderValues` — see its
  * warning before covering `set-cookie`: two cookies join into one
@@ -444,6 +493,8 @@ export function fromFetchResponse(
     method = boundRequest.method;
     url = boundRequest.url;
   } else {
+    assertMethodOrUrlString("fromFetchResponse", "method", opts?.method);
+    assertMethodOrUrlString("fromFetchResponse", "url", opts?.url);
     method = opts?.method;
     url = opts?.url;
   }
