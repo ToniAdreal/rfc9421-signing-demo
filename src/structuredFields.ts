@@ -691,12 +691,42 @@ export function assertStructuredFieldTypes(
  * rather than falling back to the trial order, so a direct
  * `buildSignatureBase` caller that skips the sign/verify asserts
  * still fails closed instead of silently ignoring its own registry.
+ *
+ * A `null` / non-object registry or a non-string field name is a
+ * caller bug and throws a named `Error` here, before `Object.entries`
+ * / `toLowerCase` dereference it — a `null` used to escape as a bare
+ * `TypeError` (`Cannot convert undefined or null to object` /
+ * `reading 'toLowerCase'`), and a non-object registry such as `42`
+ * used to be silently treated as "no registry" (`undefined`). The
+ * registry wording follows `assertStructuredFieldTypes` (with this
+ * function's name as the prefix) and the field wording follows the
+ * shared `assertStringParam` in components.ts — which this module
+ * cannot import, because components.ts imports this module. The
+ * sign/verify entry points already refuse a `null` registry through
+ * `assertStructuredFieldTypes` before they reach this lookup, so this
+ * guard only fires for a caller that imports the helper (or
+ * `buildSignatureBase` / `resolveComponent`) directly. (Backlog
+ * #1391.)
  */
 export function lookupStructuredFieldType(
   registry: Record<string, StructuredFieldType> | undefined,
   field: string,
 ): StructuredFieldType | undefined {
   if (registry === undefined) return undefined;
+  if (
+    typeof registry !== "object" ||
+    registry === null ||
+    Array.isArray(registry)
+  ) {
+    throw new Error(
+      `lookupStructuredFieldType: \`structuredFieldTypes\` must be a field-name → type object, got ${registry === null ? "null" : Array.isArray(registry) ? "an array" : typeof registry}`,
+    );
+  }
+  if (typeof field !== "string") {
+    throw new Error(
+      `lookupStructuredFieldType: "field" must be a string, got ${field === null ? "null" : typeof field}`,
+    );
+  }
   const want = field.toLowerCase();
   for (const [name, type] of Object.entries(registry)) {
     if (name.toLowerCase() === want) {
