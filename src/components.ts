@@ -226,8 +226,14 @@ function escapeRegExp(s: string): string {
  * either: it binds the exact joined bytes (see `getHeaderRaw`), so a
  * tampered cookie still fails verification, but two splittings of the
  * same joined string still produce the identical `;bs` base.
+ *
+ * A `null` / non-array argument, or any non-string element, is a
+ * caller bug and throws a named `Error` (via the shared
+ * `assertStringArrayParam`) here, before `.map` / `.trim` run — a
+ * `null` used to escape as a bare `TypeError`. (Backlog #1385.)
  */
 export function joinHeaderValues(values: string[]): string {
+  assertStringArrayParam("joinHeaderValues", "values", values);
   return values.map((x) => x.trim()).join(", ");
 }
 
@@ -278,16 +284,47 @@ export function assertStringParam(
 }
 
 /**
+ * Shared shape guard for the public entry points that take a list of
+ * strings (covered components, header values): a `null` / non-array
+ * argument, or any non-string element, is a caller bug, and it must
+ * fail as a plain named `Error` instead of a bare `TypeError` from
+ * the first dereference (`reading 'map'` on the list,
+ * `reading 'trim'` on an element). The wording follows
+ * `assertStringParam`, with the offending element named by index
+ * (`"<fn>: "values[0]" must be a string, got null"`). (Backlog
+ * #1385.)
+ */
+export function assertStringArrayParam(
+  caller: string,
+  param: string,
+  value: unknown,
+): asserts value is string[] {
+  if (!Array.isArray(value))
+    throw new Error(
+      `${caller}: "${param}" must be an array of strings, got ${value === null ? "null" : typeof value}`,
+    );
+  value.forEach((entry, i) =>
+    assertStringParam(caller, `${param}[${i}]`, entry),
+  );
+}
+
+/**
  * Case-insensitive header lookup. Multi-value headers are joined with
  * ", " per RFC 9421 §2.5 (see `joinHeaderValues` — including its
  * warning: a multi-value `set-cookie` covered bare is ambiguous,
  * because `Expires` commas make the joined string unsplittable).
+ *
+ * A `null` / non-string `name` is a caller bug and throws a named
+ * `Error` (via the shared `assertStringParam`) here, before
+ * `toLowerCase` runs — a `null` used to escape as a bare `TypeError`.
+ * (Backlog #1385.)
  */
 export function getHeader(
   headers: Record<string, string | string[] | undefined>,
   name: string,
 ): string | undefined {
   assertObjectParam("getHeader", "headers", headers);
+  assertStringParam("getHeader", "name", name);
   const want = name.toLowerCase();
   for (const k of Object.keys(headers)) {
     if (k.toLowerCase() === want) {
@@ -312,12 +349,18 @@ export function getHeader(
  * still produce the identical `;bs` base — `;bs` cannot tell them
  * apart either (see `joinHeaderValues`). Only a single-valued
  * `set-cookie` is unambiguous to cover.
+ *
+ * A `null` / non-string `name` is a caller bug and throws a named
+ * `Error` (via the shared `assertStringParam`) here, before
+ * `toLowerCase` runs — a `null` used to escape as a bare `TypeError`.
+ * (Backlog #1385.)
  */
 export function getHeaderRaw(
   headers: Record<string, string | string[] | undefined>,
   name: string,
 ): string | undefined {
   assertObjectParam("getHeaderRaw", "headers", headers);
+  assertStringParam("getHeaderRaw", "name", name);
   const want = name.toLowerCase();
   for (const k of Object.keys(headers)) {
     if (k.toLowerCase() === want) {
@@ -604,13 +647,27 @@ function resolveQueryParamValue(target: RequestLike, encodedName: string): strin
   return percentEncodeAfterEncoding(matches[0][1]);
 }
 
-/** Resolve one covered component identifier to its canonical string value. */
+/**
+ * Resolve one covered component identifier to its canonical string value.
+ *
+ * A `null` / non-string `id` or a `null` / non-object `req` is a caller
+ * bug and throws a named `Error` (via the shared `assertStringParam` /
+ * `assertObjectParam`) here, before `parseComponentId` / the header
+ * lookup dereference them — a `null` used to escape as a bare
+ * `TypeError`. `params` is deliberately NOT guarded: only `@created` /
+ * `@expires` read it, so a `null` `params` is the pre-existing
+ * tolerated semantic for components that do not read it (e.g.
+ * `@method` still resolves), and is not tightened here. (Backlog
+ * #1385.)
+ */
 export function resolveComponent(
   id: string,
   req: RequestLike,
   params: SignatureParams,
   options?: ResolveComponentOptions,
 ): string {
+  assertStringParam("resolveComponent", "id", id);
+  assertObjectParam("resolveComponent", "req", req);
   const { base: cid, req: isReq, bs: isBs, sf: isSf, key: dictKey, tr: isTr, name: queryParamName } = parseComponentId(id);
   // RFC 9421 §2.4: a `;req` component resolves against the associated
   // request, not the message carrying the signature. Without an
@@ -800,11 +857,26 @@ export function resolveComponent(
   }
 }
 
-/** Serialize the inner-list of covered components plus its parameters. */
+/**
+ * Serialize the inner-list of covered components plus its parameters.
+ *
+ * A `null` / non-object `params` or a `null` / non-array `componentIds`
+ * (or any non-string element) is a caller bug and throws a named
+ * `Error` (via the shared `assertObjectParam` /
+ * `assertStringArrayParam`) here, before `.map` / `params.created`
+ * dereference them — a `null` used to escape as a bare `TypeError`.
+ * (Backlog #1385.)
+ */
 export function serializeSignatureParams(
   componentIds: string[],
   params: SignatureParams,
 ): string {
+  assertObjectParam("serializeSignatureParams", "params", params);
+  assertStringArrayParam(
+    "serializeSignatureParams",
+    "componentIds",
+    componentIds,
+  );
   const items = componentIds.map((c) => serializeComponentId(c)).join(" ");
   let out = `(${items})`;
   if (params.created !== undefined) out += `;created=${params.created}`;
@@ -816,12 +888,23 @@ export function serializeSignatureParams(
   return out;
 }
 
-/** Full `Signature-Input` field value for one signature label. */
+/**
+ * Full `Signature-Input` field value for one signature label.
+ *
+ * A `null` / non-string `label` is a caller bug and throws a named
+ * `Error` (via the shared `assertStringParam`) here, before the
+ * template literal coerces it — a `null` label used to be silently
+ * cast into a `"null=(…)"` field value, the same silent-accept shape
+ * backlog #1380 removed from the sign-option `label`. The
+ * `componentIds` / `params` guards live in `serializeSignatureParams`,
+ * which this function delegates to. (Backlog #1385.)
+ */
 export function signatureInputValue(
   label: string,
   componentIds: string[],
   params: SignatureParams,
 ): string {
+  assertStringParam("signatureInputValue", "label", label);
   return `${label}=${serializeSignatureParams(componentIds, params)}`;
 }
 
@@ -829,6 +912,13 @@ export function signatureInputValue(
  * Build the exact byte string that gets signed (RFC 9421 §2.5):
  * one `"id": value` line per covered component, then the
  * `"@signature-params"` line.
+ *
+ * A `null` / non-array `componentIds` (or any non-string element), a
+ * `null` / non-object `req`, or a `null` / non-object `params` is a
+ * caller bug and throws a named `Error` (via the shared
+ * `assertStringArrayParam` / `assertObjectParam`) here, before
+ * `.map` / the header lookup / `params.created` dereference them —
+ * a `null` used to escape as a bare `TypeError`. (Backlog #1385.)
  */
 export function buildSignatureBase(
   componentIds: string[],
@@ -836,6 +926,9 @@ export function buildSignatureBase(
   params: SignatureParams,
   options?: ResolveComponentOptions,
 ): string {
+  assertStringArrayParam("buildSignatureBase", "componentIds", componentIds);
+  assertObjectParam("buildSignatureBase", "req", req);
+  assertObjectParam("buildSignatureBase", "params", params);
   const lines = componentIds.map((id) => {
     const value = resolveComponent(id, req, params, options);
     return `${serializeComponentId(id)}: ${value}`;
@@ -1140,8 +1233,20 @@ export function parseSignatureInput(
   return { label, componentIds, params: parseParamList(segment) };
 }
 
-/** Extract the raw signature bytes for `label` from a Signature field value. */
+/**
+ * Extract the raw signature bytes for `label` from a Signature field value.
+ *
+ * A `null` / non-string `fieldValue` or `label` is a caller bug and
+ * throws a named `Error` (via the shared `assertStringParam`) here,
+ * before `escapeRegExp` / `RegExp.exec` run — a `null` field value
+ * used to be coerced to `"null"` and misreported as `"not present"`,
+ * and a `null` label used to escape as a bare `TypeError`. Same
+ * wording as the sibling parsers `parseSignatureInput` /
+ * `listSignatureLabels` (backlog #1354). (Backlog #1385.)
+ */
 export function parseSignatureField(fieldValue: string, label: string): Buffer {
+  assertStringParam("parseSignatureField", "fieldValue", fieldValue);
+  assertStringParam("parseSignatureField", "label", label);
   const re = new RegExp(
     `(?:^|,)\\s*${escapeRegExp(label)}\\s*=:([A-Za-z0-9+/=]+):`,
   );
