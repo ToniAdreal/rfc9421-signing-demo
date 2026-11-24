@@ -348,8 +348,20 @@ function defaultCoveredComponents(hasBody: boolean): string[] {
  * cannot split (malformed) fall
  * through to `buildSignatureBase`, which reports them properly;
  * the key is only used for equality, never for parsing.
+ *
+ * A non-string entry is rejected with a named configuration error,
+ * never dereferenced: reading `.trim()` off `null` used to throw a
+ * bare `TypeError`. The sign/verify entry points already refuse a
+ * non-string list entry earlier, in `assertCoveredComponentsShape`,
+ * so this guard only fires for a caller that imports the helper
+ * directly (or for `assertNoDuplicateCoveredComponents`, which
+ * assumes the list shape was checked first). (Backlog #1381.)
  */
-export function coveredComponentKey(entry: string): string {
+export function coveredComponentKey(entry: unknown): string {
+  if (typeof entry !== "string")
+    throw new Error(
+      `coveredComponentKey: "entry" must be a string, got ${entry === null ? "null" : typeof entry}`,
+    );
   const input = entry.trim();
   const semi = input.indexOf(";");
   let base = (semi === -1 ? input : input.slice(0, semi)).trim().toLowerCase();
