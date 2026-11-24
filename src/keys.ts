@@ -4,8 +4,8 @@ import {
   createPublicKey,
   createSecretKey,
   generateKeyPairSync,
+  KeyObject,
   randomBytes,
-  type KeyObject,
 } from "node:crypto";
 import type { SignAlg } from "./sign.js";
 
@@ -381,11 +381,49 @@ export function importPublicKey(pem: string | Buffer): KeyObject {
   return createPublicKey(pem);
 }
 
+/**
+ * Export a private key as a PKCS#8 PEM string, ready to store or ship
+ * to a trusted holder. Uses node:crypto's native PEM support — no
+ * third-party dependencies.
+ *
+ * A `null` / non-`KeyObject` key is refused with a named `Error`
+ * (naming the received value) instead of a bare `TypeError` from
+ * reading `key.export` — the guard is an `instanceof KeyObject`
+ * check (the same shape used by `createVerifiedHandler`'s
+ * `assertSignResponseOptions`), so a number, string or plain object
+ * gets the same named rejection as `null`. A real `KeyObject` of the
+ * wrong kind (e.g. a public key) still fails in node:crypto with its
+ * own error, unchanged.
+ */
 export function exportPrivateKeyPem(key: KeyObject): string {
+  if (!(key instanceof KeyObject))
+    throw new Error(
+      `exportPrivateKeyPem: expected a private KeyObject, got ` +
+        `${key === null ? "null" : typeof key}`,
+    );
   return key.export({ format: "pem", type: "pkcs8" }).toString();
 }
 
+/**
+ * Export a public key as a SubjectPublicKeyInfo PEM string, ready to
+ * store or ship to a verifier. Uses node:crypto's native PEM support
+ * — no third-party dependencies.
+ *
+ * A `null` / non-`KeyObject` key is refused with a named `Error`
+ * (naming the received value) instead of a bare `TypeError` from
+ * reading `key.export` — the guard is an `instanceof KeyObject`
+ * check (the same shape used by `createVerifiedHandler`'s
+ * `assertSignResponseOptions`), so a number, string or plain object
+ * gets the same named rejection as `null`. A real `KeyObject` of the
+ * wrong kind (e.g. a private key) still fails in node:crypto with its
+ * own error, unchanged.
+ */
 export function exportPublicKeyPem(key: KeyObject): string {
+  if (!(key instanceof KeyObject))
+    throw new Error(
+      `exportPublicKeyPem: expected a public KeyObject, got ` +
+        `${key === null ? "null" : typeof key}`,
+    );
   return key.export({ format: "pem", type: "spki" }).toString();
 }
 
@@ -487,8 +525,19 @@ export interface Ed25519PrivateJwk {
  * only export over a channel already trusted for the private key
  * itself, never log the result, and never hand it to
  * {@link buildJwksDocument}.
+ *
+ * A `null` / `undefined` key is refused with the same named `Error`
+ * shape (naming the received value) instead of a bare `TypeError`
+ * from reading `key.type` — the import side
+ * ({@link importPrivateKeyJwk}) already rejects a `null` JWK this way,
+ * and the export side now matches it.
  */
 export function exportPrivateKeyJwk(key: KeyObject): Ed25519PrivateJwk {
+  if (key === null || key === undefined)
+    throw new Error(
+      `exportPrivateKeyJwk: expected an ed25519 private KeyObject, got ` +
+        `${key === null ? "null" : "undefined"}`,
+    );
   if (key.type !== "private" || key.asymmetricKeyType !== "ed25519")
     throw new Error(
       `exportPrivateKeyJwk: expected an ed25519 private KeyObject, got ` +
@@ -1496,11 +1545,23 @@ export interface ExportSymmetricKeyJwkOptions {
  * material by design — unlike the public-key exporters — so callers
  * must treat the returned object like the secret itself: only ship
  * it to verifiers over a trusted channel (see {@link HmacJwk}).
+ *
+ * A `null` / `undefined` key is refused with the same named `Error`
+ * shape (naming the received value) instead of a bare `TypeError`
+ * from reading `key.type` — the import side
+ * ({@link importSymmetricKeyJwk}) already rejects a `null` JWK this
+ * way, and the export side now matches it. The null guard runs first,
+ * before the `alg` / `kid` checks below.
  */
 export function exportSymmetricKeyJwk(
   key: KeyObject,
   opts: ExportSymmetricKeyJwkOptions = {},
 ): HmacJwk {
+  if (key === null || key === undefined)
+    throw new Error(
+      `exportSymmetricKeyJwk: expected a secret (symmetric) KeyObject, got ` +
+        `${key === null ? "null" : "undefined"}`,
+    );
   const { alg, kid } = opts;
   if (alg !== undefined && alg !== "HS256" && alg !== "HS512")
     throw new Error(
