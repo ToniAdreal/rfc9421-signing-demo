@@ -262,6 +262,9 @@ test("candidateKeysByLabel: failed rotation attempts never pollute the replay ca
       gateway: [GATEWAY_OLD, GATEWAY_NEW],
     },
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying gateway signature needs a
+    // lifetime bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(r2[1].ok, true);
   assert.equal(r2[1].nonce, nonce);

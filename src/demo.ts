@@ -10144,10 +10144,15 @@ export async function runDemo(): Promise<DemoResult> {
     ttlSec: DEMO_REPLAY_CACHE_TTL_SEC,
     now: () => DEMO_CREATED + 60,
   });
+  // Backlog #1411: the replay cache only protects a signature while it
+  // still remembers the nonce, so every replay verification below also
+  // caps the signature age (300s, inside the cache's 3600s TTL) — an
+  // unbounded lifetime would now throw instead of verifying.
   const replayVerifyOptions = {
     key: publicKey,
     now: DEMO_CREATED + 60,
     replayCache,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
   };
   const replayFirstVerification = verifyRequest(signed, replayVerifyOptions);
   const replaySecondVerification = verifyRequest(signed, replayVerifyOptions);
@@ -11158,6 +11163,7 @@ export async function runDemo(): Promise<DemoResult> {
     key: publicKey,
     now: DEMO_CREATED + 60,
     replayCache: replaySnapshotCache,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
   });
   const replaySnapshotExport = replaySnapshotCache.exportSnapshot();
   const replaySnapshotRestored = ReplayCache.restore(
@@ -11168,6 +11174,7 @@ export async function runDemo(): Promise<DemoResult> {
     key: publicKey,
     now: DEMO_CREATED + 60,
     replayCache: replaySnapshotRestored,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
   });
   const replaySnapshotFreshSigned = signRequest(
     {
@@ -11190,6 +11197,7 @@ export async function runDemo(): Promise<DemoResult> {
       key: publicKey,
       now: DEMO_CREATED + 60,
       replayCache: replaySnapshotRestored,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     },
   );
   const replaySnapshotRestoredSize = replaySnapshotRestored.size;
@@ -12617,12 +12625,14 @@ export async function runDemo(): Promise<DemoResult> {
       key: publicKey,
       now: DEMO_CREATED + 60,
       replayCache: replaySignedSnapshotsByLabelMerchantCache,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     });
   const replaySignedSnapshotsByLabelGatewayFirstVerification =
     verifyRequest(replaySignedSnapshotsByLabelGatewaySigned, {
       key: publicKey,
       now: DEMO_CREATED + 60,
       replayCache: replaySignedSnapshotsByLabelGatewayCache,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     });
   const replaySignedSnapshotsByLabelEnvelopes =
     exportSignedSnapshotsByLabel(
@@ -12676,6 +12686,7 @@ export async function runDemo(): Promise<DemoResult> {
       key: publicKey,
       now: DEMO_CREATED + 60,
       replayCache: replaySignedSnapshotsByLabelRestoredMerchant,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     },
   );
   const replaySignedSnapshotsByLabelGatewayVerification = verifyRequest(
@@ -12684,6 +12695,7 @@ export async function runDemo(): Promise<DemoResult> {
       key: publicKey,
       now: DEMO_CREATED + 60,
       replayCache: replaySignedSnapshotsByLabelRestoredGateway,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     },
   );
   const replaySignedSnapshotsByLabelCrossLabelVerification = verifyRequest(
@@ -12692,6 +12704,7 @@ export async function runDemo(): Promise<DemoResult> {
       key: publicKey,
       now: DEMO_CREATED + 60,
       replayCache: replaySignedSnapshotsByLabelRestoredGateway,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     },
   );
   const replaySignedSnapshotsByLabelFreshSigned = signRequest(
@@ -12715,6 +12728,7 @@ export async function runDemo(): Promise<DemoResult> {
       key: publicKey,
       now: DEMO_CREATED + 60,
       replayCache: replaySignedSnapshotsByLabelRestoredMerchant,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     },
   );
   const replaySignedSnapshotsByLabelTampered = JSON.parse(
@@ -12756,6 +12770,7 @@ export async function runDemo(): Promise<DemoResult> {
       key: publicKey,
       now: DEMO_CREATED + 60,
       replayCache: replaySignedSnapshotsByLabelRestoredGateway,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     },
   );
   const replaySignedSnapshotsByLabelEntriesMatch = (
@@ -17305,6 +17320,7 @@ export async function runDemo(): Promise<DemoResult> {
       key: replayCacheByLabelMerchantPair.publicKey,
       now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
       replayCache: replayCacheByLabelMerchantCache,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     },
   );
   const replayCacheByLabelVerification = verifyAllLabels(
@@ -17312,6 +17328,7 @@ export async function runDemo(): Promise<DemoResult> {
     {
       keys: replayCacheByLabelKeys,
       now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
       replayCacheByLabel: {
         [DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL]:
           replayCacheByLabelMerchantCache,
@@ -17328,6 +17345,7 @@ export async function runDemo(): Promise<DemoResult> {
     {
       keys: replayCacheByLabelKeys,
       now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
       replayCache: replayCacheByLabelGlobalCache,
     },
   );

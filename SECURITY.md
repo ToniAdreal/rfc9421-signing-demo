@@ -53,7 +53,15 @@ Read this before using it anywhere that matters.
   validity window can be replayed unless the caller opts into nonce
   replay detection (`VerifyOptions.replayCache`), which consults a
   `NonceStore` — `ReplayCache` is the built-in single-process,
-  in-memory implementation (TTL + LRU capacity cap). A `ReplayCache`
+  in-memory implementation (TTL + LRU capacity cap). A cache only
+  protects a signature while it still remembers the nonce: a
+  nonce-carrying signature verified with a cache must have its lifetime
+  bounded inside the cache TTL (`maxSignatureAgeSec` no larger than the
+  TTL, or an `expires` no more than the TTL past `created`), and must
+  carry `created`; otherwise `verifyRequest` throws a caller
+  configuration error instead of verifying. A signature whose lifetime
+  outruns the TTL would verify today and become replayable once the
+  nonce is forgotten. A `ReplayCache`
   can be carried across its own process's restart via
   `exportSnapshot()` / `ReplayCache.restore()` (the snapshot is
   strictly validated at load, TTLs keep counting from each nonce's

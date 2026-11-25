@@ -107,7 +107,7 @@ test("verifyRequest drives the counters; no-cache path unaffected", () => {
       { method: "GET", url: "https://api.example.com/v1/status", headers: {} },
       { keyId: "k", alg: "ed25519", key: privateKey, created: CREATED, nonce },
     );
-  const opts = { key: publicKey, now: t, replayCache: cache } as const;
+  const opts = { key: publicKey, now: t, replayCache: cache, maxSignatureAgeSec: 3600 } as const;
   const verify = (nonce: string) => verifyRequest(signed(nonce), opts);
 
   assert.equal(verify("n1").ok, true); // miss

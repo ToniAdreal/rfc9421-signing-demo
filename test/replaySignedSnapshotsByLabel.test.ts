@@ -441,9 +441,14 @@ test("restored per-label caches plug into verifyAllLabels", () => {
     gateway: new ReplayCache({ ttlSec: 3600, now: () => NOW }),
   };
   const first = Object.fromEntries(
-    verifyAllLabels(merged, { now: NOW, keys, replayCacheByLabel: live }).map(
-      (r: VerifyResult) => [r.label, r],
-    ),
+    verifyAllLabels(merged, {
+      now: NOW,
+      keys,
+      replayCacheByLabel: live,
+      // Backlog #1411: the nonce-carrying signatures need a lifetime
+      // bounded within the cache TTL (3600s).
+      maxSignatureAgeSec: 3600,
+    }).map((r: VerifyResult) => [r.label, r]),
   );
   assert.equal(first.merchant.ok, true);
   assert.equal(first.gateway.ok, true);
@@ -458,9 +463,12 @@ test("restored per-label caches plug into verifyAllLabels", () => {
     { ttlSec: 3600, now: () => NOW },
   );
   const second = Object.fromEntries(
-    verifyAllLabels(merged, { now: NOW, keys, replayCacheByLabel: restored }).map(
-      (r: VerifyResult) => [r.label, r],
-    ),
+    verifyAllLabels(merged, {
+      now: NOW,
+      keys,
+      replayCacheByLabel: restored,
+      maxSignatureAgeSec: 3600,
+    }).map((r: VerifyResult) => [r.label, r]),
   );
   assert.equal(second.merchant.ok, false);
   assert.equal(second.merchant.code, "NONCE_REPLAY");

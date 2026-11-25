@@ -224,6 +224,9 @@ test("empty-list rejection never records the nonce in the replay cache", () => {
     key: pair.publicKey,
     now: NOW,
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying signature needs a lifetime
+    // bounded within the cache TTL (600s).
+    maxSignatureAgeSec: 600,
   });
   assert.equal(ok.ok, true);
   // And the legal presentation did record the nonce: presenting it
@@ -232,6 +235,7 @@ test("empty-list rejection never records the nonce in the replay cache", () => {
     key: pair.publicKey,
     now: NOW,
     replayCache: cache,
+    maxSignatureAgeSec: 600,
   });
   assert.equal(replay.ok, false);
   assert.equal(replay.code, "NONCE_REPLAY");

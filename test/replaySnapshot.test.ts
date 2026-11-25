@@ -43,7 +43,9 @@ test("snapshot round-trip: seen nonce is still rejected after restore", () => {
     { keyId: "k", alg: "ed25519", key: privateKey, created: CREATED, nonce: "wire-1" },
   );
   const before = new ReplayCache({ ttlSec: 3600, now: () => CREATED + 60 });
-  const vopts = { key: publicKey, now: CREATED + 60 };
+  // Backlog #1411: the nonce-carrying signature needs a lifetime
+  // bounded within the cache TTL (3600s).
+  const vopts = { key: publicKey, now: CREATED + 60, maxSignatureAgeSec: 3600 };
   assert.equal(verifyRequest(signed, { ...vopts, replayCache: before }).ok, true);
   const after = ReplayCache.restore(before.exportSnapshot(), {
     ttlSec: 3600,

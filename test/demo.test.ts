@@ -5635,6 +5635,9 @@ test("demo per-label ReplayCache signed snapshot segment exports one envelope pe
       key: publicKey,
       now: DEMO_CREATED + 60,
       replayCache: directMerchant,
+      // Backlog #1411: the nonce-carrying signature needs a lifetime
+      // bounded within the cache TTL (DEMO_MAX_AGE_SEC is inside it).
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     }).ok,
     true,
   );
@@ -5643,6 +5646,7 @@ test("demo per-label ReplayCache signed snapshot segment exports one envelope pe
       key: publicKey,
       now: DEMO_CREATED + 60,
       replayCache: directGateway,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     }).ok,
     true,
   );
@@ -5704,6 +5708,7 @@ test("demo per-label ReplayCache signed snapshot segment exports one envelope pe
     key: publicKey,
     now: DEMO_CREATED + 60,
     replayCache: directRestoredMerchant,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
   });
   assert.equal(directMerchantReplay.ok, false);
   assert.equal(
@@ -5714,6 +5719,7 @@ test("demo per-label ReplayCache signed snapshot segment exports one envelope pe
     key: publicKey,
     now: DEMO_CREATED + 60,
     replayCache: directRestoredGateway,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
   });
   assert.equal(directGatewayReplay.ok, false);
   assert.equal(
@@ -5724,6 +5730,7 @@ test("demo per-label ReplayCache signed snapshot segment exports one envelope pe
     key: publicKey,
     now: DEMO_CREATED + 60,
     replayCache: directRestoredGateway,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
   });
   assert.equal(directCross.ok, true);
   const directTampered = JSON.parse(
@@ -5761,6 +5768,7 @@ test("demo per-label ReplayCache signed snapshot segment exports one envelope pe
     key: publicKey,
     now: DEMO_CREATED + 60,
     replayCache: directRestoredGateway,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
   });
   assert.equal(directAfterTamper.ok, false);
   assert.equal(
@@ -6559,7 +6567,8 @@ test("demo ReplayCache clear segment records, replays, clears to zero, and re-re
     { method: "POST", url: "https://api.example.com/v1/payments", headers: { "content-type": "application/json" }, body: DEMO_BODY },
     { keyId: DEMO_KEY_ID, alg: "ed25519", key: privateKey, created: DEMO_CREATED, nonce: DEMO_REPLAY_CLEAR_NONCE },
   );
-  const directOpts = { key: publicKey, now: DEMO_CREATED + 60, replayCache: directCache };
+  // Backlog #1411: the nonce-carrying signature needs a lifetime bounded within the cache TTL.
+  const directOpts = { key: publicKey, now: DEMO_CREATED + 60, replayCache: directCache, maxSignatureAgeSec: DEMO_MAX_AGE_SEC };
   assert.equal(verifyRequest(directSigned, directOpts).ok, true);
   assert.equal(verifyRequest(directSigned, directOpts).code, "NONCE_REPLAY");
   directCache.clear();
@@ -6695,7 +6704,8 @@ test("demo ReplayCache release segment records, probes, releases, and re-records
       nonce: DEMO_REPLAY_RELEASE_NONCE,
     },
   );
-  const directOpts = { key: publicKey, now: DEMO_CREATED + 60, replayCache: directCache };
+  // Backlog #1411: the nonce-carrying signature needs a lifetime bounded within the cache TTL.
+  const directOpts = { key: publicKey, now: DEMO_CREATED + 60, replayCache: directCache, maxSignatureAgeSec: DEMO_MAX_AGE_SEC };
   assert.equal(verifyRequest(directSigned, directOpts).ok, true);
   assert.equal(verifyRequest(directSigned, directOpts).code, "NONCE_REPLAY");
   assert.equal(directCache.release(DEMO_REPLAY_RELEASE_NONCE), true);
@@ -12256,6 +12266,7 @@ test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded me
       key: merchant.publicKey,
       now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
       replayCache: merchantCache,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
     }).ok,
     true,
   );
@@ -12266,6 +12277,7 @@ test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded me
       merchant: merchantCache,
       gateway: gatewayCache,
     },
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
   });
   assert.deepEqual(
     direct.map((x) => [x.label, x.ok, x.code]),
@@ -12284,6 +12296,7 @@ test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded me
     replayCache: new ReplayCache({
       now: () => DEMO_REPLAY_CACHE_BY_LABEL_NOW,
     }),
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
   });
   assert.deepEqual(
     directGlobal.map((x) => [x.label, x.ok, x.code]),

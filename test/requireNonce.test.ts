@@ -186,6 +186,9 @@ test("requireNonce + replayCache: present nonce passes once, then NONCE_REPLAY (
     now: CREATED,
     requireNonce: true,
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying signature needs a lifetime
+    // bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   };
   const first = verifyRequest(signed, opts);
   assert.equal(first.ok, true);

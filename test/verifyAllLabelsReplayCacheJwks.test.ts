@@ -176,6 +176,9 @@ function verifyDual(
         merchant: merchantCache,
         gateway: gatewayCache,
       },
+      // Backlog #1411: the nonce-carrying signatures need a lifetime
+      // bounded within the cache TTL (3600s).
+      maxSignatureAgeSec: 3600,
     }),
   );
 }
@@ -251,6 +254,9 @@ test("verifyAllLabels x replayCacheByLabel x JwksKeyStore: a nonce already seen 
       keyResolver: merchantStore.resolve,
       now: NOW,
       replayCache: merchantCache,
+      // Backlog #1411: the nonce-carrying signature needs a lifetime
+      // bounded within the cache TTL (3600s).
+      maxSignatureAgeSec: 3600,
     }).ok,
     true,
   );
@@ -376,6 +382,15 @@ test("verifyAllLabels x replayCacheByLabel x JwksKeyStore: per-label replay TTLs
   const { merged, merchantStore, gatewayStore } = twoParty("shared-nonce-742-f");
   const merchantCache = new ReplayCache({ ttlSec: 60, now: () => t });
   const gatewayCache = new ReplayCache({ ttlSec: 3600, now: () => t });
+  // Backlog #1411: each label's lifetime is capped against its own
+  // store's TTL — the merchant label gets 60s (its store's window),
+  // the gateway label 3600s. Past the merchant TTL the merchant
+  // nonce is forgotten by its store, but the same signature can no
+  // longer be re-presented fresh there either: its 60s lifetime is
+  // over, so it reports SIGNATURE_TOO_OLD while the gateway label
+  // still replays — the two TTLs stay independent, via different
+  // verdicts instead of a fresh accept. Resolver identity is
+  // unchanged by the replay outcome on either side.
   const opts = {
     keyResolvers: {
       merchant: merchantStore.resolve,
@@ -385,6 +400,7 @@ test("verifyAllLabels x replayCacheByLabel x JwksKeyStore: per-label replay TTLs
       merchant: merchantCache,
       gateway: gatewayCache,
     },
+    maxSignatureAgeSecByLabel: { merchant: 60, gateway: 3600 },
   };
   const first = byLabel(verifyAllLabels(merged, { ...opts, now: t }));
   assert.equal(first["merchant"].ok, true);
@@ -392,12 +408,12 @@ test("verifyAllLabels x replayCacheByLabel x JwksKeyStore: per-label replay TTLs
 
   t = NOW + 120; // past the merchant TTL, inside the gateway TTL
   const second = byLabel(verifyAllLabels(merged, { ...opts, now: t }));
-  // The merchant nonce expired from its own store, so it passes
-  // again and re-records; the gateway nonce is still live, so only
-  // the gateway label replays. Resolver identity is unchanged by
-  // the replay outcome on either side.
-  assert.equal(second["merchant"].ok, true);
-  assert.equal(second["merchant"].keyId, "merchant-key-1");
+  assert.equal(second["merchant"].ok, false);
+  assert.equal(second["merchant"].code, "SIGNATURE_TOO_OLD");
   assert.equal(second["gateway"].ok, false);
   assert.equal(second["gateway"].code, "NONCE_REPLAY");
+  // The merchant store itself still forgot the nonce after its TTL
+  // (the TTL behaviour is unchanged at the store layer): a direct
+  // check at the same instant treats it as unseen again.
+  assert.equal(merchantCache.check("shared-nonce-742-f", t), false);
 });

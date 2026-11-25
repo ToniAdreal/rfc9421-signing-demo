@@ -154,6 +154,9 @@ function verifyDual(
       "trailer-a": caches.aCache,
       "trailer-b": caches.bCache,
     },
+    // Backlog #1411: the nonce-carrying signatures need a lifetime
+    // bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   });
 }
 

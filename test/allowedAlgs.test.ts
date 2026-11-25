@@ -360,6 +360,12 @@ test("a whitelist rejection happens before crypto, so it never records the nonce
     key: secret,
     allowedAlgs: ["hmac-sha256"],
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying signature needs a lifetime
+    // bounded within the cache TTL (600s); pin `now` near `created`
+    // (the test previously relied on the wall-clock default with no
+    // max-age window, which no longer bounds the lifetime).
+    now: CREATED + 60,
+    maxSignatureAgeSec: 600,
   });
   assert.equal(allowed.ok, true, `expected ok, got ${JSON.stringify(allowed)}`);
 });

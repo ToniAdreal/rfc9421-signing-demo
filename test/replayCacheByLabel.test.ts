@@ -82,6 +82,12 @@ function byLabel(results: VerifyResult[]) {
   return Object.fromEntries(results.map((r) => [r.label, r]));
 }
 
+// Backlog #1411: every verify call in this file bounds the
+// nonce-carrying signature's lifetime to the store TTL
+// (`maxSignatureAgeSec: 3600`, the `cache()` default) — an unbounded
+// lifetime plus a replay store is now a configuration error. The
+// per-label-TTLs test below is the exception: it caps each label
+// against its own store's TTL via `maxSignatureAgeSecByLabel`.
 function cache(ttlSec = 3600, now: () => number = () => NOW) {
   return new ReplayCache({ ttlSec, now });
 }
@@ -93,6 +99,7 @@ test("replayCacheByLabel: same nonce in both labels passes in one call, and re-v
   const first = byLabel(
     verifyAllLabels(req, {
       now: NOW,
+      maxSignatureAgeSec: 3600,
       keys: keys(),
       replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
     }),
@@ -108,6 +115,7 @@ test("replayCacheByLabel: same nonce in both labels passes in one call, and re-v
   const second = byLabel(
     verifyAllLabels(req, {
       now: NOW,
+      maxSignatureAgeSec: 3600,
       keys: keys(),
       replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
     }),
@@ -131,6 +139,7 @@ test("replayCacheByLabel: a nonce already seen by the merchant store is still fr
       label: "merchant",
       key: merchant.publicKey,
       now: NOW,
+      maxSignatureAgeSec: 3600,
       replayCache: merchantCache,
     }).ok,
     true,
@@ -138,6 +147,7 @@ test("replayCacheByLabel: a nonce already seen by the merchant store is still fr
   const results = byLabel(
     verifyAllLabels(dual("shared-nonce-2"), {
       now: NOW,
+      maxSignatureAgeSec: 3600,
       keys: keys(),
       replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
     }),
@@ -154,6 +164,7 @@ test("replayCacheByLabel: an unmapped label falls back to the global replayCache
   const first = byLabel(
     verifyAllLabels(req, {
       now: NOW,
+      maxSignatureAgeSec: 3600,
       keys: keys(),
       replayCache: globalCache,
       replayCacheByLabel: { merchant: merchantCache },
@@ -167,6 +178,7 @@ test("replayCacheByLabel: an unmapped label falls back to the global replayCache
   const second = byLabel(
     verifyAllLabels(req, {
       now: NOW,
+      maxSignatureAgeSec: 3600,
       keys: keys(),
       replayCache: globalCache,
       replayCacheByLabel: { merchant: merchantCache },
@@ -183,6 +195,7 @@ test("replayCacheByLabel: with no global cache, an unmapped label is never repla
     const results = byLabel(
       verifyAllLabels(req, {
         now: NOW,
+        maxSignatureAgeSec: 3600,
         keys: keys(),
         replayCacheByLabel: { merchant: merchantCache },
       }),
@@ -260,6 +273,7 @@ test("replayCacheByLabel: a failed verification pollutes neither label's store",
   const forged = byLabel(
     verifyAllLabels(dual("shared-nonce-7", gatewayWrong), {
       now: NOW,
+      maxSignatureAgeSec: 3600,
       keys: keys(),
       replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
     }),
@@ -275,6 +289,7 @@ test("replayCacheByLabel: a failed verification pollutes neither label's store",
   const retried = byLabel(
     verifyAllLabels(dual("shared-nonce-7"), {
       now: NOW,
+      maxSignatureAgeSec: 3600,
       keys: keys(),
       replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
     }),
@@ -289,6 +304,7 @@ test("replayCacheByLabel: without the map, the shared-store contract is unchange
   const results = byLabel(
     verifyAllLabels(dual("shared-nonce-8"), {
       now: NOW,
+      maxSignatureAgeSec: 3600,
       keys: keys(),
       replayCache: globalCache,
     }),
@@ -305,9 +321,18 @@ test("replayCacheByLabel: per-label stores can carry different TTLs", () => {
   let t = NOW;
   const merchantCache = new ReplayCache({ ttlSec: 60, now: () => t });
   const gatewayCache = new ReplayCache({ ttlSec: 3600, now: () => t });
+  // Backlog #1411: each label's lifetime is capped against its own
+  // store's TTL — the merchant label gets 60s (its store's window),
+  // the gateway label 3600s. Past the merchant TTL the merchant
+  // nonce is forgotten by its store, but the same signature can no
+  // longer be re-presented fresh there either: its 60s lifetime is
+  // over, so it reports SIGNATURE_TOO_OLD while the gateway label
+  // still replays — the two TTLs stay independent, via different
+  // verdicts instead of a fresh accept.
   const opts = {
     keys: keys(),
     replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
+    maxSignatureAgeSecByLabel: { merchant: 60, gateway: 3600 },
   };
   const first = byLabel(verifyAllLabels(dual("shared-nonce-9"), { ...opts, now: t }));
   assert.equal(first["merchant"].ok, true);
@@ -315,9 +340,14 @@ test("replayCacheByLabel: per-label stores can carry different TTLs", () => {
 
   t = NOW + 120; // past the merchant TTL, inside the gateway TTL
   const second = byLabel(verifyAllLabels(dual("shared-nonce-9"), { ...opts, now: t }));
-  assert.equal(second["merchant"].ok, true);
+  assert.equal(second["merchant"].ok, false);
+  assert.equal(second["merchant"].code, "SIGNATURE_TOO_OLD");
   assert.equal(second["gateway"].ok, false);
   assert.equal(second["gateway"].code, "NONCE_REPLAY");
+  // The merchant store itself still forgot the nonce after its TTL
+  // (the TTL behaviour is unchanged at the store layer): a direct
+  // check at the same instant treats it as unseen again.
+  assert.equal(merchantCache.check("shared-nonce-9", t), false);
 });
 
 test("replayCacheByLabel: a nonce recorded through the per-label map still throws NONCE_REPLAY from verifyRequestOrThrow", () => {
@@ -327,6 +357,7 @@ test("replayCacheByLabel: a nonce recorded through the per-label map still throw
     byLabel(
       verifyAllLabels(dual("shared-nonce-10"), {
         now: NOW,
+        maxSignatureAgeSec: 3600,
         keys: keys(),
         replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
       }),
@@ -341,6 +372,7 @@ test("replayCacheByLabel: a nonce recorded through the per-label map still throw
         label: "merchant",
         key: merchant.publicKey,
         now: NOW,
+        maxSignatureAgeSec: 3600,
         replayCache: merchantCache,
       }),
     (e: unknown) => isVerifyError(e) && e.code === "NONCE_REPLAY",
@@ -353,6 +385,7 @@ test("replayCacheByLabel: a map entry for a label absent from the request is ign
   const results = byLabel(
     verifyAllLabels(dual("shared-nonce-11"), {
       now: NOW,
+      maxSignatureAgeSec: 3600,
       keys: keys(),
       replayCacheByLabel: { merchant: merchantCache, absent: absentCache },
     }),

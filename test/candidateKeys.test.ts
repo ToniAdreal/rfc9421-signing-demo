@@ -214,6 +214,9 @@ test("candidateKeys: NONCE_REPLAY short-circuits the walk", () => {
     now: NOW,
     candidateKeys: [NEW_SECRET, WRONG_SECRET],
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying signature needs a lifetime
+    // bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   };
   const first = verifyRequest(signed, opts);
   assert.equal(first.ok, true);

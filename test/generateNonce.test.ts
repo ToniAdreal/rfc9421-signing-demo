@@ -89,12 +89,16 @@ test("generated nonce feeds the replay chain: first verify ok, replay rejected",
     key: publicKey,
     now: CREATED + 60,
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying signature needs a lifetime
+    // bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(first.ok, true);
   const replay = verifyRequest(signed, {
     key: publicKey,
     now: CREATED + 120,
     replayCache: cache,
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(replay.ok, false);
   assert.equal(replay.code, "NONCE_REPLAY");

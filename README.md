@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2972 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2988 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2318,7 +2318,25 @@ values. Without a request to bind to, keep using the request-side API
   `requireNonce: true` alongside it when such signatures must be
   rejected instead: they then fail with `MISSING_NONCE` (an empty-string
   nonce counts as missing), checked after the cryptographic check and
-  before the cache query. A nonce longer than `MAX_NONCE_LENGTH`
+  before the cache query. Replay-lifetime consistency: a cache only
+  protects a signature while it still remembers the nonce, so a
+  nonce-carrying signature verified with a cache must have a lifetime
+  bounded inside the cache TTL — set `maxSignatureAgeSec` no larger
+  than the TTL, or have the signer send an `expires` no more than the
+  TTL past `created` (the tighter of the two governs), and the signature
+  must carry `created` at all, since the lifetime cannot be anchored
+  without it. Otherwise `verifyRequest` throws a caller configuration
+  `Error`: after the cryptographic and freshness checks, so a forgery
+  still reports `SIGNATURE_MISMATCH` and an already-dead signature keeps
+  its clean verdict, but before the nonce is recorded, so a rejected
+  verification never pollutes the cache. The check runs per label in
+  `verifyAllLabels` (bound each label with `maxSignatureAgeSecByLabel`
+  against its own store's TTL; a throwing label propagates out of the
+  call) and for responses through `verifyResponse`. `ReplayCache`
+  exposes its window as a read-only `cache.ttlSec`; a custom `NonceStore`
+  that exposes no TTL is only checked for the unbounded cases. Without
+  a cache configured nothing changes, and a nonce-less signature never
+  consults the cache, so the check does not apply to it. A nonce longer than `MAX_NONCE_LENGTH`
   (256 characters) is rejected by `signRequest` as a configuration
   error; the cap is sign-side fail-fast only (see the tag bullet for
   the rationale). By default the cache is shared across
@@ -5540,7 +5558,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2972 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2988 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

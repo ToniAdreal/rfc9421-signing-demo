@@ -163,6 +163,9 @@ test("autoNonce-signed request replays: second verify with the same ReplayCache 
     key: publicKey,
     now: NOW,
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying signature needs a lifetime
+    // bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(first.ok, true);
   assert.equal(first.nonce, nonce);
@@ -172,6 +175,7 @@ test("autoNonce-signed request replays: second verify with the same ReplayCache 
     key: publicKey,
     now: NOW,
     replayCache: cache,
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(second.ok, false);
   assert.equal(second.code, "NONCE_REPLAY");

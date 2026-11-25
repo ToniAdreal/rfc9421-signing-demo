@@ -40,7 +40,10 @@ function signedResponse(
 }
 
 function verifyOpts(key: ReturnType<typeof generateEd25519KeyPair>) {
-  return { key: key.publicKey, now: NOW };
+  // Backlog #1411: a nonce-carrying response needs a lifetime
+  // bounded within the cache TTL (3600s) whenever a replay store
+  // is configured.
+  return { key: key.publicKey, now: NOW, maxSignatureAgeSec: 3600 };
 }
 
 test("signed response nonce: first verify passes and records the nonce", () => {
@@ -158,15 +161,28 @@ test("response nonce is reusable after the TTL expires (fake clock)", () => {
   const cache = new ReplayCache({ ttlSec: 300, now: () => t });
   const keys = generateEd25519KeyPair();
   const signed = signedResponse(keys, "resp-ttl-nonce");
+  // Backlog #1411: the nonce-carrying response needs a lifetime
+  // bounded within the cache TTL (300s). The cache still forgets
+  // the nonce after the TTL — but the same response can no longer
+  // be re-presented fresh after it, because its lifetime is capped
+  // at the TTL: past the TTL it is SIGNATURE_TOO_OLD.
   const at = (now: number) =>
-    verifyResponse(signed, { key: keys.publicKey, now, replayCache: cache });
+    verifyResponse(signed, {
+      key: keys.publicKey,
+      now,
+      replayCache: cache,
+      maxSignatureAgeSec: 300,
+    });
 
   assert.equal(at(t).ok, true);
   assert.equal(at(t).code, "NONCE_REPLAY");
   assert.equal(cache.size, 1);
 
-  t += 301; // past the TTL
-  assert.equal(at(t).ok, true); // re-recorded with a fresh timestamp
-  assert.equal(cache.size, 1);
-  assert.equal(at(t).code, "NONCE_REPLAY");
+  t += 301; // past the TTL — and past the 300s lifetime cap
+  const late = at(t);
+  assert.equal(late.ok, false);
+  assert.equal(late.code, "SIGNATURE_TOO_OLD");
+  // The stale presentation never re-records: the cache still holds
+  // only the original entry (now expired).
+  assert.equal(cache.size, 0);
 });

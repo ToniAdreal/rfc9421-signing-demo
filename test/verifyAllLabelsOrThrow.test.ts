@@ -151,12 +151,21 @@ test("replayed nonce throws VerifyError with code NONCE_REPLAY", () => {
     key: publicKey,
     now: NOW,
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying signature needs a lifetime
+    // bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(first.length, 1);
   assert.equal(first[0].ok, true);
   assert.equal(first[0].nonce, "nonce-replay-1");
   assert.throws(
-    () => verifyAllLabelsOrThrow(signed, { key: publicKey, now: NOW, replayCache: cache }),
+    () =>
+      verifyAllLabelsOrThrow(signed, {
+        key: publicKey,
+        now: NOW,
+        replayCache: cache,
+        maxSignatureAgeSec: 3600,
+      }),
     (e: unknown) => {
       assert.ok(e instanceof VerifyError);
       assert.equal(e.code, "NONCE_REPLAY");

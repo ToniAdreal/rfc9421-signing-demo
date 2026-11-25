@@ -35,6 +35,9 @@ test("same nonce verified twice: second rejected with NONCE_REPLAY", () => {
     key: publicKey,
     now: CREATED + 60,
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying signature needs a lifetime
+    // bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(first.ok, true);
   assert.equal(first.nonce, "replay-1");
@@ -44,6 +47,7 @@ test("same nonce verified twice: second rejected with NONCE_REPLAY", () => {
     key: publicKey,
     now: CREATED + 60,
     replayCache: cache,
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(second.ok, false);
   assert.equal(second.code, "NONCE_REPLAY");
@@ -81,17 +85,32 @@ test("nonce is reusable after the TTL expires (fake clock)", () => {
   let t = CREATED + 60;
   const cache = new ReplayCache({ ttlSec: 300, now: () => t });
   const { signed, publicKey } = signedReq("ttl-nonce");
+  // Backlog #1411: the nonce-carrying signature needs a lifetime
+  // bounded within the cache TTL (300s). The cache still forgets the
+  // nonce after the TTL — but the same signature can no longer be
+  // re-presented fresh after it, because its lifetime is capped at
+  // the TTL: past the TTL it is SIGNATURE_TOO_OLD, not a fresh accept.
+  // (The store-level forgetting itself is still pinned by the direct
+  // `check()` calls in the TTL tests below.)
   const at = (now: number) =>
-    verifyRequest(signed, { key: publicKey, now, replayCache: cache });
+    verifyRequest(signed, {
+      key: publicKey,
+      now,
+      replayCache: cache,
+      maxSignatureAgeSec: 300,
+    });
 
   assert.equal(at(t).ok, true);
   assert.equal(at(t).code, "NONCE_REPLAY");
   assert.equal(cache.size, 1);
 
-  t += 301; // past the TTL
-  assert.equal(at(t).ok, true); // re-recorded with a fresh timestamp
-  assert.equal(cache.size, 1);
-  assert.equal(at(t).code, "NONCE_REPLAY");
+  t += 301; // past the TTL — and past the 300s lifetime cap
+  const late = at(t);
+  assert.equal(late.ok, false);
+  assert.equal(late.code, "SIGNATURE_TOO_OLD");
+  // The stale presentation never re-records: the cache still holds
+  // only the original entry (now expired).
+  assert.equal(cache.size, 0);
 });
 
 test("capacity cap evicts the least-recently-seen nonce (LRU)", () => {
@@ -99,7 +118,14 @@ test("capacity cap evicts the least-recently-seen nonce (LRU)", () => {
   const cache = new ReplayCache({ maxEntries: 3, ttlSec: 3600, now: () => t });
   const check = (nonce: string) => {
     const { signed, publicKey } = signedReq(nonce);
-    return verifyRequest(signed, { key: publicKey, now: t, replayCache: cache });
+    return verifyRequest(signed, {
+      key: publicKey,
+      now: t,
+      replayCache: cache,
+      // Backlog #1411: the nonce-carrying signature needs a lifetime
+      // bounded within the cache TTL (3600s).
+      maxSignatureAgeSec: 3600,
+    });
   };
 
   for (const n of ["n1", "n2", "n3"]) assert.equal(check(n).ok, true);
@@ -122,18 +148,38 @@ test("expired entries are reclaimed before LRU eviction", () => {
   const cache = new ReplayCache({ maxEntries: 2, ttlSec: 100, now: () => t });
   const check = (nonce: string) => {
     const { signed, publicKey } = signedReq(nonce);
-    return verifyRequest(signed, { key: publicKey, now: t, replayCache: cache });
+    return verifyRequest(signed, {
+      key: publicKey,
+      now: t,
+      replayCache: cache,
+      // Backlog #1411: the nonce-carrying signature needs a lifetime
+      // bounded within the cache TTL (100s).
+      maxSignatureAgeSec: 100,
+    });
   };
   assert.equal(check("e1").ok, true);
   assert.equal(check("e2").ok, true);
   assert.equal(cache.size, 2);
 
-  t += 200; // both entries expired
-  // e3 must fit via expiry reclamation, not by evicting a live entry.
-  assert.equal(check("e3").ok, true);
+  t += 200; // both entries expired — and both signatures are now past
+  // their 100s lifetime cap, so the verifier refuses them as too
+  // old instead of re-accepting them fresh (backlog #1411: TTL expiry
+  // no longer reopens the replay window for the same signature).
+  const { signed: e3signed, publicKey: e3key } = signedReq("e3");
+  const late = verifyRequest(e3signed, {
+    key: e3key,
+    now: t,
+    replayCache: cache,
+    maxSignatureAgeSec: 100,
+  });
+  assert.equal(late.ok, false);
+  assert.equal(late.code, "SIGNATURE_TOO_OLD");
+  // The expiry reclamation itself still happens at the store layer:
+  // e3 fits via reclamation, not by evicting a live entry, and the
+  // long-expired e1/e2 are fresh again at the store level.
+  assert.equal(cache.check("e3", t), false);
   assert.equal(cache.size, 1);
-  // e1/e2 expired long ago: accepted as fresh, not replayed.
-  assert.equal(check("e1").ok, true);
+  assert.equal(cache.check("e1", t), false);
 });
 
 test("failed verification never pollutes the cache", () => {
@@ -155,6 +201,9 @@ test("failed verification never pollutes the cache", () => {
     key: publicKey,
     now: CREATED + 60,
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying signature needs a lifetime
+    // bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(good.ok, true);
   assert.equal(cache.size, 1);
@@ -163,7 +212,9 @@ test("failed verification never pollutes the cache", () => {
 test("verifyRequestOrThrow raises VerifyError(NONCE_REPLAY)", () => {
   const { signed, publicKey } = signedReq("throw-nonce");
   const cache = new ReplayCache();
-  const opts = { key: publicKey, now: CREATED + 60, replayCache: cache };
+  // Backlog #1411: the nonce-carrying signature needs a lifetime
+  // bounded within the cache TTL (3600s).
+  const opts = { key: publicKey, now: CREATED + 60, replayCache: cache, maxSignatureAgeSec: 3600 };
   const out = verifyRequestOrThrow(signed, opts);
   assert.equal(out.nonce, "throw-nonce");
   assert.throws(
@@ -181,7 +232,9 @@ test("verifyRequestOrThrow raises VerifyError(NONCE_REPLAY)", () => {
 test("clear() drops all tracked nonces", () => {
   const { signed, publicKey } = signedReq("clear-nonce");
   const cache = new ReplayCache();
-  const opts = { key: publicKey, now: CREATED + 60, replayCache: cache };
+  // Backlog #1411: the nonce-carrying signature needs a lifetime
+  // bounded within the cache TTL (3600s).
+  const opts = { key: publicKey, now: CREATED + 60, replayCache: cache, maxSignatureAgeSec: 3600 };
   assert.equal(verifyRequest(signed, opts).ok, true);
   assert.equal(verifyRequest(signed, opts).code, "NONCE_REPLAY");
   cache.clear();
@@ -233,10 +286,13 @@ test("verifyAllLabels: a replayed label does not block the other label", () => {
     },
   };
   const cache = new ReplayCache();
+  // Backlog #1411: the nonce-carrying signatures need a lifetime
+  // bounded within the cache TTL (3600s).
   const first = verifyAllLabels(merged, {
     key: publicKey,
     now: CREATED + 60,
     replayCache: cache,
+    maxSignatureAgeSec: 3600,
   });
   assert.deepEqual(
     first.map((r) => [r.label, r.ok]),
@@ -252,6 +308,7 @@ test("verifyAllLabels: a replayed label does not block the other label", () => {
     key: publicKey,
     now: CREATED + 60,
     replayCache: cache,
+    maxSignatureAgeSec: 3600,
   });
   assert.deepEqual(
     second.map((r) => [r.label, r.ok, r.code]),
@@ -313,10 +370,13 @@ test("verifyAllLabels: a shared nonce across labels — later labels report NONC
     signLabel("gateway", "shared-nonce-1"),
   ]);
   const cache = new ReplayCache({ now: () => CREATED + 60 });
+  // Backlog #1411: the nonce-carrying signatures need a lifetime
+  // bounded within the cache TTL (3600s).
   const first = verifyAllLabels(dual, {
     key: publicKey,
     now: CREATED + 60,
     replayCache: cache,
+    maxSignatureAgeSec: 3600,
   });
   assert.deepEqual(
     first.map((r) => [r.label, r.ok, r.code]),
@@ -340,6 +400,7 @@ test("verifyAllLabels: a shared nonce across labels — later labels report NONC
     key: publicKey,
     now: CREATED + 60,
     replayCache: cache2,
+    maxSignatureAgeSec: 3600,
   });
   assert.deepEqual(
     second.map((r) => [r.label, r.ok, r.code]),
@@ -361,6 +422,7 @@ test("verifyAllLabels: a shared nonce across labels — later labels report NONC
     key: publicKey,
     now: CREATED + 60,
     replayCache: cache3,
+    maxSignatureAgeSec: 3600,
   });
   assert.deepEqual(
     third.map((r) => [r.label, r.ok]),

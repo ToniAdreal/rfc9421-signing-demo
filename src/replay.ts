@@ -507,7 +507,7 @@ function computeSnapshotMac(
 
 export class ReplayCache implements NonceStore {
   private readonly maxEntries: number;
-  private readonly ttlSec: number;
+  private readonly ttlSecValue: number;
   private readonly clock: () => number;
   /** nonce -> first-seen-at (unix seconds). Insertion order = LRU order. */
   private readonly seenAt = new Map<string, number>();
@@ -530,7 +530,7 @@ export class ReplayCache implements NonceStore {
     if (!Number.isFinite(ttlSec) || ttlSec <= 0)
       throw new Error("ReplayCache: ttlSec must be a positive finite number");
     this.maxEntries = maxEntries;
-    this.ttlSec = ttlSec;
+    this.ttlSecValue = ttlSec;
     this.clock = opts.now ?? (() => Math.floor(Date.now() / 1000));
   }
 
@@ -589,7 +589,7 @@ export class ReplayCache implements NonceStore {
     const t = this.resolveNow(now);
     const prev = this.seenAt.get(nonce);
     if (prev !== undefined) {
-      if (t - prev < this.ttlSec) {
+      if (t - prev < this.ttlSecValue) {
         // Refresh LRU recency (delete + re-insert moves it to the tail)
         // while keeping the original first-seen timestamp.
         this.seenAt.delete(nonce);
@@ -637,7 +637,7 @@ export class ReplayCache implements NonceStore {
     const t = this.resolveNow(now);
     const prev = this.seenAt.get(nonce);
     if (prev === undefined) return false;
-    return t - prev < this.ttlSec;
+    return t - prev < this.ttlSecValue;
   }
 
   /**
@@ -685,7 +685,7 @@ export class ReplayCache implements NonceStore {
     const t = this.resolveNow(now);
     const prev = this.seenAt.get(nonce);
     if (prev === undefined) return false;
-    if (t - prev >= this.ttlSec) return false;
+    if (t - prev >= this.ttlSecValue) return false;
     this.seenAt.delete(nonce);
     return true;
   }
@@ -701,8 +701,20 @@ export class ReplayCache implements NonceStore {
   get size(): number {
     const t = this.resolveNow();
     let n = 0;
-    for (const at of this.seenAt.values()) if (t - at < this.ttlSec) n++;
+    for (const at of this.seenAt.values()) if (t - at < this.ttlSecValue) n++;
     return n;
+  }
+
+  /**
+   * The configured tracking window, in seconds: a seen nonce stays
+   * tracked for exactly this long after first sight (backlog #1411).
+   * `verifyRequest` reads it to check that a nonce-carrying signature
+   * cannot outlive the window that remembers its nonce — a signature
+   * whose lifetime exceeds this value is a configuration error, not a
+   * verification verdict. Read-only: the TTL is fixed at construction.
+   */
+  get ttlSec(): number {
+    return this.ttlSecValue;
   }
 
   /** Drop all tracked nonces and reset the observability counters. */
@@ -738,7 +750,7 @@ export class ReplayCache implements NonceStore {
     const t = this.resolveNow();
     const entries: Array<[string, number]> = [];
     for (const [nonce, at] of this.seenAt) {
-      if (t - at < this.ttlSec) entries.push([nonce, at]);
+      if (t - at < this.ttlSecValue) entries.push([nonce, at]);
     }
     return { v: 1, entries };
   }
@@ -1094,7 +1106,7 @@ export class ReplayCache implements NonceStore {
   private prune(t: number): void {
     if (this.seenAt.size < this.maxEntries) return;
     for (const [nonce, at] of this.seenAt) {
-      if (t - at >= this.ttlSec) {
+      if (t - at >= this.ttlSecValue) {
         this.seenAt.delete(nonce);
         this.evictions++;
       }

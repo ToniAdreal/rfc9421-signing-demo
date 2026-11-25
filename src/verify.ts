@@ -271,6 +271,16 @@ export interface VerifyOptions {
    * In `verifyAllLabels` the same window applies to every label,
    * unless overridden per label via
    * `VerifyAllOptions.maxSignatureAgeSecByLabel`.
+   *
+   * Replay-lifetime consistency (backlog #1411): when a `replayCache`
+   * is also configured, this window (or the signature's `expires`,
+   * whichever is tighter) must fit inside the cache's TTL — a
+   * signature that outlives the window remembering its nonce becomes
+   * replayable once the nonce is forgotten. `verifyRequest` throws a
+   * caller configuration `Error` for a nonce-carrying signature whose
+   * lifetime is unbounded (no `expires` and no window set here) or
+   * longer than the cache TTL; set this window no larger than the
+   * cache TTL to keep replay protection sound.
    */
   maxSignatureAgeSec?: number;
   /**
@@ -413,6 +423,19 @@ export interface VerifyOptions {
    * `VerifyAllOptions.replayCacheByLabel`: a label in that map is
    * checked against its own store, and only unmapped labels fall back
    * to this global store.
+   *
+   * Replay-lifetime consistency (backlog #1411): a store only protects
+   * a signature while it still remembers the nonce. A nonce-carrying
+   * signature verified with a store must have a lifetime bounded
+   * within the store's TTL — `maxSignatureAgeSec` no larger than the
+   * TTL, or an `expires` no more than the TTL past `created` — and a
+   * `created` to anchor that lifetime at all. Otherwise
+   * `verifyRequest` throws a caller configuration `Error` (after the
+   * cryptographic check, before the nonce is recorded): an unbounded
+   * or over-long lifetime, or a signature with no `created`, cannot be
+   * replay-protected by this store. `ReplayCache` exposes its TTL for
+   * the comparison; a custom store that does not expose one is only
+   * checked for the unbounded cases.
    */
   replayCache?: NonceStore;
   /**
@@ -683,6 +706,77 @@ function assertMaxSignatureAgeSec(value: number | undefined): void {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
     throw new Error(
       `verifyRequest: \`maxSignatureAgeSec\` must be a non-negative finite number, got ${typeof value === "number" ? String(value) : typeof value}`,
+    );
+}
+
+/**
+ * Replay-lifetime consistency (backlog #1411): a replay cache only
+ * protects a signature while it still remembers the nonce. A signature
+ * whose lifetime runs past the cache's tracking window can be replayed
+ * once the nonce is forgotten — the crypto, freshness and nonce checks
+ * all still pass, because the forgotten nonce looks never-seen. The
+ * check below is therefore a caller configuration error (throw), not a
+ * verification verdict, and it runs after the cryptographic check (so a
+ * forgery still reports `SIGNATURE_MISMATCH`) and after the
+ * freshness/`SIGNATURE_TOO_OLD` checks (so an already-dead signature
+ * keeps its clean verdict) — but before the nonce is recorded, so a
+ * rejected verification never pollutes the cache.
+ *
+ * The signature's lifetime is bounded from its `created` (the earliest
+ * moment it could first have been seen) to the last moment it stays
+ * acceptable: the tighter of `expires - created` and `maxSignatureAgeSec`
+ * when both exist. A store that exposes a numeric `ttlSec`
+ * (`ReplayCache` does, via a read-only accessor) is compared against
+ * that lifetime; a custom `NonceStore` without one cannot be compared
+ * (its window is unknown) and is skipped for the length comparison —
+ * but an unbounded lifetime is rejected for every store, with or without
+ * an exposed TTL.
+ *
+ * Cases, for a nonce-carrying signature with a store configured:
+ * - no `created`: the lifetime cannot be anchored at all (and
+ *   `maxSignatureAgeSec` cannot apply without one) — throw. Callers
+ *   that set `requireCreated` never reach this: undated signatures are
+ *   rejected earlier with `MISSING_CREATED`.
+ * - no bound at all (no `expires`, no `maxSignatureAgeSec`): throw.
+ * - bound longer than the store's TTL: throw.
+ * - bound within the TTL: pass.
+ * A signature without a nonce never consults the store, so this check
+ * does not apply to it (use `requireNonce` to reject those instead).
+ * `verifyAllLabels` delegates per label to `verifyRequest`, so each
+ * label is checked against its own store/TTL and its own
+ * `maxSignatureAgeSec` — a throw out of one label propagates out of
+ * `verifyAllLabels` as a caller configuration error.
+ */
+function assertReplayLifetimeConsistency(
+  cache: NonceStore | undefined,
+  nonce: string | undefined,
+  created: number | undefined,
+  expires: number | undefined,
+  maxAge: number | undefined,
+): void {
+  if (cache === undefined) return;
+  if (nonce === undefined || nonce === "") return;
+  if (created === undefined)
+    throw new Error(
+      "verifyRequest: `replayCache` is configured but the signature carries no `created`, so its lifetime cannot be bounded against the cache TTL — set `requireCreated` to reject undated signatures, or have the signer include `created` (with `maxSignatureAgeSec` or a short `expires`)",
+    );
+  const bounds: number[] = [];
+  if (expires !== undefined) bounds.push(expires - created);
+  if (maxAge !== undefined) bounds.push(maxAge);
+  if (bounds.length === 0)
+    throw new Error(
+      "verifyRequest: `replayCache` is configured but the signature lifetime is unbounded (no `expires` and `maxSignatureAgeSec` is unset): the nonce would be forgotten after the cache TTL while the signature still verifies — set `maxSignatureAgeSec` (no larger than the cache TTL) or require the signer to send a short `expires`",
+    );
+  // A custom store may not expose its tracking window; only
+  // `ReplayCache` is required to (read-only `ttlSec` accessor). An
+  // unexposed window cannot be compared, so the length check is
+  // skipped for it — the unbounded cases above already threw.
+  const ttlSec = (cache as { ttlSec?: unknown }).ttlSec;
+  if (typeof ttlSec !== "number") return;
+  const lifetime = Math.min(...bounds);
+  if (lifetime > ttlSec)
+    throw new Error(
+      `verifyRequest: \`replayCache\` TTL (${ttlSec}s) is shorter than the signature lifetime (${lifetime}s): a replay after the nonce is forgotten would still verify — set \`maxSignatureAgeSec\` no larger than ${ttlSec} or shorten the signature's \`expires\``,
     );
 }
 
@@ -1059,7 +1153,9 @@ export const VERIFY_ALL_OPTION_KEYS: readonly string[] = [
  *
  * Throws only on caller configuration errors (e.g. more than one of
  * `key` / `keyResolver` / `candidateKeys` set, or none of them set —
- * and a configured HMAC secret shorter
+ * and a replay cache combined with a nonce-carrying signature whose
+ * lifetime is unbounded or longer than the cache TTL, see
+ * `assertReplayLifetimeConsistency` — and a configured HMAC secret shorter
  * than the per-algorithm floor (≥ 32 bytes for `hmac-sha256`, ≥ 64 bytes
  * for `hmac-sha512`), which is rejected loudly on both the sign and verify
  * sides). An unknown option key is likewise a configuration error:
@@ -2101,6 +2197,20 @@ function verifyWithKey(
       expires: parsed.params.expires,
       coveredComponents: [...parsed.componentIds],
     };
+
+  // Replay-lifetime consistency (backlog #1411): a nonce-carrying
+  // signature whose lifetime outruns the cache's tracking window must
+  // fail loudly here — after the crypto and freshness checks, before
+  // the nonce is recorded — instead of verifying today and becoming
+  // replayable once the nonce is forgotten. Throws a configuration
+  // `Error`; see `assertReplayLifetimeConsistency` for the cases.
+  assertReplayLifetimeConsistency(
+    opts.replayCache,
+    parsed.params.nonce,
+    parsed.params.created,
+    parsed.params.expires,
+    opts.maxSignatureAgeSec,
+  );
 
   // Nonce replay detection: consulted only *after* the signature has
   // passed every check, so failed forgeries never pollute the cache.

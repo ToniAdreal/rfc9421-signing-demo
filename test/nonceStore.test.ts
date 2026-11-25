@@ -66,10 +66,15 @@ function signedReq(nonce?: string): { signed: SignedHttpRequest; publicKey: Retu
 test("custom Map-backed NonceStore detects replay end-to-end", () => {
   const { signed, publicKey } = signedReq("custom-1");
   const store = new MapNonceStore();
+  // Backlog #1411: the nonce-carrying signature needs a bounded
+  // lifetime when a replay store is configured (a custom store
+  // exposes no TTL, so only the unbounded case is checked — a
+  // bounded lifetime passes regardless of the store's own window).
   const first = verifyRequest(signed, {
     key: publicKey,
     now: CREATED + 60,
     replayCache: store,
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(first.ok, true);
   assert.equal(first.nonce, "custom-1");
@@ -78,6 +83,7 @@ test("custom Map-backed NonceStore detects replay end-to-end", () => {
     key: publicKey,
     now: CREATED + 60,
     replayCache: store,
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(second.ok, false);
   assert.equal(second.code, "NONCE_REPLAY");
@@ -89,7 +95,9 @@ test("ReplayCache still satisfies NonceStore (type-level) and old path is unchan
   // Type-level: a ReplayCache must be assignable to the widened option type.
   const store: NonceStore = new ReplayCache({ ttlSec: 3600, now: () => CREATED + 60 });
   const { signed, publicKey } = signedReq("legacy-1");
-  const opts = { key: publicKey, now: CREATED + 60, replayCache: store };
+  // Backlog #1411: the nonce-carrying signature needs a lifetime
+  // bounded within the cache TTL (3600s).
+  const opts = { key: publicKey, now: CREATED + 60, replayCache: store, maxSignatureAgeSec: 3600 };
   assert.equal(verifyRequest(signed, opts).ok, true);
   const replay = verifyRequest(signed, opts);
   assert.equal(replay.ok, false);
@@ -134,23 +142,37 @@ test("SECURITY.md SharedNonceStore example works end-to-end with TTL expiry", ()
   const shared = new Map<string, number>();
   const store = new SharedNonceStore(shared, 600);
   const { signed, publicKey } = signedReq("shared-1");
-  const opts = { key: publicKey, replayCache: store as NonceStore };
+  // Backlog #1411: the nonce-carrying signature needs a bounded
+  // lifetime when a replay store is configured. The store's own
+  // window is 600s, so the lifetime is capped at 600s — past it the
+  // same signature is SIGNATURE_TOO_OLD, not a fresh accept: TTL
+  // expiry no longer reopens the replay window for the same
+  // signature. The store-level forgetting itself is unchanged and
+  // is pinned directly below.
+  const opts = { key: publicKey, replayCache: store as NonceStore, maxSignatureAgeSec: 600 };
 
   assert.equal(verifyRequest(signed, { ...opts, now: CREATED + 10 }).ok, true);
   const replay = verifyRequest(signed, { ...opts, now: CREATED + 20 });
   assert.equal(replay.ok, false);
   assert.equal(replay.code, "NONCE_REPLAY");
 
-  // After the TTL the same nonce is treated as unseen again.
-  const fresh = verifyRequest(signed, { ...opts, now: CREATED + 700 });
-  assert.equal(fresh.ok, true);
+  // After the TTL the same signature is too old to re-present...
+  const late = verifyRequest(signed, { ...opts, now: CREATED + 700 });
+  assert.equal(late.ok, false);
+  assert.equal(late.code, "SIGNATURE_TOO_OLD");
+  // ...but the store itself still forgets the nonce after its TTL:
+  // a direct check at the same instant treats it as unseen again
+  // (and re-records it, as the old end-to-end assertion showed).
+  assert.equal(store.check("shared-1", CREATED + 700), false);
   assert.equal(shared.get("shared-1"), CREATED + 700);
 });
 
 test("verifyRequestOrThrow raises VerifyError(NONCE_REPLAY) through a custom store", () => {
   const { signed, publicKey } = signedReq("throw-1");
   const store = new MapNonceStore();
-  const opts = { key: publicKey, now: CREATED + 60, replayCache: store };
+  // Backlog #1411: the nonce-carrying signature needs a bounded
+  // lifetime when a replay store is configured.
+  const opts = { key: publicKey, now: CREATED + 60, replayCache: store, maxSignatureAgeSec: 3600 };
   verifyRequestOrThrow(signed, opts);
   assert.throws(() => verifyRequestOrThrow(signed, opts), (err: unknown) => {
     assert.ok(err instanceof VerifyError);
@@ -175,7 +197,9 @@ test("verifyAllLabels consults the custom store per label", () => {
     nonce: "multi-1",
   });
   const store = new MapNonceStore();
-  const opts = { key: publicKey, now: CREATED + 60, replayCache: store };
+  // Backlog #1411: the nonce-carrying signature needs a bounded
+  // lifetime when a replay store is configured.
+  const opts = { key: publicKey, now: CREATED + 60, replayCache: store, maxSignatureAgeSec: 3600 };
   const once = verifyAllLabels(first, opts);
   assert.equal(once.every((r) => r.ok), true);
   const twice = verifyAllLabels(first, opts);

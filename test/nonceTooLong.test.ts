@@ -121,6 +121,9 @@ test("an over-long nonce is rejected before the replay cache, never recorded", (
     key: kp.publicKey,
     now: NOW,
     replayCache: cache,
+    // Backlog #1411: the nonce-carrying signature needs a lifetime
+    // bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   });
   assert.equal(ok.ok, true);
   assert.equal(cache.stats().misses, 1);

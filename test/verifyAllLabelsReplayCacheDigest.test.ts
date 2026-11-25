@@ -99,6 +99,9 @@ function verifyDual(
     now: NOW,
     keys: { merchant: merchant.publicKey, gateway: gateway.publicKey },
     replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
+    // Backlog #1411: the nonce-carrying signatures need a lifetime
+    // bounded within the cache TTL (3600s).
+    maxSignatureAgeSec: 3600,
   });
 }
 
@@ -175,6 +178,7 @@ test("verifyAllLabels x replayCacheByLabel x content-digest: one label's replay 
       key: merchant.publicKey,
       now: NOW,
       replayCache: merchantCache,
+      maxSignatureAgeSec: 3600,
     }).ok,
     true,
   );
