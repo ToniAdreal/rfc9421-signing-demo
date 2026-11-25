@@ -748,7 +748,10 @@ function assertHeaderLengthLimit(
  * `signature-input` limit is checked first: the input header is the
  * one the parser touches first. Missing headers (`undefined`) are
  * skipped here — their absence is reported by the caller's own
- * `MISSING_*` checks, not by this gate.
+ * `MISSING_*` checks, not by this gate. `opts` itself is shape-guarded
+ * first (backlog #1394): a `null` / non-object / array `opts` throws a
+ * plain named `Error` instead of a bare `TypeError` from the first
+ * `opts.maxSignatureInputLength` dereference.
  */
 export function checkSignatureHeaderLengths(
   sigInput: string | undefined,
@@ -761,6 +764,7 @@ export function checkSignatureHeaderLengths(
     | "verifyAllLabels"
     | "verifyAllResponseLabels" = "verifyRequest",
 ): VerifyResult | undefined {
+  assertObjectParam("checkSignatureHeaderLengths", "opts", opts);
   // A bogus limit is a caller configuration error, not a verification
   // failure — validated here as well as in `verifyRequest`, because
   // the response-side and multi-label entry points gate on this
