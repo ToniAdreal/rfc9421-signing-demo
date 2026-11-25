@@ -21,7 +21,7 @@ import { VerifyError, type VerifyFailureCode } from "./errors.js";
 import { bodyToBuffer } from "./digest.js";
 import { assertHmacSecretLength, assertRsaModulusLength, algMatchesKeyShape, describeKey, inferAlgFromKeyShape as inferAlgFromKey } from "./keys.js";
 import type { JwksKeyStore } from "./jwks.js";
-import { assertNoUnknownOptions, type SignAlg } from "./sign.js";
+import { assertNoUnknownOptions, MAX_NONCE_LENGTH, type SignAlg } from "./sign.js";
 import type { NonceStore } from "./replay.js";
 import {
   assertStructuredFieldTypes,
@@ -1155,6 +1155,38 @@ export function verifyRequest(
       keyId: parsed.params.keyid,
       alg: wireAlg,
       nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
+  // Nonce length (backlog #1399): a `nonce` longer than
+  // `MAX_NONCE_LENGTH` (256 characters, the same cap the signer
+  // enforces) is rejected here — after the header parsed, before the
+  // signature base is rebuilt, before any key resolution, and before
+  // any crypto work. It is a resource-safety policy, not an
+  // authenticity verdict: unlike `tag` / `keyid`, a nonce is stored
+  // verbatim by the replay cache / nonce store, so an unbounded
+  // value is a memory-amplification vector (one 64 KiB nonce per
+  // cache entry, up to the cache's entry limit), and the 64 KiB
+  // `signature-input` cap alone does not bound what gets recorded.
+  // A forged signature carrying an over-long nonce therefore reports
+  // this code rather than `SIGNATURE_MISMATCH`, the same precedence
+  // the `ALG_NOT_ALLOWED` gate above already sets for policy
+  // violations. `tag` and `keyid` stay uncapped on the verify side
+  // (see the constants in `sign.ts`): they are never stored, and a
+  // validly signed longer value from another implementation still
+  // verifies.
+  const wireNonce = parsed.params.nonce;
+  if (wireNonce !== undefined && wireNonce.length > MAX_NONCE_LENGTH)
+    return {
+      ok: false,
+      code: "NONCE_TOO_LONG",
+      reason: `nonce is too long: at most ${MAX_NONCE_LENGTH} characters, got ${wireNonce.length}`,
+      label,
+      keyId: parsed.params.keyid,
+      alg: parsed.params.alg,
+      nonce: wireNonce,
       tag: parsed.params.tag,
       created: parsed.params.created,
       expires: parsed.params.expires,

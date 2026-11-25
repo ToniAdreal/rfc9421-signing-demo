@@ -34,16 +34,22 @@ import {
  * pasted into a label field) and is rejected fail-fast, before the
  * signature base is built or any crypto runs.
  *
- * Sign side only, deliberately: the verifier does NOT apply these
- * caps. RFC 9421 sets no per-field length limit on `tag` / `nonce` /
- * `keyid`, so a validly signed longer value from another
- * implementation still verifies — rejecting it would be a
- * non-conformant interop restriction. The 64 KiB
- * `DEFAULT_MAX_SIGNATURE_INPUT_LENGTH` cap bounds total
+ * Sign side only, deliberately — except for `nonce`: the verifier
+ * does NOT apply the `tag` / `keyid` caps. RFC 9421 sets no
+ * per-field length limit on `tag` / `nonce` / `keyid`, so a validly
+ * signed longer value from another implementation still verifies —
+ * rejecting it would be a non-conformant interop restriction. The
+ * 64 KiB `DEFAULT_MAX_SIGNATURE_INPUT_LENGTH` cap bounds total
  * `signature-input` size on the verify side instead. This asymmetry
  * is pinned by `test/signParamLimits.test.ts`: our signer refuses a
  * 257-character tag, our verifier accepts a hand-minted 300-character
- * one.
+ * one. `nonce` is the exception (backlog #1399): the verifier
+ * rejects a nonce longer than `MAX_NONCE_LENGTH` with
+ * `NONCE_TOO_LONG`, because a nonce — unlike a tag or a keyid — is
+ * stored verbatim by the replay cache, so an unbounded value is a
+ * memory-amplification vector the header-size cap alone does not
+ * bound. A nonce at exactly 256 characters still verifies on both
+ * sides.
  *
  * Contrast `MAX_COVERED_COMPONENTS` (64, in `components.ts`): that
  * cap IS symmetric — the verify-side parser refuses a longer list
@@ -165,8 +171,9 @@ export interface SignOptions {
    * replays is the caller's job. An empty-string nonce is rejected with
    * a configuration error (it would silently bypass replay detection).
    * Longer than `MAX_NONCE_LENGTH` (256) characters is rejected the
-   * same way; the verifier applies no such cap (see the constants
-   * above for the reasoning). Pass `autoNonce: true` instead of this
+   * same way; the verifier rejects an over-long wire nonce with
+   * `NONCE_TOO_LONG` (backlog #1399 — a nonce is stored verbatim by
+   * the replay cache, unlike a tag or a keyid). Pass `autoNonce: true` instead of this
    * field to have the signer generate a fresh nonce per signature
    * (see below); the two are mutually exclusive.
    */

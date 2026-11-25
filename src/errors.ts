@@ -123,6 +123,20 @@ export type VerifyFailureCode =
    */
   | "NONCE_REPLAY"
   /**
+   * The `nonce` signature-input parameter is longer than
+   * `MAX_NONCE_LENGTH` (256 characters, the same cap the signer
+   * enforces in `signRequest`). Checked *before* any cryptographic
+   * work and before the replay cache is consulted, so an over-long
+   * nonce never reaches the store: a nonce is recorded verbatim by
+   * the cache, and an unbounded value would be a
+   * memory-amplification vector. A nonce at exactly 256 characters
+   * still verifies; only strictly-over values fail. `tag` and
+   * `keyid` carry no such verify-side cap (see the constants in
+   * `sign.ts`): they are never stored, so a validly signed longer
+   * value from another implementation still verifies.
+   */
+  | "NONCE_TOO_LONG"
+  /**
    * `VerifyOptions.requireNonce` is set but the signature carries no
    * `nonce` parameter, or carries an empty-string one (treated as
    * missing: the signing side rejects empty nonces, so one on the wire

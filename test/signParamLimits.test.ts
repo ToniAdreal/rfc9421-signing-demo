@@ -186,7 +186,11 @@ test("addSignature inherits the tag cap for the appended signature", () => {
 // --- Verify-side ruling: no per-field cap on the wire (RFC 9421 sets
 // none); the 64 KiB signature-input cap bounds total header size.
 // These signatures are hand-minted with node:crypto because our own
-// signer now refuses to mint them. ---
+// signer now refuses to mint them. `nonce` is the exception (backlog
+// #1399): the verifier rejects an over-long nonce with
+// `NONCE_TOO_LONG` — a nonce is stored verbatim by the replay cache,
+// so an unbounded value is a memory-amplification vector; `tag` and
+// `keyid` stay uncapped on the wire. ---
 
 function handMintedSigned(params: {
   tag?: string;
@@ -217,11 +221,16 @@ test("verify accepts a hand-minted 300-character tag (no verify-side cap)", () =
   assert.equal(res.tag, tag);
 });
 
-test("verify accepts a hand-minted 300-character nonce (no verify-side cap)", () => {
+test("verify rejects a hand-minted 300-character nonce with NONCE_TOO_LONG (backlog #1399)", () => {
   const nonce = "n".repeat(300);
   const { publicKey, signed } = handMintedSigned({ nonce });
   const res = verifyRequest(signed, { key: publicKey, now: NOW });
-  assert.equal(res.ok, true);
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "NONCE_TOO_LONG");
+  assert.equal(
+    res.reason,
+    "nonce is too long: at most 256 characters, got 300",
+  );
   assert.equal(res.nonce, nonce);
 });
 
