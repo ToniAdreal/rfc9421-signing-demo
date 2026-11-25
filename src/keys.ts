@@ -1758,16 +1758,18 @@ export interface JwksDocumentEntry {
 
 /**
  * One key inside a published JWKS document: one of the five public
- * JWK shapes this library exports, tagged with its `kid`. Exactly the
- * shape {@link JwksKeyStore} consumes on the verify side, so a
- * document built here round-trips through a store unchanged.
+ * JWK shapes this library exports, tagged with its `kid` and its
+ * JWA `alg` (see {@link buildJwksDocument} for the per-family
+ * values). Exactly the shape {@link JwksKeyStore} consumes on the
+ * verify side, so a document built here round-trips through a store
+ * unchanged.
  */
 export type JwksDocumentKey =
-  | (Ed25519PublicJwk & { kid: string })
-  | (P256PublicJwk & { kid: string })
-  | (P384PublicJwk & { kid: string })
-  | (P521PublicJwk & { kid: string })
-  | (RsaPublicJwk & { kid: string });
+  | (Ed25519PublicJwk & { kid: string; alg: "EdDSA" })
+  | (P256PublicJwk & { kid: string; alg: "ES256" })
+  | (P384PublicJwk & { kid: string; alg: "ES384" })
+  | (P521PublicJwk & { kid: string; alg: "ES512" })
+  | (RsaPublicJwk & { kid: string; alg: "PS512" });
 
 /**
  * A JWKS document (RFC 7517 §5) as served from
@@ -1788,6 +1790,24 @@ export interface JwksDocument {
  * [...] }` and mistype a `kty`/`crv` or forget a `kid` — mistakes
  * that otherwise surface only later, on the verifier, as
  * `KEY_RESOLUTION_FAILED`.
+ *
+ * Every entry also carries its JWK `alg` member (RFC 7517 §4.4, in
+ * JWA naming — the same vocabulary `JwksKeyStore.refresh()` checks
+ * a declared `alg` against, so a document built here passes its
+ * own verify side's check): ed25519 → `EdDSA`, P-256 → `ES256`,
+ * P-384 → `ES384`, P-521 → `ES512`, RSA → `PS512`. RSA is the one
+ * family with two library algorithms, so the document labels the
+ * key `PS512` because `rsa-pss-sha512` is the library's RSA
+ * default (see {@link inferAlgFromKeyShape}); the label does not
+ * fence the key to PSS — a verifier still accepts
+ * `rsa-v1_5-sha256` (`RS256`) under the same key, because the
+ * verify side keys off the signature-input `alg` and `refresh()`
+ * accepts either RSA value. Before this change the entries carried
+ * no `alg` at all, so a verifier that required the field — or a
+ * reader auditing the published document by eye — had no algorithm
+ * signal to check. The bare `exportPublicKeyJwk*` helpers still
+ * emit no `alg` (they are also the snapshot-export shape, which
+ * stays `alg`-free); only the published document gains it.
  *
  * Fail-fast, at build time: `kid` must be a non-empty string and
  * unique across the document (a duplicate would make the published
@@ -1872,15 +1892,15 @@ export function buildJwksDocument(
       );
     const curve = k.asymmetricKeyDetails?.namedCurve;
     if (k.asymmetricKeyType === "ed25519")
-      return { ...exportPublicKeyJwk(k), kid };
+      return { ...exportPublicKeyJwk(k), kid, alg: "EdDSA" };
     if (k.asymmetricKeyType === "ec" && curve === "prime256v1")
-      return { ...exportPublicKeyJwkP256(k), kid };
+      return { ...exportPublicKeyJwkP256(k), kid, alg: "ES256" };
     if (k.asymmetricKeyType === "ec" && curve === "secp384r1")
-      return { ...exportPublicKeyJwkP384(k), kid };
+      return { ...exportPublicKeyJwkP384(k), kid, alg: "ES384" };
     if (k.asymmetricKeyType === "ec" && curve === "secp521r1")
-      return { ...exportPublicKeyJwkP521(k), kid };
+      return { ...exportPublicKeyJwkP521(k), kid, alg: "ES512" };
     if (k.asymmetricKeyType === "rsa")
-      return { ...exportPublicKeyJwkRsa(k), kid };
+      return { ...exportPublicKeyJwkRsa(k), kid, alg: "PS512" };
     throw new Error(
       `buildJwksDocument: ${where} (kid ${JSON.stringify(kid)}) is an unsupported key shape: ` +
         `${describeKey(k)} — only ed25519, P-256, P-384, P-521 and RSA public keys can be published`,
