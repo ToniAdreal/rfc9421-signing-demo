@@ -167,6 +167,20 @@ export type VerifyFailureCode =
    */
   | "MISSING_REQUIRED_COMPONENT"
   /**
+   * The signature covers no components at all (`sig1=();…`): the
+   * signature base is just the `"@signature-params"` line, so a
+   * cryptographically valid empty signature would verify as `ok: true`
+   * while binding nothing — no method, no path, no body. The signing
+   * side refuses to mint one (`signRequest` throws on an empty
+   * `coveredComponents` list), so the verify side refuses a foreign
+   * one the same way. Checked *before* the cryptographic check, after
+   * the header parses and before the `requiredComponents` policy
+   * check (an empty list reports this more specific code). Opt out
+   * per call with `VerifyOptions.allowEmptyCoveredComponents` when a
+   * signer legitimately signs nothing.
+   */
+  | "EMPTY_COVERED_COMPONENTS"
+  /**
    * A signature label demanded by `VerifyAllOptions.requiredLabels`
    * is absent from the request entirely (no entry for it in the
    * `signature-input` header, or no `signature-input` header at all).

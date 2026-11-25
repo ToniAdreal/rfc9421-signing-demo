@@ -445,6 +445,21 @@ export interface VerifyOptions {
    */
   requiredComponents?: string[];
   /**
+   * Opt-in escape hatch for the empty covered-component rejection
+   * (backlog #1409). By default a signature covering no components
+   * at all (`sig1=();…`) fails with `EMPTY_COVERED_COMPONENTS`:
+   * the signature base is just the `"@signature-params"` line, so a
+   * cryptographically valid empty signature would verify as `ok: true`
+   * while binding nothing — no method, no path, no body — and the
+   * signing side already refuses to mint one. Set this to `true`
+   * only when interop with a signer that legitimately signs nothing
+   * requires it; the escape hatch is per call, not per label, and it
+   * flows into `verifyAllLabels` / `verifyResponse` through the
+   * shared `VerifyOptions` scan. A non-boolean value is a caller
+   * configuration error (throw).
+   */
+  allowEmptyCoveredComponents?: boolean;
+  /**
    * Per-field Structured Field type registry for `;sf` and `;key`
    * covered components (RFC 9421 §2.1.1) — the verify-side twin of
    * `SignOptions.structuredFieldTypes`: maps a header field name to
@@ -848,6 +863,23 @@ function assertAlgMatchesKeyShape(alg: SupportedAlg, key: KeyObject): void {
 }
 
 /**
+ * Validate the `allowEmptyCoveredComponents` option. A non-boolean
+ * value is a caller configuration error, not a verification failure,
+ * so it throws rather than returning `{ ok: false }` — a truthy
+ * non-boolean (e.g. `"yes"`) must never silently open the
+ * empty-signature escape hatch.
+ */
+function assertAllowEmptyCoveredComponents(
+  value: boolean | undefined,
+): void {
+  if (value === undefined) return;
+  if (typeof value !== "boolean")
+    throw new Error(
+      `verifyRequest: \`allowEmptyCoveredComponents\` must be a boolean, got ${value === null ? "null" : typeof value}`,
+    );
+}
+
+/**
  * Validate the `requiredComponents` option. A malformed list is a caller
  * configuration error, not a verification failure, so it throws rather
  * than returning `{ ok: false }`.
@@ -982,6 +1014,7 @@ export const VERIFY_OPTION_KEYS: readonly string[] = [
   "allowedAlgs",
   "replayCache",
   "requiredComponents",
+  "allowEmptyCoveredComponents",
   "structuredFieldTypes",
 ];
 
@@ -1046,6 +1079,7 @@ export function verifyRequest(
   assertHeaderLengthLimit(opts.maxSignatureInputLength, "maxSignatureInputLength", "verifyRequest");
   assertHeaderLengthLimit(opts.maxSignatureLength, "maxSignatureLength", "verifyRequest");
   assertRequiredComponents(opts.requiredComponents);
+  assertAllowEmptyCoveredComponents(opts.allowEmptyCoveredComponents);
   assertAllowedAlgs(opts.allowedAlgs);
   assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyRequest");
   const label = opts.label ?? "sig1";
@@ -1091,6 +1125,39 @@ export function verifyRequest(
   }
 
   let base: string;
+  // Empty covered-component list (backlog #1409): a signature that
+  // covers nothing binds nothing — the base would be just the
+  // `"@signature-params"` line, so a cryptographically valid empty
+  // signature would verify as `ok: true` while attesting to no
+  // content at all. The sign side already refuses to mint one
+  // (`signRequest` throws on an empty `coveredComponents` list), so
+  // the verify side refuses a foreign one the same way. Checked
+  // here — after the header parsed, before the `requiredComponents`
+  // policy check (an empty list reports this more specific code),
+  // before any key resolution or crypto work, and before the replay
+  // cache is consulted, so a rejected empty signature never records
+  // its nonce. `allowEmptyCoveredComponents: true` opts out for
+  // interop with a signer that legitimately signs nothing.
+  // `verifyAllLabels` and `verifyResponse` inherit this through
+  // their delegation to `verifyRequest`.
+  if (
+    parsed.componentIds.length === 0 &&
+    opts.allowEmptyCoveredComponents !== true
+  )
+    return {
+      ok: false,
+      code: "EMPTY_COVERED_COMPONENTS",
+      reason:
+        "signature covers no components: an empty covered-component list binds nothing",
+      label,
+      keyId: parsed.params.keyid,
+      alg: parsed.params.alg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
   // Required covered components (opt-in, fail-fast policy check): a
   // signature covering only "@method" is cryptographically valid but
   // protects nothing. This runs *before* any crypto work — a missing

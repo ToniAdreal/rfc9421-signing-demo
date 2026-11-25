@@ -229,7 +229,12 @@ test("verifyRequest enforces the count cap with MALFORMED_SIGNATURE_INPUT", () =
   assert.equal(resAtCap.code, "SIGNATURE_BASE_BUILD_FAILED");
 });
 
-test("empty covered list still parses (RFC 9421 B.2.1 minimal coverage)", () => {
+test("empty covered list still parses (parser layer only; verify rejects it)", () => {
+  // Backlog #1409: the parser still returns `[]` for `sig1=();…` —
+  // an empty list is well-formed on the wire — but `verifyRequest`
+  // rejects it with `EMPTY_COVERED_COMPONENTS` (see
+  // `test/emptyCoveredComponents.test.ts`). Parser and verifier are
+  // two layers with different jobs; this test pins only the parser's.
   const parsed = parseSignatureInput(`sig1=();created=${CREATED}`, "sig1");
   assert.deepEqual(parsed.componentIds, []);
 });

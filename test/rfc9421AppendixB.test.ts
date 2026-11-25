@@ -675,12 +675,19 @@ test("RFC 9421 B.2.1: published signature verifies end-to-end via verifyRequest"
     },
   };
   // B.2.1 carries no `alg`; `algFallback: "infer"` resolves the RSA
-  // key shape to rsa-pss-sha512, as with B.2.3.
+  // key shape to rsa-pss-sha512, as with B.2.3. B.2.1 is also the
+  // RFC's own empty-coverage example: it signs no message component,
+  // so the default empty-list rejection (backlog #1409,
+  // `EMPTY_COVERED_COMPONENTS`) would refuse it — verifying the
+  // published vector opts in explicitly with
+  // `allowEmptyCoveredComponents`, which is what the escape hatch is
+  // for. The default stays fail-closed for foreign signatures.
   const res = verifyRequest(signed, {
     key: importPublicKey(RSA_PSS_PUB_PEM),
     label: "sig-b21",
     now: 1618884473 + 60,
     algFallback: "infer",
+    allowEmptyCoveredComponents: true,
   });
   assert.equal(res.ok, true);
   assert.equal(res.keyId, "test-key-rsa-pss");
@@ -700,11 +707,16 @@ test("RFC 9421 B.2.1: tampering the nonce fails end-to-end verification", () => 
       signature: `sig-b21=:${B21_SIGNATURE_B64}:`,
     },
   };
+  // Same opt-in as the end-to-end test above: B.2.1 covers nothing,
+  // so the tamper must reach the cryptographic check to report
+  // `SIGNATURE_MISMATCH` — without it the empty-list rejection
+  // would fire first (see `test/emptyCoveredComponents.test.ts`).
   const res = verifyRequest(signed, {
     key: importPublicKey(RSA_PSS_PUB_PEM),
     label: "sig-b21",
     now: 1618884473 + 60,
     algFallback: "infer",
+    allowEmptyCoveredComponents: true,
   });
   assert.equal(res.ok, false);
   assert.equal(res.code, "SIGNATURE_MISMATCH");
