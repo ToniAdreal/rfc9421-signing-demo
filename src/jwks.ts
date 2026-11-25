@@ -516,6 +516,62 @@ function assertJwkEntryAlg(entry: Record<string, unknown>): void {
 }
 
 /**
+ * Check a JWKS entry's lifetime against the store's clock, used
+ * only by the `refresh()` path (see `fetchAndSwap`). RFC 7517 §4.6
+ * `exp` (expiration time) and §4.7 `nbf` (not before) are NumericDate
+ * values — seconds since the epoch — bounding when a key may be
+ * used: a key at or past its `exp` is expired, and a key before its
+ * `nbf` is not yet valid. Both fields are optional in a JWKS
+ * document, and an entry carrying neither is unchecked — but an
+ * entry that *does* declare one must satisfy it: a publisher that
+ * keeps serving a retired key, or publishes a rotation key early,
+ * must not have that key silently enter the verify path.
+ *
+ * Boundaries follow the JWT convention (RFC 7519 §4.1.4/§4.1.5):
+ * `exp` is exclusive — at exactly `exp` the key is already expired
+ * — while `nbf` is inclusive — at exactly `nbf` the key is already
+ * valid. A non-finite-number value is rejected, not coerced: a
+ * string `exp` is a misconfigured or hostile publisher, and
+ * guessing its meaning would be worse than a loud setup error.
+ * Throws a descriptive `Error`; `fetchAndSwap` wraps it with the
+ * entry's `kid` and leaves the previous snapshot untouched.
+ *
+ * Snapshot restore does not re-apply this check: a snapshot is this
+ * store's own export format and carries no `exp` / `nbf` (the
+ * exporters re-export keys from the imported `KeyObject`, which
+ * holds no lifetime), so a restored key's lifetime was enforced at
+ * fetch time and the next successful refresh re-enforces it — see
+ * the README's JWKS section for the honest limit.
+ */
+function assertJwkEntryLifetime(
+  entry: Record<string, unknown>,
+  nowSec: number,
+): void {
+  const exp = entry["exp"];
+  if (exp !== undefined) {
+    if (typeof exp !== "number" || !Number.isFinite(exp))
+      throw new Error(
+        `"exp" must be a finite number of seconds since the epoch when present, got ${typeof exp}`,
+      );
+    if (nowSec >= exp)
+      throw new Error(
+        `key expired at ${exp} (now ${nowSec})`,
+      );
+  }
+  const nbf = entry["nbf"];
+  if (nbf !== undefined) {
+    if (typeof nbf !== "number" || !Number.isFinite(nbf))
+      throw new Error(
+        `"nbf" must be a finite number of seconds since the epoch when present, got ${typeof nbf}`,
+      );
+    if (nowSec < nbf)
+      throw new Error(
+        `key not yet valid until ${nbf} (now ${nowSec})`,
+      );
+  }
+}
+
+/**
  * Whether a JWKS entry declares itself for a purpose other than
  * signature verification, used only by the `refresh()` path (see
  * `fetchAndSwap`). RFC 7517 §4.2 `use` and §4.3 `key_ops` describe
@@ -1114,6 +1170,19 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   keys off the signature-input `alg`, not the entry's. Snapshot
  *   restore does not re-check `alg` — a snapshot is this store's own
  *   export format and carries no `alg`.
+ * - **A carried `exp` / `nbf` must be satisfied.** When a JWKS entry
+ *   declares `exp` (RFC 7517 §4.6) or `nbf` (§4.7), `refresh()`
+ *   checks it against the store's clock (`now`, unix seconds) and
+ *   throws — leaving the previous snapshot untouched — when the key
+ *   is expired (`now` at or past `exp`) or not yet valid (`now`
+ *   before `nbf`), or when either value is not a finite number. An
+ *   entry carrying neither field is unchecked: both are optional in
+ *   JWKS. Snapshot restore does not re-check them — a snapshot is
+ *   this store's own export format and carries no `exp` / `nbf`
+ *   (the exporters re-export keys from the imported `KeyObject`,
+ *   which holds no lifetime), so a restored key's lifetime was
+ *   enforced at fetch time and is re-enforced by the next successful
+ *   refresh; the README says so plainly.
  * - **Duplicate `kid`s** within one document: the later entry wins
  *   (ordinary dictionary semantics). The repeats are observable:
  *   `stats().duplicateKids` counts them (the same `kid` twice
@@ -1733,8 +1802,10 @@ export class JwksKeyStore {
    * fetch itself fails, the response is not `ok`, the body is not
    * JSON, the document is not a `{ keys: [...] }` object, or any
    * `kid`-carrying entry is rejected by the JWK importers (wrong shape,
-   * unsupported `kty`, or private `"d"` material) or declares an `alg`
-   * that disagrees with its key family, when the injected clock does
+   * unsupported `kty`, or private `"d"` material), declares an `alg`
+   * that disagrees with its key family, or carries an `exp` / `nbf`
+   * outside its lifetime (expired, or not yet valid, against the
+   * store's clock), when the injected clock does
    * not return a finite number (see {@link JwksKeyStore.readClock}),
    * or — with `requireHttps: true` — when the response's final `url`
    * shows the fetch was redirected to plaintext `http:`. Entries with a
@@ -2075,6 +2146,14 @@ export class JwksKeyStore {
       throw new Error(
         `JwksKeyStore: invalid JWKS from ${this.url}: "keys" must be an array`,
       );
+    // Read the clock once, before the entry loop: the `exp` / `nbf`
+    // lifetime check (see `assertJwkEntryLifetime`) and the freshness
+    // timestamp at the swap point below both use this one reading,
+    // so one refresh is judged against one instant. A non-finite
+    // reading throws here (see `readClock`) before any key is
+    // imported, and the failed refresh leaves the old snapshot
+    // untouched (backlog #1291).
+    const nowSec = this.readClock();
     for (const entry of keys) {
       if (typeof entry !== "object" || entry === null || Array.isArray(entry))
         throw new Error(
@@ -2087,6 +2166,7 @@ export class JwksKeyStore {
       let key: KeyObject;
       try {
         assertJwkEntryAlg(o);
+        assertJwkEntryLifetime(o, nowSec);
         key = importJwkEntry(entry);
       } catch (err) {
         throw new Error(
@@ -2116,11 +2196,10 @@ export class JwksKeyStore {
       );
       if (maxAge !== null) effectiveTtlSec = Math.min(this.ttlSec, maxAge);
     }
-    // Read the clock before swapping anything in: a non-finite
-    // reading throws (see `readClock`) and the failed refresh must
-    // leave the old snapshot, the freshness timestamp, and the
-    // effective TTL exactly as they were (backlog #1291).
-    const nowSec = this.readClock();
+    // The clock was read once before the entry loop (see above) and
+    // is reused here, so the freshness timestamp is the same instant
+    // the lifetime checks were judged against; a failed refresh
+    // anywhere above never moves it (backlog #1291).
     this.keysByKid = next;
     this.duplicateKidCount += duplicateKids;
     this.lastRefreshAtSec = nowSec;

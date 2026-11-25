@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2907 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2918 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1288,6 +1288,20 @@ is not checked — the field is optional in a JWKS document, and the
 verify side keys off the signature-input `alg` anyway — and snapshot
 restore does not re-check `alg`, since a snapshot is this store's own
 export format and carries no `alg`.
+
+When a JWKS entry declares `exp` (RFC 7517 §4.6) or `nbf` (§4.7),
+`refresh()` checks the key's lifetime against the store's clock
+(`now`, unix seconds) and throws (leaving the previous snapshot
+untouched) when the key is expired or not yet valid: `exp` is
+exclusive, so at exactly `exp` the key is already expired, while
+`nbf` is inclusive, so at exactly `nbf` the key is already valid. A
+non-finite-number `exp` or `nbf` is likewise rejected, not coerced.
+An entry carrying neither field is unchecked, since both are optional
+in a JWKS document, and snapshot restore does not re-check them: a
+snapshot carries no `exp` / `nbf` (the exporters re-export keys from
+the imported key, which holds no lifetime), so a restored key's
+lifetime was enforced at fetch time and is re-enforced by the next
+successful refresh.
 
 Entries that declare a non-signing purpose are likewise skipped, not
 fatal: `use` present and not `"sig"` (RFC 7517 §4.2), or `key_ops`
@@ -5498,7 +5512,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2907 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2918 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
