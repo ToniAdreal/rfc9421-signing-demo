@@ -182,10 +182,11 @@ test("rsa-pss signature checked against an ed25519 key is rejected, not confused
 
   const res = verifyRequest(signed, { key: edKey, now: CREATED + 60 });
   assert.equal(res.ok, false);
-  // node:crypto rejects the key/algorithm pairing outright
-  // (VERIFICATION_ERROR) — an RSA-PSS signature never verifies
-  // *as* ed25519.
-  assert.equal(res.code, "VERIFICATION_ERROR");
+  // Backlog #1410: the wire alg/key-shape mismatch is now rejected
+  // before any crypto work with `ALG_NOT_ALLOWED` instead of the
+  // crypto layer's `VERIFICATION_ERROR` — an RSA-PSS signature never
+  // verifies *as* ed25519.
+  assert.equal(res.code, "ALG_NOT_ALLOWED");
 });
 
 test("rsa-pss signature checked against an hmac secret is rejected, not confused", () => {
@@ -194,7 +195,8 @@ test("rsa-pss signature checked against an hmac secret is rejected, not confused
 
   const res = verifyRequest(signed, { key: hmacSecret, now: CREATED + 60 });
   assert.equal(res.ok, false);
-  assert.equal(res.code, "VERIFICATION_ERROR");
+  // Backlog #1410: as above.
+  assert.equal(res.code, "ALG_NOT_ALLOWED");
 });
 
 test("keyResolver composes with rsa-pss-sha512", () => {

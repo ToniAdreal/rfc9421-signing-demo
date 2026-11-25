@@ -355,7 +355,11 @@ export interface VerifyOptions {
    *   key) throws a caller configuration `Error` instead of surfacing
    *   as a confusing `VERIFICATION_ERROR` from the crypto layer.
    * - unset or `false` (default): legacy behavior — a missing `alg`
-   *   defaults to `"ed25519"` and no key-shape checking is done.
+   *   defaults to `"ed25519"` and no key-shape inference is done.
+   *   The wire-`alg` shape check still runs without the opt-in, as an
+   *   `ALG_NOT_ALLOWED` verdict (backlog #1410) for the algorithms
+   *   without their own dedicated pre-crypto check; only the alg-less
+   *   inference is opt-in.
    *
    * Automatic detection is opt-in only: the default path is untouched
    * (a missing `alg` without this option keeps meaning `"ed25519"`).
@@ -854,6 +858,9 @@ function inferAlgFromKeyShape(key: KeyObject): SupportedAlg {
  * `UNSUPPORTED_ALG` in the crypto dispatch below. The shape predicate
  * itself lives in `keys.ts` and is shared with the sign side, so the
  * two sides can never disagree about which alg goes with which key.
+ * (On the default path the same pairing is enforced with an
+ * `ALG_NOT_ALLOWED` verdict instead — see `verifyWithKey`, backlog
+ * #1410 — so only the opt-in path throws.)
  */
 function assertAlgMatchesKeyShape(alg: SupportedAlg, key: KeyObject): void {
   if (algMatchesKeyShape(alg, key)) return;
@@ -1400,7 +1407,12 @@ export function verifyRequest(
   // the last candidate's SIGNATURE_MISMATCH is returned. A
   // misconfigured candidate (sub-floor HMAC secret, unmappable key
   // shape under algFallback "infer", ...) throws out of the walk —
-  // a broken candidate list is a caller bug, not a mismatch.
+  // a broken candidate list is a caller bug, not a mismatch. A
+  // wire-alg/key-shape mismatch is different: on the default path it
+  // returns an `ALG_NOT_ALLOWED` verdict at once (backlog #1410),
+  // which the walk returns immediately like any other policy verdict
+  // instead of advancing to the next candidate — a configuration
+  // error never masquerades as a rotation.
   // Failed cryptographic attempts never reach the replay cache (it
   // is consulted only after a full pass), so a rotating signature
   // can never pollute it.
@@ -1471,9 +1483,10 @@ function verifyWithKey(
   // default for a missing `alg` is "ed25519"; `algFallback: "infer"` is
   // an explicit opt-in that instead infers the algorithm from the
   // resolved key's shape — automatic detection never happens silently.
-  // Under the opt-in, a wire-carried `alg` that contradicts the key's
-  // shape is a caller configuration error (throw), not a verification
-  // failure; without the opt-in, that path stays exactly as before.
+  // A wire-carried `alg` is checked against the key's shape after the
+  // whitelist gate below (backlog #1410); an alg-less signature keeps
+  // the legacy `"ed25519"` default (or the inference under the opt-in)
+  // with no shape check.
   const alg = parsed.params.alg;
   const effectiveAlg: string =
     alg === undefined
@@ -1481,21 +1494,6 @@ function verifyWithKey(
         ? inferAlgFromKeyShape(key)
         : "ed25519"
       : alg;
-  if (
-    opts.algFallback === "infer" &&
-    (effectiveAlg === "ed25519" ||
-      effectiveAlg === "hmac-sha256" ||
-      effectiveAlg === "hmac-sha512" ||
-      effectiveAlg === "ecdsa-p256-sha256" ||
-      effectiveAlg === "ecdsa-p384-sha384" ||
-      effectiveAlg === "ecdsa-p521-sha512" ||
-      effectiveAlg === "rsa-pss-sha512" ||
-      effectiveAlg === "rsa-v1_5-sha256") &&
-    alg !== undefined
-  ) {
-    assertAlgMatchesKeyShape(effectiveAlg, key);
-  }
-
   // Algorithm whitelist, effective-algorithm half: this is the gate an
   // alg-less signature reaches (the wire-`alg` gate in `verifyRequest`
   // already rejected disallowed wire values, so this half only fires
@@ -1523,6 +1521,30 @@ function verifyWithKey(
       coveredComponents: [...parsed.componentIds],
     };
 
+  // A wire-carried `alg` is checked against the resolved key's shape
+  // here, after the whitelist gate (backlog #1410), so a disallowed
+  // algorithm still reports `ALG_NOT_ALLOWED` rather than throwing.
+  // Under the `algFallback: "infer"` opt-in a mismatch is a caller
+  // configuration error (throw), exactly as before; on the default
+  // path it is an `ALG_NOT_ALLOWED` verdict (see the block after the
+  // RSA check below), so the rejection stays a verification result:
+  // `verifyAllLabels` keeps its per-label isolation and a foreign
+  // signer cannot force an exception by declaring a mismatched `alg`.
+  if (
+    opts.algFallback === "infer" &&
+    (effectiveAlg === "ed25519" ||
+      effectiveAlg === "hmac-sha256" ||
+      effectiveAlg === "hmac-sha512" ||
+      effectiveAlg === "ecdsa-p256-sha256" ||
+      effectiveAlg === "ecdsa-p384-sha384" ||
+      effectiveAlg === "ecdsa-p521-sha512" ||
+      effectiveAlg === "rsa-pss-sha512" ||
+      effectiveAlg === "rsa-v1_5-sha256") &&
+    alg !== undefined
+  ) {
+    assertAlgMatchesKeyShape(effectiveAlg, key);
+  }
+
   // HMAC key-length enforcement happens *before* the crypto try/catch on
   // purpose: a weak configured secret is a caller configuration error
   // (throw), not a verification failure — symmetric with the sign side,
@@ -1541,6 +1563,54 @@ function verifyWithKey(
   // the key's shape: an RSA key alone does not imply either padding.
   if (effectiveAlg === "rsa-v1_5-sha256")
     assertRsaModulusLength(key, 'verifyRequest: alg "rsa-v1_5-sha256"');
+
+  // Wire-alg/key-shape enforcement on the default path (backlog
+  // #1410): the verify side used to check the pairing only under the
+  // `infer` opt-in above, so a foreign ECDSA signature whose declared
+  // curve did not match the configured key (e.g. `ecdsa-p256-sha256`
+  // verified against a P-384 key) reached the crypto dispatch, which
+  // only separates the curves by signature length. A mismatched
+  // pairing is now rejected here, before any crypto work, with an
+  // `ALG_NOT_ALLOWED` verdict — a verdict, not a throw, so the
+  // rejection stays a verification result: `verifyAllLabels` keeps its
+  // per-label isolation (one label's mismatched key fails only that
+  // label) and a foreign signer cannot force an exception by declaring
+  // a mismatched `alg`. The two algorithms with their own dedicated
+  // pre-crypto checks are not listed here: `hmac-*` is refused above
+  // by the secret-length check and `rsa-v1_5-sha256` by the modulus
+  // check, each with its own more specific configuration error, so a
+  // mismatched pairing for those still throws exactly as before. The
+  // check runs only when the wire carries an `alg`: an unknown wire
+  // value still fails with `UNSUPPORTED_ALG` in the dispatch below,
+  // and an alg-less signature keeps the legacy `"ed25519"` default (or
+  // the inference under the opt-in) with no shape verdict — the
+  // default is the caller's assumption, not the signer's claim, so
+  // there is nothing to contradict. In the `candidateKeys` rotation
+  // walk this verdict returns at once (only `SIGNATURE_MISMATCH`
+  // advances to the next candidate), so a misconfigured candidate is
+  // never silently rotated past.
+  if (
+    alg !== undefined &&
+    (effectiveAlg === "ed25519" ||
+      effectiveAlg === "ecdsa-p256-sha256" ||
+      effectiveAlg === "ecdsa-p384-sha384" ||
+      effectiveAlg === "ecdsa-p521-sha512" ||
+      effectiveAlg === "rsa-pss-sha512") &&
+    !algMatchesKeyShape(effectiveAlg, key)
+  )
+    return {
+      ok: false,
+      code: "ALG_NOT_ALLOWED",
+      reason: `wire alg "${effectiveAlg}" is incompatible with the configured key (${describeKey(key)}) — pass a key of the matching type for the algorithm`,
+      label,
+      keyId: parsed.params.keyid,
+      alg: effectiveAlg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
 
   let cryptoOk = false;
   try {

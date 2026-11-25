@@ -186,10 +186,11 @@ test("p256 signature checked against an ed25519 key is rejected, not confused", 
 
   const res = verifyRequest(signed, { key: edKey, now: CREATED + 60 });
   assert.equal(res.ok, false);
-  // node:crypto rejects the key/algorithm pairing outright
-  // (VERIFICATION_ERROR) — it never verifies the p256 signature
-  // *as* ed25519.
-  assert.equal(res.code, "VERIFICATION_ERROR");
+  // Backlog #1410: the wire alg/key-shape mismatch is now rejected
+  // before any crypto work with `ALG_NOT_ALLOWED` instead of the
+  // crypto layer's `VERIFICATION_ERROR` — it never verifies the p256
+  // signature *as* ed25519.
+  assert.equal(res.code, "ALG_NOT_ALLOWED");
 });
 
 test("p256 signature checked against an hmac secret is rejected, not confused", () => {
@@ -198,8 +199,9 @@ test("p256 signature checked against an hmac secret is rejected, not confused", 
 
   const res = verifyRequest(signed, { key: hmacSecret, now: CREATED + 60 });
   assert.equal(res.ok, false);
-  // An ecdsa-p256-sha256 signature never passes as hmac-sha256.
-  assert.equal(res.code, "VERIFICATION_ERROR");
+  // Backlog #1410: as above — an ecdsa-p256-sha256 signature never
+  // passes as hmac-sha256, and the mismatch is reported before crypto.
+  assert.equal(res.code, "ALG_NOT_ALLOWED");
 });
 
 test("keyResolver composes with ecdsa-p256-sha256", () => {

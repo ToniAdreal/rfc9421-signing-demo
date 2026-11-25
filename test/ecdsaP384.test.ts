@@ -169,7 +169,10 @@ test("p384 signature checked against an ed25519 key is rejected, not confused", 
 
   const res = verifyRequest(signed, { key: edKey, now: CREATED + 60 });
   assert.equal(res.ok, false);
-  assert.equal(res.code, "VERIFICATION_ERROR");
+  // Backlog #1410: the wire alg/key-shape mismatch is now rejected
+  // before any crypto work with `ALG_NOT_ALLOWED` instead of the
+  // crypto layer's `VERIFICATION_ERROR`.
+  assert.equal(res.code, "ALG_NOT_ALLOWED");
 });
 
 test("p384 signature checked against a P-256 key never verifies", () => {

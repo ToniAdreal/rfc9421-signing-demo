@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2957 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2972 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2160,8 +2160,11 @@ values. Without a request to bind to, keep using the request-side API
   rejected the same way, before the signature base is built or any crypto
   runs — so a swapped key or alg is a clear configuration error instead
   of a cryptic node:crypto complaint. The shape predicate is shared with
-  the verify side (`algFallback: "infer"` path), so the two sides can
-  never disagree about which alg goes with which key. `expires === created` is allowed.
+  the verify side, which checks every wire-carried `alg` against the
+  resolved key's shape before any crypto runs — a mismatch reports
+  `ALG_NOT_ALLOWED` (under the `algFallback: "infer"` opt-in it throws
+  a configuration error instead) — so the two sides can never disagree
+  about which alg goes with which key. `expires === created` is allowed.
   A `null` / non-object request, response, or options object is a caller
   bug in the same class: the six sign/verify entry points
   (`signRequest`, `verifyRequest`, `verifyAllLabels`, `signResponse`,
@@ -2989,10 +2992,13 @@ most also appear in [Limitations](#limitations)):
   → `ed25519`, P-256 EC key → `ecdsa-p256-sha256`, P-384 EC key →
   `ecdsa-p384-sha384`, P-521 EC key → `ecdsa-p521-sha512`, RSA key →
   `rsa-pss-sha512` — never `rsa-v1_5-sha256`, since key shape cannot
-  distinguish the two RSA paddings) and throws a caller
-  configuration `Error` when a wire-carried `alg` contradicts the key's
-  shape. Automatic detection is opt-in only — without it, a missing
-  `alg` keeps meaning `"ed25519"`, exactly as before.
+  distinguish the two RSA paddings). A wire-carried `alg` that
+  contradicts the key's shape is rejected before any crypto runs with
+  `ALG_NOT_ALLOWED` — that check runs whether or not the opt-in is
+  set, so the opt-in only governs the alg-less inference (and, when
+  set, turns the mismatch into a thrown configuration error instead
+  of the verdict). Automatic detection is opt-in only — without it, a
+  missing `alg` keeps meaning `"ed25519"`, exactly as before.
 - **HMAC secret length.** `secretKey()` refuses secrets shorter than 32
   bytes (the `hmac-sha256` floor), and the sign/verify paths pair the
   floor with the chosen algorithm: `hmac-sha256` → ≥ 32 bytes,
@@ -5534,7 +5540,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2957 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2972 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
