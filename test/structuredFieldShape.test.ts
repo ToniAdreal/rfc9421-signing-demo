@@ -11,7 +11,7 @@ import {
 // as a bare `TypeError` (`reading 'replace'`) instead of the library's
 // named configuration error — while the `digest` / `contentDigest`
 // entry points already refused a non-string body with a named
-// `"body" must be a string or a Buffer, got …` error. The helpers now
+// `"body" must be a string, a Buffer, or a Uint8Array, got …` error. The helpers now
 // guard first (same `"value" must be a string, got …` family, with
 // `null` named explicitly instead of reporting `typeof null`).
 

@@ -85,7 +85,7 @@ test("signRequest with a number body throws a configuration error, not TypeError
       assert.ok(!(e instanceof TypeError), `must not be a bare TypeError: ${e}`);
       assert.match(
         e.message,
-        /contentDigest: "body" must be a string or a Buffer, got number/,
+        /contentDigest: "body" must be a string, a Buffer, or a Uint8Array, got number/,
       );
       return true;
     },
@@ -104,7 +104,7 @@ test("signRequest with a boolean body throws a configuration error", () => {
       assert.ok(!(e instanceof TypeError));
       assert.match(
         e.message,
-        /contentDigest: "body" must be a string or a Buffer, got boolean/,
+        /contentDigest: "body" must be a string, a Buffer, or a Uint8Array, got boolean/,
       );
       return true;
     },
@@ -128,7 +128,7 @@ test("signRequest with an object body throws a configuration error", () => {
       assert.ok(!(e instanceof TypeError));
       assert.match(
         e.message,
-        /contentDigest: "body" must be a string or a Buffer, got object/,
+        /contentDigest: "body" must be a string, a Buffer, or a Uint8Array, got object/,
       );
       return true;
     },
@@ -152,7 +152,7 @@ test("signRequest with an array body throws a configuration error", () => {
       assert.ok(!(e instanceof TypeError));
       assert.match(
         e.message,
-        /contentDigest: "body" must be a string or a Buffer, got object/,
+        /contentDigest: "body" must be a string, a Buffer, or a Uint8Array, got object/,
       );
       return true;
     },
@@ -167,7 +167,7 @@ test("contentDigest with a number body throws a configuration error", () => {
       assert.ok(!(e instanceof TypeError));
       assert.match(
         e.message,
-        /contentDigest: "body" must be a string or a Buffer, got number/,
+        /contentDigest: "body" must be a string, a Buffer, or a Uint8Array, got number/,
       );
       return true;
     },
@@ -201,7 +201,7 @@ test("verifyRequest with a number body and content-digest returns VERIFICATION_E
   assert.equal(res.ok, false);
   assert.equal(res.code, "VERIFICATION_ERROR");
   assert.ok(res.reason);
-  assert.match(res.reason, /body must be a string or a Buffer, got number/);
+  assert.match(res.reason, /body must be a string, a Buffer, or a Uint8Array, got number/);
 });
 
 test("verifyRequest with a boolean body and legacy Digest returns VERIFICATION_ERROR, never throws", () => {
@@ -214,7 +214,7 @@ test("verifyRequest with a boolean body and legacy Digest returns VERIFICATION_E
   assert.equal(res.ok, false);
   assert.equal(res.code, "VERIFICATION_ERROR");
   assert.ok(res.reason);
-  assert.match(res.reason, /body must be a string or a Buffer, got boolean/);
+  assert.match(res.reason, /body must be a string, a Buffer, or a Uint8Array, got boolean/);
 });
 
 test("verifyRequestOrThrow with a number body throws VerifyError with code VERIFICATION_ERROR", () => {
@@ -225,7 +225,7 @@ test("verifyRequestOrThrow with a number body throws VerifyError with code VERIF
     (e: unknown) => {
       assert.ok(e instanceof VerifyError);
       assert.equal(e.code, "VERIFICATION_ERROR");
-      assert.match(e.message, /body must be a string or a Buffer, got number/);
+      assert.match(e.message, /body must be a string, a Buffer, or a Uint8Array, got number/);
       return true;
     },
   );

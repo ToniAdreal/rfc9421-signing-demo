@@ -290,11 +290,11 @@ test("multiple Digest entries: sha-512 preferred over sha-256", () => {
 test("digest rejects illegal body input and unsupported algorithms", () => {
   assert.throws(
     () => digest(123 as unknown as string, "sha-256"),
-    /digest: "body" must be a string or a Buffer, got number/,
+    /digest: "body" must be a string, a Buffer, or a Uint8Array, got number/,
   );
   assert.throws(
     () => digest({} as unknown as string, "sha-256"),
-    /digest: "body" must be a string or a Buffer, got object/,
+    /digest: "body" must be a string, a Buffer, or a Uint8Array, got object/,
   );
   assert.throws(
     () => digest(BODY, "md5" as unknown as "sha-256"),

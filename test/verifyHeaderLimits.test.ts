@@ -104,7 +104,7 @@ function signedSettlementResponse(): {
 function asResponseRequest(signed: SignedHttpResponse): {
   status: number;
   headers: Record<string, string | string[] | undefined>;
-  body?: string | Buffer;
+  body?: string | Buffer | Uint8Array;
 } {
   return {
     status: signed.status,

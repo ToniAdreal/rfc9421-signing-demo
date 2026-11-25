@@ -344,7 +344,7 @@ test("verifiedFetch: oversized body over the stream is rejected and the reader i
   let sentInit: { headers: Record<string, string> } | undefined;
   const fetchImpl = async (
     _url: string,
-    init: { method: string; headers: Record<string, string>; body?: string | Buffer },
+    init: { method: string; headers: Record<string, string>; body?: string | Buffer | Uint8Array },
   ): Promise<VerifiedFetchResponse> => {
     sentInit = init;
     return {
@@ -419,7 +419,7 @@ test("verifiedFetch: injected fetchImpl round-trips with zero network", async ()
   const signed = signGatewayResponse(RES_BODY);
   const fetchImpl = async (
     _url: string,
-    init: { method: string; headers: Record<string, string>; body?: string | Buffer },
+    init: { method: string; headers: Record<string, string>; body?: string | Buffer | Uint8Array },
   ): Promise<VerifiedFetchResponse> => {
     assert.equal(init.method, "POST");
     assert.match(init.headers["signature-input"] ?? "", /sig1=\(/);

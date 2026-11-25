@@ -27,6 +27,35 @@ export function assertContentDigestAlg(
 }
 
 /**
+ * The body shapes the sign/verify path accepts. A `Uint8Array` holds
+ * raw bytes exactly as received (e.g. a settlement receipt read with
+ * `arrayBuffer()`, or a protobuf payload) — a form a UTF-8 string
+ * cannot express — so it is a first-class body input alongside the
+ * string and `Buffer` forms, normalized to bytes by `bodyToBuffer`
+ * (backlog #1397).
+ */
+export type BodyInput = string | Buffer | Uint8Array;
+
+/**
+ * Normalize a message body to its exact bytes. A string encodes as
+ * UTF-8; a `Buffer` passes through untouched; a `Uint8Array` is copied
+ * into a `Buffer` holding exactly the viewed bytes — `Buffer.from(view)`
+ * honors `byteOffset`/`byteLength`, so a subarray over a larger
+ * backing store hashes only its slice, never the whole store. Any
+ * other shape is a caller configuration error (thrown, never a
+ * verification failure — the verifier guards first and reports
+ * `VERIFICATION_ERROR` instead, see src/verify.ts).
+ */
+export function bodyToBuffer(body: BodyInput): Buffer {
+  if (typeof body === "string") return Buffer.from(body, "utf8");
+  if (Buffer.isBuffer(body)) return body;
+  if (body instanceof Uint8Array) return Buffer.from(body);
+  throw new Error(
+    `body must be a string, a Buffer, or a Uint8Array, got ${typeof body}`,
+  );
+}
+
+/**
  * RFC 9530 Content-Digest field value for a request body, defaulting to
  * sha-512. Pass `"sha-256"` when the peer only accepts sha-256 digests.
  * Covering this component binds the body to the signature: any tampering
@@ -35,17 +64,24 @@ export function assertContentDigestAlg(
  * Signing emits sha-512 unless the caller opts into sha-256; the verifier
  * (src/verify.ts) additionally accepts sha-256 as a fallback when no
  * sha-512 entry is present, for foreign signers that only send sha-256.
+ *
+ * The body may be a string (UTF-8), a `Buffer`, or a `Uint8Array`
+ * (backlog #1397) — all three hash the same bytes for the same content.
  */
 export function contentDigest(
-  body: string | Buffer,
+  body: BodyInput,
   alg: ContentDigestAlg = "sha-512",
 ): string {
   assertContentDigestAlg(alg);
-  if (typeof body !== "string" && !Buffer.isBuffer(body))
+  if (
+    typeof body !== "string" &&
+    !Buffer.isBuffer(body) &&
+    !(body instanceof Uint8Array)
+  )
     throw new Error(
-      `contentDigest: "body" must be a string or a Buffer, got ${typeof body}`,
+      `contentDigest: "body" must be a string, a Buffer, or a Uint8Array, got ${typeof body}`,
     );
-  const buf = typeof body === "string" ? Buffer.from(body, "utf8") : body;
+  const buf = bodyToBuffer(body);
   return `${alg}=:${createHash(NODE_HASH_ALG[alg]).update(buf).digest("base64")}:`;
 }
 
@@ -98,13 +134,20 @@ export function assertDigestAlg(alg: unknown): asserts alg is DigestAlg {
  * binding failure. The `alg` is required (no default) so the caller
  * names the algorithm the peer expects instead of silently getting
  * the library's preferred one.
+ *
+ * The body may be a string (UTF-8), a `Buffer`, or a `Uint8Array`
+ * (backlog #1397) — all three hash the same bytes for the same content.
  */
-export function digest(body: string | Buffer, alg: DigestAlg): string {
+export function digest(body: BodyInput, alg: DigestAlg): string {
   assertDigestAlg(alg);
-  if (typeof body !== "string" && !Buffer.isBuffer(body))
+  if (
+    typeof body !== "string" &&
+    !Buffer.isBuffer(body) &&
+    !(body instanceof Uint8Array)
+  )
     throw new Error(
-      `digest: "body" must be a string or a Buffer, got ${typeof body}`,
+      `digest: "body" must be a string, a Buffer, or a Uint8Array, got ${typeof body}`,
     );
-  const buf = typeof body === "string" ? Buffer.from(body, "utf8") : body;
+  const buf = bodyToBuffer(body);
   return `${alg}=:${createHash(NODE_HASH_ALG[alg]).update(buf).digest("base64")}:`;
 }

@@ -350,7 +350,7 @@ export interface FetchRequestLike {
  */
 export function fromNodeResponse(
   res: IncomingResponseLike,
-  body?: string | Buffer,
+  body?: string | Buffer | Uint8Array,
   opts?: FromNodeResponseOptions,
 ): RequestLike {
   assertObjectParam("fromNodeResponse", "res", res);
@@ -422,7 +422,7 @@ export function fromNodeResponse(
  * caller reads it first — typically
  * `Buffer.from(await res.arrayBuffer())` — and passes the bytes in.
  * A `Uint8Array` body is copied into a `Buffer` (the `RequestLike`
- * body type is `string | Buffer`); a `Buffer` or string passes through
+ * body type is `string | Buffer | Uint8Array`); a `Buffer` or string passes through
  * untouched.
  *
  * A fetch `Response` carries no trailers, so the resulting
@@ -540,7 +540,7 @@ export function fromFetchResponse(
  * the caller reads it first — typically
  * `Buffer.from(await req.arrayBuffer())` — and passes the bytes in.
  * A `Uint8Array` body is copied into a `Buffer` (the `RequestLike`
- * body type is `string | Buffer`); a `Buffer` or string passes
+ * body type is `string | Buffer | Uint8Array`); a `Buffer` or string passes
  * through untouched.
  *
  * A real `Request` always carries an absolute URL, which is passed
@@ -828,7 +828,7 @@ function normalizeTrailers(
  */
 export function fromNodeRequest(
   req: IncomingRequestLike,
-  body?: string | Buffer,
+  body?: string | Buffer | Uint8Array,
   opts?: FromNodeRequestOptions,
 ): RequestLike {
   assertObjectParam("fromNodeRequest", "req", req);

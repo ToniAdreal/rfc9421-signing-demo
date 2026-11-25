@@ -18,6 +18,7 @@ import {
   type RequestLike,
 } from "./components.js";
 import { VerifyError, type VerifyFailureCode } from "./errors.js";
+import { bodyToBuffer } from "./digest.js";
 import { assertHmacSecretLength, assertRsaModulusLength, algMatchesKeyShape, describeKey, inferAlgFromKeyShape as inferAlgFromKey } from "./keys.js";
 import type { JwksKeyStore } from "./jwks.js";
 import { assertNoUnknownOptions, type SignAlg } from "./sign.js";
@@ -1615,16 +1616,17 @@ function verifyWithKey(
   // body actually matches the digest. Without this, swapping the body while
   // keeping the header would still verify.
   //
-  // A non-string/non-Buffer body (backlog #1280): `verifyRequest` never
-  // throws, so a body the digest checks cannot consume is a verification
+  // A non-string/non-Buffer/non-Uint8Array body (backlog #1280): `verifyRequest`
+  // never throws, so a body the digest checks cannot consume is a verification
   // failure, not an escaping TypeError. The signing side throws a
   // configuration error for the same input (`contentDigest`/`digest`); the
   // verifier reports it with VERIFICATION_ERROR instead, in both digest
-  // checks below.
+  // checks below. A `Uint8Array` body is accepted since backlog #1397 and
+  // hashes its exact viewed bytes, like the string and `Buffer` forms.
   const invalidBodyType = (): VerifyResult => ({
     ok: false,
     code: "VERIFICATION_ERROR",
-    reason: `body must be a string or a Buffer, got ${typeof req.body}`,
+    reason: `body must be a string, a Buffer, or a Uint8Array, got ${typeof req.body}`,
     label,
     keyId: parsed.params.keyid,
     alg: effectiveAlg,
@@ -1639,15 +1641,12 @@ function verifyWithKey(
     if (
       req.body !== undefined &&
       typeof req.body !== "string" &&
-      !Buffer.isBuffer(req.body)
+      !Buffer.isBuffer(req.body) &&
+      !(req.body instanceof Uint8Array)
     )
       return invalidBodyType();
     const bodyBytes =
-      req.body === undefined
-        ? Buffer.alloc(0)
-        : typeof req.body === "string"
-          ? Buffer.from(req.body, "utf8")
-          : req.body;
+      req.body === undefined ? Buffer.alloc(0) : bodyToBuffer(req.body);
     // Prefer sha-512 when the header carries both algorithms; fall back to
     // sha-256 when no sha-512 entry is present (RFC 9530 allows either).
     // Signing emits sha-512 by default, or sha-256 when the caller sets
@@ -1713,15 +1712,12 @@ function verifyWithKey(
       if (
         req.body !== undefined &&
         typeof req.body !== "string" &&
-        !Buffer.isBuffer(req.body)
+        !Buffer.isBuffer(req.body) &&
+        !(req.body instanceof Uint8Array)
       )
         return invalidBodyType();
       const bodyBytes =
-        req.body === undefined
-          ? Buffer.alloc(0)
-          : typeof req.body === "string"
-            ? Buffer.from(req.body, "utf8")
-            : req.body;
+        req.body === undefined ? Buffer.alloc(0) : bodyToBuffer(req.body);
       const dm512 = /(?:^|,)\s*sha-512\s*=:([A-Za-z0-9+/=]+):/.exec(
         legacyDigestHeader,
       );

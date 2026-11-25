@@ -269,7 +269,7 @@ export interface SignedHttpRequest {
   method: string;
   url: string;
   headers: Record<string, string>;
-  body?: string | Buffer | undefined;
+  body?: string | Buffer | Uint8Array | undefined;
   /**
    * HTTP response status code, carried through from the signed
    * `RequestLike` when present. Only consulted when `"@status"` is

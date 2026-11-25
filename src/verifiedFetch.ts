@@ -229,7 +229,7 @@ export interface VerifiedFetchResponse extends FetchResponseLike {
  */
 export type VerifiedFetchFn = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body?: string | Buffer; signal?: AbortSignal },
+  init: { method: string; headers: Record<string, string>; body?: string | Buffer | Uint8Array; signal?: AbortSignal },
 ) => Promise<VerifiedFetchResponse>;
 
 /** The `fetch()` request `verifiedFetch` builds and signs. */
@@ -243,8 +243,10 @@ export interface VerifiedFetchInit {
    * / `signature` header is overwritten, never merged.
    */
   headers?: Headers | Record<string, string | string[] | undefined>;
-  /** Request body. Defaults to none. */
-  body?: string | Buffer;
+  /** Request body. Defaults to none. A `Uint8Array` body is signed
+   * over its exact bytes, like a string (UTF-8) or a `Buffer`
+   * (backlog #1397). */
+  body?: string | Buffer | Uint8Array;
   /**
    * Abort signal for the whole call (backlog #1112): forwarded to
    * the fetch implementation — the default global `fetch` and any

@@ -475,7 +475,7 @@ function serializeDictionary(entries: SfDictEntry[]): string {
  * error (`"<fn>: \"value\" must be a string, got …"`, `null` named
  * explicitly) instead of a bare `TypeError` from the first dereference
  * (`reading 'replace'`). The wording follows the `contentDigest` /
- * `digest` `"body" must be a string or a Buffer, got …` family, and
+ * `digest` `"body" must be a string, a Buffer, or a Uint8Array, got …` family, and
  * matches the shared `assertStringParam` in components.ts — which this
  * module cannot import, because components.ts imports this module.
  * (Backlog #1379.)

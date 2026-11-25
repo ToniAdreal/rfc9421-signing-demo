@@ -96,7 +96,7 @@ export interface HttpResponseLike {
   /** HTTP response status code, bound by a covered `@status`. */
   status: number;
   headers: Record<string, string | string[] | undefined>;
-  body?: string | Buffer | undefined;
+  body?: string | Buffer | Uint8Array | undefined;
   trailers?: Record<string, string | string[] | undefined> | undefined;
 }
 
@@ -110,7 +110,7 @@ export interface HttpResponseLike {
 export interface SignedHttpResponse {
   status: number;
   headers: Record<string, string>;
-  body?: string | Buffer | undefined;
+  body?: string | Buffer | Uint8Array | undefined;
   trailers?: Record<string, string | string[] | undefined>;
   coveredComponents?: string[];
 }

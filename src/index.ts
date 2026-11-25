@@ -44,8 +44,8 @@ export type {
   JwksSleepImpl,
   JwksSnapshotKey,
 } from "./jwks.js";
-export { assertContentDigestAlg, contentDigest, contentDigestAlgOf, digest } from "./digest.js";
-export type { ContentDigestAlg, DigestAlg } from "./digest.js";
+export { assertContentDigestAlg, bodyToBuffer, contentDigest, contentDigestAlgOf, digest } from "./digest.js";
+export type { BodyInput, ContentDigestAlg, DigestAlg } from "./digest.js";
 export {
   algMatchesKeyShape,
   assertHmacSecretLength,

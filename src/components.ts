@@ -143,7 +143,7 @@ export interface RequestLike {
    * components never consult this field.
    */
   trailers?: Record<string, string | string[] | undefined> | undefined;
-  body?: string | Buffer | undefined;
+  body?: string | Buffer | Uint8Array | undefined;
   /**
    * HTTP response status code. Only consulted when `"@status"` is covered
    * (RFC 9421 §2.2.8) — signing/verifying responses, e.g. webhook
@@ -268,9 +268,9 @@ export function assertObjectParam(
  * 'replace'` in `escapeRegExp` for `parseSignatureInput` / the
  * misleading `"not present"` a `null` field value used to produce there
  * via `RegExp.exec` coercing it to `"null"`). The wording follows the
- * `contentDigest` / `digest` `"body" must be a string or a Buffer, got
- * …` family, with `null` named explicitly instead of reporting
- * `typeof null` (`"object"`). (Backlog #1354.)
+ * `contentDigest` / `digest` `"body" must be a string, a Buffer, or a
+ * Uint8Array, got …` family, with `null` named explicitly instead of
+ * reporting `typeof null` (`"object"`). (Backlog #1354.)
  */
 export function assertStringParam(
   caller: string,
