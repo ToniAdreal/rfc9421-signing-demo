@@ -3315,7 +3315,7 @@ test("demo ReplayCache snapshot segment exports the seen nonce and the restored 
     "demo-nonce-replay-snapshot-002",
   );
   assert.deepEqual(DEMO_REPLAY_SNAPSHOT_ENTRIES, [
-    [DEMO_REPLAY_SNAPSHOT_NONCE, DEMO_CREATED + 60],
+    [DEMO_KEY_ID, DEMO_REPLAY_SNAPSHOT_NONCE, DEMO_CREATED + 60],
   ]);
   assert.equal(DEMO_REPLAY_SNAPSHOT_CODE, "NONCE_REPLAY");
   assert.equal(DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE, 2);
@@ -3332,10 +3332,11 @@ test("demo ReplayCache snapshot segment exports the seen nonce and the restored 
     DEMO_REPLAY_SNAPSHOT_NONCE,
   );
 
-  // The exported snapshot is exactly the pinned v1 shape:
-  // one entry, the segment nonce at the fixed verify instant.
+  // The exported snapshot is exactly the pinned v2 shape:
+  // one entry, the segment nonce at the fixed verify instant,
+  // scoped by the demo keyid (backlog #1412).
   assert.deepEqual(replaySnapshotExport, {
-    v: 1,
+    v: 2,
     entries: [...DEMO_REPLAY_SNAPSHOT_ENTRIES],
   });
 
@@ -3370,8 +3371,14 @@ test("demo ReplayCache snapshot segment exports the seen nonce and the restored 
       now: () => DEMO_CREATED + 60,
     },
   );
-  assert.equal(restored.check(DEMO_REPLAY_SNAPSHOT_NONCE), true);
-  assert.equal(restored.check(DEMO_REPLAY_SNAPSHOT_FRESH_NONCE), false);
+  assert.equal(
+    restored.check(DEMO_REPLAY_SNAPSHOT_NONCE, undefined, DEMO_KEY_ID),
+    true,
+  );
+  assert.equal(
+    restored.check(DEMO_REPLAY_SNAPSHOT_FRESH_NONCE, undefined, DEMO_KEY_ID),
+    false,
+  );
 });
 
 test("demo lines contain the ReplayCache snapshot segment (export, restored replay rejection and detached original, followed by the ECDSA P-384 segment)", async () => {
@@ -3396,7 +3403,7 @@ test("demo lines contain the ReplayCache snapshot segment (export, restored repl
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), [
     "ReplayCache snapshot persistence: exportSnapshot carries the seen nonces across a restart — ReplayCache.restore rebuilds the cache at startup, so a nonce seen before the restart is still a replay after it",
     `Replay snapshot, first verification of nonce "${DEMO_REPLAY_SNAPSHOT_NONCE}": OK (recorded in the segment's ReplayCache)`,
-    `Exported ReplayCache snapshot: 1 entry in a v1 snapshot (nonce "${DEMO_REPLAY_SNAPSHOT_NONCE}", first seen at ${DEMO_CREATED + 60})`,
+    `Exported ReplayCache snapshot: 1 entry in a v2 snapshot (nonce "${DEMO_REPLAY_SNAPSHOT_NONCE}", first seen at ${DEMO_CREATED + 60})`,
     `Replay snapshot, same request against the restored cache: FAILED (code NONCE_REPLAY: nonce replay detected: "${DEMO_REPLAY_SNAPSHOT_NONCE}" was already seen)`,
     `Replay snapshot, new request with nonce "${DEMO_REPLAY_SNAPSHOT_FRESH_NONCE}" against the restored cache: OK (a fresh nonce is not a replay — recorded only in the restored cache)`,
     `Original ReplayCache after the restored cache recorded the fresh nonce: 1 entry (restored cache: 2 entries — the restore is detached, the original is unaffected)`,
@@ -5446,6 +5453,7 @@ test("demo per-label ReplayCache signed snapshot segment exports one envelope pe
     DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_ENTRIES,
     [
       [
+        DEMO_KEY_ID,
         DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE,
         DEMO_CREATED + 60,
       ],
@@ -5455,6 +5463,7 @@ test("demo per-label ReplayCache signed snapshot segment exports one envelope pe
     DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_ENTRIES,
     [
       [
+        DEMO_KEY_ID,
         DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE,
         DEMO_CREATED + 60,
       ],
@@ -5736,16 +5745,20 @@ test("demo per-label ReplayCache signed snapshot segment exports one envelope pe
   const directTampered = JSON.parse(
     JSON.stringify(directEnvelopes),
   ) as {
-    gateway: { snapshot: { entries: Array<[string, number]> } };
+    gateway: { snapshot: { entries: Array<[string, string, number]> } };
   };
-  const directOriginalNonce = String(
+  const directOriginalKeyId = String(
     directTampered.gateway.snapshot.entries[0]?.[0] ?? "",
   );
+  const directOriginalNonce = String(
+    directTampered.gateway.snapshot.entries[0]?.[1] ?? "",
+  );
   directTampered.gateway.snapshot.entries[0] = [
+    directOriginalKeyId,
     directOriginalNonce[0] === "d"
       ? `e${directOriginalNonce.slice(1)}`
       : `d${directOriginalNonce.slice(1)}`,
-    directTampered.gateway.snapshot.entries[0]?.[1] ?? DEMO_CREATED + 60,
+    directTampered.gateway.snapshot.entries[0]?.[2] ?? DEMO_CREATED + 60,
   ];
   let directTamperError = "";
   try {
@@ -6708,7 +6721,17 @@ test("demo ReplayCache release segment records, probes, releases, and re-records
   const directOpts = { key: publicKey, now: DEMO_CREATED + 60, replayCache: directCache, maxSignatureAgeSec: DEMO_MAX_AGE_SEC };
   assert.equal(verifyRequest(directSigned, directOpts).ok, true);
   assert.equal(verifyRequest(directSigned, directOpts).code, "NONCE_REPLAY");
-  assert.equal(directCache.release(DEMO_REPLAY_RELEASE_NONCE), true);
+  // The verified entry lives under the signature's keyid scope
+  // (backlog #1412), so the release must name that scope — an
+  // unscoped release would forget nothing here.
+  assert.equal(
+    directCache.release(
+      DEMO_REPLAY_RELEASE_NONCE,
+      undefined,
+      DEMO_KEY_ID,
+    ),
+    true,
+  );
   assert.equal(verifyRequest(directSigned, directOpts).ok, true);
 });
 
@@ -12091,7 +12114,7 @@ test("demo lines contain the per-label algorithm fallback segment (merchant infe
   );
 });
 
-test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded merchant replays, gateway first-passes, shared cache replays the gateway)", async () => {
+test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded merchant replays, gateway first-passes, shared cache passes both first and replays both second)", async () => {
   const r = await runDemo();
   assert.equal(DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL, "merchant");
   assert.equal(DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL, "gateway");
@@ -12181,15 +12204,17 @@ test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded me
     r.replayCacheByLabelVerification[1].nonce,
     DEMO_REPLAY_CACHE_BY_LABEL_NONCE,
   );
-  // The shared-cache re-verification: without the map, the bare
-  // nonce is shared, so the merchant label passes and the gateway
-  // label alone replays.
+  // The shared-cache re-verification: entries are scoped by keyid
+  // (backlog #1412), so the two signers' same nonce string records
+  // two separate entries and the first presentation passes both
+  // labels; presenting the same fixture a second time against that
+  // same store replays both.
   assert.equal(r.replayCacheByLabelGlobalVerification.length, 2);
   assert.deepEqual(
     r.replayCacheByLabelGlobalVerification.map((x) => [x.label, x.ok]),
     [
       [DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL, true],
-      [DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL, false],
+      [DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL, true],
     ],
   );
   assert.equal(
@@ -12197,15 +12222,39 @@ test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded me
     DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID,
   );
   assert.equal(
-    r.replayCacheByLabelGlobalVerification[1].code,
+    r.replayCacheByLabelGlobalVerification[1].keyId,
+    DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID,
+  );
+  assert.equal(r.replayCacheByLabelGlobalSecondVerification.length, 2);
+  assert.deepEqual(
+    r.replayCacheByLabelGlobalSecondVerification.map((x) => [x.label, x.ok]),
+    [
+      [DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL, false],
+      [DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL, false],
+    ],
+  );
+  assert.equal(
+    r.replayCacheByLabelGlobalSecondVerification[0].code,
     DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE,
   );
   assert.equal(
-    r.replayCacheByLabelGlobalVerification[1].reason,
+    r.replayCacheByLabelGlobalSecondVerification[0].reason,
     DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON,
   );
   assert.equal(
-    r.replayCacheByLabelGlobalVerification[1].keyId,
+    r.replayCacheByLabelGlobalSecondVerification[0].keyId,
+    DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID,
+  );
+  assert.equal(
+    r.replayCacheByLabelGlobalSecondVerification[1].code,
+    DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE,
+  );
+  assert.equal(
+    r.replayCacheByLabelGlobalSecondVerification[1].reason,
+    DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON,
+  );
+  assert.equal(
+    r.replayCacheByLabelGlobalSecondVerification[1].keyId,
     DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID,
   );
   // Independent checks driven directly (the same per-label
@@ -12290,18 +12339,38 @@ test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded me
       [DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL, true, undefined],
     ],
   );
+  const sharedCache = new ReplayCache({
+    now: () => DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+  });
   const directGlobal = verifyAllLabels(dual, {
     keys,
     now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
-    replayCache: new ReplayCache({
-      now: () => DEMO_REPLAY_CACHE_BY_LABEL_NOW,
-    }),
+    replayCache: sharedCache,
     maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
   });
   assert.deepEqual(
     directGlobal.map((x) => [x.label, x.ok, x.code]),
     [
       [DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL, true, undefined],
+      [DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL, true, undefined],
+    ],
+  );
+  // Second presentation against the same shared store: both scoped
+  // entries are recorded, so both labels replay together.
+  const directGlobalSecond = verifyAllLabels(dual, {
+    keys,
+    now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+    replayCache: sharedCache,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
+  });
+  assert.deepEqual(
+    directGlobalSecond.map((x) => [x.label, x.ok, x.code]),
+    [
+      [
+        DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL,
+        false,
+        DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE,
+      ],
       [
         DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL,
         false,
@@ -12311,7 +12380,7 @@ test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded me
   );
 });
 
-test("demo lines contain the per-label replay cache segment (pre-seeded merchant replays, gateway first-passes, shared cache replays the gateway, followed by the maximum-signature-age segment)", async () => {
+test("demo lines contain the per-label replay cache segment (pre-seeded merchant replays, gateway first-passes, shared cache passes both first and replays both second, followed by the maximum-signature-age segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(
@@ -12323,9 +12392,9 @@ test("demo lines contain the per-label replay cache segment (pre-seeded merchant
   );
   assert.ok(headerIdx !== -1);
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 3), [
-    "Per-label replay cache: verifyAllLabels' replayCacheByLabel map gives each label its own nonce store — the merchant and gateway signatures carry the same bare nonce string, because each party mints nonces in its own namespace, and a single shared cache keyed by that bare string cannot split a dual signature whose labels reuse a nonce — the merchant store was pre-seeded with the nonce before the dual verification, so the dual call is the merchant label's second presentation and the gateway label's first presentation in its own store",
+    "Per-label replay cache: verifyAllLabels' replayCacheByLabel map gives each label its own nonce store — the merchant and gateway signatures carry the same bare nonce string, because each party mints nonces in its own namespace, and a single shared cache scopes entries by keyid, so it splits a dual whose labels carry different keyids (the first presentation passes both labels; only the second presentation replays both) — while the map keeps the pre-seeded merchant replay confined to the merchant label — the merchant store was pre-seeded with the nonce before the dual verification, so the dual call is the merchant label's second presentation and the gateway label's first presentation in its own store",
     `Replay split: both signatures carry nonce "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}", verified with replayCacheByLabel { merchant: merchantCache, gateway: gatewayCache } after the merchant store was pre-seeded with that nonce: merchant FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE}: ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON}), gateway OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID}", alg="ed25519") — the same bare nonce is a replay in one label's store and fresh in the other's`,
-    `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: merchant OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID}"), gateway FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, code ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE}: ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON}) — without the map the cache stays shared across labels, and a label with no map entry falls back to the global store`,
+    `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: first presentation merchant OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID}") and gateway OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID}"), second presentation against the same store merchant FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE}: ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON}) and gateway FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, code ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE}: ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON}) — entries are scoped by keyid, so the shared cache splits the two signers on first presentation, but one namespace still remembers both scopes, and a label with no map entry falls back to the global store`,
   ]);
   // The header plus its two lines are followed by a blank line
   // and the per-label maximum-signature-age segment's header (the

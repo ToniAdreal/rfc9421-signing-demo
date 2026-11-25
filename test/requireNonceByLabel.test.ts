@@ -371,7 +371,7 @@ test("existence and replay stay separate: a MISSING_NONCE label never reaches th
   assert.equal(cache.stats().hits, 0);
 });
 
-test("existence and replay stay separate: a shared nonce still replays on the second label even when both pass the existence check", () => {
+test("existence and replay stay separate: a shared nonce under different keyids verifies on both labels once each passes the existence check", () => {
   const merchant = generateEd25519KeyPair();
   const gateway = generateEd25519KeyPair();
   const cache = new ReplayCache({ now: () => CREATED });
@@ -386,10 +386,51 @@ test("existence and replay stay separate: a shared nonce still replays on the se
     requireNonceByLabel: { merchant: true, gateway: true },
   });
   const by = byLabel(results);
+  // Both labels carry a nonce, so both pass the existence check — and
+  // since backlog #1412 scopes replay entries by keyid, the shared
+  // nonce string no longer makes the gateway label replay: the two
+  // signers ("merchant" / "gateway" keyids) record separate entries.
+  assert.equal(by["merchant"].ok, true);
+  assert.equal(by["gateway"].ok, true);
+  assert.equal(cache.stats().size, 2);
+});
+
+test("existence and replay stay separate: a shared nonce under the SAME keyid still replays on the second label even when both pass the existence check", () => {
+  const merchant = generateEd25519KeyPair();
+  const gateway = generateEd25519KeyPair();
+  const cache = new ReplayCache({ now: () => CREATED });
+  // Both labels signed under one shared keyid: the scoped entries
+  // collide, so the second label replays even though it passes the
+  // existence check.
+  const signSharedKey = (
+    label: string,
+    pair: ReturnType<typeof generateEd25519KeyPair>,
+  ): SignedHttpRequest =>
+    signRequest(baseRequest(), {
+      label,
+      keyId: "shared-key",
+      alg: "ed25519",
+      key: pair.privateKey,
+      created: CREATED,
+      expires: CREATED + 600,
+      nonce: "shared-nonce-2",
+    });
+  const merged = mergeSignatures(
+    signSharedKey("merchant", merchant),
+    signSharedKey("gateway", gateway),
+  );
+  const results = verifyAllLabels(merged, {
+    now: CREATED,
+    keys: { merchant: merchant.publicKey, gateway: gateway.publicKey },
+    replayCache: cache,
+    requireNonceByLabel: { merchant: true, gateway: true },
+  });
+  const by = byLabel(results);
   assert.equal(by["merchant"].ok, true);
   // The existence requirement passed for the gateway label too (it
-  // carries a nonce); the shared store's one-nonce-per-label contract
-  // from #532 is what rejects it, not the existence map.
+  // carries a nonce); the shared keyid scope is what rejects it, not
+  // the existence map.
   assert.equal(by["gateway"].ok, false);
   assert.equal(by["gateway"].code, "NONCE_REPLAY");
+  assert.equal(cache.stats().size, 1);
 });

@@ -424,6 +424,18 @@ export interface VerifyOptions {
    * checked against its own store, and only unmapped labels fall back
    * to this global store.
    *
+   * Nonces are scoped by the signature's wire `keyid` (backlog #1412):
+   * `verifyRequest` passes that `keyid` as the store's scope ("" when
+   * the signature carries none), so two signers sharing one cache no
+   * longer collide on the same nonce string — a tenant's nonce cannot
+   * be consumed by another tenant's signature, and an attacker cannot
+   * plant a victim's nonce with their own key. The same nonce under
+   * the *same* `keyid` still replays, and a keyid-less signature
+   * shares the "" scope with every other keyid-less signature. A
+   * custom `NonceStore` must incorporate the scope into its own key
+   * (see `NonceStore`): a store that ignores it silently keeps the
+   * old bare-nonce behavior.
+   *
    * Replay-lifetime consistency (backlog #1411): a store only protects
    * a signature while it still remembers the nonce. A nonce-carrying
    * signature verified with a store must have a lifetime bounded
@@ -2215,10 +2227,18 @@ function verifyWithKey(
   // Nonce replay detection: consulted only *after* the signature has
   // passed every check, so failed forgeries never pollute the cache.
   // Signatures without a (non-empty) nonce bypass the cache entirely.
+  // The check is scoped by the signature's wire `keyid` (backlog
+  // #1412): two signers sharing one cache no longer collide on the
+  // same nonce string, and an attacker cannot plant a victim's nonce
+  // with their own key — a forgery never reaches this point anyway,
+  // since the cache is consulted only after the cryptographic check,
+  // and `keyid` is part of the signed `@signature-params`. A
+  // keyid-less signature uses the "" scope, the old single-namespace
+  // behavior among keyid-less signers.
   const nonce = parsed.params.nonce;
   const cache = opts.replayCache;
   if (cache !== undefined && nonce !== undefined && nonce !== "") {
-    if (cache.check(nonce, now))
+    if (cache.check(nonce, now, parsed.params.keyid ?? ""))
       return {
         ok: false,
         code: "NONCE_REPLAY",
@@ -2513,8 +2533,10 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    * This map only overrides the existence requirement: partitioning
    * the replay cache itself per label is the job of
    * `replayCacheByLabel` below. Without that map, the cache stays
-   * shared across labels, keyed by the bare nonce string (see the
-   * `replayCache` documentation for the one-nonce-per-label contract).
+   * shared across labels, keyed by (`keyid`, nonce) (see the
+   * `replayCache` documentation): two labels sharing one nonce
+   * collide only when they also share a `keyid` — different signers
+   * reusing the same nonce string no longer block each other.
    */
   requireNonceByLabel?: Record<string, boolean>;
   /**

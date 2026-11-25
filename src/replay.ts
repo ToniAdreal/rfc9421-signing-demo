@@ -49,7 +49,27 @@ import { assertObjectParam } from "./components.js";
  * the way `ReplayCache.check` does.
  */
 export interface NonceStore {
-  check(nonce: string, now?: number): boolean;
+  /**
+   * Check-and-record one nonce, scoped by the signer's `keyid`
+   * (backlog #1412): `verifyRequest` passes the signature's wire
+   * `keyid` as `scope` ("" when the signature carries none), so two
+   * signers sharing one cache no longer collide on the same nonce
+   * string — a tenant's nonce cannot be planted or consumed by
+   * another tenant's signature. The scope is part of the key:
+   * `check(nonce, now, "a")` and `check(nonce, now, "b")` are
+   * independent entries, and the default scope "" keeps keyid-less
+   * signatures on the old shared-nonce behavior.
+   *
+   * A custom store MUST incorporate `scope` into its own key the
+   * same way `ReplayCache` does: a store that ignores the third
+   * argument silently keeps the old bare-nonce behavior — every
+   * keyid sharing that store collides again, including the
+   * cross-tenant pollution this scoping exists to prevent. The
+   * parameter is optional so existing implementations keep
+   * compiling, but ignoring it is a correctness gap, not a
+   * compatible default.
+   */
+  check(nonce: string, now?: number, scope?: string): boolean;
 }
 
 /** Options for {@link ReplayCache} and its restore entry points.
@@ -108,10 +128,21 @@ export interface ReplayCacheStats {
  * Serializable snapshot of a {@link ReplayCache}, produced by
  * `exportSnapshot()` and consumed by `ReplayCache.restore()`.
  *
- * - `v`: snapshot format version. Only `1` exists; `restore` rejects
- *   any other value (including a missing `v`) instead of guessing.
- * - `entries`: `[nonce, seenAt]` pairs in LRU order (least recently
- *   seen first). `seenAt` is a unix-seconds timestamp in the same unit
+ * - `v`: snapshot format version. `2` is current (backlog #1412):
+ *   entries are `[keyId, nonce, seenAt]` triples, so a restored
+ *   cache keeps nonces scoped by signer instead of collapsing
+ *   two tenants' same nonce into one entry. `restore` still
+ *   accepts `v: 1` snapshots — entries `[nonce, seenAt]` pairs —
+ *   and migrates them to the empty scope (""), the behavior
+ *   keyid-less signatures had before scoping; any other version
+ *   (including a missing `v`) is rejected instead of guessing.
+ *   A `v: 2` snapshot cannot be read by a version of this library
+ *   that only knows `v: 1` — upgrade both sides of a persisted
+ *   snapshot together.
+ * - `entries`: `[keyId, nonce, seenAt]` triples in LRU order (least
+ *   recently seen first). `keyId` is the wire `keyid` scope the
+ *   nonce was recorded under ("" for a keyid-less signature);
+ *   `seenAt` is a unix-seconds timestamp in the same unit
  *   as `ReplayCacheOptions.now` / the `now` argument of `check` — the
  *   original first-seen time, *not* the export time, so a restored
  *   nonce keeps counting down its original TTL instead of getting a
@@ -138,8 +169,8 @@ export interface ReplayCacheStats {
  * interface.
  */
 export interface ReplayCacheSnapshot {
-  v: 1;
-  entries: Array<[nonce: string, seenAt: number]>;
+  v: 2;
+  entries: Array<[keyId: string, nonce: string, seenAt: number]>;
 }
 
 /**
@@ -509,7 +540,8 @@ export class ReplayCache implements NonceStore {
   private readonly maxEntries: number;
   private readonly ttlSecValue: number;
   private readonly clock: () => number;
-  /** nonce -> first-seen-at (unix seconds). Insertion order = LRU order. */
+  /** (scope, nonce) -> first-seen-at (unix seconds), as one JSON-encoded
+   * composite key (see `scopedKey`). Insertion order = LRU order. */
   private readonly seenAt = new Map<string, number>();
   private hits = 0;
   private misses = 0;
@@ -563,9 +595,58 @@ export class ReplayCache implements NonceStore {
   }
 
   /**
+   * Combine a scope (`keyid`, "" when the signature carries none)
+   * with a nonce into one map key (backlog #1412). The pair is
+   * encoded as JSON so no separator game can collide two different
+   * pairs: `["a", "b\0c"]` and `["a\0b", "c"]` encode differently,
+   * where a naive `scope + "\0" + nonce` join would merge them.
+   * `splitScopedKey` reverses it for `exportSnapshot()`.
+   */
+  private static scopedKey(scope: string, nonce: string): string {
+    return JSON.stringify([scope, nonce]);
+  }
+
+  private static splitScopedKey(key: string): [string, string] {
+    const pair: unknown = JSON.parse(key);
+    if (
+      !Array.isArray(pair) ||
+      pair.length !== 2 ||
+      typeof pair[0] !== "string" ||
+      typeof pair[1] !== "string"
+    )
+      throw new Error("ReplayCache: corrupt internal scoped key");
+    return [pair[0] as string, pair[1] as string];
+  }
+
+  /**
+   * Validate a scope argument: it must be a string when provided —
+   * a non-string scope must never be recorded under a coerced key,
+   * the same rule `check` applies to nonces. The empty string is
+   * legal: it is the scope of a keyid-less signature (and the
+   * default when the caller omits `scope`), so unscoped callers
+   * keep the old single-namespace behavior among themselves.
+   */
+  private static assertScope(scope: unknown): string {
+    if (scope === undefined) return "";
+    if (typeof scope !== "string")
+      throw new Error("ReplayCache: scope must be a string");
+    return scope;
+  }
+
+  /**
    * Atomically check-and-record: returns `true` when the nonce was already
    * seen within the TTL (i.e. this is a replay); otherwise records the
    * nonce and returns `false`.
+   *
+   * The entry is keyed by the (`scope`, `nonce`) pair (backlog #1412):
+   * `verifyRequest` passes the signature's wire `keyid` as `scope`
+   * ("" when it carries none), so two signers sharing one cache no
+   * longer collide on the same nonce string — a tenant's legitimate
+   * nonce cannot be consumed by another tenant's signature, and an
+   * attacker cannot plant a victim's nonce with their own key. The
+   * same nonce under the same scope still replays, exactly as
+   * before; a direct caller that omits `scope` gets the "" scope,
+   * i.e. the old single-namespace behavior among unscoped callers.
    *
    * Expired entries are treated as unseen and reclaimed. On a replay hit
    * the entry's recency is refreshed but its original first-seen timestamp
@@ -581,29 +662,33 @@ export class ReplayCache implements NonceStore {
    * finite number of unix seconds: a non-finite reading throws a
    * configuration `Error` before anything is recorded (backlog #1288).
    */
-  check(nonce: string, now?: number): boolean {
+  check(nonce: string, now?: number, scope?: string): boolean {
     if (typeof nonce !== "string")
       throw new Error("ReplayCache: nonce must be a non-empty string");
     if (nonce === "")
       throw new Error("ReplayCache: nonce must be non-empty");
+    const key = ReplayCache.scopedKey(
+      ReplayCache.assertScope(scope),
+      nonce,
+    );
     const t = this.resolveNow(now);
-    const prev = this.seenAt.get(nonce);
+    const prev = this.seenAt.get(key);
     if (prev !== undefined) {
       if (t - prev < this.ttlSecValue) {
         // Refresh LRU recency (delete + re-insert moves it to the tail)
         // while keeping the original first-seen timestamp.
-        this.seenAt.delete(nonce);
-        this.seenAt.set(nonce, prev);
+        this.seenAt.delete(key);
+        this.seenAt.set(key, prev);
         this.hits++;
         return true; // replay
       }
       // Expired: drop and fall through to re-record with a fresh timestamp.
       // This is the miss path (an expired record means "unseen"), not an
       // eviction — the delete is immediately followed by a re-record.
-      this.seenAt.delete(nonce);
+      this.seenAt.delete(key);
     }
     this.prune(t);
-    this.seenAt.set(nonce, t);
+    this.seenAt.set(key, t);
     this.misses++;
     return false;
   }
@@ -625,17 +710,23 @@ export class ReplayCache implements NonceStore {
    * to the injected clock. The TTL boundary matches `check()`: a nonce
    * seen exactly `ttlSec` ago counts as expired. An empty or
    * non-string nonce throws a configuration `Error`, the same caliber
-   * as `check()`.
+   * as `check()`. The probe is scoped like `check()`: `has(nonce,
+   * now, scope)` only reports the entry recorded under that scope —
+   * a nonce seen under another `keyid` does not count.
    *
    * A non-finite `now` (explicit or from the injected clock) throws a
    * configuration `Error` (backlog #1288) — a probe must never report
    * a seen nonce as unseen because the clock read was `NaN`.
    */
-  has(nonce: string, now?: number): boolean {
+  has(nonce: string, now?: number, scope?: string): boolean {
     if (typeof nonce !== "string" || nonce === "")
       throw new Error("ReplayCache: nonce must be a non-empty string");
+    const key = ReplayCache.scopedKey(
+      ReplayCache.assertScope(scope),
+      nonce,
+    );
     const t = this.resolveNow(now);
-    const prev = this.seenAt.get(nonce);
+    const prev = this.seenAt.get(key);
     if (prev === undefined) return false;
     return t - prev < this.ttlSecValue;
   }
@@ -677,16 +768,23 @@ export class ReplayCache implements NonceStore {
    * An empty or non-string nonce throws a configuration `Error`, the
    * same caliber as `has()`. A non-finite `now` (explicit or from the
    * injected clock) throws a configuration `Error` (backlog #1288)
-   * before anything is released.
+   * before anything is released. The release is scoped like
+   * `check()`: `release(nonce, now, scope)` forgets only the entry
+   * recorded under that scope — another signer's same nonce stays
+   * tracked.
    */
-  release(nonce: string, now?: number): boolean {
+  release(nonce: string, now?: number, scope?: string): boolean {
     if (typeof nonce !== "string" || nonce === "")
       throw new Error("ReplayCache: nonce must be a non-empty string");
+    const key = ReplayCache.scopedKey(
+      ReplayCache.assertScope(scope),
+      nonce,
+    );
     const t = this.resolveNow(now);
-    const prev = this.seenAt.get(nonce);
+    const prev = this.seenAt.get(key);
     if (prev === undefined) return false;
     if (t - prev >= this.ttlSecValue) return false;
-    this.seenAt.delete(nonce);
+    this.seenAt.delete(key);
     return true;
   }
 
@@ -740,19 +838,25 @@ export class ReplayCache implements NonceStore {
    * it to `ReplayCache.restore()` at startup so the restart does not
    * reopen the replay window for nonces seen inside their TTL.
    *
-   * Entries already expired against this cache's clock are excluded.
-   * The returned object (including every entry pair) is a fresh copy —
+   * Entries are `[keyId, nonce, seenAt]` triples in LRU order (backlog
+   * #1412): the scope travels with the nonce, so a restored cache
+   * keeps tenants apart exactly like the live one. Entries already
+   * expired against this cache's clock are excluded.
+   * The returned object (including every entry triple) is a fresh copy —
    * mutating it does not affect this cache. A clock returning a
    * non-finite value throws a configuration `Error` (backlog #1288)
    * instead of exporting an empty snapshot.
    */
   exportSnapshot(): ReplayCacheSnapshot {
     const t = this.resolveNow();
-    const entries: Array<[string, number]> = [];
-    for (const [nonce, at] of this.seenAt) {
-      if (t - at < this.ttlSecValue) entries.push([nonce, at]);
+    const entries: Array<[string, string, number]> = [];
+    for (const [key, at] of this.seenAt) {
+      if (t - at < this.ttlSecValue) {
+        const [scope, nonce] = ReplayCache.splitScopedKey(key);
+        entries.push([scope, nonce, at]);
+      }
     }
-    return { v: 1, entries };
+    return { v: 2, entries };
   }
 
   /**
@@ -803,19 +907,28 @@ export class ReplayCache implements NonceStore {
    * validated exactly like the constructor's.
    *
    * The input is untrusted data and is validated strictly: a non-object
-   * snapshot, an unknown top-level field, a `v` other than `1`, a
-   * non-array `entries`, or a malformed entry (not a `[nonce, seenAt]`
-   * pair, an empty/non-string nonce, a non-finite or negative `seenAt`)
-   * throws a configuration `Error` — a corrupt snapshot fails loudly at
+   * snapshot, an unknown top-level field, a `v` other than `1` or `2`,
+   * a non-array `entries`, or a malformed entry throws a
+   * configuration `Error` — a corrupt snapshot fails loudly at
    * startup rather than silently disabling replay protection.
+   * A `v: 2` entry must be a `[keyId, nonce, seenAt]` triple
+   * (`keyId` a string, possibly "" for a keyid-less signature;
+   * `nonce` a non-empty string; `seenAt` a finite non-negative
+   * number). A `v: 1` entry must be the old `[nonce, seenAt]` pair
+   * and is migrated to the empty scope (""), so a snapshot written
+   * before keyId scoping (backlog #1412) restores with exactly the
+   * behavior it had: its nonces block only unscoped (keyid-less)
+   * replays, never a keyed signer's same nonce. Mixing versions is
+   * impossible by construction — the version is one field for the
+   * whole snapshot.
    *
    * Entries already expired against the new cache's clock are dropped.
    * If the surviving entries exceed `maxEntries`, the oldest by
    * `seenAt` are evicted first until the cache fits (ties break by
-   * snapshot order, least recently seen first). Duplicate nonces
-   * collapse to their last occurrence. TTLs keep counting from each
-   * entry's original `seenAt` — restoring never extends a nonce's
-   * tracking window. Observability counters start at zero: the load-time
+   * snapshot order, least recently seen first). Duplicate
+   * (scope, nonce) pairs collapse to their last occurrence. TTLs keep
+   * counting from each entry's original `seenAt` — restoring never
+   * extends a nonce's tracking window. Observability counters start at zero: the load-time
    * drops above are not counted as `evictions`.
    *
    * This covers a single process across its own restart only; see
@@ -826,31 +939,47 @@ export class ReplayCache implements NonceStore {
       throw new Error(`ReplayCache: invalid snapshot: ${detail}`);
     };
     if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot))
-      fail("expected an object of the form { v: 1, entries: [...] }");
+      fail("expected an object of the form { v: 1 | 2, entries: [...] }");
     const record = snapshot as Record<string, unknown>;
     for (const key of Object.keys(record)) {
       if (key !== "v" && key !== "entries") fail(`unknown field "${key}"`);
     }
-    if (record.v !== 1)
+    if (record.v !== 1 && record.v !== 2)
       fail(
-        `unsupported snapshot version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1)`,
+        `unsupported snapshot version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1 or 2)`,
       );
     const rawEntries: unknown = record.entries;
     if (!Array.isArray(rawEntries)) fail("entries must be an array");
     const entriesList = rawEntries as unknown[];
-    const parsed: Array<[string, number]> = [];
+    const parsed: Array<[string, string, number]> = [];
     for (let i = 0; i < entriesList.length; i++) {
       const entry: unknown = entriesList[i];
-      if (!Array.isArray(entry) || entry.length !== 2)
-        fail(`entries[${i}] must be a [nonce, seenAt] pair`);
-      const pair = entry as unknown[];
-      const nonce: unknown = pair[0];
-      const seenAt: unknown = pair[1];
-      if (typeof nonce !== "string" || nonce === "")
-        fail(`entries[${i}]: nonce must be a non-empty string`);
-      if (typeof seenAt !== "number" || !Number.isFinite(seenAt) || seenAt < 0)
-        fail(`entries[${i}]: seenAt must be a finite non-negative number (unix seconds)`);
-      parsed.push([nonce as string, seenAt as number]);
+      if (record.v === 1) {
+        if (!Array.isArray(entry) || entry.length !== 2)
+          fail(`entries[${i}] must be a [nonce, seenAt] pair`);
+        const pair = entry as unknown[];
+        const nonce: unknown = pair[0];
+        const seenAt: unknown = pair[1];
+        if (typeof nonce !== "string" || nonce === "")
+          fail(`entries[${i}]: nonce must be a non-empty string`);
+        if (typeof seenAt !== "number" || !Number.isFinite(seenAt) || seenAt < 0)
+          fail(`entries[${i}]: seenAt must be a finite non-negative number (unix seconds)`);
+        parsed.push(["", nonce as string, seenAt as number]);
+      } else {
+        if (!Array.isArray(entry) || entry.length !== 3)
+          fail(`entries[${i}] must be a [keyId, nonce, seenAt] triple`);
+        const triple = entry as unknown[];
+        const keyId: unknown = triple[0];
+        const nonce: unknown = triple[1];
+        const seenAt: unknown = triple[2];
+        if (typeof keyId !== "string")
+          fail(`entries[${i}]: keyId must be a string`);
+        if (typeof nonce !== "string" || nonce === "")
+          fail(`entries[${i}]: nonce must be a non-empty string`);
+        if (typeof seenAt !== "number" || !Number.isFinite(seenAt) || seenAt < 0)
+          fail(`entries[${i}]: seenAt must be a finite non-negative number (unix seconds)`);
+        parsed.push([keyId as string, nonce as string, seenAt as number]);
+      }
     }
 
     const cache = new ReplayCache(opts);
@@ -859,13 +988,14 @@ export class ReplayCache implements NonceStore {
     // returning NaN would otherwise silently keep expired entries.
     const t = cache.resolveNow();
     // Drop entries whose TTL already ran out against the new clock, and
-    // collapse duplicate nonces to their last occurrence (position and
-    // timestamp), mirroring the recency refresh in `check`.
+    // collapse duplicate (scope, nonce) pairs to their last occurrence
+    // (position and timestamp), mirroring the recency refresh in `check`.
     const live = new Map<string, number>();
-    for (const [nonce, at] of parsed) {
+    for (const [scope, nonce, at] of parsed) {
       if (t - at >= cache.ttlSec) continue;
-      live.delete(nonce);
-      live.set(nonce, at);
+      const key = ReplayCache.scopedKey(scope, nonce);
+      live.delete(key);
+      live.set(key, at);
     }
     let kept = [...live.entries()];
     if (kept.length > cache.maxEntries) {
@@ -878,7 +1008,7 @@ export class ReplayCache implements NonceStore {
       );
       kept = kept.filter((_, i) => !drop.has(i));
     }
-    for (const [nonce, at] of kept) cache.seenAt.set(nonce, at);
+    for (const [key, at] of kept) cache.seenAt.set(key, at);
     return cache;
   }
 

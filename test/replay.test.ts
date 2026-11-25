@@ -321,17 +321,17 @@ test("verifyAllLabels: a replayed label does not block the other label", () => {
   assert.equal(second[1].nonce, "multi-nonce-b");
 });
 
-test("verifyAllLabels: a shared nonce across labels — later labels report NONCE_REPLAY (pinned, fail-closed)", () => {
-  // PINNED BEHAVIOR — this is the intended fail-closed semantic, not a bug:
-  // the replay store is keyed by the bare nonce string with NO per-label
-  // partitioning (`cache.check(nonce, now)` in src/verify.ts). When two
-  // labels on the same request carry the SAME nonce — e.g. a gateway
-  // appending its signature while reusing the merchant's nonce — the first
-  // label records the nonce and every later label is rejected with
-  // NONCE_REPLAY even though both signatures are cryptographically valid.
-  // Caller contract: one nonce per label. Do NOT "fix" this by changing
-  // the store key format — that would silently break every existing custom
-  // NonceStore implementation.
+test("verifyAllLabels: a shared nonce across labels — scoped by keyid (backlog #1412, pinned)", () => {
+  // PINNED BEHAVIOR (backlog #1412, supersedes the old #643
+  // one-nonce-per-label contract): the replay store is keyed by the
+  // (`keyid`, nonce) pair, not the bare nonce string
+  // (`cache.check(nonce, now, keyid)` in src/verify.ts). When two
+  // labels on the same request carry the SAME nonce under DIFFERENT
+  // keyids — e.g. a gateway appending its signature while reusing the
+  // merchant's nonce string — each records its own scoped entry and
+  // both verify. The fail-closed side survives scoped: the same
+  // nonce under the SAME keyid still replays, so a replayed request
+  // (or a gateway reusing the merchant's keyid) is still rejected.
   const body = JSON.stringify({ amount: 100 });
   const req = {
     method: "POST",
@@ -340,9 +340,13 @@ test("verifyAllLabels: a shared nonce across labels — later labels report NONC
     body,
   };
   const { publicKey, privateKey } = generateEd25519KeyPair();
-  const signLabel = (label: string, nonce: string): SignedHttpRequest =>
+  const signLabel = (
+    label: string,
+    nonce: string,
+    keyId = `${label}-key`,
+  ): SignedHttpRequest =>
     signRequest(req, {
-      keyId: `${label}-key`,
+      keyId,
       alg: "ed25519",
       key: privateKey,
       created: CREATED,
@@ -364,7 +368,8 @@ test("verifyAllLabels: a shared nonce across labels — later labels report NONC
     };
   };
 
-  // Two labels, same nonce: merchant records it, gateway is rejected.
+  // Two labels, same nonce, different keyids: both verify — each
+  // records its own scoped entry.
   const dual = mergeLabels([
     signLabel("merchant", "shared-nonce-1"),
     signLabel("gateway", "shared-nonce-1"),
@@ -382,14 +387,14 @@ test("verifyAllLabels: a shared nonce across labels — later labels report NONC
     first.map((r) => [r.label, r.ok, r.code]),
     [
       ["merchant", true, undefined],
-      ["gateway", false, "NONCE_REPLAY"],
+      ["gateway", true, undefined],
     ],
   );
   assert.equal(first[1].nonce, "shared-nonce-1");
-  // the rejected replay does not consume another store entry
-  assert.equal(cache.size, 1);
+  // Two scoped entries, not one bare-nonce entry.
+  assert.equal(cache.size, 2);
 
-  // Three labels, same nonce: exactly the last two report replay.
+  // Three labels, same nonce, three different keyids: all verify.
   const triple = mergeLabels([
     signLabel("l1", "shared-nonce-2"),
     signLabel("l2", "shared-nonce-2"),
@@ -406,13 +411,38 @@ test("verifyAllLabels: a shared nonce across labels — later labels report NONC
     second.map((r) => [r.label, r.ok, r.code]),
     [
       ["l1", true, undefined],
-      ["l2", false, "NONCE_REPLAY"],
-      ["l3", false, "NONCE_REPLAY"],
+      ["l2", true, undefined],
+      ["l3", true, undefined],
     ],
   );
+  assert.equal(cache2.size, 3);
 
-  // Distinct nonces across labels keep passing together — the supported
-  // multi-party happy path for one-nonce-per-label callers.
+  // Same nonce under the SAME keyid across labels: the later labels
+  // still replay — the fail-closed side of the contract.
+  const sameKey = mergeLabels([
+    signLabel("merchant", "shared-nonce-3", "shared-key"),
+    signLabel("gateway", "shared-nonce-3", "shared-key"),
+  ]);
+  const cacheSameKey = new ReplayCache({ now: () => CREATED + 60 });
+  const replayed = verifyAllLabels(sameKey, {
+    key: publicKey,
+    now: CREATED + 60,
+    replayCache: cacheSameKey,
+    maxSignatureAgeSec: 3600,
+  });
+  assert.deepEqual(
+    replayed.map((r) => [r.label, r.ok, r.code]),
+    [
+      ["merchant", true, undefined],
+      ["gateway", false, "NONCE_REPLAY"],
+    ],
+  );
+  assert.equal(replayed[1].nonce, "shared-nonce-3");
+  // The rejected replay does not consume another store entry.
+  assert.equal(cacheSameKey.size, 1);
+
+  // Distinct nonces across labels keep passing together — the
+  // multi-party happy path.
   const distinct = mergeLabels([
     signLabel("merchant", "distinct-nonce-a"),
     signLabel("gateway", "distinct-nonce-b"),

@@ -118,7 +118,7 @@ test("exportSnapshot: bad injected clock throws instead of exporting empty", () 
   nowValue = Number.NaN;
   assertConfigError(() => cache.exportSnapshot(), CLOCK_MESSAGE);
   nowValue = 1000;
-  assert.deepEqual(cache.exportSnapshot(), { v: 1, entries: [["n1", 1000]] });
+  assert.deepEqual(cache.exportSnapshot(), { v: 2, entries: [["", "n1", 1000]] });
 });
 
 test("legal clocks and explicit now behave exactly as before", () => {
@@ -136,5 +136,5 @@ test("legal clocks and explicit now behave exactly as before", () => {
   assert.equal(cache.has("n2", 600), false);
   nowValue = 2000;
   assert.equal(cache.size, 0);
-  assert.deepEqual(cache.exportSnapshot(), { v: 1, entries: [] });
+  assert.deepEqual(cache.exportSnapshot(), { v: 2, entries: [] });
 });

@@ -2455,14 +2455,16 @@ export const DEMO_REPLAY_SNAPSHOT_FRESH_NONCE =
  * segment's nonce first seen at the demo's fixed verify
  * instant (`DEMO_CREATED + 60`, the instant `verifyRequest`
  * passes to the cache and the cache's own pinned clock) —
- * in a `v: 1` snapshot, the same entry shape
+ * in a `v: 2` snapshot, the same entry shape
  * `test/replaySnapshot.test.ts` pins for its round-trip
- * case. Written out here, never derived from the cache the
+ * case: the scope is the demo's keyid (`DEMO_KEY_ID`), the
+ * second element the nonce, the third the first-seen time.
+ * Written out here, never derived from the cache the
  * demo is checking.
  */
 export const DEMO_REPLAY_SNAPSHOT_ENTRIES: ReadonlyArray<
-  readonly [string, number]
-> = [[DEMO_REPLAY_SNAPSHOT_NONCE, DEMO_CREATED + 60]];
+  readonly [string, string, number]
+> = [[DEMO_KEY_ID, DEMO_REPLAY_SNAPSHOT_NONCE, DEMO_CREATED + 60]];
 /**
  * Hand-pinned failure code of the closing segment's restored
  * verification: the nonce was seen before the snapshot was
@@ -3171,20 +3173,28 @@ export const DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_TAMPER_ERROR =
  * exports after its first verifications: exactly one
  * entry per label — the label's nonce first seen at the
  * demo's fixed verify instant (`DEMO_CREATED + 60`) — in
- * a `v: 1` snapshot, the same entry shape
+ * a `v: 2` snapshot, the same entry shape
  * `test/replaySignedSnapshotsByLabel.test.ts` pins for its
  * round-trip case. Written out here, never derived from
  * the caches the demo is checking.
  */
 export const DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_ENTRIES: ReadonlyArray<
-  readonly [string, number]
+  readonly [string, string, number]
 > = [
-  [DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE, DEMO_CREATED + 60],
+  [
+    DEMO_KEY_ID,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_MERCHANT_NONCE,
+    DEMO_CREATED + 60,
+  ],
 ];
 export const DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_ENTRIES: ReadonlyArray<
-  readonly [string, number]
+  readonly [string, string, number]
 > = [
-  [DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE, DEMO_CREATED + 60],
+  [
+    DEMO_KEY_ID,
+    DEMO_REPLAY_SIGNED_SNAPSHOTS_BY_LABEL_GATEWAY_NONCE,
+    DEMO_CREATED + 60,
+  ],
 ];
 /**
  * Hand-pinned entry count of each per-label segment cache
@@ -5689,7 +5699,7 @@ export interface DemoResult {
    */
   replaySnapshotFirstVerification: VerifyResult;
   /**
-   * The v1 snapshot exported from the segment's cache after
+   * The v2 snapshot exported from the segment's cache after
    * the first verification (exactly the hand-pinned
    * `DEMO_REPLAY_SNAPSHOT_ENTRIES`).
    */
@@ -6801,11 +6811,23 @@ export interface DemoResult {
   replayCacheByLabelVerification: VerifyResult[];
   /**
    * Per-label results for the same request under a single shared
-   * global `replayCache` with no map (merchant passes, gateway
-   * fails `NONCE_REPLAY`: without the map the cache stays shared
-   * across labels, and an unmapped label falls back to it).
+   * global `replayCache` with no map: the first presentation passes
+   * BOTH labels (backlog #1412 scopes entries by `keyid`, so the
+   * two signers' same nonce string records two separate entries);
+   * the second presentation against that same store is
+   * `replayCacheByLabelGlobalSecondVerification` (both labels
+   * replay — one namespace remembers both scopes). An unmapped
+   * label falls back to the global store.
    */
   replayCacheByLabelGlobalVerification: VerifyResult[];
+  /**
+   * Per-label results for the same request presented a second time
+   * against the same single shared global `replayCache` (no map):
+   * both labels fail `NONCE_REPLAY` — the first presentation
+   * recorded each label's scoped entry, so the shared namespace
+   * rejects the re-presentation of both.
+   */
+  replayCacheByLabelGlobalSecondVerification: VerifyResult[];
   /** The per-label maximum-signature-age segment's dual-label request (both labels 300s old at the verifier clock). */
   maxSignatureAgeByLabelSigned: SignedHttpRequest;
   /**
@@ -11211,12 +11233,13 @@ export async function runDemo(): Promise<DemoResult> {
     entries.every(
       (entry, i) =>
         entry[0] === DEMO_REPLAY_SNAPSHOT_ENTRIES[i][0] &&
-        entry[1] === DEMO_REPLAY_SNAPSHOT_ENTRIES[i][1],
+        entry[1] === DEMO_REPLAY_SNAPSHOT_ENTRIES[i][1] &&
+        entry[2] === DEMO_REPLAY_SNAPSHOT_ENTRIES[i][2],
     );
   if (
     !replaySnapshotFirstVerification.ok ||
     replaySnapshotFirstVerification.nonce !== DEMO_REPLAY_SNAPSHOT_NONCE ||
-    replaySnapshotExport.v !== 1 ||
+    replaySnapshotExport.v !== 2 ||
     !snapshotEntriesMatch(replaySnapshotExport.entries) ||
     replaySnapshotReplayVerification.ok ||
     replaySnapshotReplayVerification.code !== DEMO_REPLAY_SNAPSHOT_CODE ||
@@ -11236,7 +11259,7 @@ export async function runDemo(): Promise<DemoResult> {
         `sizes restored/original=${replaySnapshotRestoredSize}/${replaySnapshotOriginalSize}, ` +
         `original export after=${JSON.stringify(replaySnapshotOriginalExportAfter)}, ` +
         `instead of the pinned first=true/${DEMO_REPLAY_SNAPSHOT_NONCE}, ` +
-        `export=${JSON.stringify({ v: 1, entries: DEMO_REPLAY_SNAPSHOT_ENTRIES })}, ` +
+        `export=${JSON.stringify({ v: 2, entries: DEMO_REPLAY_SNAPSHOT_ENTRIES })}, ` +
         `restored=false/${DEMO_REPLAY_SNAPSHOT_CODE}, ` +
         `fresh=true/${DEMO_REPLAY_SNAPSHOT_FRESH_NONCE}, ` +
         `sizes restored/original=${DEMO_REPLAY_SNAPSHOT_RESTORED_SIZE}/${DEMO_REPLAY_SNAPSHOT_ORIGINAL_SIZE}`,
@@ -12734,17 +12757,22 @@ export async function runDemo(): Promise<DemoResult> {
   const replaySignedSnapshotsByLabelTampered = JSON.parse(
     JSON.stringify(replaySignedSnapshotsByLabelEnvelopes),
   ) as {
-    gateway: { snapshot: { entries: Array<[string, number]> } };
+    gateway: { snapshot: { entries: Array<[string, string, number]> } };
   };
-  const replaySignedSnapshotsByLabelOriginalNonce = String(
+  const replaySignedSnapshotsByLabelOriginalKeyId = String(
     replaySignedSnapshotsByLabelTampered.gateway.snapshot.entries[0]?.[0] ??
       "",
   );
+  const replaySignedSnapshotsByLabelOriginalNonce = String(
+    replaySignedSnapshotsByLabelTampered.gateway.snapshot.entries[0]?.[1] ??
+      "",
+  );
   replaySignedSnapshotsByLabelTampered.gateway.snapshot.entries[0] = [
+    replaySignedSnapshotsByLabelOriginalKeyId,
     replaySignedSnapshotsByLabelOriginalNonce[0] === "d"
       ? `e${replaySignedSnapshotsByLabelOriginalNonce.slice(1)}`
       : `d${replaySignedSnapshotsByLabelOriginalNonce.slice(1)}`,
-    replaySignedSnapshotsByLabelTampered.gateway.snapshot.entries[0]?.[1] ??
+    replaySignedSnapshotsByLabelTampered.gateway.snapshot.entries[0]?.[2] ??
       DEMO_CREATED + 60,
   ];
   let replaySignedSnapshotsByLabelTamperError = "";
@@ -12775,12 +12803,14 @@ export async function runDemo(): Promise<DemoResult> {
   );
   const replaySignedSnapshotsByLabelEntriesMatch = (
     entries: ReplayCacheSnapshot["entries"],
-    expected: ReadonlyArray<readonly [string, number]>,
+    expected: ReadonlyArray<readonly [string, string, number]>,
   ): boolean =>
     entries.length === expected.length &&
     entries.every(
       (entry, i) =>
-        entry[0] === expected[i]?.[0] && entry[1] === expected[i]?.[1],
+        entry[0] === expected[i]?.[0] &&
+        entry[1] === expected[i]?.[1] &&
+        entry[2] === expected[i]?.[2],
     );
   if (
     !replaySignedSnapshotsByLabelMerchantFirstVerification.ok ||
@@ -17244,22 +17274,27 @@ export async function runDemo(): Promise<DemoResult> {
 
   // Per-label replay-cache segment: each party mints nonces in its
   // own namespace, so a merchant signature and a gateway signature
-  // can legitimately carry the same bare nonce string. A single
-  // shared cache keyed by that bare string would reject the second
-  // label as a replay even though it never saw the nonce; per-label
-  // stores partition the namespace instead. The merchant store is
+  // can legitimately carry the same bare nonce string. Per-label
+  // stores partition the namespace by label: the merchant store is
   // pre-seeded here by verifying the merchant's own signature once
   // against it (the first presentation of the nonce in that store),
   // so the dual verification below is the merchant label's second
   // presentation and the gateway label's first presentation in its
   // own store. A label with no map entry falls back to the global
   // `replayCache` — and with no map at all the cache stays shared
-  // across labels, which the global re-verification below pins:
-  // the same fixture under one shared store passes the merchant
-  // label and replays the gateway label. The same per-label replay
-  // semantics `test/replayCacheByLabel.test.ts` pins. A replay
-  // failure still carries its keyid, so both labels' keyids are
-  // asserted (unlike a crypto failure, which may carry none).
+  // across labels, which the global re-verifications below pin: the
+  // same fixture under one shared store passes BOTH labels on first
+  // presentation (backlog #1412 scopes entries by `keyid`, so the
+  // two signers' same nonce string records two separate entries),
+  // and replays BOTH on the second presentation against that same
+  // store — one namespace remembers both scopes. The per-label map
+  // still matters: it keeps one label's store (here the pre-seeded
+  // merchant store) from deciding the other label's verdict, and
+  // two labels sharing one `keyid` still collide under a shared
+  // cache. The same per-label replay semantics
+  // `test/replayCacheByLabel.test.ts` pins. A replay failure still
+  // carries its keyid, so both labels' keyids are asserted (unlike
+  // a crypto failure, which may carry none).
   const replayCacheByLabelMerchantPair = generateEd25519KeyPair();
   const replayCacheByLabelGatewayPair = generateEd25519KeyPair();
   const replayCacheByLabelSign = (
@@ -17349,6 +17384,17 @@ export async function runDemo(): Promise<DemoResult> {
       replayCache: replayCacheByLabelGlobalCache,
     },
   );
+  // Second presentation against the SAME shared store: both scoped
+  // entries are already recorded, so both labels replay together.
+  const replayCacheByLabelGlobalSecondVerification = verifyAllLabels(
+    replayCacheByLabelSigned,
+    {
+      keys: replayCacheByLabelKeys,
+      now: DEMO_REPLAY_CACHE_BY_LABEL_NOW,
+      maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
+      replayCache: replayCacheByLabelGlobalCache,
+    },
+  );
   if (
     replayCacheByLabelPreseed.ok !== true ||
     replayCacheByLabelPreseed.nonce !== DEMO_REPLAY_CACHE_BY_LABEL_NONCE ||
@@ -17379,21 +17425,38 @@ export async function runDemo(): Promise<DemoResult> {
       DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID ||
     replayCacheByLabelGlobalVerification[1].label !==
       DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL ||
-    replayCacheByLabelGlobalVerification[1].ok !== false ||
-    replayCacheByLabelGlobalVerification[1].code !==
-      DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE ||
-    replayCacheByLabelGlobalVerification[1].reason !==
-      DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON ||
+    replayCacheByLabelGlobalVerification[1].ok !== true ||
     replayCacheByLabelGlobalVerification[1].keyId !==
+      DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID ||
+    replayCacheByLabelGlobalSecondVerification.length !== 2 ||
+    replayCacheByLabelGlobalSecondVerification[0].label !==
+      DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL ||
+    replayCacheByLabelGlobalSecondVerification[0].ok !== false ||
+    replayCacheByLabelGlobalSecondVerification[0].code !==
+      DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE ||
+    replayCacheByLabelGlobalSecondVerification[0].reason !==
+      DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON ||
+    replayCacheByLabelGlobalSecondVerification[0].keyId !==
+      DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID ||
+    replayCacheByLabelGlobalSecondVerification[1].label !==
+      DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL ||
+    replayCacheByLabelGlobalSecondVerification[1].ok !== false ||
+    replayCacheByLabelGlobalSecondVerification[1].code !==
+      DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE ||
+    replayCacheByLabelGlobalSecondVerification[1].reason !==
+      DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON ||
+    replayCacheByLabelGlobalSecondVerification[1].keyId !==
       DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID
   ) {
     throw new Error(
       `demo fixture broken: replayCacheByLabel gave ` +
         `${JSON.stringify(replayCacheByLabelVerification)} and ` +
-        `${JSON.stringify(replayCacheByLabelGlobalVerification)}, instead of the merchant ` +
+        `${JSON.stringify(replayCacheByLabelGlobalVerification)} and ` +
+        `${JSON.stringify(replayCacheByLabelGlobalSecondVerification)}, instead of the merchant ` +
         `label rejected with ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE} and the gateway label ` +
-        `verifying under the per-label map, with the merchant label verifying and the gateway label ` +
-        `rejected with ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE} under a single shared global cache`,
+        `verifying under the per-label map, with both labels verifying on first presentation ` +
+        `and both rejected with ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE} on second presentation ` +
+        `under a single shared global cache`,
     );
   }
 
@@ -19803,15 +19866,17 @@ export async function runDemo(): Promise<DemoResult> {
       ? `Map overrides global: the same fixture re-verified with algFallback "infer" alone: merchant OK (alg="${algFallbackByLabelGlobalVerification[0]!.alg}"), gateway OK (alg="${algFallbackByLabelGlobalVerification[1]!.alg}") — the mapped false, not the global infer, is what rejects the gateway label`
       : `Map overrides global: the same fixture re-verified with algFallback "infer" alone: merchant ${algFallbackByLabelGlobalVerification[0]!.ok ? "OK" : "FAILED (unexpected — the merchant label did not infer under the global strategy)"}, gateway ${algFallbackByLabelGlobalVerification[1]!.ok ? "OK" : "FAILED (unexpected — the gateway label did not infer under the global strategy)"}`,
     "",
-    "Per-label replay cache: verifyAllLabels' replayCacheByLabel map gives each label its own nonce store — the merchant and gateway signatures carry the same bare nonce string, because each party mints nonces in its own namespace, and a single shared cache keyed by that bare string cannot split a dual signature whose labels reuse a nonce — the merchant store was pre-seeded with the nonce before the dual verification, so the dual call is the merchant label's second presentation and the gateway label's first presentation in its own store",
+    "Per-label replay cache: verifyAllLabels' replayCacheByLabel map gives each label its own nonce store — the merchant and gateway signatures carry the same bare nonce string, because each party mints nonces in its own namespace, and a single shared cache scopes entries by keyid, so it splits a dual whose labels carry different keyids (the first presentation passes both labels; only the second presentation replays both) — while the map keeps the pre-seeded merchant replay confined to the merchant label — the merchant store was pre-seeded with the nonce before the dual verification, so the dual call is the merchant label's second presentation and the gateway label's first presentation in its own store",
     replayCacheByLabelVerification[0]!.ok === false &&
     replayCacheByLabelVerification[1]!.ok === true
       ? `Replay split: both signatures carry nonce "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}", verified with replayCacheByLabel { merchant: merchantCache, gateway: gatewayCache } after the merchant store was pre-seeded with that nonce: merchant FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, code ${replayCacheByLabelVerification[0]!.code}: ${replayCacheByLabelVerification[0]!.reason}), gateway OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, keyid="${replayCacheByLabelVerification[1]!.keyId}", alg="ed25519") — the same bare nonce is a replay in one label's store and fresh in the other's`
       : `Replay split: both signatures carry nonce "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}", verified with replayCacheByLabel { merchant: merchantCache, gateway: gatewayCache } after the merchant store was pre-seeded with that nonce: merchant ${replayCacheByLabelVerification[0]!.ok ? "OK (unexpected — the pre-seeded merchant nonce was not detected as a replay)" : `code ${replayCacheByLabelVerification[0]!.code}`}, gateway ${replayCacheByLabelVerification[1]!.ok ? "OK" : "FAILED (unexpected — the gateway label's first presentation in its own store was rejected)"}`,
     replayCacheByLabelGlobalVerification[0]!.ok === true &&
-    replayCacheByLabelGlobalVerification[1]!.ok === false
-      ? `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: merchant OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, keyid="${replayCacheByLabelGlobalVerification[0]!.keyId}"), gateway FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, code ${replayCacheByLabelGlobalVerification[1]!.code}: ${replayCacheByLabelGlobalVerification[1]!.reason}) — without the map the cache stays shared across labels, and a label with no map entry falls back to the global store`
-      : `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: merchant ${replayCacheByLabelGlobalVerification[0]!.ok ? "OK" : "FAILED (unexpected — the merchant label did not pass under the shared cache)"}, gateway ${replayCacheByLabelGlobalVerification[1]!.ok ? "OK (unexpected — the shared cache did not replay the second label)" : `code ${replayCacheByLabelGlobalVerification[1]!.code}`}`,
+    replayCacheByLabelGlobalVerification[1]!.ok === true &&
+    replayCacheByLabelGlobalSecondVerification[0]!.ok === false &&
+    replayCacheByLabelGlobalSecondVerification[1]!.ok === false
+      ? `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: first presentation merchant OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, keyid="${replayCacheByLabelGlobalVerification[0]!.keyId}") and gateway OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, keyid="${replayCacheByLabelGlobalVerification[1]!.keyId}"), second presentation against the same store merchant FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, code ${replayCacheByLabelGlobalSecondVerification[0]!.code}: ${replayCacheByLabelGlobalSecondVerification[0]!.reason}) and gateway FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, code ${replayCacheByLabelGlobalSecondVerification[1]!.code}: ${replayCacheByLabelGlobalSecondVerification[1]!.reason}) — entries are scoped by keyid, so the shared cache splits the two signers on first presentation, but one namespace still remembers both scopes, and a label with no map entry falls back to the global store`
+      : `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: first presentation merchant ${replayCacheByLabelGlobalVerification[0]!.ok ? "OK" : "FAILED (unexpected — the merchant label did not pass under the shared cache)"}, gateway ${replayCacheByLabelGlobalVerification[1]!.ok ? "OK" : "FAILED (unexpected — the gateway label did not pass under the shared cache)"}, second presentation merchant ${replayCacheByLabelGlobalSecondVerification[0]!.ok ? "OK (unexpected — the shared cache did not replay the merchant label)" : `code ${replayCacheByLabelGlobalSecondVerification[0]!.code}`}, gateway ${replayCacheByLabelGlobalSecondVerification[1]!.ok ? "OK (unexpected — the shared cache did not replay the gateway label)" : `code ${replayCacheByLabelGlobalSecondVerification[1]!.code}`}`,
     "",
     "Per-label maximum signature age: verifyAllLabels' maxSignatureAgeSecByLabel map gives each label its own freshness window — the merchant window is 60s, the gateway window is 3600s, and both signatures are 300s old, so a single global window cannot split them: the merchant label is already stale while the gateway label is still fresh — an age check only rejects an otherwise cryptographically valid signature after its window, it never changes the signature itself — and a label absent from the map falls back to the global window rather than skipping the age check",
     maxSignatureAgeByLabelVerification[0]!.ok === false &&
@@ -20353,6 +20418,7 @@ export async function runDemo(): Promise<DemoResult> {
     replayCacheByLabelSigned,
     replayCacheByLabelVerification,
     replayCacheByLabelGlobalVerification,
+    replayCacheByLabelGlobalSecondVerification,
     maxSignatureAgeByLabelSigned,
     maxSignatureAgeByLabelVerification,
     maxSignatureAgeByLabelFallbackVerification,

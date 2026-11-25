@@ -27,10 +27,10 @@ test("signed snapshot round-trip: seen nonce is still a replay after restore", (
   const envelope = cache.exportSignedSnapshot(SECRET);
   assert.equal(envelope.v, 1);
   assert.deepEqual(envelope.snapshot, {
-    v: 1,
+    v: 2,
     entries: [
-      ["nonce-a", 1000],
-      ["nonce-b", 1000],
+      ["", "nonce-a", 1000],
+      ["", "nonce-b", 1000],
     ],
   });
   assert.match(envelope.mac, /^[0-9a-f]{64}$/);
@@ -86,7 +86,7 @@ test("tampered entry is rejected", () => {
   const { cache } = seededCache();
   const envelope = cache.exportSignedSnapshot(SECRET);
   const tampered = JSON.parse(JSON.stringify(envelope)) as ReplayCacheSignedSnapshotEnvelope;
-  tampered.snapshot.entries[0][0] = "nonce-evil";
+  tampered.snapshot.entries[0][1] = "nonce-evil";
   assert.throws(
     () => ReplayCache.restoreSignedSnapshot(tampered, SECRET),
     /MAC mismatch/,
@@ -99,7 +99,7 @@ test("tampered seenAt is rejected", () => {
   const { cache } = seededCache();
   const envelope = cache.exportSignedSnapshot(SECRET);
   const tampered = JSON.parse(JSON.stringify(envelope)) as ReplayCacheSignedSnapshotEnvelope;
-  tampered.snapshot.entries[0][1] = 1; // pretend the nonce was seen at t=1
+  tampered.snapshot.entries[0][2] = 1; // pretend the nonce was seen at t=1
   assert.throws(
     () => ReplayCache.restoreSignedSnapshot(tampered, SECRET),
     /MAC mismatch/,
@@ -213,7 +213,7 @@ function canonicalJsonForTest(value: unknown): string {
 test("MAC-valid but structurally broken snapshot is rejected", async () => {
   const { createHmac } = await import("node:crypto");
   const badSnapshots: Array<{ snapshot: Record<string, unknown>; pattern: RegExp }> = [
-    { snapshot: { v: 2, entries: [] }, pattern: /invalid snapshot: unsupported snapshot version/ },
+    { snapshot: { v: 3, entries: [] }, pattern: /invalid snapshot: unsupported snapshot version/ },
     { snapshot: { v: 1, entries: [["ok", 1000], ["", 1000]] }, pattern: /invalid snapshot: entries\[1\]: nonce must be a non-empty string/ },
     { snapshot: { v: 1, entries: [["ok", -5]] }, pattern: /invalid snapshot: entries\[0\]: seenAt must be a finite non-negative number/ },
     { snapshot: { v: 1 }, pattern: /invalid snapshot: entries must be an array/ },

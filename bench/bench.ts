@@ -13088,10 +13088,10 @@ const REPLAY_EXPORT_EXPIRED_NONCE = "bench-export-expired";
  * REPLAY_EXPORT_NOW, in LRU (insertion) order — written literally,
  * never derived from `exportSnapshot` itself.
  */
-const REPLAY_EXPORT_EXPECTED: Array<[string, number]> = [
-  ["bench-export-first", REPLAY_EXPORT_NOW - 30],
-  ["bench-export-second", REPLAY_EXPORT_NOW - 20],
-  ["bench-export-last", REPLAY_EXPORT_NOW - 10],
+const REPLAY_EXPORT_EXPECTED: Array<[string, string, number]> = [
+  ["", "bench-export-first", REPLAY_EXPORT_NOW - 30],
+  ["", "bench-export-second", REPLAY_EXPORT_NOW - 20],
+  ["", "bench-export-last", REPLAY_EXPORT_NOW - 10],
 ];
 
 /**
@@ -13113,7 +13113,7 @@ function replayExportFixture(): ReplayCache {
     throw new Error(
       "benchmark self-check failed: expired-fixture nonce reported as replay",
     );
-  for (const [nonce, seenAt] of REPLAY_EXPORT_EXPECTED) {
+  for (const [, nonce, seenAt] of REPLAY_EXPORT_EXPECTED) {
     clock = seenAt;
     if (cache.check(nonce) !== false)
       throw new Error(
@@ -13126,16 +13126,16 @@ function replayExportFixture(): ReplayCache {
 
 /**
  * Pin one exported snapshot against the hand-written expectation:
- * version 1, exactly the live-entry count (the expired entry is
- * filtered out), every entry item by item (nonce and `seenAt`, first
- * and last included), and the expired nonce absent.
+ * version 2, exactly the live-entry count (the expired entry is
+ * filtered out), every entry item by item (keyId scope, nonce and
+ * `seenAt`, first and last included), and the expired nonce absent.
  */
 function assertReplayExportSnapshot(
   snapshot: ReturnType<ReplayCache["exportSnapshot"]>,
 ): void {
-  if (snapshot.v !== 1)
+  if (snapshot.v !== 2)
     throw new Error(
-      `benchmark self-check failed: replay exportSnapshot v ${String(snapshot.v)} (expected 1)`,
+      `benchmark self-check failed: replay exportSnapshot v ${String(snapshot.v)} (expected 2)`,
     );
   if (snapshot.entries.length !== REPLAY_EXPORT_EXPECTED.length)
     throw new Error(
@@ -13144,14 +13144,16 @@ function assertReplayExportSnapshot(
     );
   for (let i = 0; i < REPLAY_EXPORT_EXPECTED.length; i++) {
     const entry = snapshot.entries[i]!;
-    const [nonce, seenAt] = REPLAY_EXPORT_EXPECTED[i]!;
-    if (entry[0] !== nonce || entry[1] !== seenAt)
+    const [scope, nonce, seenAt] = REPLAY_EXPORT_EXPECTED[i]!;
+    if (entry[0] !== scope || entry[1] !== nonce || entry[2] !== seenAt)
       throw new Error(
         `benchmark self-check failed: replay exportSnapshot entries[${i}] ${JSON.stringify(entry)} ` +
-          `(expected ${JSON.stringify([nonce, seenAt])})`,
+          `(expected ${JSON.stringify([scope, nonce, seenAt])})`,
       );
   }
-  if (snapshot.entries.some(([nonce]) => nonce === REPLAY_EXPORT_EXPIRED_NONCE))
+  if (
+    snapshot.entries.some(([, nonce]) => nonce === REPLAY_EXPORT_EXPIRED_NONCE)
+  )
     throw new Error(
       "benchmark self-check failed: replay exportSnapshot carries the expired nonce",
     );
@@ -13161,27 +13163,27 @@ function assertReplayExportSnapshot(
  * `ReplayCache.exportSnapshot` steady state: every measured call
  * re-exports the fixed-clock fixture and re-pins the whole snapshot
  * (see {@link assertReplayExportSnapshot}) — the live-entry filter
- * plus detached `{ v: 1, entries }` assembly a verifier pays when it
+ * plus detached `{ v: 2, entries }` assembly a verifier pays when it
  * persists its replay cache before a restart. Outside timing, the
  * detached-copy semantics are asserted (mutating an exported
  * snapshot — entry nonce, `seenAt`, an injected entry, the version —
  * leaves a re-export unchanged) and an empty cache must export
- * `{ v: 1, entries: [] }`.
+ * `{ v: 2, entries: [] }`.
  */
 function benchmarkReplayCacheExportSnapshot(): number {
   const cache = replayExportFixture();
   assertReplayExportSnapshot(cache.exportSnapshot());
   const detached = cache.exportSnapshot();
-  detached.entries[0]![0] = "bench-export-forged";
-  detached.entries[0]![1] = 0;
-  detached.entries.push(["bench-export-injected", REPLAY_EXPORT_NOW]);
+  detached.entries[0]![1] = "bench-export-forged";
+  detached.entries[0]![2] = 0;
+  detached.entries.push(["", "bench-export-injected", REPLAY_EXPORT_NOW]);
   (detached as { v: number }).v = 99;
   assertReplayExportSnapshot(cache.exportSnapshot());
   const empty = new ReplayCache({ now: () => REPLAY_EXPORT_NOW }).exportSnapshot();
-  if (empty.v !== 1 || empty.entries.length !== 0)
+  if (empty.v !== 2 || empty.entries.length !== 0)
     throw new Error(
       `benchmark self-check failed: empty replay exportSnapshot ${JSON.stringify(empty)} ` +
-        `(expected { v: 1, entries: [] })`,
+        `(expected { v: 2, entries: [] })`,
     );
   return measure(() => {
     assertReplayExportSnapshot(cache.exportSnapshot());
@@ -13791,11 +13793,11 @@ const REPLAY_RESTORE_EXPIRED_AT = REPLAY_RESTORE_NOW + 200;
  * REPLAY_RESTORE_NOW, in LRU (insertion) order — written
  * literally, never derived from `exportSnapshot` itself.
  */
-const REPLAY_RESTORE_EXPECTED: Array<[string, number]> = [
-  ["bench-restore-oldest", REPLAY_RESTORE_NOW - 3500],
-  ["bench-restore-first", REPLAY_RESTORE_NOW - 30],
-  ["bench-restore-second", REPLAY_RESTORE_NOW - 20],
-  ["bench-restore-last", REPLAY_RESTORE_NOW - 10],
+const REPLAY_RESTORE_EXPECTED: Array<[string, string, number]> = [
+  ["", "bench-restore-oldest", REPLAY_RESTORE_NOW - 3500],
+  ["", "bench-restore-first", REPLAY_RESTORE_NOW - 30],
+  ["", "bench-restore-second", REPLAY_RESTORE_NOW - 20],
+  ["", "bench-restore-last", REPLAY_RESTORE_NOW - 10],
 ];
 /**
  * Hand-pinned observability reading of a freshly restored fixture
@@ -13814,13 +13816,13 @@ const REPLAY_RESTORE_STATS = { size: 4, hits: 0, misses: 0, evictions: 0 };
  * not-a-replay.
  */
 function replayRestoreFixtureSnapshot(): ReturnType<ReplayCache["exportSnapshot"]> {
-  let clock = REPLAY_RESTORE_EXPECTED[0]![1];
+  let clock = REPLAY_RESTORE_EXPECTED[0]![2];
   const source = new ReplayCache({
     maxEntries: 10_000,
     ttlSec: REPLAY_RESTORE_TTL_SEC,
     now: () => clock,
   });
-  for (const [nonce, seenAt] of REPLAY_RESTORE_EXPECTED) {
+  for (const [, nonce, seenAt] of REPLAY_RESTORE_EXPECTED) {
     clock = seenAt;
     if (source.check(nonce) !== false)
       throw new Error(
@@ -13835,15 +13837,15 @@ function replayRestoreFixtureSnapshot(): ReturnType<ReplayCache["exportSnapshot"
 
 /**
  * Pin one fixture snapshot against the hand-written expectation:
- * version 1 and every entry item by item (nonce and `seenAt`,
- * first and last included).
+ * version 2 and every entry item by item (keyId scope, nonce and
+ * `seenAt`, first and last included).
  */
 function assertReplayRestoreSnapshot(
   snapshot: ReturnType<ReplayCache["exportSnapshot"]>,
 ): void {
-  if (snapshot.v !== 1)
+  if (snapshot.v !== 2)
     throw new Error(
-      `benchmark self-check failed: replay restore snapshot v ${String(snapshot.v)} (expected 1)`,
+      `benchmark self-check failed: replay restore snapshot v ${String(snapshot.v)} (expected 2)`,
     );
   if (snapshot.entries.length !== REPLAY_RESTORE_EXPECTED.length)
     throw new Error(
@@ -13852,11 +13854,11 @@ function assertReplayRestoreSnapshot(
     );
   for (let i = 0; i < REPLAY_RESTORE_EXPECTED.length; i++) {
     const entry = snapshot.entries[i]!;
-    const [nonce, seenAt] = REPLAY_RESTORE_EXPECTED[i]!;
-    if (entry[0] !== nonce || entry[1] !== seenAt)
+    const [scope, nonce, seenAt] = REPLAY_RESTORE_EXPECTED[i]!;
+    if (entry[0] !== scope || entry[1] !== nonce || entry[2] !== seenAt)
       throw new Error(
         `benchmark self-check failed: replay restore snapshot entries[${i}] ${JSON.stringify(entry)} ` +
-          `(expected ${JSON.stringify([nonce, seenAt])})`,
+          `(expected ${JSON.stringify([scope, nonce, seenAt])})`,
       );
   }
 }
@@ -14164,7 +14166,7 @@ function benchmarkReplayCacheExportSignedSnapshotsByLabel(): number {
     string,
     ReplayCacheSignedSnapshotEnvelope
   >;
-  tamperedSeenAt.merchant!.snapshot.entries[0]![1] = 1;
+  tamperedSeenAt.merchant!.snapshot.entries[0]![2] = 1;
   for (const attempt of [
     { envelopes: tamperedEntry, secret: REPLAY_SIGNED_BY_LABEL_SECRET },
     { envelopes: tamperedSeenAt, secret: REPLAY_SIGNED_BY_LABEL_SECRET },

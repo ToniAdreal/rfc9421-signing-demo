@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2988 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 2998 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2313,7 +2313,14 @@ values. Without a request to bind to, keep using the request-side API
   `verifyRequest(req, { key, replayCache })`: a nonce already seen within
   the cache TTL fails with `NONCE_REPLAY` (fresh nonces are recorded only
   *after* the signature fully verifies, so forgeries can't pollute the
-  cache). The cache is only consulted when a signature actually carries
+  cache). Entries are scoped by the signature's wire `keyid`, so two
+  signers sharing one cache no longer collide on the same nonce string:
+  a tenant's nonce cannot be consumed by another tenant's signature,
+  and an attacker cannot plant a victim's nonce with their own key
+  (their signature is legitimate, but it records the nonce under their
+  own `keyid`). A keyid-less signature uses the empty scope, the old
+  single-namespace behavior among keyid-less signers. The cache is only
+  consulted when a signature actually carries
   a nonce, so a nonce-less signature bypasses it silently — set
   `requireNonce: true` alongside it when such signatures must be
   rejected instead: they then fail with `MISSING_NONCE` (an empty-string
@@ -2341,15 +2348,21 @@ values. Without a request to bind to, keep using the request-side API
   error; the cap is sign-side fail-fast only (see the tag bullet for
   the rationale). By default the cache is shared across
   `verifyAllLabels` labels, while `requireNonce` is judged per label. The
-  shared store is keyed by the bare nonce string with no per-label
-  partitioning, so callers have a hard contract: **one nonce per label** — if two labels
-  on the same request carry the *same* nonce (e.g. a gateway reusing the
-  merchant's nonce while appending its own signature), the first label
-  records it and every later label is rejected with `NONCE_REPLAY`, even
-  though both signatures are cryptographically valid. This is the
-  intentional fail-closed semantic (pinned by
-  `test/replay.test.ts`), not a bug: changing the store key format would
-  silently break every existing custom `NonceStore` implementation.
+  shared store is keyed by (`keyid`, nonce) with no per-label
+  partitioning, so callers have a hard contract: **one nonce per
+  (`keyid`, label)** — if two labels on the same request carry the
+  *same* nonce under the *same* `keyid` (e.g. a gateway reusing the
+  merchant's nonce while appending its own signature under the same
+  key), the first label records it and every later label is rejected
+  with `NONCE_REPLAY`, even though both signatures are cryptographically
+  valid. Two labels under *different* `keyid`s reusing the same nonce
+  string no longer block each other — each records its own scoped
+  entry. This is the intentional fail-closed semantic (pinned by
+  `test/replay.test.ts`), not a bug: the store has no per-label
+  partitioning, only per-`keyid` scoping, so a custom `NonceStore`
+  must incorporate the `scope` argument into its own key the same way
+  `ReplayCache` does — a store that ignores it silently keeps the old
+  bare-nonce behavior.
   Generate a fresh `generateNonce()` value for each label you sign —
   unless you deliberately partition the namespace with
   `replayCacheByLabel` (see the per-label replay stores section above),
@@ -2378,11 +2391,15 @@ values. Without a request to bind to, keep using the request-side API
   that signed request, which is why the library never releases anything
   on its own. A single process can carry the cache across
   its own restart: `cache.exportSnapshot()` returns a detached,
-  JSON-serializable `{ v: 1, entries }` snapshot of the live nonces with
-  their original first-seen timestamps, and
+  JSON-serializable `{ v: 2, entries }` snapshot of the live nonces with
+  their original first-seen timestamps — entries are `[keyId, nonce,
+  seenAt]` triples, so the scope travels with each nonce — and
   `ReplayCache.restore(snapshot, opts)` reloads it after strictly
   validating the shape (a corrupt snapshot throws a configuration error
-  at startup instead of silently disabling replay protection). Expired
+  at startup instead of silently disabling replay protection). A `v: 1`
+  snapshot (the old `[nonce, seenAt]` pairs) still restores, migrated
+  to the empty scope, so its nonces block only keyid-less replays, never
+  a keyed signer's same nonce; any other version is rejected. Expired
   entries are dropped at load, an over-capacity snapshot keeps the
   newest entries, TTLs keep counting from first sight rather than from
   the restore, and the observability counters restart at zero. A
@@ -4096,14 +4113,14 @@ instant) whose map holds four recorded nonces: one recorded
 under the 3,600-second TTL, and three live nonces at pinned
 `seenAt` values 30, 20 and 10 seconds before it. Every
 measured pass re-pins the whole exported snapshot against
-hand-written expectations: version 1, exactly the three live
-entries, every entry item by item (nonce and `seenAt`, first
-and last included), and the expired nonce absent. Outside
+hand-written expectations: version 2, exactly the three live
+entries, every entry item by item (keyId scope, nonce and
+`seenAt`, first and last included), and the expired nonce absent. Outside
 timing the bench also asserts the detached-copy semantics
 (mutating an exported snapshot — an entry's nonce, its
 `seenAt`, an injected entry, the version — leaves a
 re-export unchanged) and that an empty cache exports
-`{ v: 1, entries: [] }`. In this run it measured ~428,054
+`{ v: 2, entries: [] }`. In this run it measured ~428,054
 ops/sec (~2.34 µs/op for the three-live-entry pass) — close
 to the same run's `ReplayCache.check` hit (~1.89 µs/op):
 both are small-map operations at this size (a check is one
@@ -5558,7 +5575,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2988 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 2998 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

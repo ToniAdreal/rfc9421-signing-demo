@@ -203,8 +203,9 @@ test("verifyAllLabels x replayCacheByLabel x JwksKeyStore: dual labels resolve t
   assert.equal(results["gateway"].ok, true);
   assert.equal(results["gateway"].keyId, "gateway-key-1");
   // The same bare nonce string was recorded once per label, not
-  // once globally: with a shared store the second label would
-  // already have failed on this first call.
+  // once globally. (Since backlog #1412 a shared store would also
+  // record it twice here — the labels carry different keyids — but
+  // per-label stores partition by label regardless of keyid.)
   assert.equal(merchantCache.size, 1);
   assert.equal(gatewayCache.size, 1);
 });

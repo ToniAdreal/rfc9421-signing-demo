@@ -18,11 +18,16 @@ import {
 // reuse the same nonce string could never both pass in one request:
 // the first label recorded the nonce and the second was rejected as
 // `NONCE_REPLAY` (pinned by `test/requireNonceByLabel.test.ts`).
-// `replayCacheByLabel` partitions the namespace per label: a label in
-// the map is checked against its own `NonceStore`, and only unmapped
-// labels fall back to the global `replayCache`. This file pins that
-// contract, including the opt-in nature — without the map, the shared
-// behavior is unchanged.
+// Backlog #1412 scopes entries by the signature's wire `keyid`, so
+// that one-nonce-per-label contract is gone for signers under
+// different keyids: a shared store now records one scoped entry per
+// signer, and only the *same* keyid reusing a nonce still replays.
+// `replayCacheByLabel` still partitions the namespace per label on
+// top of that: a label in the map is checked against its own
+// `NonceStore`, and only unmapped labels fall back to the global
+// `replayCache`. This file pins that contract, including the opt-in
+// nature of the per-label map — without the map, labels share one
+// store, but their entries no longer collide across keyids.
 
 const CREATED = 1700000000;
 const NOW = CREATED + 60;
@@ -104,9 +109,11 @@ test("replayCacheByLabel: same nonce in both labels passes in one call, and re-v
       replayCacheByLabel: { merchant: merchantCache, gateway: gatewayCache },
     }),
   );
-  // With a shared store this first call would already reject the
-  // gateway label; per-label stores let both labels record the same
-  // bare nonce string independently.
+  // Per-label stores let both labels record the same bare nonce
+  // string independently. (Since backlog #1412 a shared store would
+  // also pass both here — the labels carry different keyids, so their
+  // scoped entries do not collide — but per-label stores still
+  // partition by label on top of that.)
   assert.equal(first["merchant"].ok, true);
   assert.equal(first["gateway"].ok, true);
   assert.equal(merchantCache.size, 1);
@@ -299,7 +306,7 @@ test("replayCacheByLabel: a failed verification pollutes neither label's store",
   assert.equal(gatewayCache.size, 1);
 });
 
-test("replayCacheByLabel: without the map, the shared-store contract is unchanged", () => {
+test("replayCacheByLabel: without the map, a shared store scopes by keyid (backlog #1412)", () => {
   const globalCache = cache();
   const results = byLabel(
     verifyAllLabels(dual("shared-nonce-8"), {
@@ -309,12 +316,29 @@ test("replayCacheByLabel: without the map, the shared-store contract is unchange
       replayCache: globalCache,
     }),
   );
+  // The two labels carry different keyids ("merchant" / "gateway"),
+  // so their scoped entries do not collide: both pass on the first
+  // presentation against one shared store. The per-label map is
+  // still opt-in — it partitions by label on top of the keyid
+  // scoping — but the shared store no longer rejects a second
+  // signer for reusing a nonce string.
   assert.equal(results["merchant"].ok, true);
-  // The gateway label carries the same bare nonce and shares the
-  // store, so it is still rejected — per-label partitioning is
-  // opt-in via the map, not a change to the default.
-  assert.equal(results["gateway"].ok, false);
-  assert.equal(results["gateway"].code, "NONCE_REPLAY");
+  assert.equal(results["gateway"].ok, true);
+  assert.equal(globalCache.size, 2);
+  // Presenting the same dual-signed request again replays both
+  // labels: each scoped entry is remembered.
+  const second = byLabel(
+    verifyAllLabels(dual("shared-nonce-8"), {
+      now: NOW,
+      maxSignatureAgeSec: 3600,
+      keys: keys(),
+      replayCache: globalCache,
+    }),
+  );
+  assert.equal(second["merchant"].ok, false);
+  assert.equal(second["merchant"].code, "NONCE_REPLAY");
+  assert.equal(second["gateway"].ok, false);
+  assert.equal(second["gateway"].code, "NONCE_REPLAY");
 });
 
 test("replayCacheByLabel: per-label stores can carry different TTLs", () => {

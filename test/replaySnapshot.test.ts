@@ -21,10 +21,10 @@ test("snapshot round-trip: seen nonce is still rejected after restore", () => {
   assert.equal(cache.check("snap-2"), false);
 
   const snap = cache.exportSnapshot();
-  assert.equal(snap.v, 1);
+  assert.equal(snap.v, 2);
   assert.deepEqual(snap.entries, [
-    ["snap-1", 1000],
-    ["snap-2", 1000],
+    ["", "snap-1", 1000],
+    ["", "snap-2", 1000],
   ]);
 
   const restored = ReplayCache.restore(snap, opts);
@@ -68,7 +68,7 @@ test("export excludes entries already expired at export time", () => {
   const snap = cache.exportSnapshot();
   assert.deepEqual(snap.entries, []);
   t = 1149; // one second earlier "fresh" (99s old) is still live, "old" is not
-  assert.deepEqual(cache.exportSnapshot().entries, [["fresh", 1050]]);
+  assert.deepEqual(cache.exportSnapshot().entries, [["", "fresh", 1050]]);
 });
 
 // The TTL keeps counting from the original first-seen time: restoring
@@ -109,7 +109,7 @@ test("malformed snapshots throw a clear configuration error", () => {
     ["null", null, /invalid snapshot/],
     ["non-object", "snapshot", /invalid snapshot/],
     ["top-level array", [], /invalid snapshot/],
-    ["wrong version", { v: 2, entries: [] }, /unsupported snapshot version 2/],
+    ["wrong version", { v: 3, entries: [] }, /unsupported snapshot version 3/],
     ["string version", { v: "1", entries: [] }, /unsupported snapshot version "1"/],
     ["null version", { v: null, entries: [] }, /unsupported snapshot version null/],
     ["missing version", { entries: [] }, /unsupported snapshot version undefined/],
@@ -125,12 +125,21 @@ test("malformed snapshots throw a clear configuration error", () => {
     ["infinite seenAt", { v: 1, entries: [["n", Infinity]] }, /entries\[0\]: seenAt/],
     ["negative seenAt", { v: 1, entries: [["n", -1]] }, /entries\[0\]: seenAt/],
     ["second entry bad", { v: 1, entries: [["ok", 1000], ["bad", -5]] }, /entries\[1\]: seenAt/],
+    // v: 2 entries are [keyId, nonce, seenAt] triples: the pair shape
+    // is no longer enough, and the keyId itself is validated.
+    ["v2 entry not a triple", { v: 2, entries: [["k", "n"]] }, /entries\[0\] must be a \[keyId, nonce, seenAt\] triple/],
+    ["v2 entry too long", { v: 2, entries: [["k", "n", 1, 2]] }, /entries\[0\] must be a \[keyId, nonce, seenAt\] triple/],
+    ["v2 entry not an array", { v: 2, entries: ["n"] }, /entries\[0\] must be a \[keyId, nonce, seenAt\] triple/],
+    ["v2 non-string keyId", { v: 2, entries: [[42, "n", 1000]] }, /entries\[0\]: keyId must be a string/],
+    ["v2 empty nonce", { v: 2, entries: [["k", "", 1000]] }, /entries\[0\]: nonce must be a non-empty string/],
+    ["v2 non-number seenAt", { v: 2, entries: [["k", "n", "1000"]] }, /entries\[0\]: seenAt must be a finite non-negative number/],
+    ["v2 second entry bad", { v: 2, entries: [["k", "ok", 1000], ["k", "bad", -5]] }, /entries\[1\]: seenAt/],
   ];
   for (const [name, snapshot, pattern] of bad) {
     assert.throws(() => ReplayCache.restore(snapshot), pattern, name);
   }
   // The fromSnapshot alias validates identically.
-  assert.throws(() => ReplayCache.fromSnapshot({ v: 2, entries: [] }), /unsupported snapshot version/);
+  assert.throws(() => ReplayCache.fromSnapshot({ v: 3, entries: [] }), /unsupported snapshot version/);
   assert.equal(ReplayCache.fromSnapshot({ v: 1, entries: [["a", 1000]] }, { now: () => 1000 }).size, 1);
 });
 
@@ -138,13 +147,13 @@ test("malformed snapshots throw a clear configuration error", () => {
 // seenAt are evicted first, and size never exceeds maxEntries.
 test("over-capacity restore evicts the oldest seenAt first", () => {
   const snap: ReplayCacheSnapshot = {
-    v: 1,
+    v: 2,
     entries: [
-      ["n1", 1000],
-      ["n2", 1001],
-      ["n3", 1002],
-      ["n4", 1003],
-      ["n5", 1004],
+      ["", "n1", 1000],
+      ["", "n2", 1001],
+      ["", "n3", 1002],
+      ["", "n4", 1003],
+      ["", "n5", 1004],
     ],
   };
   const restored = ReplayCache.restore(snap, {
@@ -163,13 +172,13 @@ test("over-capacity restore evicts the oldest seenAt first", () => {
 // newest three are all still tracked as replays.
 test("over-capacity restore keeps the newest entries as replays", () => {
   const snap: ReplayCacheSnapshot = {
-    v: 1,
+    v: 2,
     entries: [
-      ["n1", 1000],
-      ["n2", 1001],
-      ["n3", 1002],
-      ["n4", 1003],
-      ["n5", 1004],
+      ["", "n1", 1000],
+      ["", "n2", 1001],
+      ["", "n3", 1002],
+      ["", "n4", 1003],
+      ["", "n5", 1004],
     ],
   };
   const restored = ReplayCache.restore(snap, {
@@ -186,7 +195,7 @@ test("over-capacity restore keeps the newest entries as replays", () => {
 test("empty cache round-trips", () => {
   const cache = new ReplayCache({ now: () => 1000 });
   const snap = cache.exportSnapshot();
-  assert.deepEqual(snap, { v: 1, entries: [] });
+  assert.deepEqual(snap, { v: 2, entries: [] });
   const restored = ReplayCache.restore(snap, { now: () => 1000 });
   assert.equal(restored.size, 0);
   assert.deepEqual(restored.stats(), { size: 0, hits: 0, misses: 0, evictions: 0 });
@@ -201,9 +210,10 @@ test("export and restore are detached copies", () => {
   const cache = new ReplayCache({ ttlSec: 3600, now: () => t });
   cache.check("keep");
   const snap = cache.exportSnapshot();
-  snap.entries[0][0] = "forged";
-  snap.entries[0][1] = 0;
-  snap.entries.push(["injected", 1000]);
+  snap.entries[0][0] = "forged-key";
+  snap.entries[0][1] = "forged";
+  snap.entries[0][2] = 0;
+  snap.entries.push(["", "injected", 1000]);
   (snap as { v: number }).v = 99;
 
   assert.equal(cache.size, 1);
@@ -254,7 +264,7 @@ test("snapshot survives a JSON stringify/parse round-trip", () => {
 // Restoring under a different (valid) configuration honors the new
 // cache's own limits; invalid restore options fail like the constructor.
 test("restore validates its options like the constructor", () => {
-  const snap: ReplayCacheSnapshot = { v: 1, entries: [["n", 1000]] };
+  const snap: ReplayCacheSnapshot = { v: 2, entries: [["", "n", 1000]] };
   assert.throws(() => ReplayCache.restore(snap, { maxEntries: 0 }), /maxEntries/);
   assert.throws(() => ReplayCache.restore(snap, { ttlSec: 0 }), /ttlSec/);
   // A shorter TTL on the new cache expires the entry at load time.

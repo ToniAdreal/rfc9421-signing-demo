@@ -47,15 +47,15 @@ test("two-label signed round-trip: per-label replay correct after restore", () =
     assert.match(envelope.mac, /^[0-9a-f]{64}$/);
   }
   assert.deepEqual(envelopes.merchant.snapshot, {
-    v: 1,
+    v: 2,
     entries: [
-      ["m-nonce-1", 1000],
-      ["m-nonce-2", 1000],
+      ["", "m-nonce-1", 1000],
+      ["", "m-nonce-2", 1000],
     ],
   });
   assert.deepEqual(envelopes.gateway.snapshot, {
-    v: 1,
-    entries: [["g-nonce-1", 1000]],
+    v: 2,
+    entries: [["", "g-nonce-1", 1000]],
   });
 
   // The envelopes are plain JSON: a string round-trip must not break them.
@@ -81,7 +81,7 @@ test("tampered entry in one label rejects the whole batch", () => {
   const envelopes = exportSeeded();
   const before = JSON.stringify(envelopes);
   const tampered = JSON.parse(JSON.stringify(envelopes)) as EnvelopesByLabel;
-  tampered.gateway.snapshot.entries[0][0] = "g-nonce-evil";
+  tampered.gateway.snapshot.entries[0][1] = "g-nonce-evil";
   assert.throws(
     () => ReplayCache.restoreSignedSnapshotsByLabel(tampered, SECRET),
     /MAC mismatch/,
@@ -95,7 +95,7 @@ test("tampered entry in one label rejects the whole batch", () => {
 test("tampered seenAt in one label rejects the whole batch", () => {
   const envelopes = exportSeeded();
   const tampered = JSON.parse(JSON.stringify(envelopes)) as EnvelopesByLabel;
-  tampered.merchant.snapshot.entries[0][1] = 1;
+  tampered.merchant.snapshot.entries[0][2] = 1;
   assert.throws(
     () => ReplayCache.restoreSignedSnapshotsByLabel(tampered, SECRET),
     /MAC mismatch/,
@@ -392,7 +392,7 @@ test("expired entries are excluded per label", () => {
     SECRET,
   );
   assert.deepEqual(envelopes.merchant.snapshot.entries, []);
-  assert.deepEqual(envelopes.gateway.snapshot.entries, [["g-fresh", 1050]]);
+  assert.deepEqual(envelopes.gateway.snapshot.entries, [["", "g-fresh", 1050]]);
   const restored = ReplayCache.restoreSignedSnapshotsByLabel(envelopes, SECRET, {
     ttlSec: 100,
     now: () => 1100,

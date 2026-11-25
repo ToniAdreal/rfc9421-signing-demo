@@ -97,7 +97,7 @@ test("release: the exported snapshot no longer contains the released nonce", () 
   assert.equal(cache.check("b"), false);
   assert.equal(cache.release("a"), true);
   const snapshot = cache.exportSnapshot();
-  assert.deepEqual(snapshot, { v: 1, entries: [["b", 1000]] });
+  assert.deepEqual(snapshot, { v: 2, entries: [["", "b", 1000]] });
   const restored = ReplayCache.restore(snapshot, {
     ttlSec: 3600,
     now: () => 1000,
