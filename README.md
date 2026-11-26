@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 3014 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 3025 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1064,6 +1064,23 @@ window together cannot thundering-herd the endpoint. Only overlapping calls
 merge: once a refresh settles, the next call fetches again, and a failure is
 never cached.
 
+Hard staleness cutoff (opt-in): by default staleness is advisory only — a
+stale snapshot keeps resolving, so a JWKS outage degrades to staleness instead
+of a verification outage. A caller that would rather fail closed than trust
+keys past a bound can set `maxStaleSec` (a finite number > 0, in seconds):
+once the snapshot is strictly older than that many seconds, `resolve()`
+returns `undefined` for every `keyid` — exactly at the bound still resolves —
+and `verifyRequest` fails those verifications closed as
+`KEY_RESOLUTION_FAILED`. A restored snapshot is judged the same way, from its
+`fetchedAtSec`, so a snapshot carried across a restart cannot outlive the
+bound either. The cutoff never triggers a refresh — `refreshIfStale()` and
+`startAutoRefresh()` keep their own TTL schedule — so it is a backstop for
+when the caller's refresh stops happening (endpoint down, a revoked key never
+re-fetched), not a replacement for refreshing. Refusals are counted in
+`stats()` as `staleResolutions` (and as `misses`). A non-finite clock reading
+throws a configuration error from `resolve()` while the cutoff is set; with
+the cutoff unset, `resolve()` never reads the clock and never throws.
+
 Automatic refresh (opt-in): `store.startAutoRefresh(60_000, { onError })`
 calls `refreshIfStale()` on a timer, so a long-lived gateway verifier picks
 up rotation without a hand-written polling loop. The timer is `unref()`d, so
@@ -1111,7 +1128,7 @@ a store that later grows a second key silently stops falling back.
 
 Observability: `store.stats()` returns a detached `{ refreshes,
 refreshFailures, hits, misses, conditionalRefreshes, notModified,
-duplicateKids }`
+duplicateKids, staleResolutions }`
 snapshot (mirroring `ReplayCache.stats()`).
 Refresh counts are once per `refresh()` call — a single-flight refresh shared by
 many waiters counts once, as a success or as a failure, and retry attempts
@@ -1125,7 +1142,10 @@ re-issues one `kid` for two key versions during rotation silently retires the
 first key (the later entry wins), so rotation must give each key version its
 own `kid`; this counter is the signal when it does not. Only successfully
 installed documents and restores count, and `clear()` resets the counter with
-the others. The counters
+the others. `staleResolutions` counts `resolve()` calls refused by the opt-in
+`maxStaleSec` cutoff — the snapshot was older than the bound, so no key was
+served. Every such refusal is also a `miss`, so `staleResolutions` never
+exceeds `misses`. The counters
 run for the store's lifetime and are not part of a snapshot: exporting or
 restoring one does not reset them. `store.keyIds()` returns the cached kids in
 snapshot order as a fresh array (empty before the first refresh and after
@@ -4183,9 +4203,10 @@ and one 304, three pinned kids (ed25519 / P-256 / RSA)
 resolving and two unknown kids missing. Every measured pass
 re-pins the whole snapshot against the hand-written expectation
 `{ refreshes: 3, refreshFailures: 1, hits: 3, misses: 2,
-conditionalRefreshes: 2, notModified: 1, duplicateKids: 0 }` — six
-counters non-zero and duplicateKids 0 (no repeated kid in the
-fixture), so the row cannot be measuring an empty or
+conditionalRefreshes: 2, notModified: 1, duplicateKids: 0,
+staleResolutions: 0 }` — seven
+counters non-zero and duplicateKids and staleResolutions 0 (no repeated kid
+in the fixture, no `maxStaleSec` cutoff set), so the row cannot be measuring an empty or
 never-refreshed store. Outside timing the bench also asserts
 the detached-copy semantics (a returned snapshot overwritten
 with 999s leaves a re-read unchanged), that an empty store
@@ -5586,7 +5607,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 3014 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 3025 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

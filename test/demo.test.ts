@@ -5862,7 +5862,7 @@ test("demo JWKS observability segment shows lastRefreshedAt, isStale() at the TT
   assert.equal(DEMO_JWKS_OBSERVABILITY_TTL_SEC, 120);
   assert.equal(DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC, DEMO_CREATED + DEMO_JWKS_OBSERVABILITY_TTL_SEC);
   assert.equal(DEMO_JWKS_OBSERVABILITY_FETCH_CALLS, 1);
-  assert.deepEqual(DEMO_JWKS_OBSERVABILITY_STATS, { refreshes: 1, refreshFailures: 0, hits: 2, misses: 1, conditionalRefreshes: 0, notModified: 0, duplicateKids: 0 });
+  assert.deepEqual(DEMO_JWKS_OBSERVABILITY_STATS, { refreshes: 1, refreshFailures: 0, hits: 2, misses: 1, conditionalRefreshes: 0, notModified: 0, duplicateKids: 0, staleResolutions: 0 });
   assert.equal(jwksObservabilityLastRefreshedBefore, null);
   assert.equal(jwksObservabilityStaleBefore, true);
   assert.equal(jwksObservabilityFetchCalls, DEMO_JWKS_OBSERVABILITY_FETCH_CALLS);
@@ -5920,7 +5920,7 @@ test("demo lines contain the JWKS observability segment (before/after reads, TTL
     `JWKS observability at the TTL boundary (${DEMO_JWKS_OBSERVABILITY_BOUNDARY_AT_SEC} — exactly ${DEMO_JWKS_OBSERVABILITY_TTL_SEC}s after the refresh, the >= boundary): isStale()=true (staleness is advisory only — the stale snapshot still serves)`,
     `JWKS verification at the TTL boundary through the stale snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_OBSERVABILITY_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_OBSERVABILITY_NONCE}")`,
     `JWKS observability resolves at the boundary: resolve("${DEMO_JWKS_OBSERVABILITY_KEY_ID}") returned a key (hit), resolve("${DEMO_JWKS_OBSERVABILITY_UNKNOWN_KEY_ID}") returned undefined (miss)`,
-    `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshFailures}, hits: ${DEMO_JWKS_OBSERVABILITY_STATS.hits}, misses: ${DEMO_JWKS_OBSERVABILITY_STATS.misses}, conditionalRefreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.conditionalRefreshes}, notModified: ${DEMO_JWKS_OBSERVABILITY_STATS.notModified}, duplicateKids: ${DEMO_JWKS_OBSERVABILITY_STATS.duplicateKids} } (hits + misses equals the total resolve() calls)`,
+    `JWKS observability stats after one refresh, the boundary verification and the two resolves: stats() = { refreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_OBSERVABILITY_STATS.refreshFailures}, hits: ${DEMO_JWKS_OBSERVABILITY_STATS.hits}, misses: ${DEMO_JWKS_OBSERVABILITY_STATS.misses}, conditionalRefreshes: ${DEMO_JWKS_OBSERVABILITY_STATS.conditionalRefreshes}, notModified: ${DEMO_JWKS_OBSERVABILITY_STATS.notModified}, duplicateKids: ${DEMO_JWKS_OBSERVABILITY_STATS.duplicateKids}, staleResolutions: ${DEMO_JWKS_OBSERVABILITY_STATS.staleResolutions} } (hits + misses equals the total resolve() calls)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 7), expectedLines);
   // The JWKS clear segment follows the JWKS observability segment,
@@ -5956,7 +5956,7 @@ test("demo JWKS conditional refresh segment revalidates the remembered ETag with
   assert.equal(DEMO_JWKS_CONDITIONAL_REFRESH_ETAG, '"demo-jwks-conditional-refresh-v1"');
   assert.equal(DEMO_JWKS_CONDITIONAL_REFRESH_TTL_SEC, 120);
   assert.equal(DEMO_JWKS_CONDITIONAL_REFRESH_FETCH_CALLS, 2);
-  assert.deepEqual(DEMO_JWKS_CONDITIONAL_REFRESH_STATS, { refreshes: 2, refreshFailures: 0, hits: 2, misses: 0, conditionalRefreshes: 1, notModified: 1, duplicateKids: 0 });
+  assert.deepEqual(DEMO_JWKS_CONDITIONAL_REFRESH_STATS, { refreshes: 2, refreshFailures: 0, hits: 2, misses: 0, conditionalRefreshes: 1, notModified: 1, duplicateKids: 0, staleResolutions: 0 });
   assert.equal(jwksConditionalRefreshFetchCalls, DEMO_JWKS_CONDITIONAL_REFRESH_FETCH_CALLS);
   assert.equal(jwksConditionalRefreshIfNoneMatch, DEMO_JWKS_CONDITIONAL_REFRESH_ETAG);
   assert.deepEqual(jwksConditionalRefreshKeyIdsAfterFirst, [DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID]);
@@ -5976,7 +5976,7 @@ test("demo lines contain the JWKS conditional refresh segment (first 200 with ET
   const expectedLines = [
     "JWKS conditional refresh: a JWKS endpoint that answers 304 Not Modified lets the store skip re-downloading an unchanged key set — the second refresh revalidates the remembered ETag instead of swapping in a new snapshot",
     `JWKS conditional refresh first refresh over the loopback endpoint: refresh() fetched the JWKS document (ETag ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG}), the snapshot holds 1 key and resolve("${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}") returned a key (fetch count 1)`,
-    `JWKS conditional refresh second refresh sent If-None-Match: ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG} and the endpoint answered 304 Not Modified: the snapshot still holds 1 key ("${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}"), lastRefreshedAt stayed ${DEMO_CREATED}, stats() = { refreshes: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.refreshFailures}, hits: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.hits}, misses: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.misses}, conditionalRefreshes: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.conditionalRefreshes}, notModified: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.notModified}, duplicateKids: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.duplicateKids} } (the 304 revalidated the remembered ETag — no key was re-downloaded)`,
+    `JWKS conditional refresh second refresh sent If-None-Match: ${DEMO_JWKS_CONDITIONAL_REFRESH_ETAG} and the endpoint answered 304 Not Modified: the snapshot still holds 1 key ("${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}"), lastRefreshedAt stayed ${DEMO_CREATED}, stats() = { refreshes: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.refreshes}, refreshFailures: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.refreshFailures}, hits: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.hits}, misses: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.misses}, conditionalRefreshes: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.conditionalRefreshes}, notModified: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.notModified}, duplicateKids: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.duplicateKids}, staleResolutions: ${DEMO_JWKS_CONDITIONAL_REFRESH_STATS.staleResolutions} } (the 304 revalidated the remembered ETag — no key was re-downloaded)`,
     `JWKS conditional refresh verification after the 304 through the kept snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_CONDITIONAL_REFRESH_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_CONDITIONAL_REFRESH_NONCE}")`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), expectedLines);
@@ -6017,6 +6017,7 @@ test("demo JWKS clear segment verifies, clears to zero, rejects the retired key,
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
   assert.deepEqual(DEMO_JWKS_CLEAR_STATS_AFTER_CLEAR, {
     refreshes: 0,
@@ -6026,6 +6027,7 @@ test("demo JWKS clear segment verifies, clears to zero, rejects the retired key,
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
   assert.deepEqual(DEMO_JWKS_CLEAR_STATS_AFTER_REFETCH, {
     refreshes: 1,
@@ -6035,6 +6037,7 @@ test("demo JWKS clear segment verifies, clears to zero, rejects the retired key,
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
   assert.equal(jwksClearVerificationBefore.ok, true);
   assert.deepEqual(jwksClearStatsBefore, DEMO_JWKS_CLEAR_STATS_BEFORE);
@@ -6124,8 +6127,9 @@ test("demo lines contain the JWKS clear segment (verify, cleared zero state, rej
     conditionalRefreshes: number;
     notModified: number;
     duplicateKids: number;
+    staleResolutions: number;
   }) =>
-    `{ refreshes: ${st.refreshes}, refreshFailures: ${st.refreshFailures}, hits: ${st.hits}, misses: ${st.misses}, conditionalRefreshes: ${st.conditionalRefreshes}, notModified: ${st.notModified}, duplicateKids: ${st.duplicateKids} }`;
+    `{ refreshes: ${st.refreshes}, refreshFailures: ${st.refreshFailures}, hits: ${st.hits}, misses: ${st.misses}, conditionalRefreshes: ${st.conditionalRefreshes}, notModified: ${st.notModified}, duplicateKids: ${st.duplicateKids}, staleResolutions: ${st.staleResolutions} }`;
   const expectedLines = [
     "JWKS clear: JwksKeyStore.clear() drops the cached keys and zeroes the stats() counters at once — the explicit reset a gateway runs when an endpoint stops being trusted or a key is known compromised, instead of waiting for the TTL to expire or for a refresh to succeed",
     `JWKS clear verification before clear(): the request signed under "${DEMO_JWKS_CLEAR_KEY_ID}" verifies through the fetched snapshot: OK (label ${DEMO_JWKS_OBSERVABILITY_LABEL}, keyid="${DEMO_JWKS_CLEAR_KEY_ID}", alg="${DEMO_JWKS_OBSERVABILITY_ALG}", nonce="${DEMO_JWKS_CLEAR_NONCE}"), stats() = ${fmt(DEMO_JWKS_CLEAR_STATS_BEFORE)}`,
@@ -6277,6 +6281,7 @@ test("demo JWKS fetch timeout segment aborts a hung endpoint, keeps the old snap
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
   assert.equal(
     DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID,
@@ -6395,7 +6400,7 @@ test("demo JWKS fetch timeout segment aborts a hung endpoint, keeps the old snap
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
     `JWKS fetch timeout: JwksKeyStore fetchTimeoutMs caps how long a JWKS refresh may wait — a hung endpoint aborts instead of stalling key rotation forever, and the last good snapshot keeps serving`,
     `JWKS fetch timeout over a loopback endpoint that answers once and then hangs (fetchTimeoutMs ${DEMO_JWKS_FETCH_TIMEOUT_MS}ms): the first refresh() seeded the snapshot (size ${DEMO_JWKS_FETCH_TIMEOUT_SIZE}), the second refresh() FAILED (${DEMO_JWKS_FETCH_TIMEOUT_ERROR}) after ${DEMO_JWKS_FETCH_TIMEOUT_FETCH_CALLS} fetches — lastRefreshedAt stayed ${DEMO_CREATED} and size stayed ${DEMO_JWKS_FETCH_TIMEOUT_SIZE}`,
-    `JWKS fetch timeout verification after the timed-out refresh: the request signed under "${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}" still verifies through the kept snapshot: OK (label sig1, keyid="${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}", alg="ed25519", nonce="${DEMO_JWKS_FETCH_TIMEOUT_NONCE}"), stats() = { refreshes: 1, refreshFailures: 1, hits: 1, misses: 0, conditionalRefreshes: 0, notModified: 0, duplicateKids: 0 } (the timeout counted one refresh failure, the verification one hit)`,
+    `JWKS fetch timeout verification after the timed-out refresh: the request signed under "${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}" still verifies through the kept snapshot: OK (label sig1, keyid="${DEMO_JWKS_FETCH_TIMEOUT_KEY_ID}", alg="ed25519", nonce="${DEMO_JWKS_FETCH_TIMEOUT_NONCE}"), stats() = { refreshes: 1, refreshFailures: 1, hits: 1, misses: 0, conditionalRefreshes: 0, notModified: 0, duplicateKids: 0, staleResolutions: 0 } (the timeout counted one refresh failure, the verification one hit)`,
     `JWKS fetch timeout control store (fetchTimeoutMs ${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_MS}ms) against an endpoint that answers inside the deadline: refresh() succeeded (fetch count ${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_FETCH_CALLS}), the snapshot holds ${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_SIZE} key and resolve("${DEMO_JWKS_FETCH_TIMEOUT_CONTROL_KEY_ID}") returned a key`,
   ]);
   assert.equal(lines[headerIdx + 4], "");
@@ -13685,6 +13690,7 @@ test("demo JWKS single-flight refresh segment merges eight concurrent refresh() 
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
   assert.equal(DEMO_JWKS_SINGLE_FLIGHT_FETCH_CALLS_AFTER_SERIAL, 2);
   assert.equal(DEMO_JWKS_SINGLE_FLIGHT_REFRESHES_AFTER_SERIAL, 2);
@@ -13696,6 +13702,7 @@ test("demo JWKS single-flight refresh segment merges eight concurrent refresh() 
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 
   // DemoResult fields: the eight-way batch made one fetch and

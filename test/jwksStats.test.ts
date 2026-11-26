@@ -59,6 +59,7 @@ test("stats: a fresh store starts at zero", () => {
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 });
 
@@ -77,6 +78,7 @@ test("stats: mixed refresh/resolve sequence is counted accurately", async () => 
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 
   await store.refresh(); // success
@@ -101,6 +103,7 @@ test("stats: mixed refresh/resolve sequence is counted accurately", async () => 
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 });
 
@@ -124,6 +127,7 @@ test("stats: single-flight concurrent refresh counts once (success)", async () =
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 
   // A settled refresh is not reused: the next call fetches (and counts) again.
@@ -161,6 +165,7 @@ test("stats: single-flight concurrent failure counts once, all waiters share the
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
   // The failed refresh left the old key resolvable.
   assert.ok(store.resolve("ed-key-1"));
@@ -183,6 +188,7 @@ test("stats: refreshIfStale counts only actual fetches", async () => {
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 });
 
@@ -205,6 +211,7 @@ test("stats: the returned snapshot is detached from the counters", async () => {
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 });
 
@@ -226,6 +233,7 @@ test("stats: snapshot export/restore does not reset the counters", async () => {
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
   assert.ok(store.resolve("ed-key-1"));
   assert.equal(store.stats().hits, 2);
@@ -241,6 +249,7 @@ test("stats: snapshot export/restore does not reset the counters", async () => {
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
   assert.ok(restored.resolve("ed-key-1"));
   assert.equal(restored.stats().hits, 1);

@@ -310,5 +310,6 @@ test("jwks fetchRetries: retry success still counts one refresh, not one per att
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 });

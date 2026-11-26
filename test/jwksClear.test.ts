@@ -116,6 +116,7 @@ test("JwksKeyStore.clear: resets all four stats counters to zero", async () => {
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 
   store.clear();
@@ -128,6 +129,7 @@ test("JwksKeyStore.clear: resets all four stats counters to zero", async () => {
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 });
 
@@ -154,6 +156,7 @@ test("JwksKeyStore.clear: a refresh afterwards re-fetches and restores service",
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 });
 
@@ -197,6 +200,7 @@ test("JwksKeyStore.clear: clearing a never-refreshed store does not throw", () =
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 });
 
@@ -233,6 +237,7 @@ test("JwksKeyStore.clear: resolves after the clear count as misses from zero", a
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 });
 
@@ -254,6 +259,7 @@ test("JwksKeyStore.clear: an in-flight refresh still installs its snapshot when 
     conditionalRefreshes: 0,
     notModified: 0,
     duplicateKids: 0,
+    staleResolutions: 0,
   });
 
   g.release();

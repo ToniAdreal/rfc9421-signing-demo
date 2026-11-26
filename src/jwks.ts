@@ -178,7 +178,10 @@ export interface JwksKeyStoreOptions {
    * {@link JwksKeyStore.isStale}. Defaults to 300. Must be a finite
    * number > 0. `isStale()` is advisory only: `resolve` keeps serving
    * the last good snapshot past the TTL until a `refresh()` succeeds,
-   * so a JWKS outage never turns into a verification outage.
+   * so a JWKS outage never turns into a verification outage — unless
+   * the caller opts into the hard cutoff
+   * ({@link JwksKeyStoreOptions.maxStaleSec}), which makes `resolve`
+   * refuse a snapshot older than that bound instead.
    *
    * A fetched response's `Cache-Control: max-age` can only shorten
    * this TTL, never lengthen it: after a successful `refresh()` the
@@ -191,6 +194,35 @@ export interface JwksKeyStoreOptions {
    * `max-age` (see the README's JWKS section for the honest limit).
    */
   ttlSec?: number;
+  /**
+   * Opt-in hard cutoff, in seconds, on how old a snapshot may be
+   * before {@link JwksKeyStore.resolve} stops serving it. Unset by
+   * default (zero behavior change: a stale snapshot keeps resolving,
+   * exactly as before).
+   *
+   * When set, `resolve()` returns `undefined` for every `keyid` once
+   * the snapshot's age (`now - lastRefreshedAt`, read through the
+   * store's clock) is strictly greater than this value — the age
+   * exactly equal to `maxStaleSec` still resolves, so the boundary
+   * is inclusive — and `verifyRequest` fails those verifications
+   * closed as `KEY_RESOLUTION_FAILED`. A restored snapshot is judged
+   * the same way, from its `fetchedAtSec`, so a snapshot carried
+   * across a restart cannot outlive the bound either. `isStale()`,
+   * `refreshIfStale()` and `startAutoRefresh()` are untouched: the
+   * cutoff only gates resolution, it never triggers a refresh, so a
+   * caller that wants rotation to keep working must still refresh
+   * on its own schedule — the cutoff is the backstop for when that
+   * refresh stops happening (endpoint down, key revoked and never
+   * re-fetched), not a replacement for it.
+   *
+   * Must be a finite number > 0 when set. Refusals are counted in
+   * `stats()` as `staleResolutions` (and as `misses`, since they
+   * return `undefined`). A non-finite clock reading throws a
+   * configuration `Error` from `resolve()` while the cutoff is set
+   * (see {@link JwksKeyStore.readClock}); with the cutoff unset,
+   * `resolve()` never reads the clock and never throws.
+   */
+  maxStaleSec?: number;
   /**
    * Injected clock returning unix seconds — the same convention as
    * `ReplayCacheOptions.now` / `MemoizeKeyResolverOptions.now` — so
@@ -386,6 +418,13 @@ export interface JwksKeyStoreOptions {
  *   successfully installed documents and restores count — a refresh
  *   or restore that fails before the swap leaves the counter
  *   untouched, exactly like the other counters.
+ * - `staleResolutions`: `resolve()` calls refused by the opt-in
+ *   `maxStaleSec` cutoff — the snapshot was older than the bound,
+ *   so no key was served. Every such refusal is also a `miss`
+ *   (it returned `undefined`), so `staleResolutions <= misses` and
+ *   `hits + misses` still equals the total number of `resolve()`
+ *   calls. Zero on a store without `maxStaleSec`, since the cutoff
+ *   never fires there.
  *
  * Counters start at zero, run for the lifetime of the store, and are
  * deliberately NOT part of a snapshot: `exportSnapshot()` does not
@@ -395,7 +434,7 @@ export interface JwksKeyStoreOptions {
  * `JwksKeyStore.restore()` is a new store and starts at zero, like
  * any freshly constructed store.) The one exception is
  * {@link JwksKeyStore.clear}: discarding the cached snapshot also
- * resets all seven counters to zero, so a post-clear `stats()` reads
+ * resets all eight counters to zero, so a post-clear `stats()` reads
  * as a fresh store until new activity accrues.
  */
 export interface JwksKeyStoreStats {
@@ -406,6 +445,7 @@ export interface JwksKeyStoreStats {
   conditionalRefreshes: number;
   notModified: number;
   duplicateKids: number;
+  staleResolutions: number;
 }
 
 /**
@@ -1225,6 +1265,20 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   validator, so the next fetch after a restore is unconditional.
  *   `stats()` counts the conditional path (`conditionalRefreshes`,
  *   `notModified`).
+ * - **Opt-in staleness cutoff (`maxStaleSec`).** By default
+ *   `isStale()` is advisory only and `resolve` keeps serving a
+ *   stale snapshot — a JWKS outage degrades to staleness, never to
+ *   a verification outage. A caller that would rather fail closed
+ *   than trust keys past a bound can set `maxStaleSec`: once the
+ *   snapshot is strictly older than that many seconds, `resolve`
+ *   returns `undefined` for every `keyid` (counted in `stats()` as
+ *   `staleResolutions` as well as a `miss`), and `verifyRequest`
+ *   fails closed as `KEY_RESOLUTION_FAILED`. The cutoff never
+ *   triggers a refresh — `refreshIfStale()` and `startAutoRefresh()`
+ *   keep their own TTL schedule — and a restored snapshot is judged
+ *   from its `fetchedAtSec`, so a snapshot carried across a restart
+ *   cannot outlive the bound either. Unset, the behavior is exactly
+ *   as before.
  * - **Observable via `stats()`.** Successful/failed refreshes and
  *   `resolve()` hits/misses are counted for the store's lifetime (see
  *   {@link JwksKeyStoreStats} for the exact counting rules, including
@@ -1268,7 +1322,9 @@ function parseJwksSnapshot(snapshot: unknown): {
  * a snapshot containing one like a secret. Rotation works by
  * re-fetching: a revoked key keeps verifying until the next
  * successful `refresh()` replaces the snapshot, bounded by how often
- * the caller refreshes (see `ttlSec` / `isStale()`). The snapshot is
+ * the caller refreshes (see `ttlSec` / `isStale()`) — or, with the
+ * opt-in `maxStaleSec`, bounded by that hard cutoff instead, after
+ * which `resolve` refuses the snapshot outright. The snapshot is
  * per-process and in-memory only; multiple verifier processes each
  * keep their own. A single process *can* carry its snapshot across
  * its own restart — `exportSnapshot()` before shutdown,
@@ -1286,6 +1342,7 @@ export class JwksKeyStore {
   private readonly url: string;
   private readonly fetchImpl: JwksFetchImpl;
   private readonly ttlSec: number;
+  private readonly maxStaleSec: number | undefined;
   private readonly clock: () => number;
   /**
    * Whether the store uses the default fetch. The timeout only applies
@@ -1365,6 +1422,8 @@ export class JwksKeyStore {
    * and restored snapshots (see {@link JwksKeyStoreStats}).
    */
   private duplicateKidCount = 0;
+
+  private staleResolutionCount = 0;
   /**
    * Whether the fetch of the refresh currently running in
    * `fetchAndSwap` carried an `If-None-Match` header. Reset at the
@@ -1396,6 +1455,7 @@ export class JwksKeyStore {
     const {
       fetchImpl,
       ttlSec = 300,
+      maxStaleSec,
       now,
       fetchTimeoutMs,
       maxBodyBytes = 1_048_576,
@@ -1418,6 +1478,15 @@ export class JwksKeyStore {
     if (typeof ttlSec !== "number" || !Number.isFinite(ttlSec) || ttlSec <= 0)
       throw new Error(
         `JwksKeyStore: \`ttlSec\` must be a finite number > 0, got ${String(ttlSec)}`,
+      );
+    if (
+      maxStaleSec !== undefined &&
+      (typeof maxStaleSec !== "number" ||
+        !Number.isFinite(maxStaleSec) ||
+        maxStaleSec <= 0)
+    )
+      throw new Error(
+        `JwksKeyStore: \`maxStaleSec\` must be a finite number > 0, got ${String(maxStaleSec)}`,
       );
     if (now !== undefined && typeof now !== "function")
       throw new Error(
@@ -1480,6 +1549,7 @@ export class JwksKeyStore {
     this.sleepImpl =
       sleepImpl ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     this.ttlSec = ttlSec;
+    this.maxStaleSec = maxStaleSec;
     this.clock = now ?? (() => Math.floor(Date.now() / 1000));
   }
 
@@ -1565,7 +1635,8 @@ export class JwksKeyStore {
 
   /**
    * Point-in-time observability snapshot `{ refreshes, refreshFailures,
-   * hits, misses, conditionalRefreshes, notModified, duplicateKids }` (see
+   * hits, misses, conditionalRefreshes, notModified, duplicateKids,
+   * staleResolutions }` (see
    * {@link JwksKeyStoreStats} for the exact counting rules). The
    * returned object is a fresh copy — mutating it does not affect
    * the store's counters.
@@ -1579,6 +1650,7 @@ export class JwksKeyStore {
       conditionalRefreshes: this.conditionalRefreshCount,
       notModified: this.notModifiedCount,
       duplicateKids: this.duplicateKidCount,
+      staleResolutions: this.staleResolutionCount,
     };
   }
 
@@ -1649,6 +1721,7 @@ export class JwksKeyStore {
     this.conditionalRefreshCount = 0;
     this.notModifiedCount = 0;
     this.duplicateKidCount = 0;
+    this.staleResolutionCount = 0;
   }
 
   /**
@@ -2568,14 +2641,37 @@ export class JwksKeyStore {
    *
    * Returns `undefined` for unknown keyids (and before the first
    * successful `refresh()`), which `verifyRequest` fails closed as
-   * `KEY_RESOLUTION_FAILED`. Never throws and never performs I/O.
-   * Every call is counted by {@link JwksKeyStore.stats}: returning a
-   * key is a hit, returning `undefined` (including for an invalid
-   * keyid) is a miss.
+   * `KEY_RESOLUTION_FAILED`. Never throws and never performs I/O —
+   * except that with the opt-in `maxStaleSec` cutoff set, a
+   * non-finite clock reading throws a configuration `Error` (see
+   * {@link JwksKeyStore.readClock}); with the cutoff unset the clock
+   * is never read here. Every call is counted by
+   * {@link JwksKeyStore.stats}: returning a key is a hit, returning
+   * `undefined` (including for an invalid keyid) is a miss, and a
+   * refusal under the `maxStaleSec` cutoff is additionally a
+   * `staleResolutions`.
+   *
+   * With `maxStaleSec` set, a snapshot older than the bound is
+   * refused outright: `resolve` returns `undefined` for every
+   * `keyid` once `now - lastRefreshedAt` is strictly greater than
+   * `maxStaleSec` (exactly at the bound still resolves). A restored
+   * snapshot is judged from its `fetchedAtSec`, so a snapshot
+   * carried across a restart cannot outlive the bound either. The
+   * cutoff never triggers a refresh — it is the backstop for when
+   * the caller's refresh stops happening, not a replacement for it.
    */
   resolve = (keyId: string): KeyObject | undefined => {
     if (typeof keyId !== "string" || keyId.length === 0) {
       this.missCount++;
+      return undefined;
+    }
+    if (
+      this.maxStaleSec !== undefined &&
+      this.lastRefreshAtSec !== null &&
+      this.readClock() - this.lastRefreshAtSec > this.maxStaleSec
+    ) {
+      this.missCount++;
+      this.staleResolutionCount++;
       return undefined;
     }
     const key = this.keysByKid.get(keyId);
@@ -2595,9 +2691,12 @@ export class JwksKeyStore {
    * to one of its members.
    *
    * Serves whatever snapshot is cached — including a stale one, the
-   * same as `resolve` — and, unlike `resolve`, touches neither the
-   * hit nor the miss counter: it is not a `keyid` resolution, so it
-   * must not inflate the `stats()` resolution counts.
+   * same as `resolve` without `maxStaleSec` — and the opt-in
+   * `maxStaleSec` cutoff does not apply here: this is the single-key
+   * fallback for a deployment the caller knows holds exactly one
+   * key, so it stays a pure snapshot read. Unlike `resolve`, it
+   * touches neither the hit nor the miss counter: it is not a `keyid`
+   * resolution, so it must not inflate the `stats()` resolution counts.
    */
   resolveOnlyKey(): KeyObject | undefined {
     if (this.keysByKid.size !== 1) return undefined;
