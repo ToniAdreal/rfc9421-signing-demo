@@ -72,10 +72,11 @@ export function generateP521KeyPair(): {
  * Minimum RSA modulus size in bits accepted by this library's RSA
  * signature algorithms (`rsa-pss-sha512`, `rsa-v1_5-sha256`). The key
  * generators below mint exactly this size; production deployments
- * should prefer ≥3072 bits. The sign and verify paths for
- * `rsa-v1_5-sha256` enforce this floor via
- * {@link assertRsaModulusLength} so a sub-floor key fails loudly as a
- * caller configuration error instead of minting weak signatures.
+ * should prefer ≥3072 bits. The sign and verify paths for both RSA
+ * algorithms (`rsa-pss-sha512` and `rsa-v1_5-sha256`) enforce this
+ * floor via {@link assertRsaModulusLength} so a sub-floor key fails
+ * loudly as a caller configuration error instead of minting weak
+ * signatures.
  */
 export const MIN_RSA_MODULUS_BITS = 2048;
 
@@ -83,12 +84,12 @@ export const MIN_RSA_MODULUS_BITS = 2048;
  * Enforce the RSA key-shape and modulus floor for an RSA signature
  * algorithm. Throws a caller-configuration `Error` — not a verification
  * failure — when `key` is not an RSA key at all (e.g. a P-256 key paired
- * with `alg: "rsa-v1_5-sha256"`) or when its modulus is shorter than
- * {@link MIN_RSA_MODULUS_BITS}. Shared by the sign and verify paths so
- * both sides reject the same bad configuration identically. A `null` /
- * non-`KeyObject` key is refused with the same named `Error` shape
- * (naming the received value) instead of a bare `TypeError` from
- * reading `key.asymmetricKeyType` — the guard is an
+ * with `alg: "rsa-pss-sha512"` or `"rsa-v1_5-sha256"`) or when its modulus
+ * is shorter than {@link MIN_RSA_MODULUS_BITS}. Shared by the sign and
+ * verify paths so both sides reject the same bad configuration
+ * identically. A `null` / non-`KeyObject` key is refused with the same
+ * named `Error` shape (naming the received value) instead of a bare
+ * `TypeError` from reading `key.asymmetricKeyType` — the guard is an
  * `instanceof KeyObject` check, the same shape the key exporters use.
  */
 export function assertRsaModulusLength(key: KeyObject, context: string): void {

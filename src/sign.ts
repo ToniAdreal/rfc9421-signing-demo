@@ -1047,6 +1047,16 @@ export function signRequestCore(
     // and a fixed 64-byte salt. PSS is probabilistic — the same base
     // signs to a different byte string every time, so verifiers must
     // re-verify, never re-sign-and-compare.
+    // The key-shape/modulus check runs first, exactly as in the
+    // rsa-v1_5-sha256 branch above: a non-RSA key or a sub-2048-bit
+    // modulus is a clear configuration error rather than a node:crypto
+    // complaint. Without it a 1024-bit key fails inside createSign
+    // with a raw OpenSSL "data too large for key size" (SHA-512 +
+    // 64-byte salt does not fit a 128-byte modulus), while a 1536-bit
+    // key silently mints a sub-floor signature the verifier would
+    // also accept — a 1024-bit RSA PSS signature is not "as trusted
+    // as" a 2048-bit one.
+    assertRsaModulusLength(opts.key, 'signRequest: alg "rsa-pss-sha512"');
     sig = createSign("sha512")
       .update(base, "utf8")
       .sign({

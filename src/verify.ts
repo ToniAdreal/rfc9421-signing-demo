@@ -1669,6 +1669,9 @@ function verifyWithKey(
   // swallowed into a VERIFICATION_ERROR. Note the padding dispatch
   // itself is driven by the declared `alg` (effectiveAlg), never by
   // the key's shape: an RSA key alone does not imply either padding.
+  // The rsa-pss-sha512 twin of this check lives below the
+  // wire-alg/key-shape verdict, so a non-RSA key still reports
+  // ALG_NOT_ALLOWED there (backlog #1415).
   if (effectiveAlg === "rsa-v1_5-sha256")
     assertRsaModulusLength(key, 'verifyRequest: alg "rsa-v1_5-sha256"');
 
@@ -1687,9 +1690,12 @@ function verifyWithKey(
   // pre-crypto checks are not listed here: `hmac-*` is refused above
   // by the secret-length check and `rsa-v1_5-sha256` by the modulus
   // check, each with its own more specific configuration error, so a
-  // mismatched pairing for those still throws exactly as before. The
-  // check runs only when the wire carries an `alg`: an unknown wire
-  // value still fails with `UNSUPPORTED_ALG` in the dispatch below,
+  // mismatched pairing for those still throws exactly as before.
+  // `rsa-pss-sha512` IS listed here even though it also has a modulus
+  // check (backlog #1415): that check runs *after* this verdict, so a
+  // non-RSA key still reports `ALG_NOT_ALLOWED` while only a sub-floor
+  // RSA modulus throws. The check runs only when the wire carries an
+  // `alg`: an unknown wire value still fails with `UNSUPPORTED_ALG` in
   // and an alg-less signature keeps the legacy `"ed25519"` default (or
   // the inference under the opt-in) with no shape verdict — the
   // default is the caller's assumption, not the signer's claim, so
@@ -1719,6 +1725,22 @@ function verifyWithKey(
       expires: parsed.params.expires,
       coveredComponents: [...parsed.componentIds],
     };
+
+  // RSA modulus enforcement for rsa-pss-sha512 (backlog #1415): runs
+  // *after* the wire-alg/key-shape verdict above on purpose. A
+  // non-RSA key paired with a declared PSS `alg` already returned
+  // ALG_NOT_ALLOWED there — a verdict, not a throw — so a foreign
+  // signer cannot force an exception by declaring a mismatched alg
+  // and verifyAllLabels keeps its per-label isolation. Past that
+  // gate the key is RSA (or the alg was inferred from an RSA key
+  // shape under `algFallback: "infer"`), so only the modulus floor
+  // is left to check, and a sub-floor modulus is a caller
+  // configuration error (throw), symmetric with rsa-v1_5-sha256
+  // above and with the sign side — it must not be swallowed into a
+  // VERIFICATION_ERROR, and in the candidateKeys walk it throws out
+  // of the walk like the other misconfigured-candidate cases.
+  if (effectiveAlg === "rsa-pss-sha512")
+    assertRsaModulusLength(key, 'verifyRequest: alg "rsa-pss-sha512"');
 
   let cryptoOk = false;
   try {
