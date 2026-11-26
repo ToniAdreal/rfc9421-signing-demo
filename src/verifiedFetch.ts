@@ -16,11 +16,13 @@
  * unverified response into the caller.
  *
  * What it returns, and what it throws:
- * - Success is `{ response, body, verifyResult }`: the raw fetch
+ * - Success is `{ response, body, verifyResult, finalUrl }`: the raw fetch
  *   response (its body stream is already consumed — read `body`
  *   instead), the response body decoded as a UTF-8 string, and the
  *   `VerifyResult` (label / keyId / alg / nonce / tag / created /
- *   coveredComponents for audit). A non-2xx response is still
+ *   coveredComponents for audit), plus `finalUrl` — the URL the
+ *   response was actually fetched from, after any redirects (the
+ *   requested URL when no redirect was followed). A non-2xx response is still
  *   verified and returned, never rejected on status alone: the
  *   signature is what decides trust, not the status code.
  * - A failed response verification throws `VerifyError` (same code /
@@ -86,6 +88,33 @@
  *   component cannot verify through this helper, exactly as through
  *   `fromFetchResponse` — use `fromNodeResponse` when trailers
  *   matter.
+ * - Redirects are not followed by default (backlog #1413):
+ *   `opts.redirect` defaults to `"error"`, so a 3xx response makes
+ *   the underlying fetch reject — a fetch-layer error, passed
+ *   through untouched — instead of silently carrying the signed
+ *   request headers to another origin and verifying the stranger's
+ *   response against the original request. Pass `"follow"` to allow
+ *   following (the policy is forwarded to the fetch implementation,
+ *   default or injected), `"manual"` to receive the 3xx response
+ *   itself for verification, and `allowCrossOriginRedirect: true`
+ *   to also accept a followed redirect that lands on a different
+ *   origin — without it, a response whose final URL (the native
+ *   `Response.url`, exposed as `finalUrl` on the result) has a
+ *   different origin than the requested URL is refused before any
+ *   verification runs. A caller-supplied `init.redirect` is a
+ *   configuration error: the redirect policy lives on `opts`,
+ *   never in `init`, so it can never be silently dropped again.
+ *   The response signature is still verified against the request
+ *   this call signed: a `;req` component binds to the original
+ *   URL, so a peer that covered `;req` components over the
+ *   redirected request fails verification when the redirect
+ *   changed what was requested — the failure is loud, never a
+ *   silent pass. Honest limit: with `"follow"` the signed request
+ *   headers have already been sent to the redirect target by the
+ *   underlying fetch, so the cross-origin refusal protects which
+ *   response is trusted, not which hosts see the signature
+ *   headers — the default `"error"` never sends them anywhere but
+ *   the requested URL.
  */
 
 import {
@@ -121,6 +150,8 @@ const VERIFIED_FETCH_OPTION_KEYS: readonly string[] = [
   "fetchImpl",
   "maxBodyBytes",
   "responseBody",
+  "redirect",
+  "allowCrossOriginRedirect",
 ];
 
 /**
@@ -189,6 +220,18 @@ export type VerifiedFetchVerifyOptions = Omit<
 };
 
 /**
+ * The redirect policy `verifiedFetch` forwards to the fetch
+ * implementation (backlog #1413): the same three values the global
+ * `fetch` accepts. `"error"` (the default) makes the fetch reject
+ * on a redirect instead of following it; `"manual"` returns the 3xx
+ * response itself, unverified until `verifyResponse` runs over it;
+ * `"follow"` follows the redirect, subject to the cross-origin
+ * refusal below. The policy is an `opts` field, never an `init`
+ * field: `init.redirect` is a configuration error.
+ */
+export type VerifiedFetchRedirect = "follow" | "error" | "manual";
+
+/**
  * The `fetch()` `Response` fields `verifiedFetch` actually reads.
  * The global `fetch` (Node ≥ 20) returns objects satisfying this
  * shape; plain test doubles do too. `status` is required here (a
@@ -202,6 +245,17 @@ export interface VerifiedFetchResponse extends FetchResponseLike {
   status: number;
   /** Read the whole body as bytes (fallback when `body` is absent). */
   arrayBuffer(): Promise<ArrayBuffer>;
+  /**
+   * The final URL the response was fetched from, after any
+   * redirects — the native `Response.url` (backlog #1413). The
+   * default fetch always reports it; a double that reports none
+   * leaves `verifiedFetch` to fall back to the requested URL, and
+   * the cross-origin refusal cannot be checked on that path. Only
+   * read when `redirect` is `"follow"` (or a custom `fetchImpl`
+   * followed one on its own): with the default `"error"` the fetch
+   * rejects before any response exists to report a URL.
+   */
+  url?: string;
   /**
    * The response body stream, when the implementation exposes one
    * (a real `fetch` `Response` always does, except for responses
@@ -219,22 +273,35 @@ export interface VerifiedFetchResponse extends FetchResponseLike {
  * The `fetch()` implementation `verifiedFetch` calls. The global
  * `fetch` (Node ≥ 20) satisfies this shape; pass a double to test
  * without a network, or to point the call at a non-global transport.
- * Called as `fetchImpl(url, { method, headers, body, signal })` with the
+ * Called as `fetchImpl(url, { method, headers, body, signal, redirect })` with the
  * signed request's method, headers (including `signature-input` /
  * `signature` / `content-digest`), and body. `body` is omitted when
  * the request has none; `signal` is the caller's `init.signal` when
  * one was passed, so an implementation that honors it can stop a
  * hung request — an implementation that ignores its signal cannot be
- * force-stopped by the caller.
+ * force-stopped by the caller. `redirect` is the resolved redirect
+ * policy (`opts.redirect`, default `"error"`): an implementation
+ * that follows redirects on its own must honor it, and one that
+ * reports the final URL on the response (`Response.url`) lets the
+ * cross-origin refusal run.
  */
 export type VerifiedFetchFn = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body?: string | Buffer | Uint8Array; signal?: AbortSignal },
+  init: { method: string; headers: Record<string, string>; body?: string | Buffer | Uint8Array; signal?: AbortSignal; redirect?: VerifiedFetchRedirect },
 ) => Promise<VerifiedFetchResponse>;
 
 /** The `fetch()` request `verifiedFetch` builds and signs. */
 export interface VerifiedFetchInit {
-  /** HTTP method. Defaults to `"GET"`. */
+  /**
+   * HTTP method. Defaults to `"GET"`.
+   *
+   * There is deliberately no `redirect` field here (backlog
+   * #1413): the redirect policy lives on `opts.redirect`, and a
+   * `redirect` passed in `init` (the fetch-init spelling) is a
+   * configuration error, thrown before any network happens — the
+   * old shape silently dropped it while the default fetch followed
+   * the redirect anyway.
+   */
   method?: string;
   /**
    * Request headers: a `Headers` instance or a record (same
@@ -302,6 +369,35 @@ export interface VerifiedFetchOptions {
    * call time, before any network happens.
    */
   responseBody?: "text" | "bytes";
+  /**
+   * The redirect policy for the fetch (backlog #1413). `"error"`
+   * (the default) makes the fetch reject on a 3xx instead of
+   * following it — the fail-closed default, so a signed request
+   * is never silently carried to another origin. `"manual"`
+   * returns the 3xx response itself for verification (an unsigned
+   * one fails with `MISSING_SIGNATURE_INPUT`, like any unsigned
+   * response). `"follow"` follows redirects, subject to the
+   * cross-origin refusal below; the policy is forwarded to the
+   * fetch implementation, default or injected. Anything else
+   * throws a configuration `Error` at call time, before any
+   * network happens.
+   */
+  redirect?: VerifiedFetchRedirect;
+  /**
+   * Whether a followed redirect may land on a different origin
+   * than the requested URL (backlog #1413). Defaults to `false`:
+   * a response whose final URL (`Response.url`, exposed as
+   * `finalUrl` on the result) has a different origin than the
+   * requested URL is refused with a configuration-style `Error`
+   * before any verification runs. Pass `true` only when the
+   * caller genuinely trusts the redirect target to answer for the
+   * requested URL. Must be a boolean when present; anything else
+   * throws a configuration `Error` at call time, before any
+   * network happens. Only consulted when the final URL differs
+   * from the requested URL — same-origin redirects never reach
+   * this check.
+   */
+  allowCrossOriginRedirect?: boolean;
 }
 
 /**
@@ -316,6 +412,17 @@ export interface VerifiedFetchResult<Body extends string | Buffer = string> {
    * do not call `arrayBuffer()` / `text()` on it again.
    */
   response: VerifiedFetchResponse;
+  /**
+   * The final URL the response was fetched from, after any
+   * redirects (backlog #1413): the native `Response.url` when the
+   * implementation reports one, else the URL that was requested.
+   * With the default `redirect: "error"` this is always the
+   * requested URL, since no redirect is ever followed; with
+   * `"follow"` it is where the response actually came from, so
+   * the caller can audit the landing origin before trusting the
+   * body.
+   */
+  finalUrl: string;
   /**
    * The response body: decoded as a UTF-8 string in the default
    * text mode, the raw bytes as a `Buffer` in bytes mode (see
@@ -569,6 +676,55 @@ function assertVerifyAllOptionsPreflight(
 }
 
 /**
+ * Resolve `opts.redirect` (backlog #1413): the default is
+ * `"error"` — fail-closed, so a caller that never thought about
+ * redirects gets no silent following — and anything outside the
+ * three fetch values is a configuration error, thrown before any
+ * network happens, like the other `opts` guards.
+ */
+function assertRedirect(value: unknown): VerifiedFetchRedirect {
+  if (value === undefined) return "error";
+  if (value === "follow" || value === "error" || value === "manual")
+    return value;
+  throw new Error(
+    `verifiedFetch: opts.redirect must be "follow", "error", or "manual", got ${JSON.stringify(value) ?? String(value)}`,
+  );
+}
+
+/**
+ * Resolve `opts.allowCrossOriginRedirect` (backlog #1413): the
+ * default is `false` — a followed redirect that lands on a
+ * different origin is refused — and a non-boolean value is a
+ * configuration error, thrown before any network happens.
+ */
+function assertAllowCrossOriginRedirect(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value === "boolean") return value;
+  throw new Error(
+    `verifiedFetch: opts.allowCrossOriginRedirect must be a boolean, got ${typeof value}`,
+  );
+}
+
+/**
+ * Whether two URLs sit on different origins (backlog #1413): the
+ * `URL.origin` comparison, so a different port or scheme counts as
+ * cross-origin, exactly as the fetch spec treats it. An
+ * unparseable URL fails closed — treated as a different origin —
+ * so a response whose final URL cannot even be parsed is refused
+ * rather than trusted on a guess.
+ */
+function redirectTargetOriginDiffers(
+  requestedUrl: string,
+  finalUrl: string,
+): boolean {
+  try {
+    return new URL(finalUrl).origin !== new URL(requestedUrl).origin;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Normalize an init `Headers` instance into the `RequestLike.headers`
  * record shape: names lowercased, entries grouped by name, each group
  * combined via `joinHeaderValues` — the exact convention
@@ -743,7 +899,7 @@ async function readResponseBodyCapped(
  * bind the response signature to it); verify it with
  * `verifyResponse` — or, in multi-label mode, with
  * `verifyAllResponseLabels`, requiring every label to pass. Returns
- * `{ response, body, verifyResult }` on a verified response (plus
+ * `{ response, body, verifyResult, finalUrl }` on a verified response (plus
  * `verifyResults` in multi-label mode); `body` is a UTF-8 string by
  * default, or the raw `Buffer` when `opts.responseBody` is
  * `"bytes"`. Throws `VerifyError` on a
@@ -762,7 +918,10 @@ async function readResponseBodyCapped(
  * their own entry points, in the pre-flight dry runs below, before
  * any network happens), a verifier with no key source or any other
  * non-positive-integer `maxBodyBytes`, an illegal `responseBody`
- * value, a caller-supplied
+ * value, an illegal `redirect` value or a non-boolean
+ * `allowCrossOriginRedirect`, a caller-supplied `init.redirect`
+ * (the policy lives on `opts.redirect` — pass it there, not in
+ * `init`), a caller-supplied
  * `verify.request` (managed by this helper — pass no `request`),
  * and a non-`AbortSignal` `init.signal`. A signal already aborted
  * likewise throws before any network — `verifiedFetch: request
@@ -853,6 +1012,23 @@ export async function verifiedFetch(
     throw new Error(
       'verifiedFetch: "verify.request" is managed by verifiedFetch — the response is anchored to the request this call just signed; pass no request',
     );
+  // The redirect policy lives on `opts`, never in `init`: a caller
+  // that passes `init.redirect` (the fetch-init spelling) used to
+  // have it silently dropped while the default fetch followed the
+  // redirect anyway — now it is a configuration error, thrown
+  // before any network happens, pointing at `opts.redirect`. The
+  // type already omits it (`VerifiedFetchInit`), this guard is for
+  // JavaScript callers.
+  if (
+    (init as { redirect?: unknown } | undefined)?.redirect !== undefined
+  )
+    throw new Error(
+      'verifiedFetch: init.redirect is managed by opts.redirect — pass "follow", "error", or "manual" as opts.redirect, not in init',
+    );
+  const redirect = assertRedirect(opts.redirect);
+  const allowCrossOriginRedirect = assertAllowCrossOriginRedirect(
+    opts.allowCrossOriginRedirect,
+  );
 
   const url = input.toString();
   const method = init?.method ?? "GET";
@@ -898,6 +1074,7 @@ export async function verifiedFetch(
         headers: init.headers,
         ...(body !== undefined ? { body } : {}),
         ...(init.signal !== undefined ? { signal: init.signal } : {}),
+        ...(init.redirect !== undefined ? { redirect: init.redirect } : {}),
       });
     });
   // The caller's signal rides along, so the fetch itself can be
@@ -909,9 +1086,37 @@ export async function verifiedFetch(
     headers: signed.headers,
     ...(signed.body !== undefined ? { body: signed.body } : {}),
     ...(signal !== undefined ? { signal } : {}),
+    redirect,
   });
 
   const bodyBuf = await readResponseBodyCapped(res, maxBodyBytes, signal);
+
+  // The final URL the response was fetched from: the native
+  // `Response.url` when the implementation reports one (the default
+  // fetch always does), else the URL that was requested — a double
+  // that reports no final URL cannot be checked on this path, and
+  // the result says so by echoing the requested URL.
+  const finalUrl =
+    typeof res.url === "string" && res.url !== "" ? res.url : url;
+  // A response that claims a different origin than the requested
+  // URL is refused before any verification runs, unless the caller
+  // explicitly opted into cross-origin redirects. Same-origin
+  // redirects pass: the origin is unchanged, so the trust domain
+  // is the same, and the signature is still verified against the
+  // request this call signed. Honest limit: with `redirect:
+  // "follow"` the signed request headers have already been sent to
+  // the redirect target by the underlying fetch, so this refusal
+  // protects which response is trusted, not which hosts see the
+  // signature headers — the default `"error"` never sends them
+  // anywhere but the requested URL.
+  if (
+    finalUrl !== url &&
+    !allowCrossOriginRedirect &&
+    redirectTargetOriginDiffers(url, finalUrl)
+  )
+    throw new Error(
+      `verifiedFetch: cross-origin redirect to ${finalUrl} refused — the signed request was for ${url}; pass opts.allowCrossOriginRedirect: true to accept responses from a different origin`,
+    );
 
   // `fromFetchResponse` normalizes the fetch headers and binds the
   // signed request as the triggering request; `verifyResponse` gets
@@ -919,7 +1124,10 @@ export async function verifiedFetch(
   // component resolves against what this call actually sent. The
   // spread pins a definite status (the adapter validated it is an
   // integer 100-599) for the `HttpResponseLike` shape.
-  const resLike = fromFetchResponse(res, bodyBuf, { request: signed });
+  const resLike = fromFetchResponse(res, bodyBuf, {
+    request: signed,
+    finalUrl,
+  });
   const allOpts = opts.verify.verifyAllLabels;
   if (allOpts !== undefined) {
     // Multi-label mode: every label must pass before the response is
@@ -963,6 +1171,7 @@ export async function verifiedFetch(
       body: responseBody === "bytes" ? bodyBuf : bodyBuf.toString("utf8"),
       verifyResult: { ok: true, label: "", perLabelResults: results },
       verifyResults: results,
+      finalUrl,
     };
   }
   const verifyResult = verifyResponse(
@@ -988,5 +1197,6 @@ export async function verifiedFetch(
     response: res,
     body: responseBody === "bytes" ? bodyBuf : bodyBuf.toString("utf8"),
     verifyResult,
+    finalUrl,
   };
 }

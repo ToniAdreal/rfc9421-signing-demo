@@ -122,11 +122,12 @@ function assertHttpScheme(scheme: unknown, caller: string): "http" | "https" {
  * fast"). A bound `opts.request` is deliberately NOT re-checked: its
  * method/url walk the `RequestLike` contract of the caller-supplied
  * request, and the explicit pair is ignored entirely when a request
- * is bound.
+ * is bound. Backlog #1413 widens the guard to `finalUrl` as well:
+ * the post-redirect URL override goes through the same string rule.
  */
 function assertMethodOrUrlString(
   caller: string,
-  param: "method" | "url",
+  param: "method" | "url" | "finalUrl",
   value: unknown,
 ): void {
   if (value !== undefined && typeof value !== "string")
@@ -268,6 +269,20 @@ export interface FromFetchResponseOptions {
    * (backlog #1376).
    */
   url?: string;
+  /**
+   * The URL the response was actually fetched from — e.g. the final
+   * URL after redirects, as reported by `Response.url` (backlog
+   * #1413). When provided it replaces `request.url` (or the explicit
+   * `url` pair) as the adapted message's `url`, so the message
+   * records where the response came from; the `;req` binding is
+   * untouched — covered `;req` components still resolve against
+   * `opts.request`, the request that was actually sent. Same
+   * non-empty-string rule as `url` (a non-string throws the named
+   * error, an empty string falls through to the "cannot determine
+   * the request" check). Omit it to keep the existing behavior
+   * (the adapted `url` is the triggering request's URL).
+   */
+  finalUrl?: string;
 }
 
 /**
@@ -436,6 +451,15 @@ export function fromNodeResponse(
  * and when neither `opts.request` nor the `opts.method` + `opts.url`
  * pair supplies the triggering request.
  *
+ * Backlog #1413 adds an optional `opts.finalUrl`: the URL the
+ * response was actually fetched from, after redirects (the native
+ * `Response.url`). When provided it replaces the triggering
+ * request's URL as the adapted message's `url` — the message then
+ * records where the response came from — while the `;req` binding
+ * still resolves against `opts.request`, the request that was
+ * actually sent. A non-string `finalUrl` throws the same named
+ * error as a non-string `method` / `url`.
+ *
  * Shape guards (backlog #1375, same `assertObjectParam` as the
  * Node adapters in #1352): a `null` / non-object / array `res`, or a
  * `null` / non-object `opts.request`, throws a named `Error`
@@ -497,6 +521,17 @@ export function fromFetchResponse(
     assertMethodOrUrlString("fromFetchResponse", "url", opts?.url);
     method = opts?.method;
     url = opts?.url;
+  }
+  // Backlog #1413: the post-redirect URL override. It only changes
+  // the adapted message's own `url` — the `;req` binding above
+  // still points at `opts.request`, so a covered `;req` component
+  // resolves against the request that was actually sent, not the
+  // landing URL. The guard runs even when a request is bound, so a
+  // non-string `finalUrl` fails here with the named error instead
+  // of slipping into the adapted message.
+  if (opts?.finalUrl !== undefined) {
+    assertMethodOrUrlString("fromFetchResponse", "finalUrl", opts.finalUrl);
+    url = opts.finalUrl;
   }
   if (method === undefined || method === "" || url === undefined || url === "")
     throw new Error(

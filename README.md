@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2998 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 3014 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1813,7 +1813,18 @@ configuration error). `opts.fetchImpl` injects a transport (defaults to
 the global `fetch`); `opts.maxBodyBytes` caps the response body
 (default `DEFAULT_MAX_BODY_BYTES`, 1 MiB, the same value as
 `createVerifiedHandler`) — an over-long body is rejected before any
-verification runs, never truncated into a digest check. Invalid sign or
+verification runs, never truncated into a digest check. Redirects are
+not followed by default: `opts.redirect` defaults to `"error"`, so a
+3xx makes the fetch reject instead of silently carrying the signed
+request headers to another origin; pass `"follow"` to allow following
+or `"manual"` to receive the 3xx response itself for verification, and
+`allowCrossOriginRedirect: true` to also accept a followed redirect
+that lands on a different origin — without it, a response whose final
+URL has a different origin than the requested URL is refused before
+any verification runs. The result exposes that final URL as
+`finalUrl` (the requested URL when no redirect was followed). A
+caller-supplied `init.redirect` is a configuration error: the policy
+lives on `opts.redirect`, never in `init`. Invalid sign or
 verify configuration throws before any network happens; fetch-layer
 errors pass through untouched. `init.signal` carries an `AbortSignal`
 for the whole call: it is forwarded to the fetch implementation (the
@@ -5575,7 +5586,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 2998 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 3014 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

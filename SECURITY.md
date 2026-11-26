@@ -304,7 +304,14 @@ Read this before using it anywhere that matters.
   receive the raw `Buffer` instead. Verification runs over the exact
   raw bytes in both modes. The body cap rejects
   an over-long body before verification; it never truncates one into a
-  digest check.
+  digest check. Redirects are not followed by default
+  (`opts.redirect` defaults to `"error"`), and a followed redirect
+  that lands on a different origin is refused unless the caller
+  explicitly opts in with `allowCrossOriginRedirect: true` — but
+  with `redirect: "follow"` the signed request headers have already
+  been sent to the redirect target by the underlying fetch, so the
+  refusal protects which response is trusted, not which hosts see
+  the signature headers.
 - Body binding only applies when a `content-digest` header is present, and
   only the `sha-512` entry is honored when present, with `sha-256` accepted
   as a fallback. Requests without a digest header

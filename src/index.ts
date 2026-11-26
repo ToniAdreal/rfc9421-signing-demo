@@ -153,6 +153,7 @@ export type {
   VerifiedFetchFn,
   VerifiedFetchInit,
   VerifiedFetchOptions,
+  VerifiedFetchRedirect,
   VerifiedFetchResponse,
   VerifiedFetchResult,
   VerifiedFetchSignOptions,
