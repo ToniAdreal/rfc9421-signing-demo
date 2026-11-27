@@ -3138,7 +3138,7 @@ see [SECURITY.md](SECURITY.md).
 ## Benchmarks
 
 `npm run bench` measures locally-observed sign/verify throughput per
-algorithm plus the key-resolution, JWKS snapshot-export, JWKS document-build, JWKS snapshot-restore, JWKS signed snapshot-export, JWKS signed snapshot-restore, JWKS key retirement, resolver-based verification, maximum-signature-age verification, expiry-presence verification, created-presence verification, clock-skew verification, expiry-grace verification, key-id binding verification, per-label key-id binding verification, per-label key-resolution verification, per-label nonce-presence verification, per-label candidate-keys verification, per-label candidate-keys plus key-id-pinning verification, per-label tag-presence verification, key-id-binding plus global tag-presence verification, per-label required-freshness verification, per-label dual-required freshness-existence verification, per-label tag-pinning verification, per-label freshness-window verification, per-label signature-length verification, per-label nonce-presence plus freshness-window verification, per-label candidate-keys plus tag-presence verification, per-label clock-skew verification, per-label expiry-grace verification, per-label component-coverage verification, per-label algorithm-inference verification, per-label replay-cache verification, per-label key-id binding plus nonce-presence verification, per-label candidate-keys plus freshness-window verification, per-label JWKS key-resolution verification, per-label JWKS key-resolution plus dictionary-member verification, per-label JWKS key-resolution plus replay-cache verification, per-label content-digest verification, per-label structured-field-types verification, algorithm-inference verification, application-tag-pinning verification, component-coverage verification, replay-cache verification, nonce-presence verification, tag-presence verification, JWKS refresh, JWKS concurrent single-flight refresh, JWKS fetch-retry refresh, JWKS Retry-After refresh, JWKS loopback refresh, JWKS Cache-Control max-age refresh, JWKS maxBodyBytes rejection refresh, JWKS refresh-if-stale fresh check, JWKS maxStaleSec cutoff resolution, JWKS https-only endpoint enforcement, thumbprint-derivation, replay-check, replay snapshot-export, replay stats, JWKS stats, memoized key resolver stats, replay snapshot-restore, replay signed snapshot sealing by label, replay release,
+algorithm plus the key-resolution, JWKS snapshot-export, JWKS document-build, JWKS snapshot-restore, JWKS signed snapshot-export, JWKS signed snapshot-restore, JWKS key retirement, resolver-based verification, maximum-signature-age verification, expiry-presence verification, created-presence verification, clock-skew verification, expiry-grace verification, key-id binding verification, per-label key-id binding verification, per-label key-resolution verification, per-label nonce-presence verification, per-label candidate-keys verification, per-label candidate-keys plus key-id-pinning verification, per-label tag-presence verification, key-id-binding plus global tag-presence verification, per-label required-freshness verification, per-label dual-required freshness-existence verification, per-label tag-pinning verification, per-label freshness-window verification, per-label signature-length verification, per-label nonce-presence plus freshness-window verification, per-label candidate-keys plus tag-presence verification, per-label clock-skew verification, per-label expiry-grace verification, per-label component-coverage verification, per-label algorithm-inference verification, per-label replay-cache verification, per-label key-id binding plus nonce-presence verification, per-label candidate-keys plus freshness-window verification, per-label JWKS key-resolution verification, per-label JWKS key-resolution plus dictionary-member verification, per-label JWKS key-resolution plus replay-cache verification, per-label content-digest verification, per-label structured-field-types verification, algorithm-inference verification, application-tag-pinning verification, component-coverage verification, replay-cache verification, custom NonceStore verification, nonce-presence verification, tag-presence verification, JWKS refresh, JWKS concurrent single-flight refresh, JWKS fetch-retry refresh, JWKS Retry-After refresh, JWKS loopback refresh, JWKS Cache-Control max-age refresh, JWKS maxBodyBytes rejection refresh, JWKS refresh-if-stale fresh check, JWKS maxStaleSec cutoff resolution, JWKS https-only endpoint enforcement, thumbprint-derivation, replay-check, replay snapshot-export, replay stats, JWKS stats, memoized key resolver stats, replay snapshot-restore, replay signed snapshot sealing by label, replay release,
 malformed-input rejection, oversized signature-input rejection,
 within-limit signature-input verification, standalone content-digest,
 inbound-normalization, inbound trailer-bound verification,
@@ -3148,7 +3148,7 @@ signature-base-building, end-to-end signing, standalone signature-parser,
 structured-field canonicalization, structured-field registry canonicalization, dictionary-member extraction, signature-parameter serialization, nonce generation, HMAC secret generation, key-pair generation, throwing-verify-wrapper, header-lookup, header-value combination, digest-algorithm identification, HMAC secret-length guard, RSA modulus-length guard, signature-input value building, content-digest algorithm guard, algorithm-whitelist verification, response algorithm-whitelist verification, response replay-cache verification, per-label response replay-cache verification, response signing and verification, verified-handler end-to-end receive, verified-handler unsigned rejection, verified-fetch end-to-end round trip, verified-fetch multi-label end-to-end round trip, verified-fetch redirect-policy rejection, verified-fetch-handler end-to-end receive, and component-resolution paths below
 (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU).
-All rows below are from one real run on 2026-11-23, except the `JwksKeyStore.resolve (maxStaleSec cutoff)` row and the `verifiedFetch redirect (default error, loopback 302)` row, both measured 2026-11-27 on the same host (Node v24.22.1, AMD EPYC 9D25):
+All rows below are from one real run on 2026-11-23, except the `JwksKeyStore.resolve (maxStaleSec cutoff)` row and the `verifiedFetch redirect (default error, loopback 302)` row, both measured 2026-11-27, and the `verifyRequest custom NonceStore (2 keyids)` row, measured 2026-11-28, all on the same host (Node v24.22.1, AMD EPYC 9D25):
 
 | alg | op | throughput |
 |-----|--------|------------|
@@ -3187,6 +3187,7 @@ All rows below are from one real run on 2026-11-23, except the `JwksKeyStore.res
 | verifyRequest requireCreated | verify | 6,165 ops/sec (162.20 µs/op) |
 | verifyRequest expectedTag | verify | 5,491 ops/sec (182.12 µs/op) |
 | verifyRequest replayCache | verify | 2,779 ops/sec (359.80 µs/op) |
+| verifyRequest custom NonceStore (2 keyids) | verify | 2,733 ops/sec (365.85 µs/op) |
 | verifyRequest requireNonce | verify | 6,240 ops/sec (160.26 µs/op) |
 | verifyRequest oversized signature-input (rejected) | reject | 52,229 ops/sec (19.15 µs/op) |
 | verifyRequest signature-input within limit | verify | 6,307 ops/sec (158.56 µs/op) |
@@ -5271,6 +5272,45 @@ replay-defense form has a checked steady-state number
 of its own. The bench performs zero network I/O and
 makes no wall-clock assertions (every verify instant
 is injected).
+
+The `verifyRequest custom NonceStore (2 keyids)` row is new: it measures
+`verifyRequest` with a caller-supplied `NonceStore` — the
+scoped accepting path a multi-tenant gateway pays when
+its nonce store is its own (shared storage behind the
+`NonceStore` interface) rather than the built-in
+`ReplayCache`, which the existing rows never timed
+(they pass either no store or the built-in cache, so
+the per-scope lookup a custom store performs was never
+a measured cost). One measured op verifies two pinned
+ed25519 fixtures against a fresh `Map`-backed store:
+both fixtures share the nonce
+`"bench-custom-nonce-1"` and `created` pinned at
+1700000000 but are signed under different keyids
+(`bench-custom-nonce-store-key-a` /
+`bench-custom-nonce-store-key-b`), the verifier's `now`
+injected at the `created` instant with
+`maxSignatureAgeSec: 3600`; both results are ok and
+the store holds exactly one entry per keyid scope, so
+the measured path cannot be one that collapses the
+scopes. Outside timing the bench also pins the other
+halves of the contract: the same keyid presenting the
+same nonce a second time is rejected with exactly the
+pinned `NONCE_REPLAY` code and reason, a keyid-less
+signature records under the `""` scope and neither
+collides with the keyed scopes nor shares their
+entries, and a forged signature (signature bytes
+tampered) returns `SIGNATURE_MISMATCH` without
+polluting the store — the genuine fixture still
+verifies (and is then replay-rejected) afterwards.
+Measured 2026-11-28 it came in at 2,733 ops/sec
+(365.85 µs/op), against 2,940 ops/sec (340.13 µs/op)
+for the same run's `verifyRequest replayCache` row —
+the expected shape, since one measured op performs
+two full verifications against a fresh store while the
+replayCache op performs one acceptance plus one
+replay rejection. The bench performs zero network I/O
+and makes no wall-clock assertions (every verify
+instant is injected).
 
 The `verifyRequest requireNonce` row is new: it measures
 `verifyRequest` with the opt-in `requireNonce` — the

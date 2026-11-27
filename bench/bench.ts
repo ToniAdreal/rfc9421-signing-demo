@@ -146,6 +146,21 @@
  * nonce-less signature's double acceptance under a
  * cache, and a forged signature's non-polluting
  * `SIGNATURE_MISMATCH` result asserted outside
+ * timing, plus the custom-store verify path a
+ * gateway runs when it brings its own nonce store:
+ * `verifyRequest` with a caller-supplied `Map`-backed
+ * `NonceStore` over two ed25519 fixtures sharing one
+ * pinned `nonce` string but signed under different
+ * keyids (the verifier's `now` injected at the
+ * `created` instant — see CUSTOM_NONCE_STORE_* below),
+ * self-checked on every measured pass (each measured
+ * op verifies both fixtures against a fresh store —
+ * both results ok, and the store holds exactly one
+ * entry per keyid scope), with the same-keyid second
+ * presentation's pinned `NONCE_REPLAY` code and
+ * reason, the keyid-less signature's `""`-scope
+ * isolation, and a forged signature's non-polluting
+ * `SIGNATURE_MISMATCH` result asserted outside
  * timing, plus the nonce-presence verify path a
  * receiver runs to refuse nonce-less signatures before
  * they ever reach the replay store: `verifyRequest` with
@@ -1163,6 +1178,7 @@ import {
   type JwksFetchInit,
   type JwksFetchResponse,
   type MemoizedKeyResolver,
+  type NonceStore,
   type RequestLike,
   type ReplayCacheSignedSnapshotEnvelope,
   type SignatureParams,
@@ -3530,6 +3546,239 @@ function benchmarkVerifyReplayCache(): number {
         `benchmark self-check failed: verifyRequest with replayCache (measured first pass) gave ${JSON.stringify(first)}`,
       );
     assertReplayed(cache, "measured pass");
+  }, ITERATIONS);
+}
+
+/**
+ * Pinned shape of the `verifyRequest` custom-`NonceStore`
+ * benchmark: two ed25519 key pairs (generated once,
+ * outside timing), two fixtures signed outside timing
+ * under different keyids sharing one pinned `nonce`
+ * string, and a caller-supplied `Map`-backed store —
+ * the measured steady state is the scoped accepting
+ * path a multi-tenant gateway pays on every request.
+ */
+const CUSTOM_NONCE_STORE_NOW = 1_700_000_000;
+/**
+ * Bound for the custom-store bench fixtures' signature lifetime
+ * (same rule as REPLAY_CACHE_BENCH_MAX_AGE_SEC above): a custom
+ * store exposes no TTL, so `verifyRequest`'s replay-lifetime
+ * consistency check only requires the lifetime to be bounded —
+ * a 3600s window at age 0 changes no outcome.
+ */
+const CUSTOM_NONCE_STORE_MAX_AGE_SEC = 3600;
+const CUSTOM_NONCE_STORE_KID_A = "bench-custom-nonce-store-key-a";
+const CUSTOM_NONCE_STORE_KID_B = "bench-custom-nonce-store-key-b";
+const CUSTOM_NONCE_STORE_NONCE = "bench-custom-nonce-1";
+const CUSTOM_NONCE_STORE_CODE = "NONCE_REPLAY";
+const CUSTOM_NONCE_STORE_REASON = `nonce replay detected: "${CUSTOM_NONCE_STORE_NONCE}" was already seen`;
+
+/**
+ * A caller-supplied `NonceStore` backed by a plain `Map`, the
+ * shape a deployment uses when it plugs its own storage (e.g.
+ * Redis) behind the `NonceStore` interface: the key is the
+ * `scope` (wire `keyid`, `""` when the signature carries
+ * none) joined to the nonce, so two signers sharing one store
+ * never collide on the same nonce string — the scope contract
+ * of backlog #1412, which a store that ignores the third
+ * argument silently breaks.
+ */
+class MapNonceStore implements NonceStore {
+  private readonly seen = new Map<string, number>();
+
+  check(nonce: string, now = 0, scope = ""): boolean {
+    const key = `${scope}\0${nonce}`;
+    if (this.seen.has(key)) return true;
+    this.seen.set(key, now);
+    return false;
+  }
+
+  /** Number of (scope, nonce) entries currently tracked. */
+  get size(): number {
+    return this.seen.size;
+  }
+
+  /** Whether this exact (scope, nonce) pair is already tracked. */
+  has(nonce: string, scope: string): boolean {
+    return this.seen.has(`${scope}\0${nonce}`);
+  }
+}
+
+/**
+ * `verifyRequest` with a caller-supplied custom `NonceStore`
+ * steady state: the scoped accepting path a multi-tenant
+ * gateway runs when its nonce store is its own (shared
+ * storage behind the `NonceStore` interface) rather than the
+ * built-in `ReplayCache` — every measured op verifies two
+ * fixtures that share one nonce string but carry different
+ * keyids, and re-pins that both results are ok and the store
+ * holds exactly one entry per keyid scope, so the measured
+ * path cannot be one that collapses the scopes. Outside
+ * timing, the rejecting halves are pinned once: the same
+ * keyid presenting the same nonce a second time returns
+ * exactly the pinned `NONCE_REPLAY` code and reason; a
+ * keyid-less signature records under the `""` scope and
+ * does not collide with either keyed scope; and a forged
+ * signature returns `SIGNATURE_MISMATCH` without polluting
+ * the store — the genuine fixture still verifies afterwards
+ * and is then replay-rejected. Zero network, zero
+ * randomness in the measured assertions, no wall clock
+ * (every verify instant is injected).
+ */
+function benchmarkVerifyCustomNonceStore(): number {
+  const pairA = generateEd25519KeyPair();
+  const pairB = generateEd25519KeyPair();
+  const keys = new Map<string, KeyObject>([
+    [CUSTOM_NONCE_STORE_KID_A, pairA.publicKey],
+    [CUSTOM_NONCE_STORE_KID_B, pairB.publicKey],
+  ]);
+  const keyResolver = (id: string) => keys.get(id);
+  const signedA = signRequest(fixture, {
+    keyId: CUSTOM_NONCE_STORE_KID_A,
+    alg: "ed25519",
+    key: pairA.privateKey,
+    created: CUSTOM_NONCE_STORE_NOW,
+    nonce: CUSTOM_NONCE_STORE_NONCE,
+  });
+  const signedB = signRequest(fixture, {
+    keyId: CUSTOM_NONCE_STORE_KID_B,
+    alg: "ed25519",
+    key: pairB.privateKey,
+    created: CUSTOM_NONCE_STORE_NOW,
+    nonce: CUSTOM_NONCE_STORE_NONCE,
+  });
+  const verifyOpts: Parameters<typeof verifyRequest>[1] = {
+    keyResolver,
+    now: CUSTOM_NONCE_STORE_NOW,
+    maxSignatureAgeSec: CUSTOM_NONCE_STORE_MAX_AGE_SEC,
+  };
+  // A keyid-less signature has nothing to resolve, so it
+  // cannot go through the resolver (it would fail closed
+  // with KEY_RESOLUTION_FAILED) — it verifies against the
+  // direct key instead, and still records under the ""
+  // scope, the old single-namespace behavior.
+  const verifyKeylessOpts: Parameters<typeof verifyRequest>[1] = {
+    key: pairA.publicKey,
+    now: CUSTOM_NONCE_STORE_NOW,
+    maxSignatureAgeSec: CUSTOM_NONCE_STORE_MAX_AGE_SEC,
+  };
+  const verifyScoped = (
+    signed: SignedHttpRequest,
+    store: NonceStore,
+    opts: Parameters<typeof verifyRequest>[1],
+    where: string,
+  ): void => {
+    const r = verifyRequest(signed, { ...opts, replayCache: store });
+    if (!r.ok)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with custom NonceStore (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+  const assertReplayed = (
+    signed: SignedHttpRequest,
+    store: NonceStore,
+    opts: Parameters<typeof verifyRequest>[1],
+    where: string,
+  ): void => {
+    const r = verifyRequest(signed, { ...opts, replayCache: store });
+    if (
+      r.ok ||
+      r.code !== CUSTOM_NONCE_STORE_CODE ||
+      r.reason !== CUSTOM_NONCE_STORE_REASON
+    )
+      throw new Error(
+        `benchmark self-check failed: verifyRequest with custom NonceStore (${where}) gave ${JSON.stringify(r)}`,
+      );
+  };
+
+  // Outside timing: the same keyid presenting the same nonce a
+  // second time is a replay — the scope is per keyid, not per
+  // nonce string alone.
+  const replayStore = new MapNonceStore();
+  verifyScoped(signedA, replayStore, verifyOpts, "outside timing, first A");
+  assertReplayed(signedA, replayStore, verifyOpts, "outside timing, second A");
+
+  // Outside timing: a keyid-less signature records under the ""
+  // scope — it neither collides with the keyed scopes nor
+  // shares their entries.
+  const keyless = signRequest(fixture, {
+    alg: "ed25519",
+    key: pairA.privateKey,
+    created: CUSTOM_NONCE_STORE_NOW,
+    nonce: CUSTOM_NONCE_STORE_NONCE,
+  });
+  const keylessStore = new MapNonceStore();
+  verifyScoped(signedA, keylessStore, verifyOpts, "outside timing, keyed A");
+  verifyScoped(
+    keyless,
+    keylessStore,
+    verifyKeylessOpts,
+    "outside timing, keyless after A",
+  );
+  if (
+    keylessStore.size !== 2 ||
+    !keylessStore.has(CUSTOM_NONCE_STORE_NONCE, CUSTOM_NONCE_STORE_KID_A) ||
+    !keylessStore.has(CUSTOM_NONCE_STORE_NONCE, "")
+  )
+    throw new Error(
+      `benchmark self-check failed: keyless scope isolation gave size ${keylessStore.size}`,
+    );
+  assertReplayed(
+    keyless,
+    keylessStore,
+    verifyKeylessOpts,
+    "outside timing, second keyless",
+  );
+
+  // Outside timing: a forged signature (signature bytes
+  // tampered) returns SIGNATURE_MISMATCH and never pollutes
+  // the store — the genuine fixture still verifies afterwards.
+  const forgedStore = new MapNonceStore();
+  const sigField = signedA.headers["signature"];
+  const sigMatch = /^sig1=:(.+):$/.exec(sigField);
+  if (!sigMatch)
+    throw new Error(
+      `benchmark self-check failed: unexpected signature header shape ${JSON.stringify(sigField)}`,
+    );
+  const raw = Buffer.from(sigMatch[1], "base64");
+  raw[raw.length - 1] ^= 0xff;
+  const forged: SignedHttpRequest = {
+    method: signedA.method,
+    url: signedA.url,
+    headers: {
+      ...signedA.headers,
+      signature: `sig1=:${raw.toString("base64")}:`,
+    },
+  };
+  const forgedResult = verifyRequest(forged, {
+    ...verifyOpts,
+    replayCache: forgedStore,
+  });
+  if (forgedResult.ok || forgedResult.code !== "SIGNATURE_MISMATCH")
+    throw new Error(
+      `benchmark self-check failed: forged result ${JSON.stringify(forgedResult)} ` +
+        `(expected SIGNATURE_MISMATCH)`,
+    );
+  verifyScoped(signedA, forgedStore, verifyOpts, "after forgery");
+  assertReplayed(
+    signedA,
+    forgedStore,
+    verifyOpts,
+    "replay after unpolluted first verify",
+  );
+
+  return measure(() => {
+    const store = new MapNonceStore();
+    verifyScoped(signedA, store, verifyOpts, "measured pass, A");
+    verifyScoped(signedB, store, verifyOpts, "measured pass, B");
+    if (
+      store.size !== 2 ||
+      !store.has(CUSTOM_NONCE_STORE_NONCE, CUSTOM_NONCE_STORE_KID_A) ||
+      !store.has(CUSTOM_NONCE_STORE_NONCE, CUSTOM_NONCE_STORE_KID_B)
+    )
+      throw new Error(
+        `benchmark self-check failed: custom NonceStore scopes gave size ${store.size} (expected 2)`,
+      );
   }, ITERATIONS);
 }
 
@@ -20814,6 +21063,11 @@ results.push({
   alg: "verifyRequest replayCache",
   op: "verify",
   ops: benchmarkVerifyReplayCache(),
+});
+results.push({
+  alg: "verifyRequest custom NonceStore (2 keyids)",
+  op: "verify",
+  ops: benchmarkVerifyCustomNonceStore(),
 });
 results.push({
   alg: "verifyRequest requireNonce",
