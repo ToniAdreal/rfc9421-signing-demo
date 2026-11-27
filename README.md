@@ -3145,10 +3145,10 @@ inbound-normalization, inbound trailer-bound verification,
 response-normalization, fetch-response adaptation, dual-label response verification, single-call
 dual-label response verification, throwing response verification, throwing dual-label response verification, dual-label request verification, throwing multi-label verification, dual-label trailer-bound request verification, dual-label trailer-bound response verification, per-curve JWK round-trip, ed25519 JWK round-trip, symmetric JWK round-trip, PEM round-trip, private JWK import, P-256 private JWK export, key-shape description, algorithm inference from key shape, algorithm-to-key-shape matching,
 signature-base-building, end-to-end signing, standalone signature-parser,
-structured-field canonicalization, structured-field registry canonicalization, dictionary-member extraction, signature-parameter serialization, nonce generation, HMAC secret generation, key-pair generation, throwing-verify-wrapper, header-lookup, header-value combination, digest-algorithm identification, HMAC secret-length guard, RSA modulus-length guard, signature-input value building, content-digest algorithm guard, algorithm-whitelist verification, response algorithm-whitelist verification, response replay-cache verification, per-label response replay-cache verification, response signing and verification, verified-handler end-to-end receive, verified-handler unsigned rejection, verified-fetch end-to-end round trip, verified-fetch multi-label end-to-end round trip, verified-fetch-handler end-to-end receive, and component-resolution paths below
+structured-field canonicalization, structured-field registry canonicalization, dictionary-member extraction, signature-parameter serialization, nonce generation, HMAC secret generation, key-pair generation, throwing-verify-wrapper, header-lookup, header-value combination, digest-algorithm identification, HMAC secret-length guard, RSA modulus-length guard, signature-input value building, content-digest algorithm guard, algorithm-whitelist verification, response algorithm-whitelist verification, response replay-cache verification, per-label response replay-cache verification, response signing and verification, verified-handler end-to-end receive, verified-handler unsigned rejection, verified-fetch end-to-end round trip, verified-fetch multi-label end-to-end round trip, verified-fetch redirect-policy rejection, verified-fetch-handler end-to-end receive, and component-resolution paths below
 (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU).
-All rows below are from one real run on 2026-11-23, except the `JwksKeyStore.resolve (maxStaleSec cutoff)` row, measured 2026-11-27 on the same host (Node v24.22.1, AMD EPYC 9D25):
+All rows below are from one real run on 2026-11-23, except the `JwksKeyStore.resolve (maxStaleSec cutoff)` row and the `verifiedFetch redirect (default error, loopback 302)` row, both measured 2026-11-27 on the same host (Node v24.22.1, AMD EPYC 9D25):
 
 | alg | op | throughput |
 |-----|--------|------------|
@@ -3266,6 +3266,7 @@ All rows below are from one real run on 2026-11-23, except the `JwksKeyStore.res
 | createVerifiedHandler (unsigned POST, loopback) | verify | 6,611 ops/sec (151.26 µs/op) |
 | verifiedFetch (signed POST, loopback) | sign+fetch+verify | 948.3 ops/sec (1054.57 µs/op) |
 | verifiedFetch multi-label (signed POST, loopback, 2 labels) | sign+fetch+verify | 723.0 ops/sec (1383.06 µs/op) |
+| verifiedFetch redirect (default error, loopback 302) | reject | 1,592 ops/sec (628.16 µs/op) |
 | createVerifiedFetchHandler (signed POST, in-process) | verify+sign | 2,790 ops/sec (358.39 µs/op) |
 | JWK round-trip P-256 | roundtrip | 25,869 ops/sec (38.66 µs/op) |
 | JWK round-trip P-384 | roundtrip | 19,831 ops/sec (50.43 µs/op) |
@@ -3340,6 +3341,28 @@ the single-label row (a probe round trip with both labels' identities
 pinned, and a tampered-body delivery failing with
 `BODY_DIGEST_MISMATCH`), so it cannot be measuring a path that skips
 the second signature.
+
+The `verifiedFetch redirect` row is new: it measures the fail-closed
+default a settlement caller pays when the gateway answers with a
+redirect — one measured op signs the same settlement-instruction POST
+as the single-label row and fetches the loopback 302 under the default
+`redirect: "error"` policy, re-pinning on every pass that the fetch
+rejects with the `fetch failed` TypeError before the signed request
+reaches the target (the target-hit count is snapshotted before timing
+and asserted unchanged after, so the row cannot be measuring a path
+that silently followed). Measured 2026-11-27 it came in at 1,592
+ops/sec (628.16 µs/op), against 755.7 ops/sec (1323.27 µs/op) for the
+same run's single-label round trip — about 2.1× the throughput, the
+expected shape: the rejection still pays the request signing and one
+loopback fetch of the 302, but never the response signing or
+verification. Outside timing the row pins the same-origin follow
+(verified, `finalUrl` naming the settlement endpoint), the
+cross-origin follow refused before any verification runs (the fetch
+did follow, so the second server was hit once — the documented honest
+limit, pinned in the count), the same call with
+`allowCrossOriginRedirect: true` verifying and reporting the
+cross-origin `finalUrl`, and the `manual` 302 failing verification
+with `MISSING_SIGNATURE_INPUT` while the target stays unfetched.
 
 The `ecdsa-p384-sha384` rows: the P-384 path uses the same fixture
 caliber as P-256 (one fresh key pair per scenario, outside the timed

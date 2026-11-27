@@ -1036,7 +1036,17 @@
  * `verify.verifyAllLabels` — one full sign → fetch → dual-verify
  * round trip per measured op, both labels' identities self-checked
  * on every pass, so the two rows price the one-call multi-label
- * wrapper against the single-label round trip, plus the fetch
+ * wrapper against the single-label round trip, plus the
+ * redirect-policy twin of that row: the default `redirect:
+ * "error"` rejection steady state — one measured op signs the same
+ * settlement-instruction POST and fetches a loopback 302,
+ * re-pinning on every pass that the fetch rejects before the signed
+ * request reaches the target (the target-hit count is unchanged
+ * across warmup + timed passes), with the same-origin follow
+ * (verified, `finalUrl` naming the settlement endpoint), the
+ * cross-origin follow refused before verification unless explicitly
+ * allowed, and the `manual` 302 failing verification with
+ * `MISSING_SIGNATURE_INPUT` pinned outside timing, plus the fetch
  * twin of the `createVerifiedHandler` receive path:
  * `createVerifiedFetchHandler` called in-process with a standard
  * fetch `Request` (one client ed25519 key signing the request,
@@ -1064,7 +1074,7 @@ import {
   type KeyObject,
 } from "node:crypto";
 import { cpus } from "node:os";
-import { createServer, get, request, type IncomingMessage } from "node:http";
+import { createServer, get, request, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
   addResponseSignature,
@@ -16931,6 +16941,266 @@ async function benchmarkVerifiedFetchMultiLabel(): Promise<number> {
 }
 
 /**
+ * Shared harness for the `verifiedFetch` redirect-policy row
+ * (backlog #1435): two loopback servers — a different port is a
+ * different origin. The main server signs the same fixed
+ * settlement response as the single-label row on `/target` (via
+ * `signResponse` with the pinned gateway keyid / `ed25519` /
+ * nonce / `created`), answers `/old` with a same-origin 302 to
+ * `/target`, and answers `/old-cross` with a 302 to the second
+ * server's `/target`; the second server signs the same response
+ * on its own port. Both servers count target hits, so the
+ * default-policy steady state can pin that the signed request
+ * never reaches a target. Each server's close drains connections
+ * first so `server.close` cannot hang on a keep-alive socket.
+ */
+async function startVerifiedFetchRedirectServers(): Promise<{
+  base: string;
+  crossBase: string;
+  gatewayPublicKey: KeyObject;
+  targetHits: () => number;
+  crossTargetHits: () => number;
+  close: () => Promise<void>;
+}> {
+  const { publicKey, privateKey } = generateEd25519KeyPair();
+  let targetHits = 0;
+  let crossTargetHits = 0;
+  const sendTarget = (res: ServerResponse): void => {
+    const signed = signResponse(
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: VERIFIED_FETCH_RESPONSE_BODY,
+      },
+      {
+        keyId: VERIFIED_FETCH_KEY_ID,
+        alg: "ed25519",
+        key: privateKey,
+        created: VERIFIED_FETCH_CREATED,
+        nonce: VERIFIED_FETCH_NONCE,
+      },
+    );
+    res.writeHead(200, {
+      "content-type": "application/json",
+      "content-digest": signed.headers["content-digest"] as string,
+      "signature-input": signed.headers["signature-input"] as string,
+      signature: signed.headers["signature"] as string,
+    });
+    res.end(VERIFIED_FETCH_RESPONSE_BODY);
+  };
+  const cross = createServer((_req, res) => {
+    crossTargetHits += 1;
+    sendTarget(res);
+  });
+  await new Promise<void>((resolve) =>
+    cross.listen(0, "127.0.0.1", resolve),
+  );
+  const crossBase = `http://127.0.0.1:${(cross.address() as AddressInfo).port}`;
+  const main = createServer((req, res) => {
+    if (req.url === "/old") {
+      res.writeHead(302, { location: "/target" });
+      res.end();
+      return;
+    }
+    if (req.url === "/old-cross") {
+      res.writeHead(302, { location: `${crossBase}/target` });
+      res.end();
+      return;
+    }
+    if (req.url === "/target") {
+      targetHits += 1;
+      sendTarget(res);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) =>
+    main.listen(0, "127.0.0.1", resolve),
+  );
+  const base = `http://127.0.0.1:${(main.address() as AddressInfo).port}`;
+  return {
+    base,
+    crossBase,
+    gatewayPublicKey: publicKey,
+    targetHits: () => targetHits,
+    crossTargetHits: () => crossTargetHits,
+    close: () =>
+      new Promise<void>((resolve) => {
+        main.closeAllConnections();
+        cross.closeAllConnections();
+        let pending = 2;
+        const done = () => {
+          pending -= 1;
+          if (pending === 0) resolve();
+        };
+        main.close(() => done());
+        cross.close(() => done());
+      }),
+  };
+}
+
+/**
+ * `verifiedFetch` redirect-policy rejection steady state: the
+ * fail-closed default a settlement caller pays when the gateway
+ * answers with a redirect — one measured op signs the same
+ * settlement-instruction POST as the single-label row and fetches
+ * the loopback 302, re-pinning on every pass that the fetch
+ * rejects with the `fetch failed` TypeError before the signed
+ * request reaches the target. The target-hit count is snapshotted
+ * before timing and asserted unchanged after, so the rejection is
+ * priced, not the follow — and the row cannot be measuring a path
+ * that silently followed (the `benchmarkVerifyRequireCreated`
+ * shape: price the rejection, not the success). Asserted outside
+ * timing: `"follow"` follows the same-origin 302 and verifies the
+ * landing response with `finalUrl` naming the settlement endpoint;
+ * a `"follow"` to the cross-origin 302 is refused before any
+ * verification runs (the fetch did follow, so the second server
+ * was hit once — the documented honest limit, pinned in the
+ * count), while the same call with `allowCrossOriginRedirect:
+ * true` verifies and reports the cross-origin `finalUrl`; and
+ * `"manual"` returns the unsigned 302 itself, which fails
+ * verification with `MISSING_SIGNATURE_INPUT` while the target
+ * stays unfetched.
+ */
+async function benchmarkVerifiedFetchRedirect(): Promise<number> {
+  const s = await startVerifiedFetchRedirectServers();
+  try {
+    const clientPair = generateEd25519KeyPair();
+    const sign = {
+      keyId: VERIFIED_FETCH_CLIENT_KEY_ID,
+      alg: "ed25519" as const,
+      key: clientPair.privateKey,
+      created: VERIFIED_FETCH_CREATED,
+      nonce: VERIFIED_FETCH_CLIENT_NONCE,
+    };
+    const verify = { key: s.gatewayPublicKey, now: VERIFIED_FETCH_NOW };
+    const init = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: VERIFIED_FETCH_REQUEST_BODY,
+    };
+    // Outside timing: "follow" follows the same-origin 302 and
+    // verifies the landing response, with finalUrl naming it.
+    const followed = await verifiedFetch(`${s.base}/old`, init, {
+      sign,
+      verify,
+      redirect: "follow",
+    });
+    assertVerifiedFetchRoundTrip(followed, "followed same-origin redirect");
+    if (followed.finalUrl !== `${s.base}/target`)
+      throw new Error(
+        `benchmark self-check failed: followed redirect finalUrl gave ${followed.finalUrl} (expected ${s.base}/target)`,
+      );
+    if (s.targetHits() !== 1)
+      throw new Error(
+        `benchmark self-check failed: same-origin target hit ${s.targetHits()} times after one follow (expected 1)`,
+      );
+    // Outside timing: "manual" returns the unsigned 302 itself,
+    // which fails verification with MISSING_SIGNATURE_INPUT — and
+    // the target is never fetched for it.
+    let manual: unknown;
+    try {
+      await verifiedFetch(`${s.base}/old`, init, {
+        sign,
+        verify,
+        redirect: "manual",
+      });
+    } catch (e) {
+      manual = e;
+    }
+    if (!isVerifyError(manual) || manual.code !== "MISSING_SIGNATURE_INPUT")
+      throw new Error(
+        `benchmark self-check failed: manual redirect gave ` +
+          `${manual instanceof Error ? `${manual.name}: ${manual.message}` : "no throw"} ` +
+          `(expected VerifyError MISSING_SIGNATURE_INPUT)`,
+      );
+    if (s.targetHits() !== 1)
+      throw new Error(
+        `benchmark self-check failed: manual redirect hit the target ${s.targetHits()} times (expected 1, from the follow probe only)`,
+      );
+    // Outside timing: a "follow" to the cross-origin 302 is
+    // refused before any verification runs — the fetch did follow,
+    // so the second server was hit once (the documented honest
+    // limit), but the stranger's response is never verified.
+    let cross: unknown;
+    try {
+      await verifiedFetch(`${s.base}/old-cross`, init, {
+        sign,
+        verify,
+        redirect: "follow",
+      });
+    } catch (e) {
+      cross = e;
+    }
+    if (
+      !(cross instanceof Error) ||
+      !/verifiedFetch: cross-origin redirect to .* refused/.test(cross.message)
+    )
+      throw new Error(
+        `benchmark self-check failed: cross-origin redirect gave ` +
+          `${cross instanceof Error ? `${cross.name}: ${cross.message}` : "no throw"} ` +
+          `(expected cross-origin refusal)`,
+      );
+    if (s.crossTargetHits() !== 1)
+      throw new Error(
+        `benchmark self-check failed: refused cross-origin redirect hit the second server ${s.crossTargetHits()} times (expected 1)`,
+      );
+    // Outside timing: the same cross-origin follow with the
+    // explicit opt-in verifies and reports the landing URL.
+    const crossAllowed = await verifiedFetch(`${s.base}/old-cross`, init, {
+      sign,
+      verify,
+      redirect: "follow",
+      allowCrossOriginRedirect: true,
+    });
+    assertVerifiedFetchRoundTrip(
+      crossAllowed,
+      "followed cross-origin redirect",
+    );
+    if (crossAllowed.finalUrl !== `${s.crossBase}/target`)
+      throw new Error(
+        `benchmark self-check failed: allowed cross-origin redirect finalUrl gave ${crossAllowed.finalUrl} (expected ${s.crossBase}/target)`,
+      );
+    if (s.crossTargetHits() !== 2)
+      throw new Error(
+        `benchmark self-check failed: allowed cross-origin redirect hit the second server ${s.crossTargetHits()} times (expected 2)`,
+      );
+    // The measured steady state: the default policy rejects the
+    // 302 before the signed request reaches the target.
+    const assertRejected = async (where: string): Promise<void> => {
+      let rejected: unknown;
+      try {
+        await verifiedFetch(`${s.base}/old`, init, { sign, verify });
+      } catch (e) {
+        rejected = e;
+      }
+      if (
+        !(rejected instanceof TypeError) ||
+        !/fetch failed/.test(rejected.message)
+      )
+        throw new Error(
+          `benchmark self-check failed: default-policy verifiedFetch (${where}) gave ` +
+            `${rejected instanceof Error ? `${rejected.name}: ${rejected.message}` : "no throw"} ` +
+            `(expected TypeError "fetch failed")`,
+        );
+    };
+    await assertRejected("outside timing");
+    const targetHitsBefore = s.targetHits();
+    const ops = await measureAsync(async () => {
+      await assertRejected("measured pass");
+    }, ITERATIONS);
+    if (s.targetHits() !== targetHitsBefore)
+      throw new Error(
+        `benchmark self-check failed: default-policy redirect reached the target ${s.targetHits() - targetHitsBefore} times during timing (expected 0)`,
+      );
+    return ops;
+  } finally {
+    await s.close();
+  }
+}
+
+/**
  * Fixed fixture for the `createVerifiedFetchHandler` end-to-end row
  * (backlog #1150): the fetch twin of the `createVerifiedHandler`
  * rows — no TCP server, no loopback: the handler is called
@@ -20940,6 +21210,11 @@ results.push({
   alg: "verifiedFetch multi-label (signed POST, loopback, 2 labels)",
   op: "sign+fetch+verify",
   ops: await benchmarkVerifiedFetchMultiLabel(),
+});
+results.push({
+  alg: "verifiedFetch redirect (default error, loopback 302)",
+  op: "reject",
+  ops: await benchmarkVerifiedFetchRedirect(),
 });
 results.push({
   alg: "createVerifiedFetchHandler (signed POST, in-process)",
