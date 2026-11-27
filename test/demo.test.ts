@@ -293,6 +293,16 @@ import {
   DEMO_JWKS_REFRESH_RETIRED_CODE,
   DEMO_JWKS_REFRESH_STALE_AT_SEC,
   DEMO_JWKS_REFRESH_TTL_SEC,
+  DEMO_JWKS_MAX_STALE_BOUNDARY_AT_SEC,
+  DEMO_JWKS_MAX_STALE_CALLS_AFTER_REFRESH,
+  DEMO_JWKS_MAX_STALE_CODE,
+  DEMO_JWKS_MAX_STALE_FRESH_AT_SEC,
+  DEMO_JWKS_MAX_STALE_KEY_ID,
+  DEMO_JWKS_MAX_STALE_LABEL,
+  DEMO_JWKS_MAX_STALE_NONCE,
+  DEMO_JWKS_MAX_STALE_PAST_AT_SEC,
+  DEMO_JWKS_MAX_STALE_RESOLUTIONS,
+  DEMO_JWKS_MAX_STALE_SEC,
   DEMO_JWKS_SNAPSHOT_ALG,
   DEMO_JWKS_SNAPSHOT_EXPORT_ERROR,
   DEMO_JWKS_SNAPSHOT_FETCH_CALLS,
@@ -4541,13 +4551,13 @@ test("demo JWKS refresh segment loads the old key, skips the fresh fetch, rotate
   assert.equal(directStore.resolve(DEMO_JWKS_REFRESH_OLD_KEY_ID), undefined);
 });
 
-test("demo lines contain the JWKS refresh segment (initial load, fresh skip, rotation, retired keyid rejection, followed by the header lookup segment)", async () => {
+test("demo lines contain the JWKS refresh segment (initial load, fresh skip, rotation, retired keyid rejection, followed by the JWKS maxStaleSec segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
 
   assert.match(out, /JWKS refresh and rotation: JwksKeyStore\.refreshIfStale/);
   // The JWKS refresh block sits after the RSA JWK segment
-  // and before the header lookup segment.
+  // and before the JWKS maxStaleSec segment.
   const headerIdx = lines.findIndex((l) =>
     l.startsWith("JWKS refresh and rotation:"),
   );
@@ -4565,9 +4575,9 @@ test("demo lines contain the JWKS refresh segment (initial load, fresh skip, rot
     `JWKS verification of the retired keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" after rotation: FAILED (code ${DEMO_JWKS_REFRESH_RETIRED_CODE}: keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" could not be resolved to a key)`,
   ];
   assert.deepEqual(lines.slice(headerIdx, headerIdx + 7), expectedLines);
-  // The header lookup segment follows the JWKS refresh
+  // The JWKS maxStaleSec segment follows the JWKS refresh
   // segment.
-  assert.ok(lines[headerIdx + 8]?.startsWith("Header lookup:"));
+  assert.ok(lines[headerIdx + 8]?.startsWith("JWKS maxStaleSec cutoff:"));
 
   // Deterministic double run: the segment's printed lines
   // carry no key bytes, so they are pinned constants,
@@ -4652,7 +4662,7 @@ test("demo lines contain the getHeader segment (normalized value, raw contrast, 
   const out = lines.join("\n");
 
   assert.match(out, /Header lookup: getHeader is the normalized read/);
-  // The header lookup block sits after the JWKS refresh
+  // The header lookup block sits after the JWKS maxStaleSec
   // segment and closes the demo.
   const headerIdx = lines.findIndex((l) => l.startsWith("Header lookup:"));
   const refreshIdx = lines.findIndex((l) =>
@@ -8258,6 +8268,120 @@ test("demo verifiedFetch redirect segment refuses, follows, and hands back redir
     "MISSING_SIGNATURE_INPUT",
   );
   assert.equal(verifiedFetchRedirectManualTargetHits, 1);
+});
+
+test("demo JWKS maxStaleSec segment resolves inside the window and at the bound, refuses past it, recovers on refresh, and refuses a restored snapshot past the bound", async () => {
+  const {
+    jwksMaxStaleFreshVerification,
+    jwksMaxStaleBoundaryVerification,
+    jwksMaxStalePastVerification,
+    jwksMaxStaleStaleResolutions,
+    jwksMaxStaleFetchCalls,
+    jwksMaxStaleRefreshedVerification,
+    jwksMaxStaleRestoredVerification,
+    jwksMaxStaleRestoredStaleResolutions,
+    lines,
+  } = await runDemo();
+
+  // Inside the window (60s into the 300s bound) the key resolves
+  // and the request verifies.
+  assert.equal(jwksMaxStaleFreshVerification.ok, true);
+  assert.equal(
+    jwksMaxStaleFreshVerification.label,
+    DEMO_JWKS_MAX_STALE_LABEL,
+  );
+  assert.equal(
+    jwksMaxStaleFreshVerification.keyId,
+    DEMO_JWKS_MAX_STALE_KEY_ID,
+  );
+  assert.equal(jwksMaxStaleFreshVerification.alg, "ed25519");
+  assert.equal(
+    jwksMaxStaleFreshVerification.nonce,
+    DEMO_JWKS_MAX_STALE_NONCE,
+  );
+
+  // Exactly at the bound still resolves — the cutoff refuses
+  // only strictly past it.
+  assert.equal(jwksMaxStaleBoundaryVerification.ok, true);
+  assert.equal(
+    jwksMaxStaleBoundaryVerification.label,
+    DEMO_JWKS_MAX_STALE_LABEL,
+  );
+  assert.equal(
+    jwksMaxStaleBoundaryVerification.keyId,
+    DEMO_JWKS_MAX_STALE_KEY_ID,
+  );
+  assert.equal(jwksMaxStaleBoundaryVerification.alg, "ed25519");
+  assert.equal(
+    jwksMaxStaleBoundaryVerification.nonce,
+    DEMO_JWKS_MAX_STALE_NONCE,
+  );
+
+  // One second past the bound the snapshot is refused outright:
+  // verification fails closed before any signature check, and
+  // the refusal is counted.
+  assert.equal(jwksMaxStalePastVerification.ok, false);
+  assert.equal(
+    jwksMaxStalePastVerification.code,
+    DEMO_JWKS_MAX_STALE_CODE,
+  );
+  assert.equal(
+    jwksMaxStaleStaleResolutions,
+    DEMO_JWKS_MAX_STALE_RESOLUTIONS,
+  );
+
+  // A refresh past the cutoff re-fetches exactly once and the
+  // same request verifies again.
+  assert.equal(
+    jwksMaxStaleFetchCalls,
+    DEMO_JWKS_MAX_STALE_CALLS_AFTER_REFRESH,
+  );
+  assert.equal(jwksMaxStaleRefreshedVerification.ok, true);
+  assert.equal(
+    jwksMaxStaleRefreshedVerification.label,
+    DEMO_JWKS_MAX_STALE_LABEL,
+  );
+  assert.equal(
+    jwksMaxStaleRefreshedVerification.keyId,
+    DEMO_JWKS_MAX_STALE_KEY_ID,
+  );
+  assert.equal(jwksMaxStaleRefreshedVerification.alg, "ed25519");
+  assert.equal(
+    jwksMaxStaleRefreshedVerification.nonce,
+    DEMO_JWKS_MAX_STALE_NONCE,
+  );
+
+  // A snapshot exported before that refresh and restored into a
+  // fresh store is refused the same way once the clock is past
+  // the bound — a restart cannot outlive it either.
+  assert.equal(jwksMaxStaleRestoredVerification.ok, false);
+  assert.equal(
+    jwksMaxStaleRestoredVerification.code,
+    DEMO_JWKS_MAX_STALE_CODE,
+  );
+  assert.equal(
+    jwksMaxStaleRestoredStaleResolutions,
+    DEMO_JWKS_MAX_STALE_RESOLUTIONS,
+  );
+
+  // The printed segment sits between the JWKS refresh and
+  // header-lookup segments: a blank line on each side.
+  const out = lines.join("\n");
+  assert.match(out, /JWKS maxStaleSec cutoff:/);
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS maxStaleSec cutoff:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 6), [
+    `JWKS maxStaleSec inside the window (${DEMO_JWKS_MAX_STALE_FRESH_AT_SEC - DEMO_CREATED}s after refresh): verification OK (label ${DEMO_JWKS_MAX_STALE_LABEL}, keyid="${DEMO_JWKS_MAX_STALE_KEY_ID}", alg="ed25519", nonce="${DEMO_JWKS_MAX_STALE_NONCE}")`,
+    `JWKS maxStaleSec exactly at the ${DEMO_JWKS_MAX_STALE_SEC}s bound: verification OK (label ${DEMO_JWKS_MAX_STALE_LABEL}, keyid="${DEMO_JWKS_MAX_STALE_KEY_ID}", alg="ed25519", nonce="${DEMO_JWKS_MAX_STALE_NONCE}") — exactly at the bound still resolves`,
+    `JWKS maxStaleSec 1s past the bound: verification FAILED (code ${DEMO_JWKS_MAX_STALE_CODE}: ${jwksMaxStalePastVerification.reason}) — stats().staleResolutions stepped to ${DEMO_JWKS_MAX_STALE_RESOLUTIONS}`,
+    `JWKS maxStaleSec refresh after the cutoff: refresh() fetched again (fetch count ${DEMO_JWKS_MAX_STALE_CALLS_AFTER_REFRESH}) and verification OK (label ${DEMO_JWKS_MAX_STALE_LABEL}, keyid="${DEMO_JWKS_MAX_STALE_KEY_ID}", alg="ed25519", nonce="${DEMO_JWKS_MAX_STALE_NONCE}")`,
+    `JWKS maxStaleSec restored snapshot past the bound: verification FAILED (code ${DEMO_JWKS_MAX_STALE_CODE}: ${jwksMaxStaleRestoredVerification.reason}) — a snapshot carried across a restart cannot outlive the bound (restored stats().staleResolutions ${DEMO_JWKS_MAX_STALE_RESOLUTIONS})`,
+  ]);
+  assert.equal(lines[headerIdx - 1], "");
+  assert.equal(lines[headerIdx + 6], "");
+  assert.ok(lines[headerIdx + 7]!.startsWith("Header lookup:"));
 });
 
 test("demo verifiedFetch redirect segment prints the four policy outcomes between the multi-label and allowed-algs segments", async () => {

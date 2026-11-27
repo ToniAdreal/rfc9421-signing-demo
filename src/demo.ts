@@ -495,6 +495,29 @@
  * its shape when this segment landed. Only keyids, counts
  * and outcomes are printed, never key bytes, so the
  * segment's printed lines are identical between runs.
+ * The demo then shows a JWKS maxStaleSec cutoff segment:
+ * the refresh segment above proves a stale snapshot is
+ * re-fetched, but a verifier whose refresh loop has gone
+ * quiet — endpoint down, a revoked key never re-fetched —
+ * would otherwise keep trusting the old keys forever. A
+ * `JwksKeyStore` with `maxStaleSec: 300` over a real
+ * loopback JWKS endpoint and an injected clock closes
+ * that hole: inside the window the key resolves and the
+ * request verifies, exactly at the 300-second bound it
+ * still resolves, one second past it `resolve()` returns
+ * `undefined` and verification fails closed with
+ * `KEY_RESOLUTION_FAILED` while `stats().staleResolutions`
+ * steps to 1, a `refresh()` then re-fetches and the same
+ * request verifies again, and a snapshot exported before
+ * that refresh and restored into a fresh store is refused
+ * the same way once the injected clock is past the bound
+ * — the cutoff is judged from the snapshot's
+ * `fetchedAtSec`, so a restart cannot outlive it either.
+ * Outside the printed lines the demo asserts every
+ * verification, fetch count and counter equals the
+ * hand-pinned expectations below. Only the keyid, counts
+ * and outcomes are printed, never key bytes, so the
+ * segment's printed lines are identical between runs.
  * The demo closes with a normalized header lookup segment:
  * a fixed header record — one field stored under a
  * mixed-case key as a padded two-element array, one single
@@ -2883,6 +2906,48 @@ export const DEMO_JWKS_REFRESH_CALLS_AFTER_ROTATION = 2;
  */
 export const DEMO_JWKS_REFRESH_RETIRED_CODE: VerifyFailureCode =
   "KEY_RESOLUTION_FAILED";
+
+/** Key id of the JWKS maxStaleSec segment's key. */
+export const DEMO_JWKS_MAX_STALE_KEY_ID = "demo-jwks-max-stale-1";
+/** Nonce of the JWKS maxStaleSec segment's request. */
+export const DEMO_JWKS_MAX_STALE_NONCE =
+  "demo-nonce-jwks-max-stale-001";
+/** Label the JWKS maxStaleSec segment's signature carries (the library default). */
+export const DEMO_JWKS_MAX_STALE_LABEL = "sig1";
+/**
+ * Cutoff window of the JWKS maxStaleSec segment's store: the
+ * snapshot is refused once it is strictly older than these
+ * 300 seconds — the same `>` rule `test/jwksMaxStale.test.ts`
+ * pins at its own bound.
+ */
+export const DEMO_JWKS_MAX_STALE_SEC = 300;
+/** Injected-clock instant of the in-window probe (60s in, window 300s). */
+export const DEMO_JWKS_MAX_STALE_FRESH_AT_SEC = DEMO_CREATED + 60;
+/**
+ * Injected-clock instant of the boundary probe: exactly at the
+ * 300-second bound, which still resolves (the cutoff refuses
+ * only strictly past the bound).
+ */
+export const DEMO_JWKS_MAX_STALE_BOUNDARY_AT_SEC =
+  DEMO_CREATED + DEMO_JWKS_MAX_STALE_SEC;
+/** Injected-clock instant of the past-cutoff probe (1s past the 300s bound). */
+export const DEMO_JWKS_MAX_STALE_PAST_AT_SEC =
+  DEMO_CREATED + DEMO_JWKS_MAX_STALE_SEC + 1;
+/** Fetch count after the segment's initial load (exactly one fetch). */
+export const DEMO_JWKS_MAX_STALE_CALLS_AFTER_LOAD = 1;
+/** Fetch count after the recovery refresh past the cutoff (exactly one more). */
+export const DEMO_JWKS_MAX_STALE_CALLS_AFTER_REFRESH = 2;
+/**
+ * Hand-pinned rejection code of the JWKS maxStaleSec
+ * segment: past the bound the keyid no longer resolves,
+ * so the verifier fails closed with this code before any
+ * signature check (the same code the JWKS refresh segment
+ * pins for its retired keyid).
+ */
+export const DEMO_JWKS_MAX_STALE_CODE: VerifyFailureCode =
+  "KEY_RESOLUTION_FAILED";
+/** Hand-pinned `stats().staleResolutions` after one refused resolution. */
+export const DEMO_JWKS_MAX_STALE_RESOLUTIONS = 1;
 
 /**
  * Stored key of the closing header-lookup segment's
@@ -5990,6 +6055,56 @@ export interface DemoResult {
    * never even checked.
    */
   jwksRefreshRetiredVerification: VerifyResult;
+  /**
+   * Verification of the JWKS maxStaleSec segment's request
+   * through the store's resolver inside the 300-second
+   * window (ok).
+   */
+  jwksMaxStaleFreshVerification: VerifyResult;
+  /**
+   * Verification of the same request exactly at the bound
+   * (`DEMO_JWKS_MAX_STALE_BOUNDARY_AT_SEC`, 300s after the
+   * refresh): still ok — exactly at the bound still
+   * resolves.
+   */
+  jwksMaxStaleBoundaryVerification: VerifyResult;
+  /**
+   * Verification of the same request 1 second past the bound:
+   * rejected with `DEMO_JWKS_MAX_STALE_CODE`
+   * (`KEY_RESOLUTION_FAILED`) — the snapshot is refused
+   * outright, before any signature check.
+   */
+  jwksMaxStalePastVerification: VerifyResult;
+  /**
+   * `stats().staleResolutions` after the past-cutoff
+   * refusal (equals the hand-pinned
+   * `DEMO_JWKS_MAX_STALE_RESOLUTIONS`).
+   */
+  jwksMaxStaleStaleResolutions: number;
+  /** Fetch count after the recovery refresh past the cutoff (2). */
+  jwksMaxStaleFetchCalls: number;
+  /**
+   * Verification of the same request after the recovery
+   * `refresh()` re-fetched past the cutoff (ok — the fresh
+   * snapshot resolves again).
+   */
+  jwksMaxStaleRefreshedVerification: VerifyResult;
+  /**
+   * Verification of the same request through a store
+   * restored from the pre-refresh snapshot, judged past
+   * the bound: rejected with `DEMO_JWKS_MAX_STALE_CODE`
+   * — a snapshot carried across a restart cannot outlive
+   * the bound either (the refusal happens at `resolve()`,
+   * not at `restore()`, which installs the snapshot and
+   * leaves the cutoff to judge it).
+   */
+  jwksMaxStaleRestoredVerification: VerifyResult;
+  /**
+   * `stats().staleResolutions` of the restored store after
+   * its past-bound refusal (1 — a fresh store starts its
+   * counters at zero).
+   */
+  jwksMaxStaleRestoredStaleResolutions: number;
   /**
    * The closing header-lookup segment's fixture record:
    * the multi-value field under its mixed-case stored key
@@ -9798,6 +9913,190 @@ async function fetchJwksPublishedDocument(): Promise<JwksPublishFixture> {
 }
 
 /**
+ * The JWKS maxStaleSec cutoff segment's loopback fixture
+ * (backlog #1431): #1414's `maxStaleSec` cutoff is the hard
+ * backstop for a verifier whose refresh loop has gone quiet,
+ * but the demo only ever showed the advisory TTL — a stale
+ * snapshot re-fetched, never a snapshot refused. One fresh
+ * ed25519 key is published as a one-key JWKS document from a
+ * real loopback `http` server at `/.well-known/jwks.json`,
+ * and a `JwksKeyStore` over that endpoint with
+ * `maxStaleSec: DEMO_JWKS_MAX_STALE_SEC` (300s) and an
+ * injected clock the fixture advances by hand pins the
+ * cutoff: inside the window the key resolves and a request
+ * signed under it verifies; exactly at the 300-second bound
+ * it still resolves; one second past it `resolve()` returns
+ * `undefined`, verification fails closed with
+ * `KEY_RESOLUTION_FAILED`, and `stats().staleResolutions`
+ * steps to 1. A `refresh()` past the cutoff re-fetches (a
+ * second fetch) and the same request verifies again. A
+ * snapshot exported before that refresh — its
+ * `fetchedAtSec` is the original refresh instant — and
+ * restored into a fresh store with the same cutoff and a
+ * clock past the bound is refused the same way at
+ * `resolve()`: `restore()` installs the snapshot (it never
+ * judges freshness itself) and the cutoff judges it from
+ * `fetchedAtSec`, so a snapshot carried across a restart
+ * cannot outlive the bound either. The verification instant
+ * stays `DEMO_CREATED + 60` throughout — only the store's
+ * injected clock moves — so the signature's own freshness
+ * never confounds the cutoff probes.
+ *
+ * Only the keyid, counts and outcomes are returned — no
+ * port, no signature bytes — so the printed segment is
+ * byte-identical between runs even though the port and the
+ * key pair are fresh per run.
+ */
+interface JwksMaxStaleSecFixture {
+  /** Verification inside the cutoff window (ok). */
+  freshVerification: VerifyResult;
+  /** Verification exactly at the bound (ok — exactly at the bound still resolves). */
+  boundaryVerification: VerifyResult;
+  /** Verification one second past the bound (`KEY_RESOLUTION_FAILED`). */
+  pastVerification: VerifyResult;
+  /** `stats().staleResolutions` after the past-cutoff refusal (1). */
+  staleResolutions: number;
+  /** Fetch count after the recovery refresh past the cutoff (2). */
+  fetchCalls: number;
+  /** Verification after the recovery refresh (ok). */
+  refreshedVerification: VerifyResult;
+  /** Verification through the restored pre-refresh snapshot past the bound (`KEY_RESOLUTION_FAILED`). */
+  restoredVerification: VerifyResult;
+  /** `stats().staleResolutions` of the restored store after its refusal (1). */
+  restoredStaleResolutions: number;
+}
+
+async function fetchJwksMaxStaleSec(): Promise<JwksMaxStaleSecFixture> {
+  const pair = generateEd25519KeyPair();
+  const document = buildJwksDocument([
+    { key: pair.publicKey, kid: DEMO_JWKS_MAX_STALE_KEY_ID },
+  ]);
+  let fetchCalls = 0;
+  const sockets = new Set<Socket>();
+  const server = createServer((req, res) => {
+    fetchCalls++;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(document));
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => {
+      sockets.delete(socket);
+    });
+  });
+  try {
+    const { port } = await new Promise<AddressInfo>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        resolve(server.address() as AddressInfo);
+      });
+    });
+    const url = `http://127.0.0.1:${port}/.well-known/jwks.json`;
+    let jwksMaxStaleNowSec = DEMO_CREATED;
+    const store = new JwksKeyStore(url, {
+      maxStaleSec: DEMO_JWKS_MAX_STALE_SEC,
+      now: () => jwksMaxStaleNowSec,
+    });
+    await store.refresh();
+    const signed = signRequest(
+      {
+        method: "POST",
+        url: "https://api.example.com/v1/payments",
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        keyId: DEMO_JWKS_MAX_STALE_KEY_ID,
+        alg: "ed25519",
+        key: pair.privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_JWKS_MAX_STALE_NONCE,
+      },
+    );
+    const verifyThrough = (resolver: (keyId: string) => KeyObject | undefined) =>
+      verifyRequest(signed, {
+        keyResolver: resolver,
+        now: DEMO_CREATED + 60,
+      });
+    // Inside the window (60s into the 300s bound) the key
+    // resolves and the request verifies.
+    jwksMaxStaleNowSec = DEMO_JWKS_MAX_STALE_FRESH_AT_SEC;
+    const freshVerification = verifyThrough(store.resolve);
+    // Exactly at the bound the key still resolves — the
+    // cutoff refuses only strictly past it.
+    jwksMaxStaleNowSec = DEMO_JWKS_MAX_STALE_BOUNDARY_AT_SEC;
+    const boundaryVerification = verifyThrough(store.resolve);
+    // One second past the bound `resolve()` returns
+    // `undefined`: verification fails closed before any
+    // signature check, and the refusal is counted.
+    jwksMaxStaleNowSec = DEMO_JWKS_MAX_STALE_PAST_AT_SEC;
+    const pastVerification = verifyThrough(store.resolve);
+    const staleResolutions = store.stats().staleResolutions;
+    // A snapshot exported before the recovery refresh keeps
+    // the original fetch instant: restoring it into a fresh
+    // store with the same cutoff and a clock past the bound
+    // must refuse it the same way at `resolve()`.
+    const snapshot = store.exportSnapshot();
+    await store.refresh();
+    const refreshedVerification = verifyThrough(store.resolve);
+    const restored = JwksKeyStore.restore(snapshot, url, {
+      maxStaleSec: DEMO_JWKS_MAX_STALE_SEC,
+      now: () => DEMO_JWKS_MAX_STALE_PAST_AT_SEC,
+    });
+    const restoredVerification = verifyThrough(restored.resolve);
+    const restoredStaleResolutions = restored.stats().staleResolutions;
+    if (
+      fetchCalls !== DEMO_JWKS_MAX_STALE_CALLS_AFTER_REFRESH ||
+      !freshVerification.ok ||
+      freshVerification.label !== DEMO_JWKS_MAX_STALE_LABEL ||
+      freshVerification.keyId !== DEMO_JWKS_MAX_STALE_KEY_ID ||
+      freshVerification.alg !== "ed25519" ||
+      freshVerification.nonce !== DEMO_JWKS_MAX_STALE_NONCE ||
+      !boundaryVerification.ok ||
+      boundaryVerification.label !== DEMO_JWKS_MAX_STALE_LABEL ||
+      boundaryVerification.keyId !== DEMO_JWKS_MAX_STALE_KEY_ID ||
+      boundaryVerification.alg !== "ed25519" ||
+      boundaryVerification.nonce !== DEMO_JWKS_MAX_STALE_NONCE ||
+      pastVerification.ok ||
+      pastVerification.code !== DEMO_JWKS_MAX_STALE_CODE ||
+      staleResolutions !== DEMO_JWKS_MAX_STALE_RESOLUTIONS ||
+      !refreshedVerification.ok ||
+      refreshedVerification.label !== DEMO_JWKS_MAX_STALE_LABEL ||
+      refreshedVerification.keyId !== DEMO_JWKS_MAX_STALE_KEY_ID ||
+      refreshedVerification.alg !== "ed25519" ||
+      refreshedVerification.nonce !== DEMO_JWKS_MAX_STALE_NONCE ||
+      restoredVerification.ok ||
+      restoredVerification.code !== DEMO_JWKS_MAX_STALE_CODE ||
+      restoredStaleResolutions !== DEMO_JWKS_MAX_STALE_RESOLUTIONS
+    ) {
+      throw new Error(
+        `demo fixture broken: JWKS maxStaleSec gave ${fetchCalls} fetches with fresh ` +
+          `${JSON.stringify(freshVerification)}, boundary ${JSON.stringify(boundaryVerification)}, past ` +
+          `${JSON.stringify(pastVerification)} (staleResolutions ${staleResolutions}), refreshed ` +
+          `${JSON.stringify(refreshedVerification)}, restored ${JSON.stringify(restoredVerification)} ` +
+          `(restored staleResolutions ${restoredStaleResolutions}), instead of ` +
+          `${DEMO_JWKS_MAX_STALE_CALLS_AFTER_REFRESH} fetches with ok fresh/boundary/refreshed verifications ` +
+          `and ${DEMO_JWKS_MAX_STALE_CODE} past/restored refusals with ` +
+          `${DEMO_JWKS_MAX_STALE_RESOLUTIONS} staleResolutions each`,
+      );
+    }
+    return {
+      freshVerification,
+      boundaryVerification,
+      pastVerification,
+      staleResolutions,
+      fetchCalls,
+      refreshedVerification,
+      restoredVerification,
+      restoredStaleResolutions,
+    };
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    server.close();
+  }
+}
+
+/**
  * The verified-handler segment's loopback fixture (backlog #1047):
  * a real `http` server on 127.0.0.1 runs `createVerifiedHandler`
  * (ed25519 key, verify instant pinned to the signature's `created`
@@ -12351,6 +12650,28 @@ export async function runDemo(): Promise<DemoResult> {
         `false/${DEMO_JWKS_REFRESH_RETIRED_CODE}`,
     );
   }
+
+  // JWKS maxStaleSec cutoff segment: the refresh segment above
+  // shows a stale snapshot re-fetched, but never a snapshot
+  // refused — a verifier whose refresh loop has gone quiet
+  // would keep trusting the old keys forever. This segment
+  // drives a `JwksKeyStore` with `maxStaleSec: 300` over a
+  // real loopback JWKS endpoint and an injected clock through
+  // the cutoff: inside the window and exactly at the bound
+  // the key resolves and the request verifies, one second
+  // past it the key no longer resolves and verification
+  // fails closed with `KEY_RESOLUTION_FAILED` while
+  // `stats().staleResolutions` steps to 1, a `refresh()`
+  // re-fetches and the same request verifies again, and a
+  // snapshot exported before that refresh and restored into
+  // a fresh store is refused the same way once the clock is
+  // past the bound. The helper asserts every verification,
+  // fetch count and counter against the hand-pinned
+  // DEMO_JWKS_MAX_STALE_* expectations outside the printed
+  // lines; only the keyid, counts and outcomes are printed,
+  // never key material, so the segment is byte-identical
+  // between runs.
+  const jwksMaxStaleSec = await fetchJwksMaxStaleSec();
 
   // Header lookup segment: every earlier segment read
   // headers through a full sign/verify path, so the lookup
@@ -19711,6 +20032,23 @@ export async function runDemo(): Promise<DemoResult> {
       ? `JWKS verification of the retired keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" after rotation: OK (unexpected — the retired keyid was not rejected)`
       : `JWKS verification of the retired keyid "${DEMO_JWKS_REFRESH_OLD_KEY_ID}" after rotation: FAILED (code ${jwksRefreshRetiredVerification.code}: ${jwksRefreshRetiredVerification.reason})`,
     "",
+    "JWKS maxStaleSec cutoff: a JwksKeyStore with maxStaleSec=300s over a real loopback JWKS endpoint and an injected clock resolves inside the window and exactly at the bound, refuses past it, recovers on refresh, and refuses a restored snapshot carried past the bound — the hard cutoff a verifier uses to stop trusting keys when its refresh loop has gone quiet",
+    jwksMaxStaleSec.freshVerification.ok
+      ? `JWKS maxStaleSec inside the window (${DEMO_JWKS_MAX_STALE_FRESH_AT_SEC - DEMO_CREATED}s after refresh): verification OK (label ${jwksMaxStaleSec.freshVerification.label}, keyid="${jwksMaxStaleSec.freshVerification.keyId}", alg="${jwksMaxStaleSec.freshVerification.alg}", nonce="${jwksMaxStaleSec.freshVerification.nonce}")`
+      : `JWKS maxStaleSec inside the window: FAILED (code ${jwksMaxStaleSec.freshVerification.code}: ${jwksMaxStaleSec.freshVerification.reason})`,
+    jwksMaxStaleSec.boundaryVerification.ok
+      ? `JWKS maxStaleSec exactly at the ${DEMO_JWKS_MAX_STALE_SEC}s bound: verification OK (label ${jwksMaxStaleSec.boundaryVerification.label}, keyid="${jwksMaxStaleSec.boundaryVerification.keyId}", alg="${jwksMaxStaleSec.boundaryVerification.alg}", nonce="${jwksMaxStaleSec.boundaryVerification.nonce}") — exactly at the bound still resolves`
+      : `JWKS maxStaleSec exactly at the bound: FAILED (code ${jwksMaxStaleSec.boundaryVerification.code}: ${jwksMaxStaleSec.boundaryVerification.reason})`,
+    jwksMaxStaleSec.pastVerification.ok
+      ? `JWKS maxStaleSec 1s past the bound: verification OK (unexpected — the stale snapshot was not refused)`
+      : `JWKS maxStaleSec 1s past the bound: verification FAILED (code ${jwksMaxStaleSec.pastVerification.code}: ${jwksMaxStaleSec.pastVerification.reason}) — stats().staleResolutions stepped to ${jwksMaxStaleSec.staleResolutions}`,
+    jwksMaxStaleSec.refreshedVerification.ok
+      ? `JWKS maxStaleSec refresh after the cutoff: refresh() fetched again (fetch count ${jwksMaxStaleSec.fetchCalls}) and verification OK (label ${jwksMaxStaleSec.refreshedVerification.label}, keyid="${jwksMaxStaleSec.refreshedVerification.keyId}", alg="${jwksMaxStaleSec.refreshedVerification.alg}", nonce="${jwksMaxStaleSec.refreshedVerification.nonce}")`
+      : `JWKS maxStaleSec refresh after the cutoff: FAILED (code ${jwksMaxStaleSec.refreshedVerification.code}: ${jwksMaxStaleSec.refreshedVerification.reason})`,
+    jwksMaxStaleSec.restoredVerification.ok
+      ? `JWKS maxStaleSec restored snapshot past the bound: verification OK (unexpected — the carried snapshot outlived the bound)`
+      : `JWKS maxStaleSec restored snapshot past the bound: verification FAILED (code ${jwksMaxStaleSec.restoredVerification.code}: ${jwksMaxStaleSec.restoredVerification.reason}) — a snapshot carried across a restart cannot outlive the bound (restored stats().staleResolutions ${jwksMaxStaleSec.restoredStaleResolutions})`,
+    "",
     "Header lookup: getHeader is the normalized read the verifier itself uses — the lookup name's case need not match the stored key, multi-value fields come back trimmed and joined with \", \" (RFC 9421 §2.5), and a missing field comes back undefined — while getHeaderRaw returns the field exactly as stored, the raw read a ;bs component binds",
     `getHeader("${DEMO_GET_HEADER_LOOKUP_NAME}") over the stored "${DEMO_GET_HEADER_STORED_NAME}" values ${JSON.stringify(DEMO_GET_HEADER_VALUES)}: "${getHeaderValue}"`,
     `getHeaderRaw("${DEMO_GET_HEADER_LOOKUP_NAME}") over the same stored values: "${getHeaderRawValue}" (every element's padding preserved — the two reads differ exactly by the per-element trimming)`,
@@ -20514,6 +20852,18 @@ export async function runDemo(): Promise<DemoResult> {
     jwksRefreshNewSigned,
     jwksRefreshNewVerification,
     jwksRefreshRetiredVerification,
+    jwksMaxStaleFreshVerification: jwksMaxStaleSec.freshVerification,
+    jwksMaxStaleBoundaryVerification:
+      jwksMaxStaleSec.boundaryVerification,
+    jwksMaxStalePastVerification: jwksMaxStaleSec.pastVerification,
+    jwksMaxStaleStaleResolutions: jwksMaxStaleSec.staleResolutions,
+    jwksMaxStaleFetchCalls: jwksMaxStaleSec.fetchCalls,
+    jwksMaxStaleRefreshedVerification:
+      jwksMaxStaleSec.refreshedVerification,
+    jwksMaxStaleRestoredVerification:
+      jwksMaxStaleSec.restoredVerification,
+    jwksMaxStaleRestoredStaleResolutions:
+      jwksMaxStaleSec.restoredStaleResolutions,
     getHeaderHeaders,
     getHeaderValue,
     getHeaderRawValue,
