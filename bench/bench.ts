@@ -18,7 +18,14 @@
  * showing both labels failing with that code, asserted outside
  * timing) and the key-resolution
  * hot path a gateway verifier hits on every request: `JwksKeyStore.resolve`
- * (Map hit on an offline-restored snapshot, zero network) and
+ * (Map hit on an offline-restored snapshot, zero network), plus the
+ * cutoff-refusal path the same gateway pays when its JWKS refresh has
+ * gone quiet: `JwksKeyStore.resolve` under the opt-in `maxStaleSec`
+ * cutoff (a known kid against an over-age three-shape snapshot restored
+ * offline, self-checked on every measured pass with the `undefined` pin
+ * and the `staleResolutions` counter stepping by exactly warmup + timed
+ * iterations, with the in-window, exact-boundary, refresh-recovery and
+ * restored-old-snapshot halves asserted outside timing), and
  * `memoizeKeyResolver` cache hits / misses, plus the endpoint-rule
  * path a gateway runs when it hardens its JWKS endpoint against
  * plaintext downgrade: `JwksKeyStore` with `requireHttps: true` over
@@ -3359,6 +3366,17 @@ function benchmarkVerifyExpectedTag(): number {
  * measured steady state is the replay-rejecting path.
  */
 const REPLAY_CACHE_NOW = 1_700_000_000;
+/**
+ * Bound for the replay-cache bench fixtures' signature lifetime
+ * (backlog #1411): a `ReplayCache`'s default TTL is 3600s, and
+ * every nonced bench fixture is verified at its `created`
+ * instant (age 0), so a 3600s window changes no outcome — it
+ * only satisfies `verifyRequest`'s replay-lifetime consistency
+ * check. Every verify call below that passes a `replayCache` to
+ * a nonced, dated fixture carries this window; without it
+ * `npm run bench` throws before the first measured row.
+ */
+const REPLAY_CACHE_BENCH_MAX_AGE_SEC = 3600;
 const REPLAY_CACHE_KID = "bench-replay-cache-key-1";
 const REPLAY_CACHE_NONCE = "bench-replay-nonce-1";
 const REPLAY_CACHE_CODE = "NONCE_REPLAY";
@@ -3405,6 +3423,7 @@ function benchmarkVerifyReplayCache(): number {
     verifyRequest(signed, {
       key: publicKey,
       now: REPLAY_CACHE_NOW,
+      maxSignatureAgeSec: REPLAY_CACHE_BENCH_MAX_AGE_SEC,
       replayCache: cache,
     });
 
@@ -3479,6 +3498,7 @@ function benchmarkVerifyReplayCache(): number {
   const forgedResult = verifyRequest(forged, {
     key: publicKey,
     now: REPLAY_CACHE_NOW,
+    maxSignatureAgeSec: REPLAY_CACHE_BENCH_MAX_AGE_SEC,
     replayCache: poisonedCache,
   });
   if (forgedResult.ok || forgedResult.code !== "SIGNATURE_MISMATCH")
@@ -8332,10 +8352,12 @@ const REPLAY_CACHE_BY_LABEL_REASON =
  * runs to refuse a replayed multi-party request.
  * Outside timing, the shared-store contrast is pinned
  * once: the same dual under one global `replayCache`
- * passes the merchant label and replay-rejects the
- * gateway label on its very first call (the #643
- * contract — one bare-nonce namespace cannot serve two
- * signers); the unmapped-label fallback is pinned
+ * passes both labels on first presentation and
+ * replay-rejects both on second — since backlog #1412
+ * the nonce is scoped by wire keyid, so distinct keyids
+ * sharing a bare nonce no longer collide (the pre-#1412
+ * #643 contract holds only within one keyid scope);
+ * the unmapped-label fallback is pinned
  * once (a merchant-only map over a global cache passes
  * both labels first and replay-rejects both second,
  * the gateway via the global store); and the no-cache
@@ -8372,6 +8394,7 @@ function benchmarkVerifyAllReplayCacheByLabel(): number {
   const verifyOpts = {
     keys,
     now: REPLAY_CACHE_BY_LABEL_CREATED,
+    maxSignatureAgeSec: REPLAY_CACHE_BENCH_MAX_AGE_SEC,
   };
   const assertPair = (where: string): void => {
     const merchantCache = new ReplayCache({
@@ -8418,10 +8441,15 @@ function benchmarkVerifyAllReplayCacheByLabel(): number {
   // before any timing starts.
   assertPair("outside timing");
 
-  // Outside timing: the shared-store contrast — one
-  // global cache cannot serve two signers sharing a
-  // bare nonce: the merchant passes, the gateway
-  // replay-rejects on the very first call.
+  // Outside timing: the shared-store contrast — since
+  // backlog #1412 the nonce is scoped by wire keyid,
+  // so one global cache CAN serve two signers sharing
+  // a bare nonce when their keyids differ: both labels
+  // pass on first presentation (each under its own
+  // scope) and both replay-reject on second
+  // presentation. The pre-#1412 contract (one
+  // bare-nonce namespace cannot serve two signers) now
+  // holds only within one keyid scope.
   const sharedCache = new ReplayCache({
     now: () => REPLAY_CACHE_BY_LABEL_CREATED,
   });
@@ -8434,12 +8462,28 @@ function benchmarkVerifyAllReplayCacheByLabel(): number {
     shared[0].label !== "merchant" ||
     !shared[0].ok ||
     shared[1].label !== "gateway" ||
-    shared[1].ok ||
-    shared[1].code !== REPLAY_CACHE_BY_LABEL_CODE ||
-    shared[1].reason !== REPLAY_CACHE_BY_LABEL_REASON
+    !shared[1].ok
   )
     throw new Error(
       `benchmark self-check failed: shared-cache contrast gave ${JSON.stringify(shared)}`,
+    );
+  const sharedSecond = verifyAllLabels(dual, {
+    ...verifyOpts,
+    replayCache: sharedCache,
+  });
+  if (
+    sharedSecond.length !== 2 ||
+    sharedSecond[0].label !== "merchant" ||
+    sharedSecond[0].ok ||
+    sharedSecond[0].code !== REPLAY_CACHE_BY_LABEL_CODE ||
+    sharedSecond[0].reason !== REPLAY_CACHE_BY_LABEL_REASON ||
+    sharedSecond[1].label !== "gateway" ||
+    sharedSecond[1].ok ||
+    sharedSecond[1].code !== REPLAY_CACHE_BY_LABEL_CODE ||
+    sharedSecond[1].reason !== REPLAY_CACHE_BY_LABEL_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: shared-cache contrast second presentation gave ${JSON.stringify(sharedSecond)}`,
     );
 
   // Outside timing: an unmapped label falls back to
@@ -8660,6 +8704,7 @@ function benchmarkVerifyAllJwksReplayCacheByLabel(): number {
     });
     const first = verifyAllLabels(dual, {
       now: JWKS_REPLAY_ALL_CREATED,
+      maxSignatureAgeSec: REPLAY_CACHE_BENCH_MAX_AGE_SEC,
       keyResolvers: {
         merchant: merchantStore.resolve,
         gateway: gatewayStore.resolve,
@@ -8685,6 +8730,7 @@ function benchmarkVerifyAllJwksReplayCacheByLabel(): number {
       );
     const second = verifyAllLabels(dual, {
       now: JWKS_REPLAY_ALL_CREATED,
+      maxSignatureAgeSec: REPLAY_CACHE_BENCH_MAX_AGE_SEC,
       keyResolvers: {
         merchant: merchantStore.resolve,
         gateway: gatewayStore.resolve,
@@ -8736,6 +8782,7 @@ function benchmarkVerifyAllJwksReplayCacheByLabel(): number {
   });
   const replayOpts = {
     now: JWKS_REPLAY_ALL_CREATED,
+    maxSignatureAgeSec: REPLAY_CACHE_BENCH_MAX_AGE_SEC,
     keyResolvers: {
       merchant: merchantStore.resolve,
       gateway: gatewayStore.resolve,
@@ -11012,6 +11059,7 @@ function benchmarkVerifyResponseReplayCache(): number {
     verifyResponse(signed, {
       key: publicKey,
       now: RESPONSE_BENCH_NOW,
+      maxSignatureAgeSec: REPLAY_CACHE_BENCH_MAX_AGE_SEC,
       replayCache: cache,
     });
 
@@ -11100,6 +11148,7 @@ function benchmarkVerifyResponseReplayCache(): number {
     {
       key: publicKey,
       now: RESPONSE_BENCH_NOW,
+      maxSignatureAgeSec: REPLAY_CACHE_BENCH_MAX_AGE_SEC,
       replayCache: poisonedCache,
     },
   );
@@ -11163,10 +11212,12 @@ const RESPONSE_REPLAY_CACHE_BY_LABEL_REASON =
  * lookup, exactly the path a receiver runs to refuse a
  * replayed multi-party response. Outside timing, the
  * shared-store contrast is pinned once: the same dual
- * under one global `replayCache` passes the merchant label
- * and replay-rejects the gateway label on its very first
- * call (the #643 contract — one bare-nonce namespace
- * cannot serve two signers); the unmapped-label fallback
+ * under one global `replayCache` passes both labels on
+ * first presentation and replay-rejects both on second
+ * — since backlog #1412 the nonce is scoped by wire
+ * keyid, so distinct keyids sharing a bare nonce no
+ * longer collide (the pre-#1412 #643 contract holds only
+ * within one keyid scope); the unmapped-label fallback
  * is pinned once (a merchant-only map over a global cache
  * passes both labels first and replay-rejects both second,
  * the gateway via the global store); and the no-cache
@@ -11206,6 +11257,7 @@ function benchmarkVerifyAllResponseLabelsReplayCacheByLabel(): number {
     key: merchantPublic,
     keys: { gateway: gatewaySecret },
     now: RESPONSE_BENCH_NOW,
+    maxSignatureAgeSec: REPLAY_CACHE_BENCH_MAX_AGE_SEC,
   };
   const assertPair = (where: string): void => {
     const merchantCache = new ReplayCache({
@@ -11254,10 +11306,15 @@ function benchmarkVerifyAllResponseLabelsReplayCacheByLabel(): number {
   // before any timing starts.
   assertPair("outside timing");
 
-  // Outside timing: the shared-store contrast — one
-  // global cache cannot serve two signers sharing a
-  // bare nonce: the merchant passes, the gateway
-  // replay-rejects on the very first call.
+  // Outside timing: the shared-store contrast — since
+  // backlog #1412 the nonce is scoped by wire keyid,
+  // so one global cache CAN serve two signers sharing
+  // a bare nonce when their keyids differ: both labels
+  // pass on first presentation (each under its own
+  // scope) and both replay-reject on second
+  // presentation. The pre-#1412 contract (one
+  // bare-nonce namespace cannot serve two signers) now
+  // holds only within one keyid scope.
   const sharedCache = new ReplayCache({
     now: () => RESPONSE_BENCH_NOW,
   });
@@ -11270,12 +11327,28 @@ function benchmarkVerifyAllResponseLabelsReplayCacheByLabel(): number {
     shared[0].label !== "merchant" ||
     !shared[0].ok ||
     shared[1].label !== "gateway" ||
-    shared[1].ok ||
-    shared[1].code !== RESPONSE_REPLAY_CACHE_BY_LABEL_CODE ||
-    shared[1].reason !== RESPONSE_REPLAY_CACHE_BY_LABEL_REASON
+    !shared[1].ok
   )
     throw new Error(
       `benchmark self-check failed: shared-cache contrast gave ${JSON.stringify(shared)}`,
+    );
+  const sharedSecond = verifyAllResponseLabels(dual, {
+    ...verifyOpts,
+    replayCache: sharedCache,
+  });
+  if (
+    sharedSecond.length !== 2 ||
+    sharedSecond[0].label !== "merchant" ||
+    sharedSecond[0].ok ||
+    sharedSecond[0].code !== RESPONSE_REPLAY_CACHE_BY_LABEL_CODE ||
+    sharedSecond[0].reason !== RESPONSE_REPLAY_CACHE_BY_LABEL_REASON ||
+    sharedSecond[1].label !== "gateway" ||
+    sharedSecond[1].ok ||
+    sharedSecond[1].code !== RESPONSE_REPLAY_CACHE_BY_LABEL_CODE ||
+    sharedSecond[1].reason !== RESPONSE_REPLAY_CACHE_BY_LABEL_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: shared-cache contrast second presentation gave ${JSON.stringify(sharedSecond)}`,
     );
 
   // Outside timing: an unmapped label falls back to
@@ -12777,6 +12850,198 @@ function benchmarkJwksResolve(store: JwksKeyStore): number {
       throw new Error("benchmark self-check failed: resolve missed bench-key");
   }, ITERATIONS);
 }
+/**
+ * Cutoff window of the `JwksKeyStore.resolve` maxStaleSec
+ * benchmark store: the snapshot is refused once it is strictly
+ * older than these 300 seconds — the same bound the demo's
+ * maxStaleSec segment pins (backlog #1431).
+ */
+const JWKS_MAX_STALE_SEC = 300;
+/** Fetch time of the maxStaleSec benchmark store's snapshot. */
+const JWKS_MAX_STALE_FETCHED_AT_SEC = JWKS_EXPORT_FETCHED_AT_SEC;
+/** In-window probe instant (60s into the 300s window). */
+const JWKS_MAX_STALE_FRESH_AT_SEC =
+  JWKS_MAX_STALE_FETCHED_AT_SEC + 60;
+/** Boundary probe instant: exactly at the 300s bound, still resolves. */
+const JWKS_MAX_STALE_BOUNDARY_AT_SEC =
+  JWKS_MAX_STALE_FETCHED_AT_SEC + JWKS_MAX_STALE_SEC;
+/** Past-cutoff probe instant: one second past the 300s bound. */
+const JWKS_MAX_STALE_PAST_AT_SEC =
+  JWKS_MAX_STALE_FETCHED_AT_SEC + JWKS_MAX_STALE_SEC + 1;
+
+/**
+ * Build the three-shape `JwksKeyStore` for the maxStaleSec
+ * benchmark, entirely offline like {@link offlineJwksExportStore}:
+ * restored from a hand-built snapshot of the same three key
+ * shapes under the same kids at the same fetch time, but with
+ * `maxStaleSec: 300` and a mutable injected clock — plus a stub
+ * `fetchImpl` that serves the same JWKS document, so the
+ * outside-timing refresh-recovery check pays zero network I/O.
+ * Returns the store, its clock setter, and the snapshot it was
+ * restored from (for the restored-old-snapshot check).
+ */
+function offlineJwksMaxStaleStore(): {
+  store: JwksKeyStore;
+  setNow: (sec: number) => void;
+  snapshot: ReturnType<JwksKeyStore["exportSnapshot"]>;
+} {
+  const ed25519 = generateEd25519KeyPair();
+  const p256 = generateP256KeyPair();
+  const rsa = generateRsaPssKeyPair();
+  const keys = [
+    { ...exportPublicKeyJwk(ed25519.publicKey), kid: JWKS_EXPORT_KIDS[0] },
+    { ...exportPublicKeyJwkP256(p256.publicKey), kid: JWKS_EXPORT_KIDS[1] },
+    { ...exportPublicKeyJwkRsa(rsa.publicKey), kid: JWKS_EXPORT_KIDS[2] },
+  ];
+  const document = { keys };
+  let nowSec = JWKS_MAX_STALE_FETCHED_AT_SEC;
+  const store = JwksKeyStore.restore(
+    {
+      v: 1 as const,
+      fetchedAtSec: JWKS_MAX_STALE_FETCHED_AT_SEC,
+      keys,
+    },
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => document,
+      }),
+      now: () => nowSec,
+      maxStaleSec: JWKS_MAX_STALE_SEC,
+    },
+  );
+  return {
+    store,
+    setNow: (sec: number) => {
+      nowSec = sec;
+    },
+    snapshot: store.exportSnapshot(),
+  };
+}
+
+/**
+ * `JwksKeyStore.resolve` under the opt-in `maxStaleSec` cutoff
+ * (backlog #1433): the steady state a gateway pays when its JWKS
+ * refresh has stopped happening — every measured call refuses
+ * the over-age snapshot, returns `undefined` for a known kid,
+ * and counts one `staleResolutions`. One measured op is a single
+ * `resolve` of the ed25519 kid plus the `undefined` pin; the
+ * counter is asserted once after timing (it must step by exactly
+ * warmup + timed iterations), so no `stats()` read pollutes the
+ * measured path. Outside timing, the in-window, boundary, refresh
+ * recovery and restored-old-snapshot halves are pinned: the key
+ * resolves 60s into the window and exactly at the 300s bound, a
+ * `refresh()` past the cutoff re-fetches (the stub serves the same
+ * document) and resolution recovers, and a snapshot exported
+ * before that refresh and restored into a fresh store is refused
+ * the same way once the clock is past the bound while a restore
+ * at the fetch instant resolves. Zero network, zero randomness
+ * in the measured assertions, no wall clock (the store clock is
+ * injected).
+ */
+async function benchmarkJwksResolveMaxStaleSec(): Promise<number> {
+  const { store, setNow, snapshot } = offlineJwksMaxStaleStore();
+  const kid = JWKS_EXPORT_KIDS[0];
+
+  // Outside timing: in-window resolution (60s into the window).
+  setNow(JWKS_MAX_STALE_FRESH_AT_SEC);
+  if (store.resolve(kid) === undefined)
+    throw new Error(
+      "benchmark self-check failed: in-window resolve missed the ed25519 kid",
+    );
+  if (store.resolve(JWKS_EXPORT_KIDS[1]) === undefined)
+    throw new Error(
+      "benchmark self-check failed: in-window resolve missed the P-256 kid",
+    );
+  if (store.resolve(JWKS_EXPORT_KIDS[2]) === undefined)
+    throw new Error(
+      "benchmark self-check failed: in-window resolve missed the RSA kid",
+    );
+
+  // Outside timing: exactly at the bound still resolves (the
+  // cutoff refuses only strictly past it).
+  setNow(JWKS_MAX_STALE_BOUNDARY_AT_SEC);
+  if (store.resolve(kid) === undefined)
+    throw new Error(
+      "benchmark self-check failed: boundary resolve missed the ed25519 kid",
+    );
+
+  // Outside timing: one second past the bound every keyid is
+  // refused and the refusal is counted once per call.
+  setNow(JWKS_MAX_STALE_PAST_AT_SEC);
+  const staleBefore = store.stats().staleResolutions;
+  if (store.resolve(kid) !== undefined)
+    throw new Error(
+      "benchmark self-check failed: past-cutoff resolve returned a key",
+    );
+  if (store.stats().staleResolutions - staleBefore !== 1)
+    throw new Error(
+      `benchmark self-check failed: past-cutoff resolve counted ${store.stats().staleResolutions - staleBefore} staleResolutions (expected 1)`,
+    );
+
+  // Measured: the past-cutoff refusal steady state.
+  const measuredStaleBefore = store.stats().staleResolutions;
+  const ops = measure(() => {
+    if (store.resolve(kid) !== undefined)
+      throw new Error(
+        "benchmark self-check failed: past-cutoff resolve returned a key in the measured loop",
+      );
+  }, ITERATIONS);
+  if (store.stats().staleResolutions - measuredStaleBefore !== WARMUP + ITERATIONS)
+    throw new Error(
+      `benchmark self-check failed: ${store.stats().staleResolutions - measuredStaleBefore} staleResolutions in the measured loop (expected ${WARMUP + ITERATIONS})`,
+    );
+
+  // Outside timing: a refresh past the cutoff re-fetches (the
+  // stub serves the same document) and resolution recovers.
+  await store.refresh();
+  if (store.resolve(kid) === undefined)
+    throw new Error(
+      "benchmark self-check failed: resolve missed the ed25519 kid after refresh recovery",
+    );
+
+  // Outside timing: a snapshot exported before that refresh,
+  // restored into a fresh store, is refused the same way once
+  // the clock is past the bound — while a restore at the fetch
+  // instant resolves.
+  const restoredOld = JwksKeyStore.restore(
+    snapshot,
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: async () => {
+        throw new Error("benchmark must not fetch (offline store)");
+      },
+      now: () => JWKS_MAX_STALE_PAST_AT_SEC,
+      maxStaleSec: JWKS_MAX_STALE_SEC,
+    },
+  );
+  if (restoredOld.resolve(kid) !== undefined)
+    throw new Error(
+      "benchmark self-check failed: restored old snapshot resolved past the cutoff",
+    );
+  if (restoredOld.stats().staleResolutions !== 1)
+    throw new Error(
+      `benchmark self-check failed: restored old snapshot counted ${restoredOld.stats().staleResolutions} staleResolutions (expected 1)`,
+    );
+  const restoredFresh = JwksKeyStore.restore(
+    snapshot,
+    "https://gateway.example.com/.well-known/jwks.json",
+    {
+      fetchImpl: async () => {
+        throw new Error("benchmark must not fetch (offline store)");
+      },
+      now: () => JWKS_MAX_STALE_FETCHED_AT_SEC,
+      maxStaleSec: JWKS_MAX_STALE_SEC,
+    },
+  );
+  if (restoredFresh.resolve(kid) === undefined)
+    throw new Error(
+      "benchmark self-check failed: restored snapshot missed the ed25519 kid at the fetch instant",
+    );
+  return ops;
+}
 
 /**
  * Pinned shape of the `JwksKeyStore` requireHttps benchmark:
@@ -13922,7 +14187,7 @@ function benchmarkReplayCacheFromSnapshot(): number {
   const opts = { ttlSec: REPLAY_RESTORE_TTL_SEC, now: () => REPLAY_RESTORE_NOW };
   const pre = ReplayCache.fromSnapshot(snapshot, opts);
   assertReplayRestored(pre);
-  for (const [nonce] of REPLAY_RESTORE_EXPECTED) {
+  for (const [, nonce] of REPLAY_RESTORE_EXPECTED) {
     if (pre.check(nonce) !== true)
       throw new Error(
         `benchmark self-check failed: restored nonce ${nonce} not a replay`,
@@ -13937,17 +14202,17 @@ function benchmarkReplayCacheFromSnapshot(): number {
       `benchmark self-check failed: expired-at-restore size ${expired.size} ` +
         `(expected ${REPLAY_RESTORE_EXPECTED.length - 1})`,
     );
-  if (expired.check(REPLAY_RESTORE_EXPECTED[0]![0]) !== false)
+  if (expired.check(REPLAY_RESTORE_EXPECTED[0]![1]) !== false)
     throw new Error(
       "benchmark self-check failed: nonce expired at restore reported as replay",
     );
-  if (expired.check(REPLAY_RESTORE_EXPECTED[1]![0]) !== true)
+  if (expired.check(REPLAY_RESTORE_EXPECTED[1]![1]) !== true)
     throw new Error(
       "benchmark self-check failed: surviving nonce after expiry drop not a replay",
     );
   assertBenchThrows(
-    () => ReplayCache.fromSnapshot({ v: 2, entries: [] }, opts),
-    /invalid snapshot: unsupported snapshot version 2/,
+    () => ReplayCache.fromSnapshot({ v: 3, entries: [] }, opts),
+    /invalid snapshot: unsupported snapshot version 3/,
     "wrong-version snapshot",
   );
   assertBenchThrows(
@@ -13958,7 +14223,7 @@ function benchmarkReplayCacheFromSnapshot(): number {
   return measure(() => {
     const restored = ReplayCache.fromSnapshot(snapshot, opts);
     assertReplayRestored(restored);
-    for (const [nonce] of REPLAY_RESTORE_EXPECTED) {
+    for (const [, nonce] of REPLAY_RESTORE_EXPECTED) {
       if (restored.check(nonce) !== true)
         throw new Error(
           `benchmark self-check failed: restored nonce ${nonce} not a replay`,
@@ -14001,27 +14266,27 @@ const REPLAY_SIGNED_BY_LABEL_MAC_MISMATCH =
  */
 const REPLAY_SIGNED_BY_LABEL_EXPECTED: Record<
   (typeof REPLAY_SIGNED_BY_LABEL_LABELS)[number],
-  Array<[string, number]>
+  Array<[string, string, number]>
 > = {
   merchant: [
-    ["bench-signed-by-label-merchant-1", REPLAY_SIGNED_BY_LABEL_NOW - 80],
-    ["bench-signed-by-label-merchant-2", REPLAY_SIGNED_BY_LABEL_NOW - 70],
-    ["bench-signed-by-label-merchant-3", REPLAY_SIGNED_BY_LABEL_NOW - 60],
-    ["bench-signed-by-label-merchant-4", REPLAY_SIGNED_BY_LABEL_NOW - 50],
-    ["bench-signed-by-label-merchant-5", REPLAY_SIGNED_BY_LABEL_NOW - 40],
-    ["bench-signed-by-label-merchant-6", REPLAY_SIGNED_BY_LABEL_NOW - 30],
-    ["bench-signed-by-label-merchant-7", REPLAY_SIGNED_BY_LABEL_NOW - 20],
-    ["bench-signed-by-label-merchant-8", REPLAY_SIGNED_BY_LABEL_NOW - 10],
+    ["", "bench-signed-by-label-merchant-1", REPLAY_SIGNED_BY_LABEL_NOW - 80],
+    ["", "bench-signed-by-label-merchant-2", REPLAY_SIGNED_BY_LABEL_NOW - 70],
+    ["", "bench-signed-by-label-merchant-3", REPLAY_SIGNED_BY_LABEL_NOW - 60],
+    ["", "bench-signed-by-label-merchant-4", REPLAY_SIGNED_BY_LABEL_NOW - 50],
+    ["", "bench-signed-by-label-merchant-5", REPLAY_SIGNED_BY_LABEL_NOW - 40],
+    ["", "bench-signed-by-label-merchant-6", REPLAY_SIGNED_BY_LABEL_NOW - 30],
+    ["", "bench-signed-by-label-merchant-7", REPLAY_SIGNED_BY_LABEL_NOW - 20],
+    ["", "bench-signed-by-label-merchant-8", REPLAY_SIGNED_BY_LABEL_NOW - 10],
   ],
   gateway: [
-    ["bench-signed-by-label-gateway-1", REPLAY_SIGNED_BY_LABEL_NOW - 80],
-    ["bench-signed-by-label-gateway-2", REPLAY_SIGNED_BY_LABEL_NOW - 70],
-    ["bench-signed-by-label-gateway-3", REPLAY_SIGNED_BY_LABEL_NOW - 60],
-    ["bench-signed-by-label-gateway-4", REPLAY_SIGNED_BY_LABEL_NOW - 50],
-    ["bench-signed-by-label-gateway-5", REPLAY_SIGNED_BY_LABEL_NOW - 40],
-    ["bench-signed-by-label-gateway-6", REPLAY_SIGNED_BY_LABEL_NOW - 30],
-    ["bench-signed-by-label-gateway-7", REPLAY_SIGNED_BY_LABEL_NOW - 20],
-    ["bench-signed-by-label-gateway-8", REPLAY_SIGNED_BY_LABEL_NOW - 10],
+    ["", "bench-signed-by-label-gateway-1", REPLAY_SIGNED_BY_LABEL_NOW - 80],
+    ["", "bench-signed-by-label-gateway-2", REPLAY_SIGNED_BY_LABEL_NOW - 70],
+    ["", "bench-signed-by-label-gateway-3", REPLAY_SIGNED_BY_LABEL_NOW - 60],
+    ["", "bench-signed-by-label-gateway-4", REPLAY_SIGNED_BY_LABEL_NOW - 50],
+    ["", "bench-signed-by-label-gateway-5", REPLAY_SIGNED_BY_LABEL_NOW - 40],
+    ["", "bench-signed-by-label-gateway-6", REPLAY_SIGNED_BY_LABEL_NOW - 30],
+    ["", "bench-signed-by-label-gateway-7", REPLAY_SIGNED_BY_LABEL_NOW - 20],
+    ["", "bench-signed-by-label-gateway-8", REPLAY_SIGNED_BY_LABEL_NOW - 10],
   ],
 };
 
@@ -14096,7 +14361,7 @@ function assertReplaySignedSnapshotsByLabel(
         `benchmark self-check failed: restored ${label} size ${cache.size} ` +
           `(expected ${REPLAY_SIGNED_BY_LABEL_NONCE_COUNT})`,
       );
-    for (const [nonce] of expected) {
+    for (const [, nonce] of expected) {
       if (cache.check(nonce) !== true)
         throw new Error(
           `benchmark self-check failed: restored nonce ${nonce} under ${label} not a replay`,
@@ -14167,7 +14432,7 @@ function benchmarkReplayCacheExportSignedSnapshotsByLabel(): number {
     string,
     ReplayCacheSignedSnapshotEnvelope
   >;
-  tamperedEntry.gateway!.snapshot.entries[0]![0] = "bench-signed-by-label-evil";
+  tamperedEntry.gateway!.snapshot.entries[0]![1] = "bench-signed-by-label-evil";
   const tamperedSeenAt = JSON.parse(JSON.stringify(envelopes)) as Record<
     string,
     ReplayCacheSignedSnapshotEnvelope
@@ -20199,6 +20464,11 @@ results.push({
   alg: "JwksKeyStore.resolve (hit)",
   op: "resolve",
   ops: benchmarkJwksResolve(benchStore),
+});
+results.push({
+  alg: "JwksKeyStore.resolve (maxStaleSec cutoff)",
+  op: "resolve",
+  ops: await benchmarkJwksResolveMaxStaleSec(),
 });
 results.push({
   alg: "JwksKeyStore.requireHttps (resolve)",
