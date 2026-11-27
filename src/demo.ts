@@ -1476,7 +1476,7 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { createServer, get, request, type IncomingMessage } from "node:http";
+import { createServer, get, request, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import {
   createHmac,
@@ -5070,6 +5070,21 @@ export const DEMO_VERIFIED_FETCH_MULTI_MERCHANT_NONCE =
 /** Nonce the multi-label verified-fetch segment's gateway signature carries. */
 export const DEMO_VERIFIED_FETCH_MULTI_GATEWAY_NONCE =
   "demo-verified-fetch-multi-gateway-nonce-1";
+/** Path the verified-fetch redirect segment's same-origin 302 answers on. */
+export const DEMO_VERIFIED_FETCH_REDIRECT_SAME_PATH =
+  "/v1/redirect-same-origin";
+/** Path the verified-fetch redirect segment's cross-origin 302 answers on. */
+export const DEMO_VERIFIED_FETCH_REDIRECT_CROSS_PATH =
+  "/v1/redirect-cross-origin";
+/** Nonce the verified-fetch redirect segment's gateway signature carries on the landing response. */
+export const DEMO_VERIFIED_FETCH_REDIRECT_NONCE =
+  "demo-verified-fetch-redirect-nonce-1";
+/**
+ * Error the default fetch reports when a redirect is refused
+ * (undici `fetch failed`, cause `unexpected redirect` — probed
+ * live before this segment was written, not assumed).
+ */
+export const DEMO_VERIFIED_FETCH_REDIRECT_DEFAULT_ERROR = "fetch failed";
 /** Label of the merchant signature in the dual-signed response segment. */
 export const DEMO_DUAL_RESPONSE_MERCHANT_LABEL = "merchant";
 /** Label of the gateway signature in the dual-signed response segment. */
@@ -7544,6 +7559,59 @@ export interface DemoResult {
    */
   verifiedFetchMultiLabelVerifications: VerifyResult[];
   /**
+   * Whether the verified-fetch redirect segment's default-policy
+   * call refused the 302 instead of following it (true — the
+   * fetch itself rejects, so there is no `finalUrl` to report).
+   */
+  verifiedFetchRedirectDefaultRejected: boolean;
+  /**
+   * Times the settlement endpoint was hit after the redirect
+   * segment's default-policy call (0 — the signed request never
+   * reached it).
+   */
+  verifiedFetchRedirectDefaultTargetHits: number;
+  /** Status of the redirect segment's followed same-origin redirect (200). */
+  verifiedFetchRedirectFollowStatus: number;
+  /**
+   * Response body of the redirect segment's followed same-origin
+   * redirect (the pinned `DEMO_GATEWAY_RESPONSE_BODY` settlement body).
+   */
+  verifiedFetchRedirectFollowBody: string;
+  /**
+   * Verification of the redirect segment's followed same-origin
+   * redirect (ok — label `sig1`, keyid `DEMO_VERIFIED_FETCH_KEY_ID`,
+   * nonce `DEMO_VERIFIED_FETCH_REDIRECT_NONCE`).
+   */
+  verifiedFetchRedirectFollowVerification: VerifyResult;
+  /**
+   * Whether the followed call's `finalUrl` is the settlement
+   * endpoint (true).
+   */
+  verifiedFetchRedirectFollowFinalUrlIsTarget: boolean;
+  /**
+   * Whether the redirect segment's cross-origin follow was refused
+   * before verification (true — `allowCrossOriginRedirect` not set).
+   */
+  verifiedFetchRedirectCrossOriginRefused: boolean;
+  /**
+   * Times the cross-origin settlement endpoint was hit by the
+   * refused follow (1 — the fetch followed before the refusal,
+   * the documented honest limit).
+   */
+  verifiedFetchRedirectCrossOriginTargetHits: number;
+  /** Status of the 3xx the redirect segment's `"manual"` call received (302). */
+  verifiedFetchRedirectManualStatus: number;
+  /**
+   * Verification code the redirect segment's unsigned 302 failed
+   * with (`MISSING_SIGNATURE_INPUT`).
+   */
+  verifiedFetchRedirectManualCode: string;
+  /**
+   * Times the settlement endpoint was hit after the redirect
+   * segment's `"manual"` call (unchanged, 1 — manual never follows).
+   */
+  verifiedFetchRedirectManualTargetHits: number;
+  /**
    * Verification of the whitelisted ed25519 signature in the
    * allowed-algs segment (ok under `allowedAlgs: ["ed25519"]`).
    */
@@ -9335,6 +9403,268 @@ async function fetchVerifiedFetchMultiLabelRoundTrip(): Promise<VerifiedFetchMul
   } finally {
     server.closeAllConnections();
     server.close();
+  }
+}
+
+/**
+ * The verified-fetch redirect-policy segment's loopback fixture
+ * (backlog #1429): #1413's redirect policy is fail-closed by
+ * default, but the demo never showed it — a 302 was invisible in
+ * the one-call path. Two loopback servers stand in for two
+ * origins (a different port is a different origin): the main
+ * server answers the settlement endpoint and two 302 endpoints —
+ * one to the same origin, one to the second server — and the
+ * second server answers the same signed settlement response.
+ * Four `verifiedFetch` calls pin the policy: the default
+ * (`redirect` unset) refuses the 302 before the signed request
+ * reaches the target (the fetch itself rejects, target hit 0
+ * times); `"follow"` follows the same-origin 302 and verifies
+ * the landing response, with `finalUrl` naming the settlement
+ * endpoint; `"follow"` to the cross-origin 302 is refused by
+ * `verifiedFetch` before any verification runs (the fetch did
+ * follow — the second server was hit once — which is the
+ * documented honest limit: the refusal protects which response
+ * is trusted, not which hosts see the signed headers);
+ * `"manual"` returns the unsigned 302 itself, which fails
+ * verification with `MISSING_SIGNATURE_INPUT` while the target
+ * stays unfetched.
+ *
+ * Only statuses, bodies, verification identities, hit counts and
+ * refusal verdicts are returned — no port, no signature bytes —
+ * so the printed segment is byte-identical between runs even
+ * though both ports and both key pairs are fresh per run.
+ */
+interface VerifiedFetchRedirectFixture {
+  /** The default-policy call threw instead of following (true). */
+  defaultRejected: boolean;
+  /** Times the settlement endpoint was hit after the default-policy call (0). */
+  defaultTargetHits: number;
+  /** Status the loopback answered for the followed same-origin redirect (200). */
+  followStatus: number;
+  /** Response body of the followed same-origin redirect (the pinned settlement body). */
+  followBody: string;
+  /** Verification of the followed same-origin redirect's response (ok). */
+  followVerification: VerifyResult;
+  /** Whether `finalUrl` of the followed call is the settlement endpoint (true). */
+  followFinalUrlIsTarget: boolean;
+  /** The cross-origin follow was refused before verification (true). */
+  crossOriginRefused: boolean;
+  /** Times the cross-origin settlement endpoint was hit by the refused follow (1). */
+  crossOriginTargetHits: number;
+  /** Status of the 3xx the `"manual"` call received (302). */
+  manualStatus: number;
+  /** Verification code the unsigned 302 failed with (`MISSING_SIGNATURE_INPUT`). */
+  manualCode: string;
+  /** Times the settlement endpoint was hit after the `"manual"` call (unchanged, 1). */
+  manualTargetHits: number;
+}
+
+async function fetchVerifiedFetchRedirectPolicy(): Promise<VerifiedFetchRedirectFixture> {
+  const gatewayPair = generateEd25519KeyPair();
+  const clientPair = generateEd25519KeyPair();
+  let sameTargetHits = 0;
+  let crossTargetHits = 0;
+  let mainPort = 0;
+  let crossPort = 0;
+  const serveSettlement = (res: ServerResponse) => {
+    const signed = signResponse(
+      {
+        status: DEMO_GATEWAY_RESPONSE_STATUS,
+        headers: { "content-type": "application/json" },
+        body: DEMO_GATEWAY_RESPONSE_BODY,
+      },
+      {
+        keyId: DEMO_VERIFIED_FETCH_KEY_ID,
+        alg: "ed25519",
+        key: gatewayPair.privateKey,
+        created: DEMO_CREATED,
+        nonce: DEMO_VERIFIED_FETCH_REDIRECT_NONCE,
+      },
+    );
+    res.writeHead(DEMO_GATEWAY_RESPONSE_STATUS, {
+      "content-type": "application/json",
+      "content-digest": signed.headers["content-digest"] as string,
+      "signature-input": signed.headers["signature-input"] as string,
+      signature: signed.headers["signature"] as string,
+    });
+    res.end(DEMO_GATEWAY_RESPONSE_BODY);
+  };
+  const crossServer = createServer((req, res) => {
+    if (req.url === DEMO_GATEWAY_RESPONSE_PATH) {
+      crossTargetHits++;
+      serveSettlement(res);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  const mainServer = createServer((req, res) => {
+    if (req.url === DEMO_GATEWAY_RESPONSE_PATH) {
+      sameTargetHits++;
+      serveSettlement(res);
+      return;
+    }
+    if (req.url === DEMO_VERIFIED_FETCH_REDIRECT_SAME_PATH) {
+      res.writeHead(302, {
+        location: `http://127.0.0.1:${mainPort}${DEMO_GATEWAY_RESPONSE_PATH}`,
+      });
+      res.end();
+      return;
+    }
+    if (req.url === DEMO_VERIFIED_FETCH_REDIRECT_CROSS_PATH) {
+      res.writeHead(302, {
+        location: `http://127.0.0.1:${crossPort}${DEMO_GATEWAY_RESPONSE_PATH}`,
+      });
+      res.end();
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  try {
+    crossPort = (
+      await new Promise<AddressInfo>((resolve, reject) => {
+        crossServer.on("error", reject);
+        crossServer.listen(0, "127.0.0.1", () => {
+          resolve(crossServer.address() as AddressInfo);
+        });
+      })
+    ).port;
+    mainPort = (
+      await new Promise<AddressInfo>((resolve, reject) => {
+        mainServer.on("error", reject);
+        mainServer.listen(0, "127.0.0.1", () => {
+          resolve(mainServer.address() as AddressInfo);
+        });
+      })
+    ).port;
+    const sign = {
+      keyId: DEMO_VERIFIED_FETCH_CLIENT_KEY_ID,
+      alg: "ed25519" as const,
+      key: clientPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_VERIFIED_FETCH_CLIENT_NONCE,
+    };
+    const verify = {
+      key: gatewayPair.publicKey,
+      now: DEMO_CREATED + 60,
+    };
+    const sameUrl = `http://127.0.0.1:${mainPort}${DEMO_VERIFIED_FETCH_REDIRECT_SAME_PATH}`;
+    const crossUrl = `http://127.0.0.1:${mainPort}${DEMO_VERIFIED_FETCH_REDIRECT_CROSS_PATH}`;
+    const targetUrl = `http://127.0.0.1:${mainPort}${DEMO_GATEWAY_RESPONSE_PATH}`;
+
+    // Default policy (`redirect` unset): the fetch rejects on the
+    // 302 — no result, no `finalUrl` to assert — and the signed
+    // request never reaches the settlement endpoint.
+    let defaultRejected = false;
+    let defaultError: unknown;
+    try {
+      await verifiedFetch(sameUrl, undefined, { sign, verify });
+    } catch (e) {
+      defaultRejected = true;
+      defaultError = e;
+    }
+    const defaultTargetHits = sameTargetHits;
+
+    // The 3xx the `"manual"` call will receive, confirmed with a
+    // plain fetch first: a 302 pointing at the settlement endpoint.
+    const manualProbe = await fetch(sameUrl, { redirect: "manual" });
+    const manualStatus = manualProbe.status;
+    const manualLocation = manualProbe.headers.get("location");
+    await manualProbe.text();
+
+    // `"follow"`, same origin: the redirect is followed and the
+    // landing response verifies, with `finalUrl` naming it.
+    const followResult = await verifiedFetch(sameUrl, undefined, {
+      sign,
+      verify,
+      redirect: "follow",
+    });
+    const followFinalUrlIsTarget = followResult.finalUrl === targetUrl;
+    const followTargetHits = sameTargetHits;
+
+    // `"follow"`, cross origin: the fetch follows to the second
+    // server, then `verifiedFetch` refuses the landing origin
+    // before any verification runs.
+    let crossOriginRefused = false;
+    let crossError: unknown;
+    try {
+      await verifiedFetch(crossUrl, undefined, {
+        sign,
+        verify,
+        redirect: "follow",
+      });
+    } catch (e) {
+      crossOriginRefused = true;
+      crossError = e;
+    }
+
+    // `"manual"`: the unsigned 302 itself is verified and fails
+    // with `MISSING_SIGNATURE_INPUT`; the target is never fetched.
+    let manualCode = "";
+    try {
+      await verifiedFetch(sameUrl, undefined, {
+        sign,
+        verify,
+        redirect: "manual",
+      });
+    } catch (e) {
+      if (isVerifyError(e)) manualCode = e.code ?? "";
+    }
+    const manualTargetHits = sameTargetHits;
+
+    const fixture: VerifiedFetchRedirectFixture = {
+      defaultRejected,
+      defaultTargetHits,
+      followStatus: followResult.response.status,
+      followBody: followResult.body,
+      followVerification: followResult.verifyResult,
+      followFinalUrlIsTarget,
+      crossOriginRefused,
+      crossOriginTargetHits: crossTargetHits,
+      manualStatus,
+      manualCode,
+      manualTargetHits,
+    };
+    if (
+      !fixture.defaultRejected ||
+      !(defaultError instanceof Error) ||
+      defaultError.message !==
+        DEMO_VERIFIED_FETCH_REDIRECT_DEFAULT_ERROR ||
+      fixture.defaultTargetHits !== 0 ||
+      fixture.manualStatus !== 302 ||
+      manualLocation !== targetUrl ||
+      fixture.followStatus !== DEMO_GATEWAY_RESPONSE_STATUS ||
+      fixture.followBody !== DEMO_GATEWAY_RESPONSE_BODY ||
+      !fixture.followVerification.ok ||
+      fixture.followVerification.label !== "sig1" ||
+      fixture.followVerification.keyId !== DEMO_VERIFIED_FETCH_KEY_ID ||
+      fixture.followVerification.alg !== "ed25519" ||
+      fixture.followVerification.nonce !==
+        DEMO_VERIFIED_FETCH_REDIRECT_NONCE ||
+      fixture.followVerification.coveredComponents?.join(" ") !==
+        "@status content-digest" ||
+      !fixture.followFinalUrlIsTarget ||
+      followTargetHits !== 1 ||
+      !fixture.crossOriginRefused ||
+      !(crossError instanceof Error) ||
+      !crossError.message.startsWith(
+        "verifiedFetch: cross-origin redirect to ",
+      ) ||
+      fixture.crossOriginTargetHits !== 1 ||
+      fixture.manualCode !== "MISSING_SIGNATURE_INPUT" ||
+      fixture.manualTargetHits !== 1
+    ) {
+      throw new Error(
+        `demo fixture broken: verified-fetch redirect segment gave default rejected=${fixture.defaultRejected} (${defaultError instanceof Error ? defaultError.message : String(defaultError)}), target hits after default=${fixture.defaultTargetHits}, manual probe ${fixture.manualStatus}/${manualLocation}, follow ${fixture.followStatus}/${JSON.stringify(fixture.followVerification)} finalUrlIsTarget=${fixture.followFinalUrlIsTarget} target hits=${followTargetHits}, cross-origin refused=${fixture.crossOriginRefused} (${crossError instanceof Error ? crossError.message : String(crossError)}) cross target hits=${fixture.crossOriginTargetHits}, manual code=${fixture.manualCode} target hits=${fixture.manualTargetHits}, instead of a refused default (target 0), a verified same-origin follow (finalUrl is the target), a refused cross-origin follow, and a MISSING_SIGNATURE_INPUT manual 302`,
+      );
+    }
+    return fixture;
+  } finally {
+    mainServer.closeAllConnections();
+    mainServer.close();
+    crossServer.closeAllConnections();
+    crossServer.close();
   }
 }
 
@@ -15725,6 +16055,21 @@ export async function runDemo(): Promise<DemoResult> {
   const verifiedFetchMultiLabelRoundTrip =
     await fetchVerifiedFetchMultiLabelRoundTrip();
 
+  // Verified-fetch redirect-policy segment (client direction):
+  // the default `redirect: "error"` policy refuses a 302 before
+  // the signed request reaches the target, `"follow"` follows a
+  // same-origin redirect and verifies the landing response
+  // (`finalUrl` names where it came from), a cross-origin landing
+  // is refused before verification unless the caller opts in
+  // with `allowCrossOriginRedirect`, and `"manual"` hands the
+  // unsigned 3xx back for the caller to inspect. The helper's
+  // fail-fast asserts already pinned every outcome outside the
+  // printed lines; only the ports (never printed) and the key
+  // pairs are fresh per run, so the segment's printed lines are
+  // byte-identical between runs.
+  const verifiedFetchRedirectPolicy =
+    await fetchVerifiedFetchRedirectPolicy();
+
   // Allowed-algs whitelist segment: a gateway that only accepts
   // ed25519 should not have to hand-roll a pre-check before
   // verifying — `allowedAlgs: ["ed25519"]` (backlog #851) is
@@ -19729,6 +20074,15 @@ export async function runDemo(): Promise<DemoResult> {
       : `Verified fetch multi-label verification: FAILED (code ${verifiedFetchMultiLabelRoundTrip.verification.code}: ${verifiedFetchMultiLabelRoundTrip.verification.reason})`,
     `Verified fetch multi-label body: ${verifiedFetchMultiLabelRoundTrip.body}`,
     "",
+    "Verified fetch redirect policy: verifiedFetch never silently follows a redirect — the default redirect: \"error\" refuses a 302 before the signed request reaches the target, \"follow\" follows a same-origin redirect and verifies the landing response (finalUrl names where it came from), a cross-origin landing is refused before verification unless the caller opts in with allowCrossOriginRedirect, and \"manual\" hands the unsigned 3xx back for the caller to inspect",
+    `Verified fetch redirect default policy: 302 refused (${DEMO_VERIFIED_FETCH_REDIRECT_DEFAULT_ERROR}) — target hit ${verifiedFetchRedirectPolicy.defaultTargetHits} times, the signed request never reached the settlement endpoint`,
+    verifiedFetchRedirectPolicy.followVerification.ok
+      ? `Verified fetch redirect follow: same-origin 302 followed — status ${verifiedFetchRedirectPolicy.followStatus}, finalUrl is the settlement endpoint, verification OK (label ${verifiedFetchRedirectPolicy.followVerification.label}, keyid="${verifiedFetchRedirectPolicy.followVerification.keyId}", alg="${verifiedFetchRedirectPolicy.followVerification.alg}", nonce="${verifiedFetchRedirectPolicy.followVerification.nonce}")`
+      : `Verified fetch redirect follow: FAILED (code ${verifiedFetchRedirectPolicy.followVerification.code}: ${verifiedFetchRedirectPolicy.followVerification.reason})`,
+    `Verified fetch redirect follow body: ${verifiedFetchRedirectPolicy.followBody}`,
+    `Verified fetch redirect cross-origin: 302 to a different origin refused before verification (allowCrossOriginRedirect not set, cross-origin target hit ${verifiedFetchRedirectPolicy.crossOriginTargetHits} time)`,
+    `Verified fetch redirect manual: ${verifiedFetchRedirectPolicy.manualStatus} returned unsigned — verification failed (code ${verifiedFetchRedirectPolicy.manualCode}), target still hit ${verifiedFetchRedirectPolicy.manualTargetHits} time — manual never follows`,
+    "",
     "Allowed-algs whitelist: a gateway that only accepts ed25519 verifies both signatures under allowedAlgs [\"ed25519\"] — the ed25519 signature verifies, the RSA-PSS signature is rejected with ALG_NOT_ALLOWED before any cryptographic verification, so a foreign algorithm never reaches the crypto path",
     allowedAlgsEdVerification.ok
       ? `Whitelisted algorithm verifies: the same request signed with ed25519 verified under allowedAlgs ["ed25519"]: OK (label ${allowedAlgsEdVerification.label}, keyid="${allowedAlgsEdVerification.keyId}", alg="${allowedAlgsEdVerification.alg}", nonce="${allowedAlgsEdVerification.nonce}")`
@@ -20378,6 +20732,28 @@ export async function runDemo(): Promise<DemoResult> {
       verifiedFetchMultiLabelRoundTrip.verification,
     verifiedFetchMultiLabelVerifications:
       verifiedFetchMultiLabelRoundTrip.verifications,
+    verifiedFetchRedirectDefaultRejected:
+      verifiedFetchRedirectPolicy.defaultRejected,
+    verifiedFetchRedirectDefaultTargetHits:
+      verifiedFetchRedirectPolicy.defaultTargetHits,
+    verifiedFetchRedirectFollowStatus:
+      verifiedFetchRedirectPolicy.followStatus,
+    verifiedFetchRedirectFollowBody:
+      verifiedFetchRedirectPolicy.followBody,
+    verifiedFetchRedirectFollowVerification:
+      verifiedFetchRedirectPolicy.followVerification,
+    verifiedFetchRedirectFollowFinalUrlIsTarget:
+      verifiedFetchRedirectPolicy.followFinalUrlIsTarget,
+    verifiedFetchRedirectCrossOriginRefused:
+      verifiedFetchRedirectPolicy.crossOriginRefused,
+    verifiedFetchRedirectCrossOriginTargetHits:
+      verifiedFetchRedirectPolicy.crossOriginTargetHits,
+    verifiedFetchRedirectManualStatus:
+      verifiedFetchRedirectPolicy.manualStatus,
+    verifiedFetchRedirectManualCode:
+      verifiedFetchRedirectPolicy.manualCode,
+    verifiedFetchRedirectManualTargetHits:
+      verifiedFetchRedirectPolicy.manualTargetHits,
     allowedAlgsEdVerification,
     allowedAlgsRsaVerification,
     jwksRequireHttpsError,

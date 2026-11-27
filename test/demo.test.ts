@@ -149,6 +149,8 @@ import {
   DEMO_VERIFIED_FETCH_MULTI_MERCHANT_NONCE,
   DEMO_VERIFIED_FETCH_POST_BODY,
   DEMO_VERIFIED_FETCH_POST_NONCE,
+  DEMO_VERIFIED_FETCH_REDIRECT_DEFAULT_ERROR,
+  DEMO_VERIFIED_FETCH_REDIRECT_NONCE,
   DEMO_DUAL_RESPONSE_GATEWAY_KEY_ID,
   DEMO_DUAL_RESPONSE_GATEWAY_LABEL,
   DEMO_DUAL_RESPONSE_GATEWAY_NONCE,
@@ -8161,7 +8163,7 @@ test("demo verifiedFetch multi-label segment prints the dual-signed round-trip b
     `Verified fetch multi-label body: ${DEMO_GATEWAY_RESPONSE_BODY}`,
   ]);
   // The segment sits between the single-label verified-fetch and
-  // allowed-algs segments: a blank line on each side.
+  // redirect-policy segments: a blank line on each side.
   const fetchHeaderIdx = lines.findIndex((l) =>
     l.startsWith("Verified fetch client:"),
   );
@@ -8170,7 +8172,7 @@ test("demo verifiedFetch multi-label segment prints the dual-signed round-trip b
   assert.equal(lines[headerIdx - 1], "");
   assert.equal(lines[headerIdx + 4], "");
   assert.ok(
-    lines[headerIdx + 5]!.startsWith("Allowed-algs whitelist:"),
+    lines[headerIdx + 5]!.startsWith("Verified fetch redirect policy:"),
   );
 });
 
@@ -8180,7 +8182,7 @@ test("demo verifiedFetch multi-label segment prints byte-identical lines across 
   const start = (ls: string[]) =>
     ls.findIndex((l) => l.startsWith("Verified fetch multi-label client:"));
   const end = (ls: string[]) =>
-    ls.findIndex((l) => l.startsWith("Allowed-algs whitelist:"));
+    ls.findIndex((l) => l.startsWith("Verified fetch redirect policy:"));
   const a = start(first.lines);
   const b = start(second.lines);
   const aEnd = end(first.lines);
@@ -8190,6 +8192,124 @@ test("demo verifiedFetch multi-label segment prints byte-identical lines across 
   // run and the signatures themselves are never printed, so the
   // segment's printed lines — header, status, verification and
   // body — are byte-identical.
+  assert.deepEqual(
+    first.lines.slice(a, aEnd),
+    second.lines.slice(b, bEnd),
+  );
+});
+
+test("demo verifiedFetch redirect segment refuses, follows, and hands back redirects per policy", async () => {
+  const {
+    verifiedFetchRedirectDefaultRejected,
+    verifiedFetchRedirectDefaultTargetHits,
+    verifiedFetchRedirectFollowStatus,
+    verifiedFetchRedirectFollowBody,
+    verifiedFetchRedirectFollowVerification,
+    verifiedFetchRedirectFollowFinalUrlIsTarget,
+    verifiedFetchRedirectCrossOriginRefused,
+    verifiedFetchRedirectCrossOriginTargetHits,
+    verifiedFetchRedirectManualStatus,
+    verifiedFetchRedirectManualCode,
+    verifiedFetchRedirectManualTargetHits,
+  } = await runDemo();
+
+  // Default policy: the 302 is refused and the signed request
+  // never reaches the settlement endpoint.
+  assert.equal(verifiedFetchRedirectDefaultRejected, true);
+  assert.equal(verifiedFetchRedirectDefaultTargetHits, 0);
+
+  // `"follow"`, same origin: the landing response verifies and
+  // `finalUrl` names the settlement endpoint.
+  assert.equal(
+    verifiedFetchRedirectFollowStatus,
+    DEMO_GATEWAY_RESPONSE_STATUS,
+  );
+  assert.equal(
+    verifiedFetchRedirectFollowBody,
+    DEMO_GATEWAY_RESPONSE_BODY,
+  );
+  assert.equal(verifiedFetchRedirectFollowVerification.ok, true);
+  assert.equal(verifiedFetchRedirectFollowVerification.label, "sig1");
+  assert.equal(
+    verifiedFetchRedirectFollowVerification.keyId,
+    DEMO_VERIFIED_FETCH_KEY_ID,
+  );
+  assert.equal(verifiedFetchRedirectFollowVerification.alg, "ed25519");
+  assert.equal(
+    verifiedFetchRedirectFollowVerification.nonce,
+    DEMO_VERIFIED_FETCH_REDIRECT_NONCE,
+  );
+  assert.deepEqual(
+    verifiedFetchRedirectFollowVerification.coveredComponents,
+    ["@status", "content-digest"],
+  );
+  assert.equal(verifiedFetchRedirectFollowFinalUrlIsTarget, true);
+
+  // `"follow"`, cross origin: refused before verification — but
+  // the fetch did follow, so the second server was hit once.
+  assert.equal(verifiedFetchRedirectCrossOriginRefused, true);
+  assert.equal(verifiedFetchRedirectCrossOriginTargetHits, 1);
+
+  // `"manual"`: the unsigned 302 fails verification, and the
+  // target is never fetched again.
+  assert.equal(verifiedFetchRedirectManualStatus, 302);
+  assert.equal(
+    verifiedFetchRedirectManualCode,
+    "MISSING_SIGNATURE_INPUT",
+  );
+  assert.equal(verifiedFetchRedirectManualTargetHits, 1);
+});
+
+test("demo verifiedFetch redirect segment prints the four policy outcomes between the multi-label and allowed-algs segments", async () => {
+  const { lines } = await runDemo();
+
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Verified fetch redirect policy: verifiedFetch never silently follows a redirect/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Verified fetch redirect policy:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx + 1, headerIdx + 6), [
+    `Verified fetch redirect default policy: 302 refused (${DEMO_VERIFIED_FETCH_REDIRECT_DEFAULT_ERROR}) — target hit 0 times, the signed request never reached the settlement endpoint`,
+    `Verified fetch redirect follow: same-origin 302 followed — status ${DEMO_GATEWAY_RESPONSE_STATUS}, finalUrl is the settlement endpoint, verification OK (label sig1, keyid="${DEMO_VERIFIED_FETCH_KEY_ID}", alg="ed25519", nonce="${DEMO_VERIFIED_FETCH_REDIRECT_NONCE}")`,
+    `Verified fetch redirect follow body: ${DEMO_GATEWAY_RESPONSE_BODY}`,
+    "Verified fetch redirect cross-origin: 302 to a different origin refused before verification (allowCrossOriginRedirect not set, cross-origin target hit 1 time)",
+    "Verified fetch redirect manual: 302 returned unsigned — verification failed (code MISSING_SIGNATURE_INPUT), target still hit 1 time — manual never follows",
+  ]);
+  // The segment sits between the multi-label verified-fetch and
+  // allowed-algs segments: a blank line on each side.
+  const multiLabelIdx = lines.findIndex((l) =>
+    l.startsWith("Verified fetch multi-label client:"),
+  );
+  assert.ok(multiLabelIdx !== -1);
+  assert.equal(headerIdx, multiLabelIdx + 5);
+  assert.equal(lines[headerIdx - 1], "");
+  assert.equal(lines[headerIdx + 6], "");
+  assert.ok(
+    lines[headerIdx + 7]!.startsWith("Allowed-algs whitelist:"),
+  );
+});
+
+test("demo verifiedFetch redirect segment prints byte-identical lines across runs", async () => {
+  const first = await runDemo();
+  const second = await runDemo();
+  const start = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Verified fetch redirect policy:"));
+  const end = (ls: string[]) =>
+    ls.findIndex((l) => l.startsWith("Allowed-algs whitelist:"));
+  const a = start(first.lines);
+  const b = start(second.lines);
+  const aEnd = end(first.lines);
+  const bEnd = end(second.lines);
+  assert.ok(a !== -1 && b !== -1 && aEnd !== -1 && bEnd !== -1);
+  // Only the ports (never printed) and the key pairs are fresh
+  // per run and the signatures themselves are never printed, so
+  // the segment's printed lines — header, the default refusal,
+  // the follow, its body, the cross-origin refusal and the
+  // manual 302 — are byte-identical.
   assert.deepEqual(
     first.lines.slice(a, aEnd),
     second.lines.slice(b, bEnd),
