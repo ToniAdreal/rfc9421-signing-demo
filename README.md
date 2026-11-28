@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 3136 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 3158 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -930,6 +930,30 @@ const results = verifyAllLabels(dualSigned, {
 });
 // merchant without tag → { ok: false, code: "MISSING_TAG" }
 // gateway without tag → { ok: true } (falls back to global, unset)
+```
+
+Per-label content-digest requirement (a merchant signature that must
+bind its body through `content-digest`, plus a gateway signature that
+historically sends bodies without one, on the same request):
+`verifyAllLabels` accepts a `requireContentDigestByLabel` map with the
+same override/fallback semantics: a label in the map is checked against
+its own boolean; any other label falls back to the global
+`requireContentDigest` (unset means no check for it). A missing digest
+reuses the global error code (`MISSING_CONTENT_DIGEST`); no new code is
+introduced, and the check position is the same as the global one
+(before the signature base is rebuilt, before any crypto work), so a
+digest-less label is rejected before its signature is even examined. A
+non-boolean map value is a caller configuration error, and like the
+other existence requirements it never joins the key-selection
+mutual-exclusion rules. It is orthogonal to `requireNonceByLabel` /
+`requireTagByLabel`: each map drives only its own check.
+
+```ts
+const results = verifyAllLabels(dualSigned, {
+  requireContentDigestByLabel: { merchant: true }, // gateway may omit digest
+});
+// merchant with a body but no content-digest → { ok: false, code: "MISSING_CONTENT_DIGEST" }
+// gateway with a body but no content-digest → { ok: true } (falls back to global, unset)
 ```
 
 Per-label `;sf` type registries (a merchant signature that treats a
@@ -2442,7 +2466,27 @@ values. Without a request to bind to, keep using the request-side API
   emits the value, the verifier checks it against the body, and a missing
   header, an md5/unknown algorithm, or a mismatched value fails with
   `BODY_DIGEST_MISMATCH`. Content-Digest stays preferred; Digest is
-  legacy-gateway interop only (see Limitations).
+  legacy-gateway interop only (see Limitations). The binding above only
+  runs when a `content-digest` header is present at all — a signed request
+  with a body and no digest header verifies against headers alone, so the
+  body can be swapped freely after signing. A verifier that must never
+  accept an unbound body sets the opt-in `requireContentDigest: true`:
+  a non-empty body (`string` / `Buffer` / `Uint8Array`) with no
+  `content-digest` header then fails fast with `MISSING_CONTENT_DIGEST`,
+  before the signature base is rebuilt and before any crypto work (a
+  forged signature on a digest-less body reports this code, not
+  `SIGNATURE_MISMATCH` — it is a policy violation, not an authenticity
+  verdict). An empty or absent body passes (there is nothing to bind), a
+  legacy `Digest` header does not satisfy the requirement, and a present
+  `content-digest` header defers to the digest check above (a mismatched
+  body still reports `BODY_DIGEST_MISMATCH`). Unlike
+  `requiredComponents: ["content-digest"]`, which additionally forces the
+  signer to cover the header, this only demands that a digest be present
+  — the caller's choice when the signer is a third party whose
+  covered-component list the verifier does not control. It composes
+  with `verifyAllLabels` via `requireContentDigestByLabel` (below) and
+  with `verifyResponse` / `verifyAllResponseLabels`, which delegate to
+  the same functions.
 - **Freshness**: `created` enforced with a configurable clock-skew
   tolerance (`clockSkewToleranceSec`, default 60s); `expires` enforced
   strictly by default, with an optional grace period
@@ -2980,7 +3024,10 @@ const dual = addResponseSignature(merchantSigned, {
   set to `"sha-256"` (for a peer that only accepts sha-256 digests).
   Note the scope limit: body binding only applies when a
   `content-digest` header is present at all — a request without one
-  verifies against headers alone.
+  verifies against headers alone, unless the verifier opts into
+  `requireContentDigest: true`, which rejects a non-empty body with no
+  `content-digest` header as `MISSING_CONTENT_DIGEST` (see "Body
+  binding" in [What it implements](#what-it-implements)).
 
 - **Does verifying a signature ever make network requests?**
   `signRequest` / `verifyRequest` themselves do no network I/O — key
@@ -3099,7 +3146,14 @@ const dual = addResponseSignature(merchantSigned, {
   (preferred when present) and `sha-256` (fallback when no `sha-512` entry
   exists); signing emits `sha-512` by default, `sha-256` with
   `contentDigestAlg: "sha-256"`. Other `content-digest` algorithms
-  are rejected with `MISSING_CONTENT_DIGEST`. The legacy RFC 3230
+  are rejected with `MISSING_CONTENT_DIGEST`. All of the above only
+  runs when a `content-digest` header is present: a request with a body
+  and no digest header at all verifies against headers alone unless the
+  verifier opts into `requireContentDigest: true`, which rejects the
+  unbound body with `MISSING_CONTENT_DIGEST` before any crypto work
+  (empty or absent bodies pass, a legacy `Digest` header does not
+  satisfy it, and `requireContentDigestByLabel` partitions it per label
+  in `verifyAllLabels`). The legacy RFC 3230
   `Digest` header is bound under the same two algorithms, but only
   when `digest` is a covered component (an uncovered Digest header is
   not checked); a covered Digest that is missing, carries only
@@ -5861,7 +5915,7 @@ and `addResponseSignature` inherit the check through delegation.
 | `KEYID_MISMATCH` | signature's `keyid` does not match the verifier's `expectedKeyId` (or no `keyid` present) |
 | `TAG_MISMATCH` | signature's `tag` does not match the verifier's `expectedTag` (or no `tag` present) |
 | `KEY_RESOLUTION_FAILED` | `keyResolver` could not map the signature's `keyid` to a key (missing or unknown `keyid`) |
-| `MISSING_CONTENT_DIGEST` | body present but no `sha-512` (preferred) or `sha-256` (fallback) entry in `content-digest` |
+| `MISSING_CONTENT_DIGEST` | body present but no `sha-512` (preferred) or `sha-256` (fallback) entry in `content-digest`, or (with opt-in `requireContentDigest`) a non-empty body with no `content-digest` header at all |
 | `BODY_DIGEST_MISMATCH` | body bytes do not match the signed `sha-512` (or `sha-256` fallback) digest |
 | `EXPIRED` | `expires` timestamp is in the past (beyond tolerance) |
 | `CREATED_IN_FUTURE` | `created` timestamp is in the future (beyond clock-skew tolerance) |
@@ -5893,7 +5947,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 3136 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 3158 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

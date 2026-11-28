@@ -252,6 +252,37 @@ export interface VerifyOptions {
    */
   requireTag?: boolean;
   /**
+   * Reject a request that carries a non-empty body but no
+   * `content-digest` header. The body-digest check below only runs
+   * when the header is present, so without this option a signed
+   * request with a body and no digest at all verifies against
+   * headers alone — the body can be swapped freely and the
+   * signature still passes. A verifier that must never accept an
+   * unbound body (a payment gateway that requires the signer to
+   * bind the payload, even when the signer is a third party whose
+   * covered-component list the verifier does not control — unlike
+   * `requiredComponents: ["content-digest"]`, which additionally
+   * forces the signer to cover the header) sets this instead.
+   * Defaults to false (backwards compatible): no check is made
+   * unless you opt in. An empty or absent body passes (there is
+   * nothing to bind); a legacy RFC 3230 `Digest` header does not
+   * satisfy the requirement — only `content-digest` does. Fails
+   * with `MISSING_CONTENT_DIGEST`, checked *before* the signature
+   * base is rebuilt and before any crypto work, like the
+   * `allowedAlgs` policy gate: it is a policy violation, not an
+   * authenticity verdict, so a forged signature on a digest-less
+   * body reports this code rather than `SIGNATURE_MISMATCH`. When
+   * the header is present, the existing digest check runs
+   * unchanged (a mismatched body still reports
+   * `BODY_DIGEST_MISMATCH`). In `verifyAllLabels` a label in
+   * `VerifyAllOptions.requireContentDigestByLabel` overrides this
+   * value for that label; any other label falls back to it.
+   * Responses inherit the check through `verifyResponse` /
+   * `verifyAllResponseLabels`, which delegate to these same
+   * functions.
+   */
+  requireContentDigest?: boolean;
+  /**
    * Maximum acceptable signature age, in seconds (opt-in). When set, a
    * signature whose `created` timestamp is older than this is rejected
    * with `SIGNATURE_TOO_OLD` — even when it carries no `expires` (an old
@@ -1130,6 +1161,21 @@ function coversWholeDigestField(componentIds: string[]): boolean {
 }
 
 /**
+ * Whether the request carries a body worth binding: a non-empty
+ * string, `Buffer`, or `Uint8Array` (`Buffer` is a `Uint8Array`
+ * subclass, so one `instanceof` covers both binary forms). Any
+ * other runtime body shape (a body the digest checks cannot
+ * consume, backlog #1280) is not counted here — it is reported by
+ * the digest checks themselves when a `content-digest` header is
+ * present, and `requireContentDigest` does not speak for it.
+ */
+function hasNonEmptyBody(body: unknown): boolean {
+  if (typeof body === "string") return body.length > 0;
+  if (body instanceof Uint8Array) return body.byteLength > 0;
+  return false;
+}
+
+/**
  * Split a component identifier into the bare base name and whether it
  * carries the RFC 9421 §2.4 `;req` parameter, for the
  * `requiredComponents` coverage check (backlog #1267). Component ids
@@ -1178,6 +1224,7 @@ export const VERIFY_OPTION_KEYS: readonly string[] = [
   "requireExpires",
   "requireNonce",
   "requireTag",
+  "requireContentDigest",
   "maxSignatureAgeSec",
   "maxSignatureInputLength",
   "maxSignatureLength",
@@ -1212,6 +1259,7 @@ export const VERIFY_ALL_OPTION_KEYS: readonly string[] = [
   "requireNonceByLabel",
   "replayCacheByLabel",
   "requireTagByLabel",
+  "requireContentDigestByLabel",
   "structuredFieldTypesByLabel",
 ];
 
@@ -1454,6 +1502,38 @@ export function verifyRequest(
       code: "BODY_DIGEST_MISMATCH",
       reason:
         'body cannot be bound: signature covers "digest" but no Digest header is present',
+      label,
+      keyId: parsed.params.keyid,
+      alg: parsed.params.alg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
+  // Required content-digest (opt-in, backlog #1457): a non-empty
+  // body with no `content-digest` header is an unbound body — the
+  // digest check in `verifyWithKey` only runs when the header is
+  // present, so without this gate the body could be swapped after
+  // signing and the request would still verify. Checked here —
+  // after the header parsed, before the signature base is rebuilt,
+  // before any key resolution, and before any crypto work — like
+  // the `ALG_NOT_ALLOWED` policy gate above: it is a policy
+  // violation, not an authenticity verdict, so a forged signature
+  // on a digest-less body reports MISSING_CONTENT_DIGEST rather
+  // than SIGNATURE_MISMATCH. An empty or absent body passes, a
+  // legacy `Digest` header does not satisfy the requirement, and a
+  // present `content-digest` header defers to the digest check.
+  if (
+    opts.requireContentDigest === true &&
+    hasNonEmptyBody(req.body) &&
+    getHeader(req.headers, "content-digest") === undefined
+  )
+    return {
+      ok: false,
+      code: "MISSING_CONTENT_DIGEST",
+      reason:
+        "request carries a non-empty body but no content-digest header and requireContentDigest is set",
       label,
       keyId: parsed.params.keyid,
       alg: parsed.params.alg,
@@ -2659,6 +2739,38 @@ export async function verifyRequestAsync(
       expires: parsed.params.expires,
       coveredComponents: [...parsed.componentIds],
     };
+  // Required content-digest (opt-in, backlog #1457): a non-empty
+  // body with no `content-digest` header is an unbound body — the
+  // digest check in `verifyWithKey` only runs when the header is
+  // present, so without this gate the body could be swapped after
+  // signing and the request would still verify. Checked here —
+  // after the header parsed, before the signature base is rebuilt,
+  // before any key resolution, and before any crypto work — like
+  // the `ALG_NOT_ALLOWED` policy gate above: it is a policy
+  // violation, not an authenticity verdict, so a forged signature
+  // on a digest-less body reports MISSING_CONTENT_DIGEST rather
+  // than SIGNATURE_MISMATCH. An empty or absent body passes, a
+  // legacy `Digest` header does not satisfy the requirement, and a
+  // present `content-digest` header defers to the digest check.
+  if (
+    opts.requireContentDigest === true &&
+    hasNonEmptyBody(req.body) &&
+    getHeader(req.headers, "content-digest") === undefined
+  )
+    return {
+      ok: false,
+      code: "MISSING_CONTENT_DIGEST",
+      reason:
+        "request carries a non-empty body but no content-digest header and requireContentDigest is set",
+      label,
+      keyId: parsed.params.keyid,
+      alg: parsed.params.alg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
   try {
     base = buildSignatureBase(parsed.componentIds, req, parsed.params, {
       ...(opts.structuredFieldTypes !== undefined
@@ -3142,6 +3254,28 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
    */
   requireTagByLabel?: Record<string, boolean>;
   /**
+   * Per-label content-digest requirements for multi-party
+   * signatures (e.g. a merchant signature that must bind its body
+   * through `content-digest`, plus a gateway signature that
+   * historically sends bodies without one, on the same request):
+   * maps a signature label to that label's own
+   * `requireContentDigest` value. A label in the map is checked
+   * against its own boolean; any other label falls back to the
+   * global `requireContentDigest` (unset means no check for it).
+   * Each value must be a boolean — any other value is a caller
+   * configuration error (throw). A missing digest reuses the
+   * global error code (`MISSING_CONTENT_DIGEST`); no new code is
+   * introduced, and the check position is the same as the global
+   * one (before the signature base is rebuilt, before any crypto
+   * work), so a digest-less label is rejected before its signature
+   * is even examined. An existence requirement is not key
+   * selection, so it never joins the
+   * `keys`/`keyResolver`/`candidateKeys` mutual-exclusion rules.
+   * It is orthogonal to `requireNonceByLabel` /
+   * `requireTagByLabel`: each map drives only its own check.
+   */
+  requireContentDigestByLabel?: Record<string, boolean>;
+  /**
    * Per-label `;sf` type registries for multi-party signatures (e.g.
    * a merchant signature that treats a shared header field as a
    * Dictionary plus a payment-gateway signature that treats the same
@@ -3562,7 +3696,7 @@ function assertReplayCacheByLabel(
  * so it throws rather than returning `{ ok: false }`.
  */
 function assertRequireFlagByLabel(
-  field: "requireCreatedByLabel" | "requireExpiresByLabel" | "requireNonceByLabel" | "requireTagByLabel",
+  field: "requireCreatedByLabel" | "requireExpiresByLabel" | "requireNonceByLabel" | "requireTagByLabel" | "requireContentDigestByLabel",
   map: Record<string, boolean> | undefined,
 ): void {
   if (map === undefined) return;
@@ -3648,6 +3782,7 @@ export function verifyAllLabels(
   assertRequireFlagByLabel("requireExpiresByLabel", opts.requireExpiresByLabel);
   assertRequireFlagByLabel("requireNonceByLabel", opts.requireNonceByLabel);
   assertRequireFlagByLabel("requireTagByLabel", opts.requireTagByLabel);
+  assertRequireFlagByLabel("requireContentDigestByLabel", opts.requireContentDigestByLabel);
   assertReplayCacheByLabel(opts.replayCacheByLabel);
   assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyAllLabels");
   assertStructuredFieldTypesByLabel(opts.structuredFieldTypesByLabel);
@@ -3803,6 +3938,13 @@ export function verifyAllLabels(
     // selection, so it never joins the mutual-exclusion checks.
     const requireTag =
       opts.requireTagByLabel?.[label] ?? opts.requireTag;
+    // Per-label content-digest requirement: a label in the map
+    // is checked against its own flag; every other label falls back
+    // to the global flag (unset means no check for it). Like the
+    // tag requirement above, a requirement is not key selection,
+    // so it never joins the mutual-exclusion checks.
+    const requireContentDigest =
+      opts.requireContentDigestByLabel?.[label] ?? opts.requireContentDigest;
     // Per-label nonce replay store: a label in the map is checked
     // against its own store; every other label falls back to the
     // global `replayCache` (unset means no replay check for it).
@@ -3841,6 +3983,7 @@ export function verifyAllLabels(
       ...(requireExpires !== undefined ? { requireExpires } : {}),
       ...(requireNonce !== undefined ? { requireNonce } : {}),
       ...(requireTag !== undefined ? { requireTag } : {}),
+      ...(requireContentDigest !== undefined ? { requireContentDigest } : {}),
       ...(replayCache !== undefined ? { replayCache } : {}),
       ...(structuredFieldTypes !== undefined ? { structuredFieldTypes } : {}),
     });
@@ -3996,6 +4139,7 @@ export async function verifyAllLabelsAsync(
   assertRequireFlagByLabel("requireExpiresByLabel", opts.requireExpiresByLabel);
   assertRequireFlagByLabel("requireNonceByLabel", opts.requireNonceByLabel);
   assertRequireFlagByLabel("requireTagByLabel", opts.requireTagByLabel);
+  assertRequireFlagByLabel("requireContentDigestByLabel", opts.requireContentDigestByLabel);
   assertReplayCacheByLabel(opts.replayCacheByLabel);
   assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyAllLabelsAsync");
   assertStructuredFieldTypesByLabel(opts.structuredFieldTypesByLabel);
@@ -4153,6 +4297,13 @@ export async function verifyAllLabelsAsync(
     // selection, so it never joins the mutual-exclusion checks.
     const requireTag =
       opts.requireTagByLabel?.[label] ?? opts.requireTag;
+    // Per-label content-digest requirement: a label in the map
+    // is checked against its own flag; every other label falls back
+    // to the global flag (unset means no check for it). Like the
+    // tag requirement above, a requirement is not key selection,
+    // so it never joins the mutual-exclusion checks.
+    const requireContentDigest =
+      opts.requireContentDigestByLabel?.[label] ?? opts.requireContentDigest;
     // Per-label nonce replay store: a label in the map is checked
     // against its own store; every other label falls back to the
     // global `replayCache` (unset means no replay check for it).
@@ -4191,6 +4342,7 @@ export async function verifyAllLabelsAsync(
       ...(requireExpires !== undefined ? { requireExpires } : {}),
       ...(requireNonce !== undefined ? { requireNonce } : {}),
       ...(requireTag !== undefined ? { requireTag } : {}),
+      ...(requireContentDigest !== undefined ? { requireContentDigest } : {}),
       ...(replayCache !== undefined ? { replayCache } : {}),
       ...(structuredFieldTypes !== undefined ? { structuredFieldTypes } : {}),
     }));
