@@ -31,7 +31,10 @@
  * the loop: it buffers the body, adapts it with `fromNodeRequest`,
  * verifies it, and only then calls the business handler — so a
  * webhook receiver cannot forget a step and let an unverified request
- * into its logic. `fromFetchRequest` is the inbound twin of
+ * into its logic. `createVerifiedHandlerAsync` is the same loop with
+ * the key lookup awaited (`verifyRequestAsync` /
+ * `verifyAllLabelsAsync`), for resolvers that fetch a key on demand
+ * from a JWKS endpoint, a Vault, or a KMS. `fromFetchRequest` is the inbound twin of
  * `fromFetchResponse` for fetch-style servers (undici / WinterCG /
  * edge runtimes, where the handler receives a standard `Request`
  * instead of an `IncomingMessage`): same normalization, only the
@@ -56,9 +59,13 @@ import {
 import { assertNoUnknownOptions } from "./sign.js";
 import {
   verifyAllLabels,
+  verifyAllLabelsAsync,
   verifyRequest,
+  verifyRequestAsync,
   type VerifyAllOptions,
+  type VerifyAllOptionsAsync,
   type VerifyOptions,
+  type VerifyOptionsAsync,
   type VerifyResult,
 } from "./verify.js";
 
@@ -1072,6 +1079,23 @@ export interface CreateVerifiedHandlerOptions {
 }
 
 /**
+ * Options for `createVerifiedHandlerAsync`: exactly
+ * `CreateVerifiedHandlerOptions`, except the multi-label verifier
+ * takes the async shape — `verifyAllLabels` is
+ * `Omit<VerifyAllOptionsAsync, "label">`, so per-label `keyResolvers`
+ * (and the global `keyResolver` fallback) may be asynchronous. The
+ * single-label `verifyOpts` of `createVerifiedHandlerAsync` is a
+ * `VerifyOptionsAsync` for the same reason. Every other key —
+ * `maxBodyBytes`, `signResponse`, `signResponses` — keeps its sync
+ * meaning: response signing stays synchronous, only the request-side
+ * key lookup is awaited.
+ */
+export interface CreateVerifiedHandlerOptionsAsync
+  extends Omit<CreateVerifiedHandlerOptions, "verifyAllLabels"> {
+  verifyAllLabels?: Omit<VerifyAllOptionsAsync, "label">;
+}
+
+/**
  * Signing options for a verified handler's responses: exactly the
  * options `signResponse` takes, minus `request` — the wrapper
  * supplies the request it just verified, so callers never pass one
@@ -1263,9 +1287,17 @@ const VERIFY_OPTIONS_VALIDATION_REQUEST: RequestLike = {
  * `verifyOpts` is a `VerifyOptions` and carries no per-label map to
  * validate. The multi-label path has its own dry run,
  * `assertVerifyAllOptions`.
+ *
+ * The async factory (`createVerifiedHandlerAsync`) reuses this check
+ * with a `VerifyOptionsAsync`: the only field whose type differs is
+ * the resolver, and the dry run never invokes it — the synthetic
+ * request carries no signature headers, so `verifyRequest` returns
+ * `MISSING_SIGNATURE_INPUT` before key selection — so the async
+ * options are passed to the sync dry run as the sync shape, the same
+ * cast `verifyRequestAsync` itself makes for its shared validators.
  */
 function assertVerifyOptions(
-  verifyOpts: VerifyOptions,
+  verifyOpts: VerifyOptions | VerifyOptionsAsync,
   fnName: string = "createVerifiedHandler",
 ): void {
   try {
@@ -1283,7 +1315,10 @@ function assertVerifyOptions(
       );
     const result = verifyRequest(
       VERIFY_OPTIONS_VALIDATION_REQUEST,
-      verifyOpts,
+      // The dry run never invokes the resolver (see the JSDoc above),
+      // so the async shape is safe here — only the resolver's return
+      // type differs, and it is never called.
+      verifyOpts as VerifyOptions,
     );
     if (result.ok || result.code !== "MISSING_SIGNATURE_INPUT")
       throw new Error(
@@ -1332,7 +1367,9 @@ const VERIFY_ALL_OPTIONS_VALIDATION_SIGNATURE =
   "dryrun=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==:";
 
 function dryRunLabelForVerifyAll(
-  allOpts: Omit<VerifyAllOptions, "label">,
+  allOpts:
+    | Omit<VerifyAllOptions, "label">
+    | Omit<VerifyAllOptionsAsync, "label">,
 ): string {
   if (allOpts.requiredLabels !== undefined && allOpts.requiredLabels.length > 0)
     return allOpts.requiredLabels[0];
@@ -1362,9 +1399,19 @@ function dryRunLabelForVerifyAll(
  * failure results are swallowed. A verifier with no key source at
  * all is rejected explicitly, with the same wording `verifyRequest`
  * uses.
+ *
+ * The async factory (`createVerifiedHandlerAsync`) reuses this check
+ * with an `Omit<VerifyAllOptionsAsync, "label">`: the dry run's dummy
+ * signature carries no `keyid`, so no resolver is ever invoked — the
+ * per-label `verifyRequest` calls fail closed with
+ * `KEY_RESOLUTION_FAILED` before key selection — so the async shape
+ * is passed to the sync dry run as the sync shape, the same cast the
+ * single-label assert makes above.
  */
 function assertVerifyAllOptions(
-  allOpts: Omit<VerifyAllOptions, "label">,
+  allOpts:
+    | Omit<VerifyAllOptions, "label">
+    | Omit<VerifyAllOptionsAsync, "label">,
   fnName: string = "createVerifiedHandler",
 ): void {
   try {
@@ -1408,7 +1455,10 @@ function assertVerifyAllOptions(
         },
         body: "",
       },
-      allOpts,
+      // The dry run never invokes a resolver (see the JSDoc above),
+      // so the async shape is safe here — only the resolvers' return
+      // types differ, and they are never called.
+      allOpts as Omit<VerifyAllOptions, "label">,
     );
     if (results.length > 0 && results.every((r) => r.ok))
       throw new Error(
@@ -1663,6 +1713,246 @@ export function createVerifiedHandler(
           return;
         }
       }
+      settled = true;
+      cleanup();
+      handler(
+        req,
+        signOpts !== undefined
+          ? wrapResponseForSigning(res, [signOpts], requestLike)
+          : signOptsList !== undefined
+            ? wrapResponseForSigning(res, signOptsList, requestLike)
+            : res,
+        result,
+      );
+    }
+
+    function onError(): void {
+      // Stream read error mid-body: fail closed without verifying.
+      reject(500, "failed to read request body", "BODY_READ_FAILED", false);
+    }
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+  };
+}
+
+/**
+ * The asynchronous twin of `createVerifiedHandler`: the same
+ * buffer→adapt→verify→401 loop over a `RequestListener`, except the
+ * per-request verification awaits `verifyRequestAsync` — or
+ * `verifyAllLabelsAsync` when `opts.verifyAllLabels` is set — so a
+ * `keyid`→key lookup that lives behind an async fetch (a JWKS
+ * endpoint pulled on demand, a Vault, a KMS) can be handed to the
+ * handler directly instead of pre-fetching the key. The single-label
+ * `verifyOpts` is therefore a `VerifyOptionsAsync` and
+ * `opts.verifyAllLabels` an `Omit<VerifyAllOptionsAsync, "label">`;
+ * a synchronous resolver keeps working here unchanged, since
+ * `AsyncKeyResolver` accepts a plain `KeyObject | undefined` return.
+ *
+ * Everything else is step-for-step the sync factory, which is
+ * untouched: the same `maxBodyBytes` cap (413 `BODY_TOO_LARGE`
+ * before any verification runs, the key resolver never called), the
+ * same `fromNodeRequest` adaptation (400 `MALFORMED_REQUEST` when
+ * the request cannot even be adapted), the same 401 body
+ * `{ error: "signature verification failed", code }` — the
+ * `VerifyResult.code`, or the first failing label's code in
+ * multi-label mode — with no `reason`, no stack, no key material,
+ * the same opt-in `signResponse` / `signResponses` response signing
+ * (still synchronous: only the request-side key lookup is awaited),
+ * and the same creation-time validation — a misconfigured verifier
+ * or response signer throws `createVerifiedHandlerAsync: invalid
+ * verifyOpts: …` (or `… invalid verifyAllLabels: …` /
+ * `… invalid signResponse options: …`) when the handler is built,
+ * never on the first live request. The creation-time dry runs reuse
+ * the sync asserts: the single-label dry run is over an unsigned
+ * request and the multi-label dry run's dummy signature carries no
+ * `keyid`, so neither ever invokes the resolver (see
+ * `assertVerifyOptions` / `assertVerifyAllOptions`).
+ *
+ * Honest limits, as on the sync factory and on
+ * `verifyRequestAsync`: the library sets no timeout on the resolver
+ * — bound its latency in your own layer (see SECURITY.md) — and a
+ * resolver that throws, or resolves to a value that is not a
+ * `KeyObject`, is contained to `VERIFICATION_ERROR` without its
+ * error text, so a backend outage cannot leak its internals into a
+ * 401. The body is held in memory up to the cap, and replay
+ * protection still needs an opt-in `VerifyOptions.replayCache`.
+ */
+export function createVerifiedHandlerAsync(
+  verifyOpts: VerifyOptionsAsync,
+  handler: VerifiedRequestHandler,
+  opts?: CreateVerifiedHandlerOptionsAsync,
+): RequestListener {
+  if (opts !== undefined)
+    assertNoUnknownOptions(
+      opts,
+      VERIFIED_HANDLER_OPTION_KEYS,
+      "createVerifiedHandlerAsync",
+    );
+  const maxBodyBytes = opts?.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0)
+    throw new Error(
+      `createVerifiedHandlerAsync: maxBodyBytes must be a positive integer number of bytes, got ${String(opts?.maxBodyBytes)}`,
+    );
+  assertVerifyOptions(verifyOpts, "createVerifiedHandlerAsync");
+  const signOpts = opts?.signResponse;
+  const signOptsList = opts?.signResponses;
+  if (signOpts !== undefined && signOptsList !== undefined)
+    throw new Error(
+      "createVerifiedHandlerAsync: signResponse and signResponses are mutually exclusive — pass one of them",
+    );
+  if (signOpts !== undefined)
+    assertSignResponseOptions(
+      signOpts,
+      "signResponse",
+      "createVerifiedHandlerAsync",
+    );
+  if (signOptsList !== undefined)
+    assertSignResponsesOptions(signOptsList, "createVerifiedHandlerAsync");
+  const allOpts = opts?.verifyAllLabels;
+  if (allOpts !== undefined)
+    assertVerifyAllOptions(allOpts, "createVerifiedHandlerAsync");
+
+  return (req, res) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+
+    function cleanup(): void {
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("error", onError);
+    }
+
+    function reject(
+      status: number,
+      error: string,
+      code: string,
+      destroyAfterFlush: boolean,
+    ): void {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      res.writeHead(status, { "content-type": "application/json" });
+      const body = JSON.stringify({ error, code });
+      if (destroyAfterFlush) {
+        // The 413 path: the peer may still be uploading, so close the
+        // socket once the rejection is flushed — nothing more is read.
+        res.end(body, () => {
+          req.destroy();
+        });
+      } else {
+        res.end(body);
+      }
+    }
+
+    function onData(chunk: Buffer): void {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buf.length;
+      if (size > maxBodyBytes) {
+        // Fail-closed: stop accumulating, never verify, 413. The
+        // buffered prefix is discarded.
+        reject(413, "request body too large", "BODY_TOO_LARGE", true);
+        return;
+      }
+      chunks.push(buf);
+    }
+
+    async function onEnd(): Promise<void> {
+      if (settled) return;
+      const body = Buffer.concat(chunks);
+      let requestLike: RequestLike;
+      try {
+        // Feed the adapter exactly the fields it reads: a real
+        // IncomingMessage satisfies IncomingRequestLike at runtime,
+        // but its `socket` is typed net.Socket, which has no
+        // `encrypted` property for TS's weak-type check — narrow it
+        // to the one flag the adapter reads (a TLSSocket carries it),
+        // the same cast `fromNodeRequest` itself applies.
+        requestLike = fromNodeRequest(
+          {
+            method: req.method,
+            url: req.url,
+            headers: req.headers,
+            socket: req.socket as { encrypted?: boolean } | null | undefined,
+            trailers: req.trailers,
+            rawTrailers: req.rawTrailers,
+          },
+          body,
+        );
+      } catch {
+        // A real IncomingMessage always carries method/url; a missing
+        // host header (e.g. an HTTP/1.0 peer) is the realistic miss —
+        // the request cannot even be adapted, so it is malformed,
+        // not a signature verdict.
+        reject(400, "malformed request", "MALFORMED_REQUEST", false);
+        return;
+      }
+      let result: VerifyResult;
+      if (allOpts !== undefined) {
+        // Multi-label mode: every label must pass before the business
+        // handler runs. An unsigned request yields no results at all
+        // (unless requiredLabels synthesizes failures), and an empty
+        // result set must not pass an `every` check vacuously — it is
+        // a missing signature, answered 401 like the single-label
+        // path. The first failing label's code is the 401 code, so a
+        // stripped co-signature (`MISSING_REQUIRED_LABEL`) and a
+        // tampered one (`SIGNATURE_MISMATCH`) are distinguishable.
+        let results: VerifyResult[];
+        try {
+          results = await verifyAllLabelsAsync(requestLike, allOpts);
+        } catch {
+          // verifyAllLabelsAsync throws only on caller configuration
+          // errors (bad per-label key setup) — a server bug, never a
+          // client verdict.
+          reject(500, "internal error", "INTERNAL_ERROR", false);
+          return;
+        }
+        const failed = results.find((r) => !r.ok);
+        if (results.length === 0) {
+          reject(
+            401,
+            "signature verification failed",
+            "MISSING_SIGNATURE_INPUT",
+            false,
+          );
+          return;
+        }
+        if (failed !== undefined) {
+          reject(
+            401,
+            "signature verification failed",
+            failed.code ?? "SIGNATURE_MISMATCH",
+            false,
+          );
+          return;
+        }
+        result = { ok: true, label: "", perLabelResults: results };
+      } else {
+        try {
+          result = await verifyRequestAsync(requestLike, verifyOpts);
+        } catch {
+          // verifyRequestAsync throws only on caller configuration
+          // errors (bad key setup) — a server bug, never a client
+          // verdict.
+          reject(500, "internal error", "INTERNAL_ERROR", false);
+          return;
+        }
+        if (!result.ok) {
+          reject(
+            401,
+            "signature verification failed",
+            result.code ?? "SIGNATURE_MISMATCH",
+            false,
+          );
+          return;
+        }
+      }
+      // The verification awaited above: a stream error in the
+      // meantime (answered 500 by onError) must win over dispatching
+      // a just-verified request to the business handler.
+      if (settled) return;
       settled = true;
       cleanup();
       handler(

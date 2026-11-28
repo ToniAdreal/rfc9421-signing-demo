@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 3114 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 3127 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1620,6 +1620,42 @@ defense-in-depth, e.g. if the caller mutates the `verifyOpts` object after
 creation. Honest limits: TLS is the caller's job, the body is held in
 memory up to the cap, and replay protection still needs an opt-in
 `VerifyOptions.replayCache` (see SECURITY.md).
+
+When the signing key lives behind an async lookup, use
+`createVerifiedHandlerAsync` instead — the same loop with the key
+lookup awaited (`verifyRequestAsync`, or `verifyAllLabelsAsync` when
+`verifyAllLabels` is set), so a JWKS endpoint fetched on demand, a
+Vault, or a KMS can be handed to the handler directly:
+
+```ts
+import { createVerifiedHandlerAsync } from "./dist/src/index.js";
+
+const server = createServer(
+  createVerifiedHandlerAsync(
+    {
+      keyResolver: async (keyId) => (await vault.getKey(keyId)) ?? undefined,
+      now: Math.floor(Date.now() / 1000),
+    },
+    (req, res, result) => {
+      res.writeHead(200).end("ok");
+    },
+  ),
+);
+```
+
+The single-label `verifyOpts` is a `VerifyOptionsAsync` and
+`opts.verifyAllLabels` an `Omit<VerifyAllOptionsAsync, "label">`; a
+synchronous resolver keeps working here unchanged. The 400/401/413
+mapping, the freshness window, `requiredComponents`, the creation-time
+validation (errors name `createVerifiedHandlerAsync`), and the opt-in
+response signing are all identical to the sync factory — response
+signing stays synchronous, only the request-side key lookup is
+awaited — and a resolver that throws, or resolves to a value that is
+not a `KeyObject`, is contained to `VERIFICATION_ERROR` without its
+error text, exactly as `verifyRequestAsync` documents it. There is no
+timeout on the resolver: bound its latency in your own layer (see
+SECURITY.md). See the "Async verification" section above for the
+underlying entry points.
 
 The `verifyOpts` are validated when the handler is built, at the same
 level as the `maxBodyBytes` check: a dry-run `verifyRequest` over a
@@ -5849,7 +5885,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 3114 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 3127 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
