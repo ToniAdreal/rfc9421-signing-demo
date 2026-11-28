@@ -1333,6 +1333,27 @@
  * labels). Every clock is injected and the segment's key
  * pairs are fresh per run, so the segment is byte-identical
  * between runs.
+ * The demo then adds a custom-nonce-store segment: `verifyRequest`
+ * accepts any caller-supplied `NonceStore` as its `replayCache`,
+ * and the segment brings a plain `Map`-backed store keyed by
+ * (`keyid`, nonce) — the scope contract of backlog #1412, which
+ * the bench's `MapNonceStore` also implements. Three fresh ed25519
+ * key pairs sign the same request under keyids A, B and C, all
+ * carrying the same bare nonce string: A's first presentation
+ * verifies and the store holds one entry, B's first presentation
+ * verifies too (scope isolation — the same nonce under a different
+ * keyid is a different entry) and the store holds two, A's second
+ * presentation fails with `NONCE_REPLAY` while the store stays at
+ * two, and a forged C signature (last signature byte flipped)
+ * fails with `SIGNATURE_MISMATCH` without recording anything, so
+ * the genuine C signature still verifies first time and the store
+ * ends at three entries. Outside the printed lines the demo asserts
+ * every outcome, label, code, reason and keyid equals the
+ * hand-pinned expectations below (the same custom-store semantics
+ * `test/replay.test.ts` pins for the built-in cache; a failed
+ * verification never touches the store). Every clock is injected
+ * and the segment's key pairs are fresh per run, so the segment
+ * is byte-identical between runs.
  * The demo closes with a per-label maximum-signature-age
  * segment: `VerifyAllOptions.maxSignatureAgeSecByLabel` gives each
  * label its own freshness window — the merchant window is 60s,
@@ -1602,6 +1623,7 @@ import {
   type JwksSetIntervalImpl,
   type JwksSignedSnapshotEnvelope,
   type JwksKeyStoreStats,
+  type NonceStore,
   type ParsedSignatureInput,
   type ReplayCacheSignedSnapshotEnvelope,
   type ReplayCacheSnapshot,
@@ -1613,6 +1635,7 @@ import {
   type VerifyAllOptions,
   type VerifyError,
   type VerifyFailureCode,
+  type VerifyOptions,
   type VerifyResult,
 } from "./index.js";
 
@@ -4418,6 +4441,44 @@ export const DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE: VerifyFailureCode =
 export const DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON =
   `nonce replay detected: "${DEMO_REPLAY_CACHE_BY_LABEL_NONCE}" was already seen`;
 
+/** Key id the custom-nonce-store segment's first signature carries. */
+export const DEMO_CUSTOM_NONCE_STORE_KEY_ID_A =
+  "demo-custom-nonce-store-key-a";
+/** Key id the custom-nonce-store segment's second signature carries. */
+export const DEMO_CUSTOM_NONCE_STORE_KEY_ID_B =
+  "demo-custom-nonce-store-key-b";
+/** Key id the custom-nonce-store segment's forged-then-genuine signature carries. */
+export const DEMO_CUSTOM_NONCE_STORE_KEY_ID_C =
+  "demo-custom-nonce-store-key-c";
+/** Absolute URL the custom-nonce-store segment signs. */
+export const DEMO_CUSTOM_NONCE_STORE_URL =
+  "https://api.example.com/v1/payments";
+/** Nonce all three segment signatures carry (the same bare nonce string in three scopes). */
+export const DEMO_CUSTOM_NONCE_STORE_NONCE =
+  "demo-custom-nonce-store-nonce-1";
+/** Verifier clock for the custom-nonce-store segment (the pinned `DEMO_CREATED` instant). */
+export const DEMO_CUSTOM_NONCE_STORE_NOW = DEMO_CREATED;
+/** `created` all three segment signatures carry (the pinned `DEMO_CREATED` instant). */
+export const DEMO_CUSTOM_NONCE_STORE_CREATED = DEMO_CREATED;
+/**
+ * Hand-pinned failure code when a keyid presents a nonce its own
+ * scope has already seen (`NONCE_REPLAY`).
+ */
+export const DEMO_CUSTOM_NONCE_STORE_REJECT_CODE: VerifyFailureCode =
+  "NONCE_REPLAY";
+/**
+ * Hand-pinned `NONCE_REPLAY` reason (the exact wording
+ * `src/verify.ts` returns, with the segment nonce interpolated).
+ */
+export const DEMO_CUSTOM_NONCE_STORE_REJECT_REASON =
+  `nonce replay detected: "${DEMO_CUSTOM_NONCE_STORE_NONCE}" was already seen`;
+/**
+ * Hand-pinned failure code for the segment's forged signature
+ * (`SIGNATURE_MISMATCH`).
+ */
+export const DEMO_CUSTOM_NONCE_STORE_FORGED_CODE: VerifyFailureCode =
+  "SIGNATURE_MISMATCH";
+
 /** Label of the per-label maximum-signature-age segment's merchant signature. */
 export const DEMO_MAX_SIGNATURE_AGE_BY_LABEL_MERCHANT_LABEL = "merchant";
 /** Label of the per-label maximum-signature-age segment's gateway signature. */
@@ -6966,6 +7027,47 @@ export interface DemoResult {
    * rejects the re-presentation of both.
    */
   replayCacheByLabelGlobalSecondVerification: VerifyResult[];
+  /** The custom-nonce-store segment's first signed request (keyid A, the segment nonce). */
+  customNonceStoreSignedA: SignedHttpRequest;
+  /** The custom-nonce-store segment's second signed request (keyid B, the same nonce string). */
+  customNonceStoreSignedB: SignedHttpRequest;
+  /** The custom-nonce-store segment's third signed request (keyid C, the same nonce string). */
+  customNonceStoreSignedC: SignedHttpRequest;
+  /**
+   * Verification of the first request against the segment's
+   * caller-supplied `Map`-backed `NonceStore` (ok: the store
+   * records the nonce under keyid A's scope).
+   */
+  customNonceStoreVerificationA: VerifyResult;
+  /**
+   * Verification of the second request against the same store (ok:
+   * the same nonce string under keyid B's scope is a different
+   * entry — scope isolation, not a replay).
+   */
+  customNonceStoreVerificationB: VerifyResult;
+  /**
+   * Second presentation of the first request against the same store
+   * (fails `NONCE_REPLAY`: the same keyid presenting the same nonce
+   * again is a replay).
+   */
+  customNonceStoreSecondVerificationA: VerifyResult;
+  /**
+   * Verification of the forged third request — the genuine keyid C
+   * signature with its last byte flipped — against the same store
+   * (fails `SIGNATURE_MISMATCH` and records nothing).
+   */
+  customNonceStoreForgedVerification: VerifyResult;
+  /**
+   * Verification of the genuine third request against the same store
+   * (ok: the forgery above recorded nothing, so this is still the
+   * first presentation of the nonce under keyid C's scope).
+   */
+  customNonceStoreVerificationC: VerifyResult;
+  /**
+   * Number of (scope, nonce) entries the segment's store holds after
+   * the whole segment (3: one per keyid scope).
+   */
+  customNonceStoreSize: number;
   /** The per-label maximum-signature-age segment's dual-label request (both labels 300s old at the verifier clock). */
   maxSignatureAgeByLabelSigned: SignedHttpRequest;
   /**
@@ -18136,6 +18238,193 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // The custom-nonce-store segment: `verifyRequest` accepts any
+  // caller-supplied `NonceStore` as its `replayCache`, so a
+  // deployment can plug its own storage (e.g. Redis) behind the
+  // interface instead of the built-in `ReplayCache`. The segment
+  // brings a plain `Map`-backed store keyed by (`keyid`, nonce) —
+  // the scope contract of backlog #1412, the same shape the bench's
+  // `MapNonceStore` implements — and drives three fresh ed25519 key
+  // pairs (keyids A, B, C) over the same request carrying the same
+  // bare nonce string: A's first presentation verifies and the store
+  // holds one entry, B's first presentation verifies too (scope
+  // isolation: the same nonce under a different keyid is a different
+  // entry) and the store holds two, A's second presentation fails
+  // with `NONCE_REPLAY` while the store stays at two, and a forged C
+  // signature (last signature byte flipped) fails with
+  // `SIGNATURE_MISMATCH` without recording anything, so the genuine
+  // C signature still verifies first time and the store ends at
+  // three entries. The store is consulted only after the signature
+  // passes every check, so the forgery never reaches it — the same
+  // non-pollution `test/replay.test.ts` pins for the built-in cache.
+  // Outside the printed lines the demo asserts every outcome, label,
+  // code, reason and keyid equals the hand-pinned expectations.
+  class DemoMapNonceStore implements NonceStore {
+    private readonly seen = new Map<string, number>();
+
+    check(nonce: string, now = 0, scope = ""): boolean {
+      const key = `${scope}\0${nonce}`;
+      if (this.seen.has(key)) return true;
+      this.seen.set(key, now);
+      return false;
+    }
+
+    /** Number of (scope, nonce) entries currently tracked. */
+    get size(): number {
+      return this.seen.size;
+    }
+
+    /** Whether this exact (scope, nonce) pair is already tracked. */
+    has(nonce: string, scope: string): boolean {
+      return this.seen.has(`${scope}\0${nonce}`);
+    }
+  }
+  const customNonceStorePairA = generateEd25519KeyPair();
+  const customNonceStorePairB = generateEd25519KeyPair();
+  const customNonceStorePairC = generateEd25519KeyPair();
+  const customNonceStoreSign = (
+    keyId: string,
+    key: KeyObject,
+  ): SignedHttpRequest =>
+    signRequest(
+      {
+        method: "POST",
+        url: DEMO_CUSTOM_NONCE_STORE_URL,
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        keyId,
+        alg: "ed25519",
+        key,
+        created: DEMO_CUSTOM_NONCE_STORE_CREATED,
+        nonce: DEMO_CUSTOM_NONCE_STORE_NONCE,
+      },
+    );
+  const customNonceStoreSignedA = customNonceStoreSign(
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_A,
+    customNonceStorePairA.privateKey,
+  );
+  const customNonceStoreSignedB = customNonceStoreSign(
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_B,
+    customNonceStorePairB.privateKey,
+  );
+  const customNonceStoreSignedC = customNonceStoreSign(
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_C,
+    customNonceStorePairC.privateKey,
+  );
+  const customNonceStore = new DemoMapNonceStore();
+  const customNonceStoreVerifyOptions = (key: KeyObject): VerifyOptions => ({
+    key,
+    now: DEMO_CUSTOM_NONCE_STORE_NOW,
+    replayCache: customNonceStore,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
+  });
+  const customNonceStoreVerificationA = verifyRequest(
+    customNonceStoreSignedA,
+    customNonceStoreVerifyOptions(customNonceStorePairA.publicKey),
+  );
+  const customNonceStoreSizeAfterA = customNonceStore.size;
+  const customNonceStoreVerificationB = verifyRequest(
+    customNonceStoreSignedB,
+    customNonceStoreVerifyOptions(customNonceStorePairB.publicKey),
+  );
+  const customNonceStoreSizeAfterB = customNonceStore.size;
+  const customNonceStoreSecondVerificationA = verifyRequest(
+    customNonceStoreSignedA,
+    customNonceStoreVerifyOptions(customNonceStorePairA.publicKey),
+  );
+  const customNonceStoreSizeAfterReplay = customNonceStore.size;
+  const customNonceStoreSignatureField =
+    customNonceStoreSignedC.headers["signature"];
+  const customNonceStoreSignatureMatch =
+    /^sig1=:(.+):$/.exec(customNonceStoreSignatureField);
+  if (!customNonceStoreSignatureMatch)
+    throw new Error(
+      `demo fixture broken: custom NonceStore segment's C signature has unexpected shape ${JSON.stringify(customNonceStoreSignatureField)}`,
+    );
+  const customNonceStoreForgedBytes = Buffer.from(
+    customNonceStoreSignatureMatch[1],
+    "base64",
+  );
+  customNonceStoreForgedBytes[customNonceStoreForgedBytes.length - 1] ^= 0xff;
+  const customNonceStoreForgedC: SignedHttpRequest = {
+    ...customNonceStoreSignedC,
+    headers: {
+      ...customNonceStoreSignedC.headers,
+      signature: `sig1=:${customNonceStoreForgedBytes.toString("base64")}:`,
+    },
+  };
+  const customNonceStoreForgedVerification = verifyRequest(
+    customNonceStoreForgedC,
+    customNonceStoreVerifyOptions(customNonceStorePairC.publicKey),
+  );
+  const customNonceStoreSizeAfterForgery = customNonceStore.size;
+  const customNonceStoreVerificationC = verifyRequest(
+    customNonceStoreSignedC,
+    customNonceStoreVerifyOptions(customNonceStorePairC.publicKey),
+  );
+  const customNonceStoreSize = customNonceStore.size;
+  if (
+    customNonceStoreVerificationA.ok !== true ||
+    customNonceStoreVerificationA.keyId !==
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_A ||
+    customNonceStoreVerificationA.nonce !==
+      DEMO_CUSTOM_NONCE_STORE_NONCE ||
+    customNonceStoreSizeAfterA !== 1 ||
+    customNonceStoreVerificationB.ok !== true ||
+    customNonceStoreVerificationB.keyId !==
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_B ||
+    customNonceStoreVerificationB.nonce !==
+      DEMO_CUSTOM_NONCE_STORE_NONCE ||
+    customNonceStoreSizeAfterB !== 2 ||
+    !customNonceStore.has(
+      DEMO_CUSTOM_NONCE_STORE_NONCE,
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_A,
+    ) ||
+    !customNonceStore.has(
+      DEMO_CUSTOM_NONCE_STORE_NONCE,
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_B,
+    ) ||
+    customNonceStoreSecondVerificationA.ok !== false ||
+    customNonceStoreSecondVerificationA.code !==
+      DEMO_CUSTOM_NONCE_STORE_REJECT_CODE ||
+    customNonceStoreSecondVerificationA.reason !==
+      DEMO_CUSTOM_NONCE_STORE_REJECT_REASON ||
+    customNonceStoreSecondVerificationA.keyId !==
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_A ||
+    customNonceStoreSecondVerificationA.nonce !==
+      DEMO_CUSTOM_NONCE_STORE_NONCE ||
+    customNonceStoreSizeAfterReplay !== 2 ||
+    customNonceStoreForgedVerification.ok !== false ||
+    customNonceStoreForgedVerification.code !==
+      DEMO_CUSTOM_NONCE_STORE_FORGED_CODE ||
+    customNonceStoreForgedVerification.keyId !==
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_C ||
+    customNonceStoreForgedVerification.nonce !==
+      DEMO_CUSTOM_NONCE_STORE_NONCE ||
+    customNonceStoreSizeAfterForgery !== 2 ||
+    customNonceStoreVerificationC.ok !== true ||
+    customNonceStoreVerificationC.keyId !==
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_C ||
+    customNonceStoreVerificationC.nonce !==
+      DEMO_CUSTOM_NONCE_STORE_NONCE ||
+    customNonceStoreSize !== 3 ||
+    !customNonceStore.has(
+      DEMO_CUSTOM_NONCE_STORE_NONCE,
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_C,
+    )
+  ) {
+    throw new Error(
+      `demo fixture broken: custom NonceStore gave ` +
+        `${JSON.stringify(customNonceStoreVerificationA)} and ` +
+        `${JSON.stringify(customNonceStoreVerificationB)} and ` +
+        `${JSON.stringify(customNonceStoreSecondVerificationA)} and ` +
+        `${JSON.stringify(customNonceStoreForgedVerification)} and ` +
+        `${JSON.stringify(customNonceStoreVerificationC)}, store size ${customNonceStoreSize}, instead of both first presentations verifying with one entry per keyid scope, the same keyid's second presentation rejected with ${DEMO_CUSTOM_NONCE_STORE_REJECT_CODE}, the forged signature rejected with ${DEMO_CUSTOM_NONCE_STORE_FORGED_CODE} without recording anything, and the genuine third signature verifying first time`,
+    );
+  }
+
   // The per-label maximum-signature-age segment, mirroring the
   // clock-skew segment above with the other freshness window: the
   // merchant's acceptance window is 60s while the gateway's is 3600s, so
@@ -20580,6 +20869,25 @@ export async function runDemo(): Promise<DemoResult> {
       ? `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: first presentation merchant OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, keyid="${replayCacheByLabelGlobalVerification[0]!.keyId}") and gateway OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, keyid="${replayCacheByLabelGlobalVerification[1]!.keyId}"), second presentation against the same store merchant FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, code ${replayCacheByLabelGlobalSecondVerification[0]!.code}: ${replayCacheByLabelGlobalSecondVerification[0]!.reason}) and gateway FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, code ${replayCacheByLabelGlobalSecondVerification[1]!.code}: ${replayCacheByLabelGlobalSecondVerification[1]!.reason}) — entries are scoped by keyid, so the shared cache splits the two signers on first presentation, but one namespace still remembers both scopes, and a label with no map entry falls back to the global store`
       : `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: first presentation merchant ${replayCacheByLabelGlobalVerification[0]!.ok ? "OK" : "FAILED (unexpected — the merchant label did not pass under the shared cache)"}, gateway ${replayCacheByLabelGlobalVerification[1]!.ok ? "OK" : "FAILED (unexpected — the gateway label did not pass under the shared cache)"}, second presentation merchant ${replayCacheByLabelGlobalSecondVerification[0]!.ok ? "OK (unexpected — the shared cache did not replay the merchant label)" : `code ${replayCacheByLabelGlobalSecondVerification[0]!.code}`}, gateway ${replayCacheByLabelGlobalSecondVerification[1]!.ok ? "OK (unexpected — the shared cache did not replay the gateway label)" : `code ${replayCacheByLabelGlobalSecondVerification[1]!.code}`}`,
     "",
+    "Custom nonce store: verifyRequest accepts any caller-supplied NonceStore as its replayCache — the demo brings a plain Map-backed store keyed by (keyid, nonce), so two signers sharing one store never collide on the same nonce string: the scope contract of backlog #1412, which a store that ignores the scope argument silently breaks — and a failed verification never records its nonce, so a forgery cannot plant or consume one",
+    customNonceStoreVerificationA.ok === true &&
+    customNonceStoreVerificationB.ok === true &&
+    customNonceStoreSizeAfterB === 2
+      ? `Scope isolation: the same nonce "${DEMO_CUSTOM_NONCE_STORE_NONCE}" presented under keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_A}" and keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_B}" both verify (label sig1, alg="ed25519"), and the store holds ${customNonceStoreSizeAfterB} entries — one per keyid scope, not one per nonce string`
+      : `Scope isolation: the same nonce "${DEMO_CUSTOM_NONCE_STORE_NONCE}" presented under keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_A}" and keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_B}": A ${customNonceStoreVerificationA.ok ? "OK" : "FAILED (unexpected — the first presentation under keyid A was rejected)"}, B ${customNonceStoreVerificationB.ok ? "OK" : "FAILED (unexpected — the first presentation under keyid B collided with A's entry)"}, store holds ${customNonceStoreSizeAfterB} entries`,
+    customNonceStoreSecondVerificationA.ok === false &&
+    customNonceStoreSecondVerificationA.code ===
+      DEMO_CUSTOM_NONCE_STORE_REJECT_CODE
+      ? `Replay: presenting keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_A}"'s signature a second time FAILED (code ${customNonceStoreSecondVerificationA.code}: ${customNonceStoreSecondVerificationA.reason}) and the store still holds ${customNonceStoreSizeAfterReplay} entries — the same keyid reusing its nonce is a replay even though the nonce string is shared across scopes`
+      : `Replay: presenting keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_A}"'s signature a second time ${customNonceStoreSecondVerificationA.ok ? "OK (unexpected — the replay was not detected)" : `code ${customNonceStoreSecondVerificationA.code}`}, store holds ${customNonceStoreSizeAfterReplay} entries`,
+    customNonceStoreForgedVerification.ok === false &&
+    customNonceStoreForgedVerification.code ===
+      DEMO_CUSTOM_NONCE_STORE_FORGED_CODE &&
+    customNonceStoreVerificationC.ok === true &&
+    customNonceStoreSize === 3
+      ? `No pollution: a forged keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_C}" signature (last signature byte flipped) FAILED (code ${customNonceStoreForgedVerification.code}) and the store still holds ${customNonceStoreSizeAfterForgery} entries, so the genuine keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_C}" signature with the same nonce still verifies first time and the store ends at ${customNonceStoreSize} entries — a failed verification never records its nonce`
+      : `No pollution: a forged keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_C}" signature ${customNonceStoreForgedVerification.ok ? "OK (unexpected — the forgery verified)" : `code ${customNonceStoreForgedVerification.code}`}, genuine C ${customNonceStoreVerificationC.ok ? "OK" : "FAILED (unexpected — the forgery polluted the store)"}, store holds ${customNonceStoreSize} entries`,
+    "",
     "Per-label maximum signature age: verifyAllLabels' maxSignatureAgeSecByLabel map gives each label its own freshness window — the merchant window is 60s, the gateway window is 3600s, and both signatures are 300s old, so a single global window cannot split them: the merchant label is already stale while the gateway label is still fresh — an age check only rejects an otherwise cryptographically valid signature after its window, it never changes the signature itself — and a label absent from the map falls back to the global window rather than skipping the age check",
     maxSignatureAgeByLabelVerification[0]!.ok === false &&
     maxSignatureAgeByLabelVerification[1]!.ok === true
@@ -21155,6 +21463,15 @@ export async function runDemo(): Promise<DemoResult> {
     replayCacheByLabelVerification,
     replayCacheByLabelGlobalVerification,
     replayCacheByLabelGlobalSecondVerification,
+    customNonceStoreSignedA,
+    customNonceStoreSignedB,
+    customNonceStoreSignedC,
+    customNonceStoreVerificationA,
+    customNonceStoreVerificationB,
+    customNonceStoreSecondVerificationA,
+    customNonceStoreForgedVerification,
+    customNonceStoreVerificationC,
+    customNonceStoreSize,
     maxSignatureAgeByLabelSigned,
     maxSignatureAgeByLabelVerification,
     maxSignatureAgeByLabelFallbackVerification,

@@ -71,6 +71,7 @@ import {
   verifyRequest,
   verifyAllLabels,
   verifyResponse,
+  type NonceStore,
   type VerifyResult,
 } from "../src/index.js";
 import {
@@ -664,6 +665,16 @@ import {
   DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE,
   DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON,
   DEMO_REPLAY_CACHE_BY_LABEL_URL,
+  DEMO_CUSTOM_NONCE_STORE_CREATED,
+  DEMO_CUSTOM_NONCE_STORE_FORGED_CODE,
+  DEMO_CUSTOM_NONCE_STORE_KEY_ID_A,
+  DEMO_CUSTOM_NONCE_STORE_KEY_ID_B,
+  DEMO_CUSTOM_NONCE_STORE_KEY_ID_C,
+  DEMO_CUSTOM_NONCE_STORE_NONCE,
+  DEMO_CUSTOM_NONCE_STORE_NOW,
+  DEMO_CUSTOM_NONCE_STORE_REJECT_CODE,
+  DEMO_CUSTOM_NONCE_STORE_REJECT_REASON,
+  DEMO_CUSTOM_NONCE_STORE_URL,
   DEMO_REPLAY_CLEAR_CHECKS,
   DEMO_REPLAY_CLEAR_NONCE,
   DEMO_REPLAY_CLEAR_SIZE_AFTER_CLEAR,
@@ -12629,7 +12640,220 @@ test("demo per-label replay cache segment pins replayCacheByLabel (pre-seeded me
   );
 });
 
-test("demo lines contain the per-label replay cache segment (pre-seeded merchant replays, gateway first-passes, shared cache passes both first and replays both second, followed by the maximum-signature-age segment)", async () => {
+test("demo custom nonce store segment pins a Map-backed NonceStore (same nonce under two keyids passes twice, same keyid replays, forgery does not pollute)", async () => {
+  const r = await runDemo();
+  assert.equal(
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_A,
+    "demo-custom-nonce-store-key-a",
+  );
+  assert.equal(
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_B,
+    "demo-custom-nonce-store-key-b",
+  );
+  assert.equal(
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_C,
+    "demo-custom-nonce-store-key-c",
+  );
+  assert.equal(
+    DEMO_CUSTOM_NONCE_STORE_URL,
+    "https://api.example.com/v1/payments",
+  );
+  assert.equal(
+    DEMO_CUSTOM_NONCE_STORE_NONCE,
+    "demo-custom-nonce-store-nonce-1",
+  );
+  assert.equal(DEMO_CUSTOM_NONCE_STORE_NOW, DEMO_CREATED);
+  assert.equal(DEMO_CUSTOM_NONCE_STORE_CREATED, DEMO_CREATED);
+  assert.equal(DEMO_CUSTOM_NONCE_STORE_REJECT_CODE, "NONCE_REPLAY");
+  assert.equal(
+    DEMO_CUSTOM_NONCE_STORE_REJECT_REASON,
+    `nonce replay detected: "${DEMO_CUSTOM_NONCE_STORE_NONCE}" was already seen`,
+  );
+  assert.equal(DEMO_CUSTOM_NONCE_STORE_FORGED_CODE, "SIGNATURE_MISMATCH");
+  // Wire shapes: all three signatures carry the same nonce, at the
+  // pinned created instant, under their own keyids.
+  for (const [signed, keyId] of [
+    [r.customNonceStoreSignedA, DEMO_CUSTOM_NONCE_STORE_KEY_ID_A],
+    [r.customNonceStoreSignedB, DEMO_CUSTOM_NONCE_STORE_KEY_ID_B],
+    [r.customNonceStoreSignedC, DEMO_CUSTOM_NONCE_STORE_KEY_ID_C],
+  ] as const) {
+    const part = signed.headers["signature-input"]!;
+    assert.match(part, /;created=1700000000/);
+    assert.match(part, new RegExp(`;keyid="${keyId}"`));
+    assert.ok(part.includes(`nonce="${DEMO_CUSTOM_NONCE_STORE_NONCE}"`));
+  }
+  assert.equal(r.customNonceStoreVerificationA.ok, true);
+  assert.equal(
+    r.customNonceStoreVerificationA.keyId,
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_A,
+  );
+  assert.equal(
+    r.customNonceStoreVerificationA.nonce,
+    DEMO_CUSTOM_NONCE_STORE_NONCE,
+  );
+  assert.equal(r.customNonceStoreVerificationB.ok, true);
+  assert.equal(
+    r.customNonceStoreVerificationB.keyId,
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_B,
+  );
+  assert.equal(
+    r.customNonceStoreVerificationB.nonce,
+    DEMO_CUSTOM_NONCE_STORE_NONCE,
+  );
+  assert.equal(r.customNonceStoreSecondVerificationA.ok, false);
+  assert.equal(
+    r.customNonceStoreSecondVerificationA.code,
+    DEMO_CUSTOM_NONCE_STORE_REJECT_CODE,
+  );
+  assert.equal(
+    r.customNonceStoreSecondVerificationA.reason,
+    DEMO_CUSTOM_NONCE_STORE_REJECT_REASON,
+  );
+  assert.equal(
+    r.customNonceStoreSecondVerificationA.keyId,
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_A,
+  );
+  assert.equal(
+    r.customNonceStoreSecondVerificationA.nonce,
+    DEMO_CUSTOM_NONCE_STORE_NONCE,
+  );
+  assert.equal(r.customNonceStoreForgedVerification.ok, false);
+  assert.equal(
+    r.customNonceStoreForgedVerification.code,
+    DEMO_CUSTOM_NONCE_STORE_FORGED_CODE,
+  );
+  assert.equal(
+    r.customNonceStoreForgedVerification.keyId,
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_C,
+  );
+  assert.equal(
+    r.customNonceStoreForgedVerification.nonce,
+    DEMO_CUSTOM_NONCE_STORE_NONCE,
+  );
+  assert.equal(r.customNonceStoreVerificationC.ok, true);
+  assert.equal(
+    r.customNonceStoreVerificationC.keyId,
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_C,
+  );
+  assert.equal(
+    r.customNonceStoreVerificationC.nonce,
+    DEMO_CUSTOM_NONCE_STORE_NONCE,
+  );
+  assert.equal(r.customNonceStoreSize, 3);
+  // Independent checks driven directly (the same custom-store
+  // semantics bench/bench.ts pins): fresh key pairs, an own
+  // `Map`-backed store, the same nonce under three keyids.
+  class TestMapNonceStore implements NonceStore {
+    private readonly seen = new Map<string, number>();
+
+    check(nonce: string, now = 0, scope = ""): boolean {
+      const key = `${scope}\0${nonce}`;
+      if (this.seen.has(key)) return true;
+      this.seen.set(key, now);
+      return false;
+    }
+
+    get size(): number {
+      return this.seen.size;
+    }
+
+    has(nonce: string, scope: string): boolean {
+      return this.seen.has(`${scope}\0${nonce}`);
+    }
+  }
+  const pairA = generateEd25519KeyPair();
+  const pairB = generateEd25519KeyPair();
+  const pairC = generateEd25519KeyPair();
+  const signWithKeyId = (keyId: string, privateKey: KeyObject) =>
+    signRequest(
+      {
+        method: "POST",
+        url: DEMO_CUSTOM_NONCE_STORE_URL,
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        keyId,
+        alg: "ed25519",
+        key: privateKey,
+        created: DEMO_CUSTOM_NONCE_STORE_CREATED,
+        nonce: DEMO_CUSTOM_NONCE_STORE_NONCE,
+      },
+    );
+  const firstA = signWithKeyId(
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_A,
+    pairA.privateKey,
+  );
+  const firstB = signWithKeyId(
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_B,
+    pairB.privateKey,
+  );
+  const firstC = signWithKeyId(
+    DEMO_CUSTOM_NONCE_STORE_KEY_ID_C,
+    pairC.privateKey,
+  );
+  const store = new TestMapNonceStore();
+  const opts = (key: KeyObject) => ({
+    key,
+    now: DEMO_CUSTOM_NONCE_STORE_NOW,
+    replayCache: store,
+    maxSignatureAgeSec: DEMO_MAX_AGE_SEC,
+  });
+  assert.equal(verifyRequest(firstA, opts(pairA.publicKey)).ok, true);
+  assert.equal(store.size, 1);
+  assert.equal(verifyRequest(firstB, opts(pairB.publicKey)).ok, true);
+  assert.equal(store.size, 2);
+  assert.equal(
+    store.has(
+      DEMO_CUSTOM_NONCE_STORE_NONCE,
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_A,
+    ),
+    true,
+  );
+  assert.equal(
+    store.has(
+      DEMO_CUSTOM_NONCE_STORE_NONCE,
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_B,
+    ),
+    true,
+  );
+  const replayA = verifyRequest(firstA, opts(pairA.publicKey));
+  assert.equal(replayA.ok, false);
+  assert.equal(replayA.code, DEMO_CUSTOM_NONCE_STORE_REJECT_CODE);
+  assert.equal(replayA.reason, DEMO_CUSTOM_NONCE_STORE_REJECT_REASON);
+  assert.equal(store.size, 2);
+  // Forged C: last signature byte flipped, same nonce, same keyid.
+  const sigField = firstC.headers["signature"];
+  const sigMatch = /^sig1=:(.+):$/.exec(sigField);
+  if (!sigMatch)
+    throw new Error(
+      `test fixture broken: unexpected signature header shape ${JSON.stringify(sigField)}`,
+    );
+  const raw = Buffer.from(sigMatch[1], "base64");
+  raw[raw.length - 1] ^= 0xff;
+  const forgedC = {
+    ...firstC,
+    headers: {
+      ...firstC.headers,
+      signature: `sig1=:${raw.toString("base64")}:`,
+    },
+  };
+  const forged = verifyRequest(forgedC, opts(pairC.publicKey));
+  assert.equal(forged.ok, false);
+  assert.equal(forged.code, DEMO_CUSTOM_NONCE_STORE_FORGED_CODE);
+  assert.equal(store.size, 2);
+  assert.equal(verifyRequest(firstC, opts(pairC.publicKey)).ok, true);
+  assert.equal(store.size, 3);
+  assert.equal(
+    store.has(
+      DEMO_CUSTOM_NONCE_STORE_NONCE,
+      DEMO_CUSTOM_NONCE_STORE_KEY_ID_C,
+    ),
+    true,
+  );
+});
+
+test("demo lines contain the per-label replay cache segment (pre-seeded merchant replays, gateway first-passes, shared cache passes both first and replays both second, followed by the custom nonce store segment)", async () => {
   const { lines } = await runDemo();
   const out = lines.join("\n");
   assert.match(
@@ -12646,11 +12870,11 @@ test("demo lines contain the per-label replay cache segment (pre-seeded merchant
     `Shared cache contrast: the same fixture re-verified with a single global replayCache and no map: first presentation merchant OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, keyid="${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_KEY_ID}") and gateway OK (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, keyid="${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_KEY_ID}"), second presentation against the same store merchant FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_MERCHANT_LABEL}, code ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE}: ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON}) and gateway FAILED (label ${DEMO_REPLAY_CACHE_BY_LABEL_GATEWAY_LABEL}, code ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_CODE}: ${DEMO_REPLAY_CACHE_BY_LABEL_REJECT_REASON}) — entries are scoped by keyid, so the shared cache splits the two signers on first presentation, but one namespace still remembers both scopes, and a label with no map entry falls back to the global store`,
   ]);
   // The header plus its two lines are followed by a blank line
-  // and the per-label maximum-signature-age segment's header (the
-  // demo's new closing segment), not by the end of the demo.
+  // and the custom nonce store segment's header, not by the
+  // per-label maximum-signature-age segment or the end of the demo.
   assert.equal(lines[headerIdx + 3], "");
   assert.ok(
-    lines[headerIdx + 4]!.startsWith("Per-label maximum signature age:"),
+    lines[headerIdx + 4]!.startsWith("Custom nonce store:"),
   );
   const again = await runDemo();
   const againIdx = again.lines.findIndex((l) =>
@@ -12659,6 +12883,40 @@ test("demo lines contain the per-label replay cache segment (pre-seeded merchant
   assert.deepEqual(
     again.lines.slice(againIdx, againIdx + 3),
     lines.slice(headerIdx, headerIdx + 3),
+  );
+});
+
+test("demo lines contain the custom nonce store segment (scope isolation, same-keyid replay, forgery without pollution, followed by the maximum-signature-age segment)", async () => {
+  const { lines } = await runDemo();
+  const out = lines.join("\n");
+  assert.match(
+    out,
+    /Custom nonce store: verifyRequest accepts any caller-supplied NonceStore/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Custom nonce store:"),
+  );
+  assert.ok(headerIdx !== -1);
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 4), [
+    "Custom nonce store: verifyRequest accepts any caller-supplied NonceStore as its replayCache — the demo brings a plain Map-backed store keyed by (keyid, nonce), so two signers sharing one store never collide on the same nonce string: the scope contract of backlog #1412, which a store that ignores the scope argument silently breaks — and a failed verification never records its nonce, so a forgery cannot plant or consume one",
+    `Scope isolation: the same nonce "${DEMO_CUSTOM_NONCE_STORE_NONCE}" presented under keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_A}" and keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_B}" both verify (label sig1, alg="ed25519"), and the store holds 2 entries — one per keyid scope, not one per nonce string`,
+    `Replay: presenting keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_A}"'s signature a second time FAILED (code ${DEMO_CUSTOM_NONCE_STORE_REJECT_CODE}: ${DEMO_CUSTOM_NONCE_STORE_REJECT_REASON}) and the store still holds 2 entries — the same keyid reusing its nonce is a replay even though the nonce string is shared across scopes`,
+    `No pollution: a forged keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_C}" signature (last signature byte flipped) FAILED (code ${DEMO_CUSTOM_NONCE_STORE_FORGED_CODE}) and the store still holds 2 entries, so the genuine keyid "${DEMO_CUSTOM_NONCE_STORE_KEY_ID_C}" signature with the same nonce still verifies first time and the store ends at 3 entries — a failed verification never records its nonce`,
+  ]);
+  // The header plus its three lines are followed by a blank line
+  // and the per-label maximum-signature-age segment's header, not
+  // by the end of the demo.
+  assert.equal(lines[headerIdx + 4], "");
+  assert.ok(
+    lines[headerIdx + 5]!.startsWith("Per-label maximum signature age:"),
+  );
+  const again = await runDemo();
+  const againIdx = again.lines.findIndex((l) =>
+    l.startsWith("Custom nonce store:"),
+  );
+  assert.deepEqual(
+    again.lines.slice(againIdx, againIdx + 4),
+    lines.slice(headerIdx, headerIdx + 4),
   );
 });
 

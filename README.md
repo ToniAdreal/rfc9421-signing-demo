@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 3038 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 3040 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -2414,7 +2414,12 @@ values. Without a request to bind to, keep using the request-side API
   partitioning, only per-`keyid` scoping, so a custom `NonceStore`
   must incorporate the `scope` argument into its own key the same way
   `ReplayCache` does — a store that ignores it silently keeps the old
-  bare-nonce behavior.
+  bare-nonce behavior. The CLI demo (`npm run demo`) shows the
+  contract end to end with a plain `Map`-backed store: the same nonce
+  under two keyids verifies twice with one entry per scope, the same
+  keyid's second presentation is `NONCE_REPLAY`, and a forged
+  signature records nothing, so the genuine signature still verifies
+  first time (see the custom nonce store segment).
   Generate a fresh `generateNonce()` value for each label you sign —
   unless you deliberately partition the namespace with
   `replayCacheByLabel` (see the per-label replay stores section above),
@@ -5694,7 +5699,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 3038 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 3040 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
