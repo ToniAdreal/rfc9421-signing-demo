@@ -156,8 +156,13 @@ export interface JwksRefreshOptions {
    * `JwksKeyStore: JWKS refresh aborted`. A custom `fetchImpl`
    * never receives the signal, so an in-flight custom fetch runs
    * to completion and the abort is honoured before the snapshot
-   * is swapped instead. `refreshIfStale()` and `startAutoRefresh()`
-   * take no signal and never pass one through.
+   * is swapped instead. `refreshIfStale()` takes the same options
+   * and passes the signal through (see
+   * {@link JwksKeyStore.refreshIfStale}) — except that a signal
+   * already aborted when `refreshIfStale()` is called returns
+   * `false` without fetching instead of throwing.
+   * `startAutoRefresh()` ticks still take no signal and never pass
+   * one through: the timer itself has none.
    */
   signal?: AbortSignal;
 }
@@ -1388,8 +1393,12 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   abort is honoured before the snapshot is swapped, never by
  *   interrupting the call — and a call that joins a refresh
  *   already in flight shares that refresh's outcome, so its own
- *   signal is ignored. `refreshIfStale()` and `startAutoRefresh()`
- *   take no signal and never pass one through.
+ *   signal is ignored. `refreshIfStale()` takes the same options
+ *   and passes the signal through, with one difference: a signal
+ *   already aborted when `refreshIfStale()` is called returns
+ *   `false` without fetching instead of throwing, since no refresh
+ *   was attempted. `startAutoRefresh()` ticks still take no signal
+ *   and never pass one through: the timer itself has none.
  *
  * Honest limits: trusting the endpoint is the caller's responsibility —
  * this store performs no TLS pinning, no response-signature check, and
@@ -1847,8 +1856,9 @@ export class JwksKeyStore {
    * auto-refresh fetch counts in `stats()` exactly like a manual
    * one (see {@link JwksKeyStoreStats}). Ticks carry no
    * cancellation signal: the timer itself has none, and a caller
-   * that needs to cancel a refresh calls `refresh({ signal })`
-   * directly (see {@link JwksKeyStore.refresh}).
+   * that needs to cancel a refresh calls `refresh({ signal })` or
+   * `refreshIfStale({ signal })` directly (see
+   * {@link JwksKeyStore.refresh}).
    *
    * On a tick failure the error is passed to `opts.onError` when
    * one is given, and silently swallowed otherwise — the timer
@@ -1926,28 +1936,51 @@ export class JwksKeyStore {
   /**
    * Refresh only when the snapshot is stale: the convenience form of
    * the caller's `if (store.isStale()) await store.refresh()` loop.
+   * Takes the same options as {@link JwksKeyStore.refresh} and passes
+   * the caller signal through, so a manual polling loop can be
+   * cancelled the same way a direct `refresh()` can (see
+   * {@link JwksKeyStore.refresh}).
    *
    * Returns `false` — and never calls the configured `fetchImpl` —
-   * when {@link JwksKeyStore.isStale} reports the snapshot fresh.
-   * Returns `true` after delegating to {@link JwksKeyStore.refresh}
-   * when the snapshot is stale (including when no refresh has ever
-   * succeeded), inheriting all of `refresh()`'s atomic semantics: on
-   * failure this method throws the same descriptive `Error` and the
-   * previous snapshot and freshness timestamp are left untouched, so
-   * the store remains stale and a later call will retry.
+   * when {@link JwksKeyStore.isStale} reports the snapshot fresh, or
+   * when the caller signal is already aborted when the call starts
+   * (no refresh was attempted, so `stats()` does not move — unlike
+   * `refresh()`, which throws on a pre-aborted signal, this method
+   * returns: a cancelled caller asked for no refresh, and `false`
+   * reports that none happened). Returns `true` after delegating to
+   * {@link JwksKeyStore.refresh} when the snapshot is stale
+   * (including when no refresh has ever succeeded), inheriting all
+   * of `refresh()`'s atomic semantics: on failure this method throws
+   * the same descriptive `Error` and the previous snapshot and
+   * freshness timestamp are left untouched, so the store remains
+   * stale and a later call will retry. A signal that fires while
+   * the delegated refresh is running aborts it exactly like a
+   * direct `refresh({ signal })` — the aborted error is thrown and
+   * it counts once as a refresh failure.
    *
    * Concurrency: refreshes are single-flight — overlapping calls
    * that observe a stale snapshot share the one in-flight fetch (see
    * {@link JwksKeyStore.refresh}) instead of each fetching, and all
-   * of them settle with that fetch's outcome.
+   * of them settle with that fetch's outcome; a call that joins a
+   * refresh already in flight shares that refresh's outcome, so its
+   * own signal is ignored, exactly as for `refresh()`.
    *
-   * Takes no cancellation signal: a caller that needs to cancel a
-   * refresh calls `refresh({ signal })` directly instead of this
-   * convenience wrapper (see {@link JwksKeyStore.refresh}).
+   * A non-object options value, or a `signal` that is not an
+   * `AbortSignal`, is a configuration error thrown before any fetch
+   * is attempted (see {@link JwksKeyStore.refresh}).
    */
-  async refreshIfStale(): Promise<boolean> {
+  async refreshIfStale(opts?: JwksRefreshOptions): Promise<boolean> {
+    const signal = refreshSignalOf(opts);
+    // A signal already aborted when the call starts: no refresh was
+    // attempted — return false instead of refresh()'s throw (see the
+    // JSDoc above). The check runs before the staleness read, so a
+    // cancelled call never fetches even on a stale snapshot.
+    if (signal?.aborted) return false;
     if (!this.isStale()) return false;
-    await this.refresh();
+    // Pass the signal through only when one was given: an explicit
+    // `undefined` property is not assignable to `JwksRefreshOptions`
+    // under `exactOptionalPropertyTypes`.
+    await this.refresh(signal === undefined ? undefined : { signal });
     return true;
   }
 
@@ -2002,9 +2035,13 @@ export class JwksKeyStore {
    * interrupting the call — and a call that joins a refresh
    * already in flight shares that refresh's outcome, so its own
    * signal is ignored: cancelling a shared fetch would cancel
-   * another caller's refresh. `refreshIfStale()` and
-   * `startAutoRefresh()` take no signal and never pass one
-   * through.
+   * another caller's refresh. `refreshIfStale()` takes the same
+   * options and passes the signal through (see
+   * {@link JwksKeyStore.refreshIfStale}), except that a signal
+   * already aborted when `refreshIfStale()` is called returns
+   * `false` without fetching instead of throwing.
+   * `startAutoRefresh()` ticks take no signal and never pass one
+   * through: the timer itself has none.
    */
   refresh(opts?: JwksRefreshOptions): Promise<void> {
     const signal = refreshSignalOf(opts);

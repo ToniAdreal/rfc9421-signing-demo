@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 3127 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 3136 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1123,7 +1123,11 @@ whatever it serves becomes a verification key (see SECURITY.md).
 `refreshIfStale()` is the one-call form of the `if (store.isStale()) await store.refresh()`
 check: a fresh snapshot returns `false` without touching the network, a stale
 one (or a store that has never refreshed) delegates to `refresh()` with all of
-its atomic semantics and returns `true`. Refreshes are single-flight:
+its atomic semantics and returns `true`. It takes the same `{ signal }` options
+as `refresh()` and passes the signal through, so a manual polling loop can be
+cancelled the same way a direct `refresh()` can — with one difference: a signal
+already aborted when the call starts returns `false` without fetching instead of
+throwing, since no refresh was attempted. Refreshes are single-flight:
 concurrent `refresh()` calls — and stale `refreshIfStale()` calls — share one
 in-flight fetch and its single atomic snapshot replacement (on failure every
 waiter receives the same error), so a burst of verifiers hitting a stale
@@ -1269,8 +1273,12 @@ limits: a custom `fetchImpl` never receives the signal, so an in-flight
 custom fetch runs to completion and the abort is honoured before the snapshot
 is swapped (and before a `304` advances freshness), never by interrupting the
 call; and a call that joins a refresh already in flight shares that refresh's
-outcome, so its own signal is ignored. `refreshIfStale()` and
-`startAutoRefresh()` take no signal and never pass one through.
+outcome, so its own signal is ignored. `refreshIfStale({ signal })` passes the
+same signal through — a manual polling loop can be cancelled the same way —
+except that a signal already aborted when the call starts returns `false`
+without fetching instead of throwing, since no refresh was attempted.
+`startAutoRefresh()` ticks still take no signal and never pass one through:
+the timer itself has none.
 
 Response body limit: `new JwksKeyStore(url, { maxBodyBytes: 1_048_576 })`
 caps the JWKS response body at 1 MiB by default (a positive integer in
@@ -5885,7 +5893,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 3127 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 3136 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from
