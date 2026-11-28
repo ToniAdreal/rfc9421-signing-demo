@@ -12,9 +12,9 @@ export {
   SIGN_OPTION_KEYS,
 } from "./sign.js";
 export type { SignAlg, SignedHttpRequest, SignOptions } from "./sign.js";
-export { verifyAllLabels, verifyAllLabelsOrThrow, verifyRequest, verifyRequestOrThrow } from "./verify.js";
+export { verifyAllLabels, verifyAllLabelsAsync, verifyAllLabelsOrThrow, verifyRequest, verifyRequestAsync, verifyRequestOrThrow } from "./verify.js";
 export { DEFAULT_MAX_SIGNATURE_INPUT_LENGTH, DEFAULT_MAX_SIGNATURE_LENGTH, VERIFY_ALL_OPTION_KEYS, VERIFY_OPTION_KEYS } from "./verify.js";
-export type { VerifyAllOptions, VerifyOptions, VerifyResult } from "./verify.js";
+export type { AsyncKeyResolver, VerifyAllOptions, VerifyAllOptionsAsync, VerifyOptions, VerifyOptionsAsync, VerifyResult } from "./verify.js";
 export { isVerifyError, VerifyError } from "./errors.js";
 export type { VerifyErrorOptions, VerifyFailureCode } from "./errors.js";
 export { exportSignedSnapshotsByLabel, ReplayCache } from "./replay.js";

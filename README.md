@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 3040 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 3068 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -605,6 +605,43 @@ expired entries reclaimed (on read, or while making room for a new
 entry) and least-recently-used entries evicted from a full cache.
 `keyResolver.clear()` empties the cache and resets every counter to
 zero, e.g. after a key rotation or between tests.
+
+Async verification (keys behind an async lookup): when the signing
+key lives in a JWKS endpoint fetched on demand, a Vault, or a KMS,
+pass an async resolver to `verifyRequestAsync` (or per label to
+`verifyAllLabelsAsync` via `keyResolvers`, with a global async
+`keyResolver` as the fallback for unmapped labels) instead of
+pre-fetching the key and calling the sync verifier. The resolver may
+return the key directly or a `Promise` of it, so a synchronous
+resolver keeps working here unchanged. The async entry points are
+the sync ones with the lookup awaited: the same option keys (no new
+option is introduced, so the unknown-option check runs against the
+same key tables), the same verdict codes in the same check order —
+including the rule that a request failing an earlier gate never
+invokes the resolver — and the same `candidateKeys` rotation walk
+and the same sync `replayCache` (its `check` is consulted only after
+the cryptographic check passes, so a failed verification never
+records a nonce). An unknown `keyid` still fails with
+`KEY_RESOLUTION_FAILED`; a resolver that throws, or that resolves to
+a value that is not a `KeyObject`, is contained to
+`VERIFICATION_ERROR` without copying the resolver's own error (or
+the offending value) into the result, so a backend outage cannot
+leak its internals into a verification verdict. There is no timeout
+on the resolver: bound its latency in your own layer (see
+SECURITY.md), and do not perform an unbounded network fetch inside
+verification.
+
+```ts
+const result = await verifyRequestAsync(signed, {
+  keyResolver: async (keyId) => (await vault.getKey(keyId)) ?? undefined,
+});
+const results = await verifyAllLabelsAsync(dualSigned, {
+  keyResolvers: {
+    merchant: async (keyId) => merchantStore.get(keyId),
+    gateway: async (keyId) => gatewayStore.get(keyId),
+  },
+});
+```
 
 Key rotation without `keyid` (Stripe-style webhook secret rollover): pass
 `candidateKeys` — an ordered list of keys — and the verifier tries each in
@@ -5699,7 +5736,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 3040 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 3068 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

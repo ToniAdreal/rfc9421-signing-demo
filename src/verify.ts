@@ -525,6 +525,46 @@ export interface VerifyOptions {
   structuredFieldTypes?: Record<string, StructuredFieldType>;
 }
 
+/**
+ * An asynchronous `keyid`→key resolver for `verifyRequestAsync` /
+ * `verifyAllLabelsAsync`: the same contract as the synchronous
+ * `VerifyOptions.keyResolver`, except the lookup may be asynchronous —
+ * a key fetched on demand from a JWKS endpoint, a Vault, or a KMS —
+ * so it may return the key directly or a `Promise` of it. A
+ * synchronous resolver is still assignable here: a function returning
+ * `KeyObject | undefined` satisfies this type, so existing resolvers
+ * keep working through the async entry points unchanged.
+ *
+ * Containment is the same as on the sync path: an unknown `keyid`
+ * resolves to `undefined` and fails with `KEY_RESOLUTION_FAILED`, a
+ * resolver that throws — or that resolves to a value that is not a
+ * `KeyObject` — is contained to `VERIFICATION_ERROR`, and the
+ * resolver's own error (or the offending value) is never copied into
+ * the result, so a backend outage cannot leak its internals into a
+ * verification verdict.
+ */
+export type AsyncKeyResolver = (
+  keyId: string,
+) => KeyObject | undefined | Promise<KeyObject | undefined>;
+
+/**
+ * Options for `verifyRequestAsync`: exactly `VerifyOptions`, except
+ * `keyResolver` may be asynchronous (see `AsyncKeyResolver`). Every
+ * other option — `key`, `candidateKeys`, freshness windows, pinning,
+ * `replayCache`, and the rest — keeps its sync meaning and its sync
+ * validation: the async entry point accepts no new option key, so the
+ * unknown-option check runs against the same `VERIFY_OPTION_KEYS`
+ * table as `verifyRequest` (backlog #1439: no key-table sync was
+ * needed). The `replayCache` / `NonceStore` is reused as-is: its
+ * `check` stays synchronous and is consulted only after the
+ * cryptographic check passes, so a failed verification never records
+ * a nonce — the same rule `verifyRequest` enforces (backlog #1444).
+ */
+export interface VerifyOptionsAsync
+  extends Omit<VerifyOptions, "keyResolver"> {
+  keyResolver?: AsyncKeyResolver;
+}
+
 export interface VerifyResult {
   ok: boolean;
   reason?: string;
@@ -637,7 +677,11 @@ function assertKeyConfig(
  */
 function assertSingleKeyFallbackStore(
   store: JwksKeyStore | undefined,
-  caller: "verifyRequest" | "verifyAllLabels",
+  caller:
+    | "verifyRequest"
+    | "verifyAllLabels"
+    | "verifyRequestAsync"
+    | "verifyAllLabelsAsync",
 ): void {
   if (store === undefined) return;
   const shape = store as unknown as {
@@ -667,7 +711,11 @@ function assertSingleKeyFallbackStore(
  */
 function assertSingleKeyFallback(
   opts: Pick<VerifyOptions, "keyResolver" | "singleKeyFallback">,
-  caller: "verifyRequest" | "verifyAllLabels",
+  caller:
+    | "verifyRequest"
+    | "verifyAllLabels"
+    | "verifyRequestAsync"
+    | "verifyAllLabelsAsync",
 ): void {
   assertSingleKeyFallbackStore(opts.singleKeyFallback, caller);
   const store = opts.singleKeyFallback;
@@ -817,7 +865,11 @@ function assertVerifyClockOptions(
   now: number,
   skew: number,
   expiredTolerance: number,
-  caller: "verifyRequest" | "verifyAllLabels",
+  caller:
+    | "verifyRequest"
+    | "verifyAllLabels"
+    | "verifyRequestAsync"
+    | "verifyAllLabelsAsync",
 ): void {
   if (typeof now !== "number" || !Number.isInteger(now) || now < 0)
     throw new Error(
@@ -854,7 +906,9 @@ function assertHeaderLengthLimit(
     | "verifyRequest"
     | "verifyAllLabels"
     | "verifyResponse"
-    | "verifyAllResponseLabels",
+    | "verifyAllResponseLabels"
+    | "verifyRequestAsync"
+    | "verifyAllLabelsAsync",
 ): void {
   if (value === undefined) return;
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0)
@@ -888,7 +942,9 @@ export function checkSignatureHeaderLengths(
     | "verifyRequest"
     | "verifyResponse"
     | "verifyAllLabels"
-    | "verifyAllResponseLabels" = "verifyRequest",
+    | "verifyAllResponseLabels"
+    | "verifyRequestAsync"
+    | "verifyAllLabelsAsync" = "verifyRequest",
 ): VerifyResult | undefined {
   assertObjectParam("checkSignatureHeaderLengths", "opts", opts);
   // A bogus limit is a caller configuration error, not a verification
@@ -2309,6 +2365,484 @@ export function verifyRequestOrThrow(
   );
 }
 
+/**
+ * Is `value` a `KeyObject`? The same shape predicate
+ * `assertCandidateKeys` applies to rotation entries (an object whose
+ * `type` is `"secret"`, `"private"`, or `"public"`): a resolver that
+ * returns anything else — a string, a number, a plain object — has
+ * not resolved a key, so the async path contains it as
+ * `VERIFICATION_ERROR` instead of letting it reach the crypto layer
+ * (where it would surface as a bare `TypeError`).
+ */
+function isKeyObject(value: unknown): value is KeyObject {
+  if (typeof value !== "object" || value === null) return false;
+  const kind = (value as { type?: unknown }).type;
+  return kind === "secret" || kind === "private" || kind === "public";
+}
+
+/**
+ * Asynchronous twin of `verifyRequest` (backlog #1439): verify an
+ * RFC 9421 signed request whose signing key lives behind an
+ * asynchronous lookup — a JWKS endpoint fetched on demand, a Vault,
+ * a KMS — by passing an async `keyResolver`.
+ *
+ * This is a deliberate step-for-step mirror of `verifyRequest`, not a
+ * refactor of it: the sync path is left untouched, and the two
+ * functions share only the small validators and `verifyWithKey` (the
+ * crypto + post-crypto policy unit, which never reads `keyResolver`
+ * and so takes the async options as-is). The pre-key pipeline —
+ * option validation, header presence/length gates, parsing, the
+ * empty-components and coverage and whitelist gates, the signature
+ * base rebuild — runs in the same order and returns the same codes,
+ * so an async verification reports exactly what the sync one would
+ * for the same request; the sync/async parity test pins that. The
+ * only semantic differences are at key resolution (below) and the
+ * `verifyRequestAsync` caller name in configuration-error messages.
+ *
+ * Key resolution, in the same position as the sync path (after the
+ * header parses and the base rebuilds, before any crypto runs):
+ * the resolver is awaited, so a synchronous resolver works here too
+ * (it is assignable to `AsyncKeyResolver`). An unknown `keyid`
+ * still fails with `KEY_RESOLUTION_FAILED`; a resolver that throws,
+ * or that resolves to a value that is not a `KeyObject`, is
+ * contained to `VERIFICATION_ERROR` — and the resolver's own error
+ * (or the offending value) is never copied into the result, so a
+ * backend outage cannot leak its internals into a verification
+ * verdict. `candidateKeys` keeps its sync rotation walk (the
+ * candidates are already-resolved keys), and `replayCache` keeps its
+ * sync `check`, consulted only after the cryptographic check passes
+ * — a failed verification never records a nonce.
+ *
+ * Never throws on verification failure: returns
+ * `{ ok: false, code, reason }`. Throws only on caller configuration
+ * errors, exactly the sync set (unknown option keys, more than one
+ * of `key` / `keyResolver` / `candidateKeys`, a malformed option, a
+ * replay cache combined with a nonce-carrying signature whose
+ * lifetime is unbounded or longer than the cache TTL).
+ *
+ * Honest limit, see SECURITY.md: this library sets no timeout on the
+ * resolver — an async resolver must bound its own latency (pass a
+ * timeout into its own fetch / Vault call), and must not perform an
+ * unbounded network fetch inside verification, or one slow or hung
+ * keystore stalls every verification that awaits it.
+ */
+export async function verifyRequestAsync(
+  req: RequestLike,
+  opts: VerifyOptionsAsync,
+): Promise<VerifyResult> {
+  assertObjectParam("verifyRequestAsync", "req", req);
+  assertObjectParam("verifyRequestAsync", "opts", opts);
+  assertNoUnknownOptions(opts, VERIFY_OPTION_KEYS, "verifyRequestAsync");
+  // `verifyWithKey` (shared with the sync path) reads only the policy
+  // options from `opts` — never `keyResolver` — so the async options
+  // are passed to it, and to the key-selection validators, as the
+  // sync shape; the only field whose type differs is the resolver
+  // itself, and those validators only test whether it is set.
+  const verifyOpts = opts as unknown as VerifyOptions;
+  assertKeyConfig(verifyOpts);
+  assertSingleKeyFallback(verifyOpts, "verifyRequestAsync");
+  assertCandidateKeys(opts.candidateKeys);
+  assertMaxSignatureAgeSec(opts.maxSignatureAgeSec);
+  assertHeaderLengthLimit(opts.maxSignatureInputLength, "maxSignatureInputLength", "verifyRequestAsync");
+  assertHeaderLengthLimit(opts.maxSignatureLength, "maxSignatureLength", "verifyRequestAsync");
+  assertRequiredComponents(opts.requiredComponents);
+  assertAllowEmptyCoveredComponents(opts.allowEmptyCoveredComponents);
+  assertAllowedAlgs(opts.allowedAlgs);
+  assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyRequestAsync");
+  const label = opts.label ?? "sig1";
+  const now = opts.now ?? Math.floor(Date.now() / 1000);
+  const skew = opts.clockSkewToleranceSec ?? 60;
+  const expiredTolerance = opts.expiredToleranceSec ?? 0;
+  assertVerifyClockOptions(now, skew, expiredTolerance, "verifyRequestAsync");
+
+  const sigInput = getHeader(req.headers, "signature-input");
+  if (!sigInput)
+    return {
+      ok: false,
+      code: "MISSING_SIGNATURE_INPUT",
+      reason: "missing signature-input header",
+      label,
+    };
+  const sigField = getHeader(req.headers, "signature");
+  if (!sigField)
+    return {
+      ok: false,
+      code: "MISSING_SIGNATURE",
+      reason: "missing signature header",
+      label,
+    };
+
+  // Header length limits (fail-closed, before any parsing): an
+  // oversized header is rejected without the parser ever running
+  // over it. Checked after the presence checks above, so a missing
+  // header still reports its own MISSING_* code.
+  const tooLarge = checkSignatureHeaderLengths(sigInput, sigField, opts, label, "verifyRequestAsync");
+  if (tooLarge !== undefined) return tooLarge;
+
+  let parsed;
+  try {
+    parsed = parseSignatureInput(sigInput, label);
+  } catch (e) {
+    return {
+      ok: false,
+      code: "MALFORMED_SIGNATURE_INPUT",
+      reason: `bad signature-input: ${(e as Error).message}`,
+      label,
+    };
+  }
+
+  let base: string;
+  // Empty covered-component list (backlog #1409): a signature that
+  // covers nothing binds nothing — the base would be just the
+  // `"@signature-params"` line, so a cryptographically valid empty
+  // signature would verify as `ok: true` while attesting to no
+  // content at all. The sign side already refuses to mint one
+  // (`signRequest` throws on an empty `coveredComponents` list), so
+  // the verify side refuses a foreign one the same way. Checked
+  // here — after the header parsed, before the `requiredComponents`
+  // policy check (an empty list reports this more specific code),
+  // before any key resolution or crypto work, and before the replay
+  // cache is consulted, so a rejected empty signature never records
+  // its nonce. `allowEmptyCoveredComponents: true` opts out for
+  // interop with a signer that legitimately signs nothing.
+  if (
+    parsed.componentIds.length === 0 &&
+    opts.allowEmptyCoveredComponents !== true
+  )
+    return {
+      ok: false,
+      code: "EMPTY_COVERED_COMPONENTS",
+      reason:
+        "signature covers no components: an empty covered-component list binds nothing",
+      label,
+      keyId: parsed.params.keyid,
+      alg: parsed.params.alg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
+  // Required covered components (opt-in, fail-fast policy check): a
+  // signature covering only "@method" is cryptographically valid but
+  // protects nothing. This runs *before* any crypto work — a missing
+  // component is a policy violation, not an authenticity verdict — and
+  // compares by component base name, case-insensitively, matching the
+  // `cid.toLowerCase()` convention of `resolveComponent`: value
+  // parameters (`;bs`, `;sf`, `;key="…"`, `;tr`) do not affect the
+  // decision, so a signature covering `"content-digest";bs` satisfies
+  // a `content-digest` requirement. The one exception is `;req`
+  // (backlog #1267): it redirects the binding to the associated
+  // request, so it must match exactly — a signature covering only
+  // `"content-digest";req` does not satisfy a plain `content-digest`
+  // requirement (this message's body would be unbound), and a plain
+  // `content-digest` coverage does not satisfy an explicit
+  // `content-digest;req` requirement. The check happens *before* any
+  // cryptographic work: a missing component is a policy violation,
+  // not an authenticity verdict. An empty array disables the check.
+  const requiredComponents = opts.requiredComponents;
+  if (requiredComponents !== undefined && requiredComponents.length > 0) {
+    const covered = parsed.componentIds.map((c) =>
+      splitComponentIdForCoverage(c),
+    );
+    const missing = requiredComponents.filter((r) => {
+      const want = splitComponentIdForCoverage(r);
+      return !covered.some(
+        (c) => c.base === want.base && c.req === want.req,
+      );
+    });
+    if (missing.length > 0)
+      return {
+        ok: false,
+        code: "MISSING_REQUIRED_COMPONENT",
+        reason: `signature does not cover required component${missing.length === 1 ? "" : "s"}: ${missing
+          .map((m) => `"${m}"`)
+          .join(", ")}`,
+        label,
+        keyId: parsed.params.keyid,
+        alg: parsed.params.alg,
+        nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+      };
+  }
+  // Algorithm whitelist (opt-in, fail-fast policy check): a signature
+  // whose wire `alg` is outside `allowedAlgs` is a policy violation,
+  // not an authenticity verdict, so it is rejected here — after the
+  // header parsed, before the signature base is rebuilt, before any
+  // key resolution, and before any crypto work. An alg-less signature
+  // passes this gate (there is no wire `alg` to judge yet) and is
+  // judged in `verifyWithKey` against its effective algorithm instead.
+  const wireAlg = parsed.params.alg;
+  if (
+    opts.allowedAlgs !== undefined &&
+    wireAlg !== undefined &&
+    !opts.allowedAlgs.includes(wireAlg as SignAlg)
+  )
+    return {
+      ok: false,
+      code: "ALG_NOT_ALLOWED",
+      reason: `signature alg "${wireAlg}" is not in the allowedAlgs whitelist`,
+      label,
+      keyId: parsed.params.keyid,
+      alg: wireAlg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
+  // Nonce length (backlog #1399): a `nonce` longer than
+  // `MAX_NONCE_LENGTH` (256 characters, the same cap the signer
+  // enforces) is rejected here — after the header parsed, before the
+  // signature base is rebuilt, before any key resolution, and before
+  // any crypto work. It is a resource-safety policy, not an
+  // authenticity verdict: unlike `tag` / `keyid`, a nonce is stored
+  // verbatim by the replay cache / nonce store, so an unbounded
+  // value is a memory-amplification vector (one 64 KiB nonce per
+  // cache entry, up to the cache's entry limit), and the 64 KiB
+  // `signature-input` cap alone does not bound what gets recorded.
+  // A forged signature carrying an over-long nonce therefore reports
+  // this code rather than `SIGNATURE_MISMATCH`, the same precedence
+  // the `ALG_NOT_ALLOWED` gate above already sets for policy
+  // violations. `tag` and `keyid` stay uncapped on the verify side
+  // (see the constants in `sign.ts`): they are never stored, and a
+  // validly signed longer value from another implementation still
+  // verifies.
+  const wireNonce = parsed.params.nonce;
+  if (wireNonce !== undefined && wireNonce.length > MAX_NONCE_LENGTH)
+    return {
+      ok: false,
+      code: "NONCE_TOO_LONG",
+      reason: `nonce is too long: at most ${MAX_NONCE_LENGTH} characters, got ${wireNonce.length}`,
+      label,
+      keyId: parsed.params.keyid,
+      alg: parsed.params.alg,
+      nonce: wireNonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
+  // Legacy `Digest` body binding, presence half (backlog #1100): a
+  // signature that covers the whole `digest` field claims the body is
+  // bound through the Digest header, so the header must actually be
+  // there. Checked here — after the header parsed, before the
+  // signature base is rebuilt — because a missing covered field
+  // would otherwise surface as SIGNATURE_BASE_BUILD_FAILED from
+  // `resolveComponent`; the settled code for a missing Digest is
+  // BODY_DIGEST_MISMATCH, the same code as every other Digest
+  // binding failure (see `verifyWithKey`). Only the whole field of
+  // this message counts: `;req` binds the associated request's
+  // Digest, `;tr` the trailers, and `;key="…"` one dictionary member.
+  if (
+    coversWholeDigestField(parsed.componentIds) &&
+    getHeader(req.headers, "digest") === undefined
+  )
+    return {
+      ok: false,
+      code: "BODY_DIGEST_MISMATCH",
+      reason:
+        'body cannot be bound: signature covers "digest" but no Digest header is present',
+      label,
+      keyId: parsed.params.keyid,
+      alg: parsed.params.alg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
+  try {
+    base = buildSignatureBase(parsed.componentIds, req, parsed.params, {
+      ...(opts.structuredFieldTypes !== undefined
+        ? { structuredFieldTypes: opts.structuredFieldTypes }
+        : {}),
+    });
+  } catch (e) {
+    return {
+      ok: false,
+      code: "SIGNATURE_BASE_BUILD_FAILED",
+      reason: `cannot rebuild signature base: ${(e as Error).message}`,
+      label,
+    };
+  }
+
+  let sigBytes: Buffer;
+  try {
+    sigBytes = parseSignatureField(sigField, label);
+  } catch (e) {
+    return {
+      ok: false,
+      code: "MALFORMED_SIGNATURE",
+      reason: `bad signature field: ${(e as Error).message}`,
+      label,
+      keyId: parsed.params.keyid,
+      alg: parsed.params.alg,
+      nonce: parsed.params.nonce,
+      tag: parsed.params.tag,
+      created: parsed.params.created,
+      expires: parsed.params.expires,
+      coveredComponents: [...parsed.componentIds],
+    };
+  }
+
+  // Key resolution: `keyid`→key lookup happens here, after the header
+  // parsed cleanly but before any crypto runs — the same position as
+  // the sync path, so a request that fails an earlier gate never
+  // invokes the resolver (no wasted Vault/JWKS fetch, and a throwing
+  // resolver can never mask an earlier verdict). The `keyid` claim is
+  // still untrusted at this point — the cryptographic check below is
+  // what authenticates it (the params are part of the signature base).
+  // The one deliberate difference from the sync path: the resolver is
+  // awaited, and a throw — or a resolved value that is not a
+  // KeyObject — is contained to `VERIFICATION_ERROR` without copying
+  // the resolver's own error (or the offending value) into the
+  // result.
+  let key: KeyObject | undefined = opts.key;
+  if (opts.keyResolver !== undefined) {
+    const claimedKeyId = parsed.params.keyid;
+    if (claimedKeyId === undefined || claimedKeyId === "") {
+      // Opt-in single-key fallback (see `VerifyOptions.singleKeyFallback`):
+      // a keyid-less signature has nothing to resolve, so without the
+      // opt-in it fails closed exactly as before. With the opt-in, the
+      // store's only key is tried — and only when the snapshot holds
+      // exactly one key, so a rotation set can never silently collapse
+      // to one of its members.
+      const onlyKey = opts.singleKeyFallback?.resolveOnlyKey();
+      if (onlyKey === undefined)
+        return {
+          ok: false,
+          code: "KEY_RESOLUTION_FAILED",
+          reason: "signature carries no keyid to resolve",
+          label,
+          alg: parsed.params.alg,
+          nonce: parsed.params.nonce,
+          tag: parsed.params.tag,
+          created: parsed.params.created,
+          expires: parsed.params.expires,
+          coveredComponents: [...parsed.componentIds],
+        };
+      key = onlyKey;
+    } else {
+      let resolved: KeyObject | undefined;
+      try {
+        const value = await opts.keyResolver(claimedKeyId);
+        if (value === undefined) {
+          resolved = undefined;
+        } else if (!isKeyObject(value)) {
+          return {
+            ok: false,
+            code: "VERIFICATION_ERROR",
+            reason: `key resolver returned a non-KeyObject value for keyid "${claimedKeyId}"`,
+            label,
+            keyId: claimedKeyId,
+            alg: parsed.params.alg,
+            nonce: parsed.params.nonce,
+            tag: parsed.params.tag,
+            created: parsed.params.created,
+            expires: parsed.params.expires,
+            coveredComponents: [...parsed.componentIds],
+          };
+        } else {
+          resolved = value;
+        }
+      } catch {
+        return {
+          ok: false,
+          code: "VERIFICATION_ERROR",
+          reason: "key resolver threw an error",
+          label,
+          keyId: claimedKeyId,
+          alg: parsed.params.alg,
+          nonce: parsed.params.nonce,
+          tag: parsed.params.tag,
+          created: parsed.params.created,
+          expires: parsed.params.expires,
+          coveredComponents: [...parsed.componentIds],
+        };
+      }
+      if (resolved === undefined)
+        return {
+          ok: false,
+          code: "KEY_RESOLUTION_FAILED",
+          reason: `keyid "${claimedKeyId}" could not be resolved to a key`,
+          label,
+          keyId: claimedKeyId,
+          alg: parsed.params.alg,
+          nonce: parsed.params.nonce,
+          tag: parsed.params.tag,
+          created: parsed.params.created,
+          expires: parsed.params.expires,
+          coveredComponents: [...parsed.componentIds],
+        };
+      key = resolved;
+    }
+  }
+
+  // Key rotation (ordered candidate list, e.g. the old and new
+  // webhook secrets during a rotation window): each candidate is
+  // tried in order and the first full pass wins. Only
+  // SIGNATURE_MISMATCH advances to the next candidate — policy
+  // verdicts (EXPIRED, NONCE_REPLAY, MISSING_*, ...) are about the
+  // signature itself, not the key, so they return immediately
+  // instead of widening the walk. When every candidate mismatches,
+  // the last candidate's SIGNATURE_MISMATCH is returned. A
+  // misconfigured candidate (sub-floor HMAC secret, unmappable key
+  // shape under algFallback "infer", ...) throws out of the walk —
+  // a broken candidate list is a caller bug, not a mismatch. A
+  // wire-alg/key-shape mismatch is different: on the default path it
+  // returns an `ALG_NOT_ALLOWED` verdict at once (backlog #1410),
+  // which the walk returns immediately like any other policy verdict
+  // instead of advancing to the next candidate — a configuration
+  // error never masquerades as a rotation.
+  // Failed cryptographic attempts never reach the replay cache (it
+  // is consulted only after a full pass), so a rotating signature
+  // can never pollute it.
+  if (opts.candidateKeys !== undefined) {
+    let lastMismatch: VerifyResult | undefined;
+    for (const candidate of opts.candidateKeys) {
+      const res = verifyWithKey(
+        req,
+        verifyOpts,
+        parsed,
+        base,
+        sigBytes,
+        candidate,
+        label,
+        now,
+        skew,
+        expiredTolerance,
+      );
+      if (res.ok) return res;
+      if (res.code !== "SIGNATURE_MISMATCH") return res;
+      lastMismatch = res;
+    }
+    // assertCandidateKeys (top of this function) rejects empty lists,
+    // so a mismatch was always recorded above.
+    return lastMismatch as VerifyResult;
+  }
+
+  if (key === undefined)
+    throw new Error(
+      "verifyRequestAsync: one of `key`, `keyResolver`, or `candidateKeys` must be provided",
+    );
+  return verifyWithKey(
+    req,
+    verifyOpts,
+    parsed,
+    base,
+    sigBytes,
+    key,
+    label,
+    now,
+    skew,
+    expiredTolerance,
+  );
+}
+
 export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
   /**
    * Per-label verification keys for multi-party signatures (e.g. a
@@ -2626,6 +3160,26 @@ export interface VerifyAllOptions extends Omit<VerifyOptions, "label"> {
     string,
     Record<string, StructuredFieldType>
   >;
+}
+
+/**
+ * Options for `verifyAllLabelsAsync`: exactly `VerifyAllOptions`,
+ * except the global `keyResolver` and the per-label `keyResolvers`
+ * may be asynchronous (see `AsyncKeyResolver`). A synchronous
+ * resolver is still assignable in either slot. Every other option —
+ * `keys`, `candidateKeysByLabel`, the per-label policy maps, and the
+ * rest — keeps its sync meaning and validation, and the async entry
+ * point accepts no new option key, so the unknown-option check runs
+ * against the same `VERIFY_ALL_OPTION_KEYS` table as
+ * `verifyAllLabels` (backlog #1439: no key-table sync was needed).
+ * Per-label `replayCacheByLabel` stores are reused as-is, with the
+ * same sync `check` and the same record-only-after-crypto-success
+ * rule as the single-label async path.
+ */
+export interface VerifyAllOptionsAsync
+  extends Omit<VerifyAllOptions, "keyResolver" | "keyResolvers"> {
+  keyResolver?: AsyncKeyResolver;
+  keyResolvers?: Record<string, AsyncKeyResolver>;
 }
 
 /**
@@ -3358,6 +3912,300 @@ export function verifyAllLabelsOrThrow(
           verifyResults: [...results],
         },
       );
+  }
+  return results;
+}
+
+/**
+ * Asynchronous twin of `verifyAllLabels` (backlog #1439): verify
+ * every signature label on a request whose keys live behind
+ * asynchronous resolvers — one resolver per label via `keyResolvers`,
+ * or one global async `keyResolver` as the fallback for unmapped
+ * labels.
+ *
+ * This mirrors `verifyAllLabels` step-for-step — the sync function is
+ * left untouched — and delegates each label to `verifyRequestAsync`,
+ * so the per-label assembly (the `VerifyOptions` keys that travel in,
+ * the per-label maps that override the globals, the mutual-exclusion
+ * throws) is the same shape as the sync delegation, with the async
+ * resolver types in the resolver slots. The top-level gates are the
+ * same: `requiredLabels` is validated before the unsigned-request
+ * early return, the global header-length bound caps parser work
+ * before the header is split into labels, and a required label that
+ * never appears on the wire is appended as a synthetic
+ * `MISSING_REQUIRED_LABEL` failure in `requiredLabels` order.
+ *
+ * Never throws on verification failure: returns one `VerifyResult`
+ * per label, in wire order. Throws only on caller configuration
+ * errors, exactly the sync set (unknown option keys, malformed
+ * per-label maps, mutually exclusive key options on a label, a
+ * malformed `requiredLabels`). A request with no `signature-input`
+ * header returns `[]` without throwing, exactly as `verifyAllLabels`
+ * does.
+ */
+export async function verifyAllLabelsAsync(
+  req: RequestLike,
+  opts: VerifyAllOptionsAsync,
+): Promise<VerifyResult[]> {
+  assertObjectParam("verifyAllLabelsAsync", "req", req);
+  assertObjectParam("verifyAllLabelsAsync", "opts", opts);
+  assertNoUnknownOptions(opts, VERIFY_ALL_OPTION_KEYS, "verifyAllLabelsAsync");
+  // `requiredLabels` is validated first, before the unsigned-request
+  // early return below: a misconfigured policy must throw even for an
+  // unsigned request, and an unsigned request with required labels
+  // must report synthetic failures instead of `[]`.
+  assertRequiredLabels(opts.requiredLabels);
+  const sigInput = getHeader(req.headers, "signature-input");
+  if (sigInput === undefined) {
+    return (opts.requiredLabels ?? []).map((label) => ({
+      ok: false,
+      code: "MISSING_REQUIRED_LABEL",
+      reason: `required signature label "${label}" is missing: request carries no signature-input header`,
+      label,
+    }));
+  }
+  assertExpectedKeyIds(opts.expectedKeyIds);
+  assertExpectedTags(opts.expectedTags);
+  // The map validator only checks that each entry is a function, so
+  // the async resolvers pass through this sync-typed check unchanged.
+  assertKeyResolvers(
+    opts.keyResolvers as unknown as
+      | Record<string, (keyId: string) => KeyObject | undefined>
+      | undefined,
+  );
+  // Shape-only here: the resolver-identity half of the fallback rule
+  // is per label (a label's own resolver may differ from the global
+  // one), so it is enforced inside each per-label `verifyRequestAsync`
+  // call below — a misconfigured label throws there, like the other
+  // per-label key-source conflicts.
+  assertSingleKeyFallbackStore(opts.singleKeyFallback, "verifyAllLabelsAsync");
+  assertCandidateKeysByLabel(opts.candidateKeysByLabel);
+  assertMaxSignatureAgeSecByLabel(opts.maxSignatureAgeSecByLabel);
+  assertHeaderLengthLimitByLabel("maxSignatureInputLengthByLabel", opts.maxSignatureInputLengthByLabel);
+  assertHeaderLengthLimitByLabel("maxSignatureLengthByLabel", opts.maxSignatureLengthByLabel);
+  assertClockSkewToleranceSecByLabel(opts.clockSkewToleranceSecByLabel);
+  assertExpiredToleranceSecByLabel(opts.expiredToleranceSecByLabel);
+  assertRequiredComponentsByLabel(opts.requiredComponentsByLabel);
+  assertAlgFallbackByLabel(opts.algFallbackByLabel);
+  assertAllowedAlgsByLabel(opts.allowedAlgsByLabel);
+  assertRequireFlagByLabel("requireCreatedByLabel", opts.requireCreatedByLabel);
+  assertRequireFlagByLabel("requireExpiresByLabel", opts.requireExpiresByLabel);
+  assertRequireFlagByLabel("requireNonceByLabel", opts.requireNonceByLabel);
+  assertRequireFlagByLabel("requireTagByLabel", opts.requireTagByLabel);
+  assertReplayCacheByLabel(opts.replayCacheByLabel);
+  assertStructuredFieldTypes(opts.structuredFieldTypes, "verifyAllLabelsAsync");
+  assertStructuredFieldTypesByLabel(opts.structuredFieldTypesByLabel);
+  // Header length limits (fail-closed, before the header is split into
+  // labels): the global/default bound caps parser work here; a tighter
+  // per-label limit is then enforced per label inside `verifyRequestAsync`.
+  // A missing `signature` header is not a gate failure — each label
+  // reports it as MISSING_SIGNATURE from its own `verifyRequestAsync`.
+  const sigField = getHeader(req.headers, "signature");
+  const tooLarge = checkSignatureHeaderLengths(sigInput, sigField, opts, "", "verifyAllLabelsAsync");
+  if (tooLarge !== undefined) return [tooLarge];
+  let labels: string[];
+  try {
+    labels = listSignatureLabels(sigInput);
+  } catch (e) {
+    return [
+      {
+        ok: false,
+        code: "MALFORMED_SIGNATURE_INPUT",
+        reason: `bad signature-input: ${(e as Error).message}`,
+        label: "",
+      },
+    ];
+  }
+  const results: VerifyResult[] = [];
+  for (const label of labels) {
+    // Per-label delegation base: only the `VerifyOptions` keys
+    // travel into `verifyRequestAsync` — the per-label maps (`keys`,
+    // `keyResolvers`, `*ByLabel`, `requiredLabels`) are consumed
+    // here, never by the single-label entry point, which rejects
+    // unknown keys fail-closed (backlog #1251). Picking by the
+    // allowlist keeps the delegation honest if `VerifyOptions`
+    // grows a field: the scan in `verifyRequestAsync` would catch a key
+    // this list forgot.
+    const verifyOptionsBase: VerifyOptionsAsync = {};
+    for (const key of VERIFY_OPTION_KEYS) {
+      if (key === "label") continue;
+      const value = (opts as VerifyAllOptionsAsync)[key as keyof VerifyAllOptionsAsync];
+      if (value !== undefined)
+        (verifyOptionsBase as Record<string, unknown>)[key] = value;
+    }
+    const key = opts.keys?.[label] ?? opts.key;
+    // Per-label resolver: the label's dedicated resolver wins; any
+    // other label falls back to the global `keyResolver`.
+    const keyResolver = opts.keyResolvers?.[label] ?? opts.keyResolver;
+    if (key !== undefined && keyResolver !== undefined)
+      throw new Error(
+        "verifyAllLabelsAsync: `keys`/`key` is mutually exclusive with `keyResolver`/`keyResolvers` — pass one or the other",
+      );
+    // Per-label rotation candidates: the label's dedicated list wins;
+    // any other label falls back to the global `candidateKeys`. Like
+    // the global option, exactly one of key / resolver / candidates may
+    // be in play per label.
+    const candidateKeys =
+      opts.candidateKeysByLabel?.[label] ?? opts.candidateKeys;
+    if (
+      candidateKeys !== undefined &&
+      (key !== undefined || keyResolver !== undefined)
+    )
+      throw new Error(
+        "verifyAllLabelsAsync: `candidateKeysByLabel`/`candidateKeys` is mutually exclusive with `keys`/`key` and `keyResolver`/`keyResolvers` — pass one or the other",
+      );
+    // Per-label keyid pinning: a label pinned in `expectedKeyIds` is
+    // checked against its own expectation; every other label falls back
+    // to the global `expectedKeyId` (unset means no pinning for it).
+    const expectedKeyId = opts.expectedKeyIds?.[label] ?? opts.expectedKeyId;
+    // Per-label tag pinning: a label pinned in `expectedTags` is checked
+    // against its own application protocol; every other label falls back
+    // to the global `expectedTag` (unset means no pinning for it).
+    const expectedTag = opts.expectedTags?.[label] ?? opts.expectedTag;
+    // Per-label freshness window: a label pinned in
+    // `maxSignatureAgeSecByLabel` is checked against its own window;
+    // every other label falls back to the global `maxSignatureAgeSec`
+    // (unset means no age check for it). A window is not key selection,
+    // so it never joins the mutual-exclusion checks above.
+    const maxSignatureAgeSec =
+      opts.maxSignatureAgeSecByLabel?.[label] ?? opts.maxSignatureAgeSec;
+    // Per-label header length limits: a label in the map is checked
+    // against its own limit; every other label falls back to the
+    // global limit (default 65,536). The pre-parse gate above already
+    // bounded parser work by the global value, so a tighter limit
+    // here only ever rejects a label that parsed cleanly — it never
+    // lets a header past the parser that the global bound would
+    // have stopped.
+    const maxSignatureInputLength =
+      opts.maxSignatureInputLengthByLabel?.[label] ??
+      opts.maxSignatureInputLength;
+    const maxSignatureLength =
+      opts.maxSignatureLengthByLabel?.[label] ?? opts.maxSignatureLength;
+    // Per-label clock-skew tolerance: a label pinned in
+    // `clockSkewToleranceSecByLabel` is checked against its own
+    // tolerance; every other label falls back to the global
+    // `clockSkewToleranceSec` (default 60 in `verifyRequestAsync`). Like
+    // the window above, a tolerance is not key selection, so it
+    // never joins the mutual-exclusion checks above.
+    const clockSkewToleranceSec =
+      opts.clockSkewToleranceSecByLabel?.[label] ??
+      opts.clockSkewToleranceSec;
+    // Per-label expiry tolerance: a label pinned in
+    // `expiredToleranceSecByLabel` is checked against its own grace
+    // period; every other label falls back to the global
+    // `expiredToleranceSec` (default 0 in `verifyRequestAsync`). Like the
+    // tolerances above, it is not key selection, so it never joins
+    // the mutual-exclusion checks above.
+    const expiredToleranceSec =
+      opts.expiredToleranceSecByLabel?.[label] ?? opts.expiredToleranceSec;
+    // Per-label component-coverage policy: a label in the map is
+    // checked against its own list; every other label falls back to
+    // the global `requiredComponents` (unset means no coverage check
+    // for it). A mapped list replaces the global list — it is not
+    // unioned with it — so `[]` disables the check for that label
+    // even when a global list is set. Like the tolerances above, a
+    // coverage policy is not key selection, so it never joins the
+    // mutual-exclusion checks above.
+    const requiredComponents =
+      opts.requiredComponentsByLabel?.[label] ?? opts.requiredComponents;
+    // Per-label `alg` fallback strategy: a label in the map is
+    // verified with its own strategy; every other label falls back
+    // to the global `algFallback` (unset means the legacy default).
+    // Nullish fallback (not `||`) matters here: a mapped `false`
+    // must keep that label strict even when the global strategy is
+    // `"infer"`. Like the policies above, a strategy is not key
+    // selection, so it never joins the mutual-exclusion checks.
+    const algFallback =
+      opts.algFallbackByLabel?.[label] ?? opts.algFallback;
+    // Per-label algorithm whitelist: a label in the map is checked
+    // against its own list; every other label falls back to the
+    // global `allowedAlgs` (unset means no whitelist check for it).
+    // A mapped list replaces the global list for that label — it is
+    // not unioned with it. Like the policies above, a whitelist is
+    // not key selection, so it never joins the mutual-exclusion
+    // checks.
+    const allowedAlgs =
+      opts.allowedAlgsByLabel?.[label] ?? opts.allowedAlgs;
+    // Per-label freshness-existence requirements: a label in the map
+    // is checked against its own flag; every other label falls back
+    // to the global flag (unset means no existence check for it).
+    // Like the window above, a requirement is not key selection, so
+    // it never joins the mutual-exclusion checks.
+    const requireCreated =
+      opts.requireCreatedByLabel?.[label] ?? opts.requireCreated;
+    const requireExpires =
+      opts.requireExpiresByLabel?.[label] ?? opts.requireExpires;
+    // Per-label nonce-existence requirement: a label in the map is
+    // checked against its own flag; every other label falls back to
+    // the global flag (unset means no existence check for it).
+    // Like the freshness requirements above, a requirement is not
+    // key selection, so it never joins the mutual-exclusion checks.
+    const requireNonce =
+      opts.requireNonceByLabel?.[label] ?? opts.requireNonce;
+    // Per-label tag-existence requirement: a label in the map is
+    // checked against its own flag; every other label falls back to
+    // the global flag (unset means no existence check for it). Like
+    // the nonce requirement above, a requirement is not key
+    // selection, so it never joins the mutual-exclusion checks.
+    const requireTag =
+      opts.requireTagByLabel?.[label] ?? opts.requireTag;
+    // Per-label nonce replay store: a label in the map is checked
+    // against its own store; every other label falls back to the
+    // global `replayCache` (unset means no replay check for it).
+    // This must be passed explicitly — spreading `opts` alone would
+    // carry the global store for every label, since `verifyRequestAsync`
+    // knows nothing about the per-label map. Nullish fallback
+    // matters only for absent entries; a mapped store is always an
+    // object, never a falsy override to be skipped.
+    const replayCache =
+      opts.replayCacheByLabel?.[label] ?? opts.replayCache;
+    // Per-label `;sf` type registry: a label in the map is verified
+    // with its own registry; every other label falls back to the
+    // global `structuredFieldTypes` (unset means the trial order for
+    // it). A mapped registry replaces the global one — it is not
+    // merged with it — so this must be passed explicitly: spreading
+    // `opts` alone would carry the global registry for every label.
+    const structuredFieldTypes =
+      opts.structuredFieldTypesByLabel?.[label] ?? opts.structuredFieldTypes;
+    results.push(await verifyRequestAsync(req, {
+      ...verifyOptionsBase,
+      label,
+      ...(key !== undefined ? { key } : {}),
+      ...(keyResolver !== undefined ? { keyResolver } : {}),
+      ...(expectedKeyId !== undefined ? { expectedKeyId } : {}),
+      ...(expectedTag !== undefined ? { expectedTag } : {}),
+      ...(candidateKeys !== undefined ? { candidateKeys } : {}),
+      ...(maxSignatureAgeSec !== undefined ? { maxSignatureAgeSec } : {}),
+      ...(maxSignatureInputLength !== undefined ? { maxSignatureInputLength } : {}),
+      ...(maxSignatureLength !== undefined ? { maxSignatureLength } : {}),
+      ...(clockSkewToleranceSec !== undefined ? { clockSkewToleranceSec } : {}),
+      ...(expiredToleranceSec !== undefined ? { expiredToleranceSec } : {}),
+      ...(requiredComponents !== undefined ? { requiredComponents } : {}),
+      ...(algFallback !== undefined ? { algFallback } : {}),
+      ...(allowedAlgs !== undefined ? { allowedAlgs } : {}),
+      ...(requireCreated !== undefined ? { requireCreated } : {}),
+      ...(requireExpires !== undefined ? { requireExpires } : {}),
+      ...(requireNonce !== undefined ? { requireNonce } : {}),
+      ...(requireTag !== undefined ? { requireTag } : {}),
+      ...(replayCache !== undefined ? { replayCache } : {}),
+      ...(structuredFieldTypes !== undefined ? { structuredFieldTypes } : {}),
+    }));
+  }
+  // Required-label fail-closed: every required label that never
+  // appeared on the wire is appended as a synthetic failure, in
+  // `requiredLabels` order after the wire-order results. A stripped
+  // co-signature is a policy failure, not a silent absence.
+  const required = opts.requiredLabels ?? [];
+  if (required.length === 0) return results;
+  const present = new Set(labels);
+  for (const label of required) {
+    if (!present.has(label))
+      results.push({
+        ok: false,
+        code: "MISSING_REQUIRED_LABEL",
+        reason: `required signature label "${label}" is missing from the signature-input header`,
+        label,
+      });
   }
   return results;
 }

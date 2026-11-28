@@ -167,7 +167,16 @@ Read this before using it anywhere that matters.
   never falls back with zero or two-plus keys). `verifyAllLabels` accepts per-label
   resolvers via `VerifyAllOptions.keyResolvers` (one per label, with
   the same per-label containment semantics); the same `VERIFICATION_ERROR`
-  containment applies per label. JWKS network key discovery *is*
+  containment applies per label. The async twins
+  (`verifyRequestAsync` / `verifyAllLabelsAsync`) accept an async
+  resolver with the same containment — a throw, or a resolution to a
+  value that is not a `KeyObject`, is contained to
+  `VERIFICATION_ERROR` without leaking the resolver's own error —
+  but the library sets no timeout on the resolver: an async resolver
+  must bound its own latency (a timeout on its own fetch / Vault
+  call), and must not perform an unbounded network fetch inside
+  verification, or one slow or hung keystore stalls every
+  verification that awaits it. JWKS network key discovery *is*
   implemented via the opt-in `JwksKeyStore`: `refresh()` fetches a JWKS
   document and imports its keys by `kid` (ed25519 / P-256 / RSA only;
   entries carrying private `"d"` material make the refresh throw), and
