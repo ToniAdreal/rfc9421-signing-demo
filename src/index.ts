@@ -37,6 +37,7 @@ export type {
   JwksKeyStoreOptions,
   JwksKeyStoreSnapshot,
   JwksKeyStoreStats,
+  JwksRefreshOptions,
   JwksSetIntervalImpl,
   JwksSignedSnapshotEnvelope,
   JwksSignedSnapshotExportOptions,

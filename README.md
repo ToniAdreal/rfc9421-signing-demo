@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 3079 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 3091 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -1187,7 +1187,9 @@ many waiters counts once, as a success or as a failure, and retry attempts
 inside one `refresh()` do not multiply the count — and every `resolve()`
 call counts as exactly one hit (returned a key) or miss (returned `undefined`:
 an unknown keyid, any keyid before the first successful refresh, or an invalid
-keyid), so `hits + misses` is the total number of resolutions. `duplicateKids`
+keyid), so `hits + misses` is the total number of resolutions. An aborted
+refresh counts once as a failure; a signal already aborted before the call
+starts counts nothing, since no refresh was attempted. `duplicateKids`
 counts repeated `kid`s inside one fetched document or one restored snapshot —
 the same `kid` listed twice counts 1, three times counts 2. A publisher that
 re-issues one `kid` for two key versions during rotation silently retires the
@@ -1229,6 +1231,25 @@ The option takes a positive integer (milliseconds) and is unset by default, so
 no configuration change is zero behavior change; it applies to the default
 fetch only — a custom `fetchImpl` never receives an abort signal and must
 implement its own timeout if it needs one.
+
+Caller cancellation: `store.refresh({ signal })` lets the caller stop a
+refresh it started — on shutdown, or when the endpoint is being replaced. A
+signal already aborted when the call starts throws
+`JwksKeyStore: JWKS refresh aborted` at once: no fetch is attempted, the
+snapshot and `lastRefreshedAt` are untouched, and `stats()` does not move,
+since no refresh was attempted. An abort while the refresh is running cancels
+the default fetch through the same controller the timeout deadline uses (the
+caller's abort wins over the deadline), interrupts a retry backoff wait at
+once — including a `Retry-After` wait — and starts no new attempt; the refresh
+throws the same aborted error, the previous snapshot and freshness timestamp
+stay untouched, and it counts once as a refresh failure. A non-`AbortSignal`
+`signal` is a configuration error, thrown before any fetch. Two honest
+limits: a custom `fetchImpl` never receives the signal, so an in-flight
+custom fetch runs to completion and the abort is honoured before the snapshot
+is swapped (and before a `304` advances freshness), never by interrupting the
+call; and a call that joins a refresh already in flight shares that refresh's
+outcome, so its own signal is ignored. `refreshIfStale()` and
+`startAutoRefresh()` take no signal and never pass one through.
 
 Response body limit: `new JwksKeyStore(url, { maxBodyBytes: 1_048_576 })`
 caps the JWKS response body at 1 MiB by default (a positive integer in
@@ -5746,7 +5767,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 3079 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 3091 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

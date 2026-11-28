@@ -105,6 +105,63 @@ export type JwksFetchImpl = (
  */
 export type JwksSleepImpl = (ms: number) => Promise<void>;
 
+/** Error message thrown when a `refresh()` is cancelled through its
+ * caller signal (see {@link JwksKeyStore.refresh}). One pinned
+ * string, so every abort site reports the cancellation the same way
+ * and the retry loop can tell it apart from a fetch failure. */
+const REFRESH_ABORTED_MESSAGE = "JwksKeyStore: JWKS refresh aborted";
+
+/** Throw the refresh-aborted error when the caller signal has fired.
+ * A no-op without a signal or with a live one, so the abort check
+ * reads the same at every site that honours it. */
+function throwIfRefreshAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error(REFRESH_ABORTED_MESSAGE);
+}
+
+/**
+ * Validate `refresh()` options and return the caller signal, if any.
+ * A non-object options value, or a `signal` that is not an
+ * `AbortSignal`, is a configuration error thrown before any fetch
+ * is attempted — mirroring the `init.signal` check in
+ * `verifiedFetch`.
+ */
+function refreshSignalOf(
+  opts: JwksRefreshOptions | undefined,
+): AbortSignal | undefined {
+  if (opts === undefined) return undefined;
+  if (typeof opts !== "object" || opts === null)
+    throw new Error(
+      `JwksKeyStore: refresh options must be an object, got ${String(opts)}`,
+    );
+  const { signal } = opts;
+  if (signal !== undefined && !(signal instanceof AbortSignal))
+    throw new Error(
+      `JwksKeyStore: refresh signal must be an AbortSignal, got ${String(signal)}`,
+    );
+  return signal;
+}
+
+/**
+ * Options for {@link JwksKeyStore.refresh}: today only the caller
+ * cancellation signal. The semantics — what aborts, what counts in
+ * `stats()`, and the two honest limits — live on `refresh()` itself.
+ */
+export interface JwksRefreshOptions {
+  /**
+   * Caller cancellation signal for this refresh (see
+   * {@link JwksKeyStore.refresh}). A signal already aborted when
+   * `refresh()` is called throws at once without fetching; an
+   * abort while the refresh is running cancels the default fetch
+   * and interrupts any retry backoff wait, and the refresh throws
+   * `JwksKeyStore: JWKS refresh aborted`. A custom `fetchImpl`
+   * never receives the signal, so an in-flight custom fetch runs
+   * to completion and the abort is honoured before the snapshot
+   * is swapped instead. `refreshIfStale()` and `startAutoRefresh()`
+   * take no signal and never pass one through.
+   */
+  signal?: AbortSignal;
+}
+
 /**
  * The minimal timer handle a {@link JwksSetIntervalImpl} returns.
  * `clear` cancels the timer (the `clearInterval` half); `unref`
@@ -249,7 +306,11 @@ export interface JwksKeyStoreOptions {
    * that aborts at the deadline; the timeout throws
    * `JwksKeyStore: JWKS fetch timed out after Nms` from `refresh()`
    * with the previous snapshot and freshness timestamp untouched
-   * (fail-closed, counted as a refresh failure).
+   * (fail-closed, counted as a refresh failure). A caller signal
+   * passed to `refresh({ signal })` aborts the same controller
+   * (see {@link JwksKeyStore.refresh}): the caller's abort wins
+   * over the deadline, and the refresh then throws the aborted
+   * error instead of the timeout error.
    *
    * Applies to the DEFAULT fetch only. The `JwksFetchImpl` signature
    * takes no signal, so a custom `fetchImpl` never receives one —
@@ -390,7 +451,11 @@ export interface JwksKeyStoreOptions {
  * - `refreshFailures`: failed refreshes, under the same once-per-
  *   `refresh()`-call counting (a failed refresh shared by N waiters
  *   counts once, and a refresh that exhausted its retries counts
- *   once, not once per attempt).
+ *   once, not once per attempt). An aborted refresh counts once
+ *   here too — the attempt was made and the caller stopped it. A
+ *   signal already aborted before the call starts does not count:
+ *   no fetch was attempted, so there is no failed refresh to
+ *   count, exactly like a configuration error at the door.
  * - `hits`: `resolve()` calls that returned a key.
  * - `misses`: `resolve()` calls that returned `undefined` — an unknown
  *   keyid, any keyid before the first successful refresh, or an
@@ -1307,6 +1372,24 @@ function parseJwksSnapshot(snapshot: unknown): {
  *   fetch timeouts are terminal. The previous snapshot is
  *   untouched until an attempt fully succeeds, so retries can
  *   never install a partial key set.
+ * - **Caller cancellation.** `refresh({ signal })` lets the caller
+ *   cancel a refresh in progress (see {@link JwksKeyStore.refresh}):
+ *   a signal already aborted when `refresh()` is called throws
+ *   `JwksKeyStore: JWKS refresh aborted` at once — no fetch, no
+ *   snapshot or freshness change, and no `stats()` change, since no
+ *   refresh was attempted. An abort while the refresh is running
+ *   aborts the default fetch through the same controller the
+ *   `fetchTimeoutMs` deadline uses, interrupts a retry backoff
+ *   wait at once, and starts no new attempt; the refresh throws
+ *   the same aborted error, the previous snapshot and freshness
+ *   timestamp stay untouched, and it counts once as a refresh
+ *   failure. Two honest limits: a custom `fetchImpl` receives no
+ *   signal, so an in-flight custom fetch runs to completion — the
+ *   abort is honoured before the snapshot is swapped, never by
+ *   interrupting the call — and a call that joins a refresh
+ *   already in flight shares that refresh's outcome, so its own
+ *   signal is ignored. `refreshIfStale()` and `startAutoRefresh()`
+ *   take no signal and never pass one through.
  *
  * Honest limits: trusting the endpoint is the caller's responsibility —
  * this store performs no TLS pinning, no response-signature check, and
@@ -1345,9 +1428,13 @@ export class JwksKeyStore {
   private readonly maxStaleSec: number | undefined;
   private readonly clock: () => number;
   /**
-   * Whether the store uses the default fetch. The timeout only applies
-   * to the default fetch (see `fetchTimeoutMs`): a custom `fetchImpl`
-   * never receives an abort signal, so it is never wrapped in one.
+   * Whether the store uses the default fetch. The timeout — and a
+   * caller signal passed to `refresh({ signal })` — only apply to
+   * the default fetch (see `fetchTimeoutMs`): a custom `fetchImpl`
+   * never receives an abort signal, so it is never wrapped in one;
+   * on that path a caller signal only shortens the retry waits
+   * between attempts, never the in-flight call itself (see
+   * {@link JwksKeyStore.refresh}).
    */
   private readonly usingDefaultFetch: boolean;
   /** Opt-in fetch timeout in milliseconds, or undefined when unset. */
@@ -1758,7 +1845,10 @@ export class JwksKeyStore {
    * costs no fetch and no `stats()` change; a stale snapshot
    * re-fetches with all of `refresh()`'s atomic semantics, and an
    * auto-refresh fetch counts in `stats()` exactly like a manual
-   * one (see {@link JwksKeyStoreStats}).
+   * one (see {@link JwksKeyStoreStats}). Ticks carry no
+   * cancellation signal: the timer itself has none, and a caller
+   * that needs to cancel a refresh calls `refresh({ signal })`
+   * directly (see {@link JwksKeyStore.refresh}).
    *
    * On a tick failure the error is passed to `opts.onError` when
    * one is given, and silently swallowed otherwise — the timer
@@ -1850,6 +1940,10 @@ export class JwksKeyStore {
    * that observe a stale snapshot share the one in-flight fetch (see
    * {@link JwksKeyStore.refresh}) instead of each fetching, and all
    * of them settle with that fetch's outcome.
+   *
+   * Takes no cancellation signal: a caller that needs to cancel a
+   * refresh calls `refresh({ signal })` directly instead of this
+   * convenience wrapper (see {@link JwksKeyStore.refresh}).
    */
   async refreshIfStale(): Promise<boolean> {
     if (!this.isStale()) return false;
@@ -1885,11 +1979,41 @@ export class JwksKeyStore {
    * missing or empty `kid` — and entries that declare a non-signing
    * purpose (`use` / `key_ops`, see class documentation) — are
    * skipped.
+   *
+   * Caller cancellation: `refresh({ signal })` lets the caller stop
+   * a refresh it started — on shutdown, or when the endpoint is
+   * being replaced. A signal already aborted when the call starts
+   * throws `JwksKeyStore: JWKS refresh aborted` at once: no fetch
+   * is attempted (not even joining a refresh already in flight),
+   * the snapshot and freshness timestamp are untouched, and the
+   * `stats()` counters do not move — no refresh was attempted, so
+   * there is no failed refresh to count. An abort while the
+   * refresh is running cancels the default fetch through the same
+   * `AbortController` the `fetchTimeoutMs` deadline uses (the
+   * caller's abort wins over the deadline, so the error is the
+   * aborted one, not the timeout one), interrupts a retry backoff
+   * wait at once, and starts no new attempt; the refresh throws
+   * the same aborted error, the previous snapshot and freshness
+   * timestamp stay untouched, and it counts once as a refresh
+   * failure. Two honest limits: a custom `fetchImpl` never
+   * receives the signal, so an in-flight custom fetch runs to
+   * completion — the abort is honoured before the snapshot is
+   * swapped (and before a `304` advances freshness), never by
+   * interrupting the call — and a call that joins a refresh
+   * already in flight shares that refresh's outcome, so its own
+   * signal is ignored: cancelling a shared fetch would cancel
+   * another caller's refresh. `refreshIfStale()` and
+   * `startAutoRefresh()` take no signal and never pass one
+   * through.
    */
-  refresh(): Promise<void> {
+  refresh(opts?: JwksRefreshOptions): Promise<void> {
+    const signal = refreshSignalOf(opts);
+    // Fail fast on a pre-aborted signal: no fetch, no joining a
+    // shared in-flight refresh, no stats change (see above).
+    throwIfRefreshAborted(signal);
     if (this.inFlightRefresh !== null) return this.inFlightRefresh;
     let flight: Promise<void>;
-    flight = this.performRefresh().finally(() => {
+    flight = this.performRefresh(signal).finally(() => {
       if (this.inFlightRefresh === flight) this.inFlightRefresh = null;
     });
     this.inFlightRefresh = flight;
@@ -1903,9 +2027,9 @@ export class JwksKeyStore {
    * concurrent waiters counts exactly once, as a success or as a
    * failure.
    */
-  private async performRefresh(): Promise<void> {
+  private async performRefresh(signal?: AbortSignal): Promise<void> {
     try {
-      await this.fetchAndSwap();
+      await this.fetchAndSwap(signal);
       this.refreshCount++;
     } catch (err) {
       this.refreshFailureCount++;
@@ -1939,14 +2063,17 @@ export class JwksKeyStore {
    * `fetchImpl` receives no second argument, so a legacy
    * single-argument implementation keeps working untouched.
    */
-  private async fetchOnce(): Promise<JwksFetchResponse> {
+  private async fetchOnce(signal?: AbortSignal): Promise<JwksFetchResponse> {
     const headers =
       this.rememberedEtag !== null
         ? { "If-None-Match": this.rememberedEtag }
         : undefined;
     if (headers !== undefined) this.sentConditionalRequest = true;
-    if (this.usingDefaultFetch && this.fetchTimeoutMs !== undefined) {
-      return this.fetchWithTimeout(headers);
+    if (
+      this.usingDefaultFetch &&
+      (this.fetchTimeoutMs !== undefined || signal !== undefined)
+    ) {
+      return this.fetchWithTimeout(headers, signal);
     }
     try {
       return await this.fetchImpl(
@@ -1988,17 +2115,33 @@ export class JwksKeyStore {
    * `resolve()` keeps serving the old snapshot while a retry is
    * waiting: the sleep happens between attempts, never under a
    * lock, and no state changes until `fetchAndSwap` swaps.
+   *
+   * A caller signal (see {@link JwksKeyStore.refresh}) is honoured
+   * at every pause: the loop checks it before each attempt, a
+   * failure while it is fired throws the aborted error instead of
+   * retrying, and the sleep between attempts is raced against it —
+   * an abort during the wait rejects at once and no new attempt is
+   * started. A custom `fetchImpl` in flight cannot be interrupted
+   * (it never receives the signal), so an abort noticed only after
+   * that call returns is reported here, at the catch, before any
+   * retry is considered.
    */
-  private async fetchWithRetries(): Promise<JwksFetchResponse> {
+  private async fetchWithRetries(
+    signal?: AbortSignal,
+  ): Promise<JwksFetchResponse> {
     const maxAttempts = this.fetchRetries + 1;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      throwIfRefreshAborted(signal);
       let res: JwksFetchResponse;
       try {
-        res = await this.fetchOnce();
+        res = await this.fetchOnce(signal);
       } catch (err) {
+        // A caller abort beats the retry policy: no new attempt is
+        // started, whatever the failure was.
+        throwIfRefreshAborted(signal);
         if (this.isFetchTimeoutError(err) || attempt === maxAttempts - 1)
           throw err;
-        await this.sleepImpl(this.fetchBackoffMs);
+        await this.sleepWithSignal(this.fetchBackoffMs, signal);
         continue;
       }
       if (
@@ -2025,7 +2168,7 @@ export class JwksKeyStore {
           // to the throw below: the request itself is wrong and
           // will not heal by re-fetching.
           const delayMs = this.retryAfterDelayMs(res) ?? this.fetchBackoffMs;
-          await this.sleepImpl(delayMs);
+          await this.sleepWithSignal(delayMs, signal);
           continue;
         }
         throw new Error(
@@ -2037,6 +2180,39 @@ export class JwksKeyStore {
     // Unreachable: every iteration returns, throws, or continues to
     // the next attempt, and the last attempt always returns or throws.
     throw new Error("JwksKeyStore: unreachable fetch retry state");
+  }
+
+  /**
+   * Sleep between fetch retry attempts, unless the caller cancelled
+   * the refresh first: an abort during the wait rejects at once
+   * with the refresh-aborted error instead of sleeping out the
+   * backoff and starting a new attempt. Without a signal this is
+   * exactly `sleepImpl`. The abort listener is removed once the
+   * sleep settles either way, so a completed refresh leaves no
+   * listener behind — and the post-race check makes a signal that
+   * fired in the same instant as the sleep elapsed win over
+   * starting the next attempt.
+   */
+  private async sleepWithSignal(
+    ms: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (signal === undefined) return this.sleepImpl(ms);
+    throwIfRefreshAborted(signal);
+    let onAbort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        this.sleepImpl(ms),
+        new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(new Error(REFRESH_ABORTED_MESSAGE));
+          signal.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      if (onAbort !== undefined)
+        signal.removeEventListener("abort", onAbort);
+    }
+    throwIfRefreshAborted(signal);
   }
 
 
@@ -2106,9 +2282,14 @@ export class JwksKeyStore {
   }
 
   /** Fetch the JWKS document and build/swap the next snapshot. */
-  private async fetchAndSwap(): Promise<void> {
+  private async fetchAndSwap(signal?: AbortSignal): Promise<void> {
     this.sentConditionalRequest = false;
-    const res = await this.fetchWithRetries();
+    const res = await this.fetchWithRetries(signal);
+    // The fetch returned but the caller cancelled while it was in
+    // flight (a custom fetchImpl cannot be interrupted, so the abort
+    // is only noticed here): honour it before any state changes —
+    // no body is read and a 304 does not advance freshness.
+    throwIfRefreshAborted(signal);
     // 304 Not Modified: the endpoint confirms the held snapshot is
     // current. No body is read and `json()` is never called — a 304
     // carries no representation, so a response without `json()` is a
@@ -2273,6 +2454,11 @@ export class JwksKeyStore {
     // is reused here, so the freshness timestamp is the same instant
     // the lifetime checks were judged against; a failed refresh
     // anywhere above never moves it (backlog #1291).
+    //
+    // Last abort checkpoint before the swap: a signal that fired
+    // while the body was being read or the keys imported must not
+    // install a snapshot the caller has already cancelled.
+    throwIfRefreshAborted(signal);
     this.keysByKid = next;
     this.duplicateKidCount += duplicateKids;
     this.lastRefreshAtSec = nowSec;
@@ -2298,6 +2484,13 @@ export class JwksKeyStore {
    * later in `fetchAndSwap` — keeps the existing error shapes, so the
    * timeout is purely additive. The timer is always cleared.
    *
+   * A caller signal (see {@link JwksKeyStore.refresh}) is forwarded
+   * into the same controller, so the same fetch is cancellable
+   * without any timeout configured — and when both are present the
+   * caller's abort wins over the deadline in the error reported.
+   * The caller listener is removed once the fetch settles either
+   * way.
+   *
    * Deliberately separate from `fetchImpl`: only the default fetch is
    * constructed here with a `signal`, and only the default-fetch path
    * calls this method, so a custom `fetchImpl` is never timed out —
@@ -2306,10 +2499,24 @@ export class JwksKeyStore {
    */
   private async fetchWithTimeout(
     headers?: Record<string, string>,
+    signal?: AbortSignal,
   ): Promise<JwksFetchResponse> {
     const timeoutMs = this.fetchTimeoutMs as number;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // The deadline timer exists only when `fetchTimeoutMs` is set;
+    // a caller signal alone still routes through this method, so
+    // the default fetch is cancellable without a timeout configured.
+    const timer =
+      this.fetchTimeoutMs !== undefined
+        ? setTimeout(() => controller.abort(), timeoutMs)
+        : undefined;
+    // Forward the caller's abort into the same controller: one
+    // signal drives the fetch, whichever fires first. The listener
+    // is removed in the finally below, so a settled fetch leaves
+    // no listener behind.
+    const onCallerAbort = () => controller.abort();
+    if (signal !== undefined)
+      signal.addEventListener("abort", onCallerAbort, { once: true });
     try {
       const res = await globalThis.fetch(this.url, {
         signal: controller.signal,
@@ -2323,6 +2530,10 @@ export class JwksKeyStore {
       });
       return res as unknown as JwksFetchResponse;
     } catch (err) {
+      // The caller's abort wins over the timeout: both abort the
+      // same controller, and a fired caller signal means the caller
+      // asked for this refresh to stop, not that the endpoint hung.
+      if (signal?.aborted) throw new Error(REFRESH_ABORTED_MESSAGE);
       if (err instanceof DOMException && err.name === "AbortError") {
         throw new Error(
           `JwksKeyStore: JWKS fetch timed out after ${timeoutMs}ms`,
@@ -2334,7 +2545,9 @@ export class JwksKeyStore {
         }`,
       );
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
+      if (signal !== undefined)
+        signal.removeEventListener("abort", onCallerAbort);
     }
   }
 
