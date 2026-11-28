@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 3111 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 3114 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -426,12 +426,22 @@ real loopback endpoint, a tick after `stop()` fetches nothing even
 once the injected clock has advanced past the TTL, and a restart
 followed by `clear()` stops the second timer, resets the stats
 counters, and leaves the restart's `stop()` a safe no-op. The demo
-closes with a JWKS single-flight refresh segment: eight concurrent
+then shows a JWKS single-flight refresh segment: eight concurrent
 `refresh()` calls share one in-flight fetch through a counting fake
 fetch (fetch count 1, `stats().refreshes` 1, `lastRefreshedAt` the
 pinned instant, the scripted key resolves), and a serial `refresh()`
 afterwards fetches again (fetch count 2) — only overlapping calls
-merge, a settled refresh is never cached.
+merge, a settled refresh is never cached. The demo closes with an
+asynchronous keyResolver segment: `verifyRequestAsync` awaits a
+counting async resolver (each call awaits one zero-delay tick
+first, so the async hop is real) through a keyid rotation — the
+old keyid resolves and verifies before the rotation, the new
+keyid resolves and verifies after it, the retired old keyid is
+refused with `KEY_RESOLUTION_FAILED`, a never-served keyid is
+refused with the same code, and a throwing async resolver is
+contained to `VERIFICATION_ERROR` without copying its own error
+into the verdict; only keyids, call counts and outcomes are
+printed, never key bytes.
 
 ```bash
 npm run demo
@@ -633,7 +643,14 @@ the offending value) into the result, so a backend outage cannot
 leak its internals into a verification verdict. There is no timeout
 on the resolver: bound its latency in your own layer (see
 SECURITY.md), and do not perform an unbounded network fetch inside
-verification.
+verification. The CLI demo (`npm run demo`) also shows an
+asynchronous keyResolver segment that drives a counting async
+resolver through a keyid rotation end to end: the old keyid
+resolves and verifies before the rotation, the new keyid resolves
+and verifies after it, the retired old keyid and a never-served
+keyid are both refused with `KEY_RESOLUTION_FAILED`, and a
+throwing async resolver is contained to `VERIFICATION_ERROR`
+without copying its own error into the verdict.
 
 ```ts
 const result = await verifyRequestAsync(signed, {
@@ -5832,7 +5849,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 3111 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 3114 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

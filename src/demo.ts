@@ -1500,6 +1500,25 @@
  * pair is a fresh ed25519 pair (generation is not printed) and
  * every clock is injected, so the segment's printed lines are
  * identical between runs.
+ * The demo closes with an asynchronous keyResolver segment:
+ * `verifyRequestAsync` awaits the resolver, so a key that lives
+ * behind a remote JWKS endpoint, a Vault, or a KMS is one async
+ * hop per verification instead of a pre-fetch. The segment drives
+ * a counting async resolver (each call awaits one zero-delay tick
+ * first, so the async hop is real) through a keyid rotation: the
+ * first call resolves the old keyid and its request verifies, the
+ * resolver then rotates — the new keyid resolves and its request
+ * verifies, while the retired old keyid is refused with
+ * `KEY_RESOLUTION_FAILED` — and a request under an unknown keyid
+ * is refused with the same code. A second, throwing async
+ * resolver is contained to `VERIFICATION_ERROR` without copying
+ * its own error into the verdict. Outside the printed lines the
+ * demo asserts every verification, code, reason and call count
+ * equals the hand-pinned `DEMO_ASYNC_KEY_RESOLVER_*` expectations
+ * (the same containment rules `test/verifyRequestAsync.test.ts`
+ * pins). Only keyids, counts and outcomes are printed, never key
+ * bytes, so the segment's printed lines are identical between
+ * runs.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the library
@@ -1607,6 +1626,7 @@ import {
   verifyAllResponseLabels,
   verifyAllResponseLabelsOrThrow,
   verifyRequest,
+  verifyRequestAsync,
   verifyRequestOrThrow,
   verifyResponse,
   verifyResponseOrThrow,
@@ -4635,6 +4655,39 @@ export const DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL: JwksKeyStoreStats = {
   duplicateKids: 0,
   staleResolutions: 0,
 };
+
+/** Key id the async-keyResolver segment's pre-rotation request carries. */
+export const DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID = "demo-async-old-1";
+/** Key id the async-keyResolver segment's post-rotation request carries. */
+export const DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID = "demo-async-new-1";
+/** Nonce of the async-keyResolver segment's pre-rotation request. */
+export const DEMO_ASYNC_KEY_RESOLVER_OLD_NONCE = "demo-async-nonce-old-001";
+/** Nonce of the async-keyResolver segment's post-rotation request. */
+export const DEMO_ASYNC_KEY_RESOLVER_NEW_NONCE = "demo-async-nonce-new-001";
+/** Key id the async-keyResolver segment's never-resolvable request carries. */
+export const DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_KEY_ID =
+  "demo-async-unknown-1";
+/** Nonce of the async-keyResolver segment's never-resolvable request. */
+export const DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_NONCE =
+  "demo-async-nonce-unknown-001";
+/** Resolver call count after the pre-rotation verification (one async hop). */
+export const DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_OLD = 1;
+/** Resolver call count after the post-rotation verification. */
+export const DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_NEW = 2;
+/** Resolver call count after the retired-keyid verification. */
+export const DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_RETIRED = 3;
+/** Resolver call count after the unknown-keyid verification. */
+export const DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_UNKNOWN = 4;
+/** Resolver call count of the throwing async resolver (one attempted hop). */
+export const DEMO_ASYNC_KEY_RESOLVER_THROWING_CALLS = 1;
+/** Failure code for the retired and unknown keyids (the resolver returns `undefined`). */
+export const DEMO_ASYNC_KEY_RESOLVER_UNRESOLVED_CODE =
+  "KEY_RESOLUTION_FAILED";
+/** Failure code for the throwing async resolver (contained, error not copied). */
+export const DEMO_ASYNC_KEY_RESOLVER_THROWING_CODE = "VERIFICATION_ERROR";
+/** Pinned `reason` for the throwing async resolver (the library's own wording, never the resolver's error). */
+export const DEMO_ASYNC_KEY_RESOLVER_THROWING_REASON =
+  "key resolver threw an error";
 
 /** Absolute URL the `@query-param` segment signs (`a` bound, `b` unbound). */
 export const DEMO_QUERY_PARAM_URL =
@@ -8214,6 +8267,41 @@ export interface DemoResult {
    * refreshes, the batch resolve's hit unchanged).
    */
   jwksSingleFlightStatsAfterSerial: JwksKeyStoreStats;
+  /**
+   * Async-keyResolver segment: the pre-rotation verification
+   * (old keyid resolves through the counting async resolver).
+   */
+  asyncKeyResolverOldVerification: VerifyResult;
+  /**
+   * Async-keyResolver segment: the post-rotation verification
+   * (new keyid resolves after the resolver rotates).
+   */
+  asyncKeyResolverNewVerification: VerifyResult;
+  /**
+   * Async-keyResolver segment: the retired old keyid re-presented
+   * after the rotation (`KEY_RESOLUTION_FAILED`).
+   */
+  asyncKeyResolverRetiredVerification: VerifyResult;
+  /**
+   * Async-keyResolver segment: a keyid the resolver never serves
+   * (`KEY_RESOLUTION_FAILED`).
+   */
+  asyncKeyResolverUnknownVerification: VerifyResult;
+  /**
+   * Async-keyResolver segment: the throwing async resolver,
+   * contained to `VERIFICATION_ERROR`.
+   */
+  asyncKeyResolverThrowingVerification: VerifyResult;
+  /** Async-keyResolver segment: resolver call count after the old-keyid verification. */
+  asyncKeyResolverCallsAfterOld: number;
+  /** Async-keyResolver segment: resolver call count after the new-keyid verification. */
+  asyncKeyResolverCallsAfterNew: number;
+  /** Async-keyResolver segment: resolver call count after the retired-keyid verification. */
+  asyncKeyResolverCallsAfterRetired: number;
+  /** Async-keyResolver segment: resolver call count after the unknown-keyid verification. */
+  asyncKeyResolverCallsAfterUnknown: number;
+  /** Async-keyResolver segment: call count of the throwing async resolver. */
+  asyncKeyResolverThrowingCalls: number;
   lines: string[];
 }
 
@@ -19998,6 +20086,189 @@ export async function runDemo(): Promise<DemoResult> {
     );
   }
 
+  // Asynchronous keyResolver segment (backlog #1450): every segment
+  // above resolves keys synchronously, so the async entry points
+  // `verifyRequestAsync` / `verifyAllLabelsAsync` (#1439) have no
+  // end-to-end demo — the async key lookup (a JWKS endpoint fetched
+  // on demand, a Vault, a KMS) is their main scenario. This segment
+  // drives a counting async resolver through a keyid rotation: each
+  // call first awaits one zero-delay tick, so the async hop is real
+  // (a resolver that returned synchronously would still satisfy the
+  // type). Generation 0 serves only the old keyid; after the
+  // rotation the resolver serves only the new keyid, so the old
+  // request verifies before the rotation and is refused with
+  // `KEY_RESOLUTION_FAILED` after it, the new request verifies
+  // after the rotation, and a request under a never-served keyid is
+  // refused with the same code. A second, throwing async resolver
+  // is contained to `VERIFICATION_ERROR` without copying its own
+  // error into the verdict. Outside the printed lines the demo
+  // asserts every verification, code, reason and call count equals
+  // the hand-pinned DEMO_ASYNC_KEY_RESOLVER_* expectations (the
+  // same containment rules test/verifyRequestAsync.test.ts pins) —
+  // a mismatch throws instead of printing a misleading segment.
+  const asyncKeyResolverOldPair = generateEd25519KeyPair();
+  const asyncKeyResolverNewPair = generateEd25519KeyPair();
+  const asyncKeyResolverUnknownPair = generateEd25519KeyPair();
+  let asyncKeyResolverCalls = 0;
+  let asyncKeyResolverGeneration = 0;
+  const asyncKeyResolver = async (keyId: string) => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    asyncKeyResolverCalls++;
+    if (asyncKeyResolverGeneration === 0)
+      return keyId === DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID
+        ? asyncKeyResolverOldPair.publicKey
+        : undefined;
+    return keyId === DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID
+      ? asyncKeyResolverNewPair.publicKey
+      : undefined;
+  };
+  const asyncKeyResolverOldSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID,
+      alg: "ed25519",
+      key: asyncKeyResolverOldPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_ASYNC_KEY_RESOLVER_OLD_NONCE,
+    },
+  );
+  const asyncKeyResolverOldVerification = await verifyRequestAsync(
+    asyncKeyResolverOldSigned,
+    {
+      keyResolver: asyncKeyResolver,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const asyncKeyResolverCallsAfterOld = asyncKeyResolverCalls;
+  // Key rotation: the resolver now serves the new keyid and the old
+  // keyid is retired.
+  asyncKeyResolverGeneration = 1;
+  const asyncKeyResolverNewSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID,
+      alg: "ed25519",
+      key: asyncKeyResolverNewPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_ASYNC_KEY_RESOLVER_NEW_NONCE,
+    },
+  );
+  const asyncKeyResolverNewVerification = await verifyRequestAsync(
+    asyncKeyResolverNewSigned,
+    {
+      keyResolver: asyncKeyResolver,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const asyncKeyResolverCallsAfterNew = asyncKeyResolverCalls;
+  const asyncKeyResolverRetiredVerification = await verifyRequestAsync(
+    asyncKeyResolverOldSigned,
+    {
+      keyResolver: asyncKeyResolver,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const asyncKeyResolverCallsAfterRetired = asyncKeyResolverCalls;
+  const asyncKeyResolverUnknownSigned = signRequest(
+    {
+      method: "POST",
+      url: "https://api.example.com/v1/payments",
+      headers: { "content-type": "application/json" },
+      body: DEMO_BODY,
+    },
+    {
+      keyId: DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_KEY_ID,
+      alg: "ed25519",
+      key: asyncKeyResolverUnknownPair.privateKey,
+      created: DEMO_CREATED,
+      nonce: DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_NONCE,
+    },
+  );
+  const asyncKeyResolverUnknownVerification = await verifyRequestAsync(
+    asyncKeyResolverUnknownSigned,
+    {
+      keyResolver: asyncKeyResolver,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  const asyncKeyResolverCallsAfterUnknown = asyncKeyResolverCalls;
+  let asyncKeyResolverThrowingCalls = 0;
+  const asyncKeyResolverThrowing = async (keyId: string) => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    asyncKeyResolverThrowingCalls++;
+    throw new Error(`async keystore down for keyid "${keyId}"`);
+  };
+  const asyncKeyResolverThrowingVerification = await verifyRequestAsync(
+    asyncKeyResolverOldSigned,
+    {
+      keyResolver: asyncKeyResolverThrowing,
+      now: DEMO_CREATED + 60,
+    },
+  );
+  if (
+    !asyncKeyResolverOldVerification.ok ||
+    asyncKeyResolverOldVerification.keyId !==
+      DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID ||
+    asyncKeyResolverOldVerification.alg !== "ed25519" ||
+    asyncKeyResolverOldVerification.nonce !==
+      DEMO_ASYNC_KEY_RESOLVER_OLD_NONCE ||
+    asyncKeyResolverCallsAfterOld !==
+      DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_OLD ||
+    !asyncKeyResolverNewVerification.ok ||
+    asyncKeyResolverNewVerification.keyId !==
+      DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID ||
+    asyncKeyResolverNewVerification.alg !== "ed25519" ||
+    asyncKeyResolverNewVerification.nonce !==
+      DEMO_ASYNC_KEY_RESOLVER_NEW_NONCE ||
+    asyncKeyResolverCallsAfterNew !==
+      DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_NEW ||
+    asyncKeyResolverRetiredVerification.ok !== false ||
+    asyncKeyResolverRetiredVerification.code !==
+      DEMO_ASYNC_KEY_RESOLVER_UNRESOLVED_CODE ||
+    asyncKeyResolverRetiredVerification.reason !==
+      `keyid "${DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID}" could not be resolved to a key` ||
+    asyncKeyResolverCallsAfterRetired !==
+      DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_RETIRED ||
+    asyncKeyResolverUnknownVerification.ok !== false ||
+    asyncKeyResolverUnknownVerification.code !==
+      DEMO_ASYNC_KEY_RESOLVER_UNRESOLVED_CODE ||
+    asyncKeyResolverUnknownVerification.reason !==
+      `keyid "${DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_KEY_ID}" could not be resolved to a key` ||
+    asyncKeyResolverCallsAfterUnknown !==
+      DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_UNKNOWN ||
+    asyncKeyResolverThrowingVerification.ok !== false ||
+    asyncKeyResolverThrowingVerification.code !==
+      DEMO_ASYNC_KEY_RESOLVER_THROWING_CODE ||
+    asyncKeyResolverThrowingVerification.reason !==
+      DEMO_ASYNC_KEY_RESOLVER_THROWING_REASON ||
+    asyncKeyResolverThrowingCalls !==
+      DEMO_ASYNC_KEY_RESOLVER_THROWING_CALLS
+  ) {
+    throw new Error(
+      `demo fixture broken: async keyResolver gave old ${asyncKeyResolverOldVerification.ok} ` +
+        `(${asyncKeyResolverCallsAfterOld} calls), new ${asyncKeyResolverNewVerification.ok} ` +
+        `(${asyncKeyResolverCallsAfterNew} calls), retired code ${asyncKeyResolverRetiredVerification.code} ` +
+        `(${asyncKeyResolverCallsAfterRetired} calls), unknown code ${asyncKeyResolverUnknownVerification.code} ` +
+        `(${asyncKeyResolverCallsAfterUnknown} calls), throwing code ${asyncKeyResolverThrowingVerification.code} ` +
+        `(${asyncKeyResolverThrowingCalls} calls), instead of the pinned ` +
+        `old/new ok with ${DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_OLD}/${DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_NEW} calls, ` +
+        `retired/unknown ${DEMO_ASYNC_KEY_RESOLVER_UNRESOLVED_CODE} with ` +
+        `${DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_RETIRED}/${DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_UNKNOWN} calls, ` +
+        `throwing ${DEMO_ASYNC_KEY_RESOLVER_THROWING_CODE} with ` +
+        `${DEMO_ASYNC_KEY_RESOLVER_THROWING_CALLS} call`,
+    );
+  }
+
   const lines: string[] = [
     "RFC 9421 signing demo (ed25519)",
     `Request: POST https://api.example.com/v1/payments`,
@@ -21032,6 +21303,29 @@ export async function runDemo(): Promise<DemoResult> {
     "JWKS single-flight refresh: eight concurrent refresh() calls share one in-flight fetch — a gateway cold-start or key rotation never stampedes the JWKS endpoint, because only overlapping calls merge and a settled refresh is never cached",
     `JWKS single-flight refresh: ${DEMO_JWKS_SINGLE_FLIGHT_CONCURRENCY} concurrent refresh() calls made ${jwksSingleFlightFetchCallsAfterBatch} fetch (stats.refreshes ${jwksSingleFlightStats.refreshes}), lastRefreshedAt ${jwksSingleFlightLastRefreshedAt}, key "${DEMO_JWKS_SINGLE_FLIGHT_KEY_ID}" resolves (all eight waiters shared the one snapshot)`,
     `JWKS single-flight refresh: a serial refresh() afterwards fetched again — ${jwksSingleFlightFetchCallsAfterSerial} fetches total, stats.refreshes ${jwksSingleFlightStatsAfterSerial.refreshes} (only overlapping calls merge)`,
+    "",
+    "Asynchronous keyResolver: verifyRequestAsync awaits the resolver — a key behind a remote JWKS endpoint, a Vault, or a KMS is one async hop per verification, and a key rotation is just the resolver returning a different key on the next call",
+    asyncKeyResolverOldVerification.ok
+      ? `Async keyResolver (old keyid "${DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID}"): OK (label ${asyncKeyResolverOldVerification.label}, keyid="${asyncKeyResolverOldVerification.keyId}", alg="ed25519", nonce="${asyncKeyResolverOldVerification.nonce}") — resolved after ${asyncKeyResolverCallsAfterOld} async call`
+      : `Async keyResolver (old keyid "${DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID}"): FAILED (code ${asyncKeyResolverOldVerification.code}: ${asyncKeyResolverOldVerification.reason}) (unexpected — the pre-rotation key was supposed to resolve)`,
+    asyncKeyResolverNewVerification.ok
+      ? `Key rotation: the resolver now serves the new keyid "${DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID}" — async keyResolver (new keyid): OK (label ${asyncKeyResolverNewVerification.label}, keyid="${asyncKeyResolverNewVerification.keyId}", alg="ed25519", nonce="${asyncKeyResolverNewVerification.nonce}") — resolved after ${asyncKeyResolverCallsAfterNew} async calls`
+      : `Key rotation: the resolver now serves the new keyid "${DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID}" — async keyResolver (new keyid): FAILED (code ${asyncKeyResolverNewVerification.code}: ${asyncKeyResolverNewVerification.reason}) (unexpected — the post-rotation key was supposed to resolve)`,
+    asyncKeyResolverRetiredVerification.ok === false &&
+    asyncKeyResolverRetiredVerification.code ===
+      DEMO_ASYNC_KEY_RESOLVER_UNRESOLVED_CODE
+      ? `Retired keyid re-presented (old keyid "${DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID}" after rotation): FAILED (code ${asyncKeyResolverRetiredVerification.code}: ${asyncKeyResolverRetiredVerification.reason}) — the old key no longer resolves`
+      : `Retired keyid re-presented (old keyid "${DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID}" after rotation): ${asyncKeyResolverRetiredVerification.ok ? "OK (unexpected — the retired key was not supposed to resolve)" : `code ${asyncKeyResolverRetiredVerification.code}`}`,
+    asyncKeyResolverUnknownVerification.ok === false &&
+    asyncKeyResolverUnknownVerification.code ===
+      DEMO_ASYNC_KEY_RESOLVER_UNRESOLVED_CODE
+      ? `Unknown keyid "${DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_KEY_ID}": FAILED (code ${asyncKeyResolverUnknownVerification.code}: ${asyncKeyResolverUnknownVerification.reason})`
+      : `Unknown keyid "${DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_KEY_ID}": ${asyncKeyResolverUnknownVerification.ok ? "OK (unexpected — the unknown keyid was not supposed to resolve)" : `code ${asyncKeyResolverUnknownVerification.code}`}`,
+    asyncKeyResolverThrowingVerification.ok === false &&
+    asyncKeyResolverThrowingVerification.code ===
+      DEMO_ASYNC_KEY_RESOLVER_THROWING_CODE
+      ? `Throwing async resolver: FAILED (code ${asyncKeyResolverThrowingVerification.code}: ${asyncKeyResolverThrowingVerification.reason}) — the resolver's own error is never copied into the verdict`
+      : `Throwing async resolver: ${asyncKeyResolverThrowingVerification.ok ? "OK (unexpected — the throwing resolver was not supposed to verify)" : `code ${asyncKeyResolverThrowingVerification.code}`}`,
   ];
 
   return {
@@ -21571,6 +21865,16 @@ export async function runDemo(): Promise<DemoResult> {
     jwksSingleFlightStats,
     jwksSingleFlightFetchCallsAfterSerial,
     jwksSingleFlightStatsAfterSerial,
+    asyncKeyResolverOldVerification,
+    asyncKeyResolverNewVerification,
+    asyncKeyResolverRetiredVerification,
+    asyncKeyResolverUnknownVerification,
+    asyncKeyResolverThrowingVerification,
+    asyncKeyResolverCallsAfterOld,
+    asyncKeyResolverCallsAfterNew,
+    asyncKeyResolverCallsAfterRetired,
+    asyncKeyResolverCallsAfterUnknown,
+    asyncKeyResolverThrowingCalls,
     lines,
   };
 }

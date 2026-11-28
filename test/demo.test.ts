@@ -69,6 +69,7 @@ import {
   signRequest,
   signatureInputValue,
   verifyRequest,
+  verifyRequestAsync,
   verifyAllLabels,
   verifyResponse,
   type NonceStore,
@@ -249,6 +250,20 @@ import {
   DEMO_JWKS_SINGLE_FLIGHT_STATS,
   DEMO_JWKS_SINGLE_FLIGHT_STATS_AFTER_SERIAL,
   DEMO_JWKS_SINGLE_FLIGHT_TTL_SEC,
+  DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_NEW,
+  DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_OLD,
+  DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_RETIRED,
+  DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_UNKNOWN,
+  DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID,
+  DEMO_ASYNC_KEY_RESOLVER_NEW_NONCE,
+  DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID,
+  DEMO_ASYNC_KEY_RESOLVER_OLD_NONCE,
+  DEMO_ASYNC_KEY_RESOLVER_THROWING_CALLS,
+  DEMO_ASYNC_KEY_RESOLVER_THROWING_CODE,
+  DEMO_ASYNC_KEY_RESOLVER_THROWING_REASON,
+  DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_KEY_ID,
+  DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_NONCE,
+  DEMO_ASYNC_KEY_RESOLVER_UNRESOLVED_CODE,
   DEMO_JWKS_FETCHED_AT_SEC,
   DEMO_JWKS_URL,
   DEMO_HMAC_GUARD_ACCEPTED,
@@ -14280,7 +14295,8 @@ test("demo JWKS single-flight refresh segment merges eight concurrent refresh() 
 
   // Printed lines: the single-flight header plus two lines, in
   // order, sitting after the JWKS auto-refresh segment — and the
-  // segment is the last one.
+  // async-keyResolver segment follows it (backlog #1450), so the
+  // single-flight segment is no longer the last one.
   assert.match(
     out,
     /JWKS single-flight refresh: eight concurrent refresh\(\) calls share one in-flight fetch/,
@@ -14302,7 +14318,10 @@ test("demo JWKS single-flight refresh segment merges eight concurrent refresh() 
     `JWKS single-flight refresh: 8 concurrent refresh() calls made 1 fetch (stats.refreshes 1), lastRefreshedAt ${DEMO_CREATED}, key "${DEMO_JWKS_SINGLE_FLIGHT_KEY_ID}" resolves (all eight waiters shared the one snapshot)`,
     `JWKS single-flight refresh: a serial refresh() afterwards fetched again — 2 fetches total, stats.refreshes 2 (only overlapping calls merge)`,
   ]);
-  assert.equal(headerIdx + 3, lines.length);
+  assert.equal(lines[headerIdx + 3], "");
+  assert.ok(
+    lines[headerIdx + 4].startsWith("Asynchronous keyResolver:"),
+  );
 
   // Deterministic double run: the segment's lines are pinned
   // constants, identical between runs.
@@ -14314,4 +14333,265 @@ test("demo JWKS single-flight refresh segment merges eight concurrent refresh() 
     again.lines.slice(againIdx, againIdx + 3),
     lines.slice(headerIdx, headerIdx + 3),
   );
+});
+
+test("demo async keyResolver segment resolves the old key, rotates to the new key, and refuses the retired and unknown keyids", async () => {
+  const {
+    asyncKeyResolverOldVerification,
+    asyncKeyResolverNewVerification,
+    asyncKeyResolverRetiredVerification,
+    asyncKeyResolverUnknownVerification,
+    asyncKeyResolverThrowingVerification,
+    asyncKeyResolverCallsAfterOld,
+    asyncKeyResolverCallsAfterNew,
+    asyncKeyResolverCallsAfterRetired,
+    asyncKeyResolverCallsAfterUnknown,
+    asyncKeyResolverThrowingCalls,
+  } = await runDemo();
+
+  // The fixtures are the literals pinned in src/demo.ts — the
+  // test pins them again here so a drift in either place fails
+  // loudly.
+  assert.equal(DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID, "demo-async-old-1");
+  assert.equal(DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID, "demo-async-new-1");
+  assert.equal(
+    DEMO_ASYNC_KEY_RESOLVER_OLD_NONCE,
+    "demo-async-nonce-old-001",
+  );
+  assert.equal(
+    DEMO_ASYNC_KEY_RESOLVER_NEW_NONCE,
+    "demo-async-nonce-new-001",
+  );
+  assert.equal(
+    DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_KEY_ID,
+    "demo-async-unknown-1",
+  );
+  assert.equal(
+    DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_NONCE,
+    "demo-async-nonce-unknown-001",
+  );
+  assert.equal(DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_OLD, 1);
+  assert.equal(DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_NEW, 2);
+  assert.equal(DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_RETIRED, 3);
+  assert.equal(DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_UNKNOWN, 4);
+  assert.equal(DEMO_ASYNC_KEY_RESOLVER_THROWING_CALLS, 1);
+  assert.equal(
+    DEMO_ASYNC_KEY_RESOLVER_UNRESOLVED_CODE,
+    "KEY_RESOLUTION_FAILED",
+  );
+  assert.equal(
+    DEMO_ASYNC_KEY_RESOLVER_THROWING_CODE,
+    "VERIFICATION_ERROR",
+  );
+  assert.equal(
+    DEMO_ASYNC_KEY_RESOLVER_THROWING_REASON,
+    "key resolver threw an error",
+  );
+
+  // Pre-rotation: the old keyid resolves and verifies.
+  assert.equal(asyncKeyResolverOldVerification.ok, true);
+  assert.equal(
+    asyncKeyResolverOldVerification.keyId,
+    DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID,
+  );
+  assert.equal(asyncKeyResolverOldVerification.alg, "ed25519");
+  assert.equal(
+    asyncKeyResolverOldVerification.nonce,
+    DEMO_ASYNC_KEY_RESOLVER_OLD_NONCE,
+  );
+  assert.equal(
+    asyncKeyResolverCallsAfterOld,
+    DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_OLD,
+  );
+
+  // Post-rotation: the new keyid resolves and verifies.
+  assert.equal(asyncKeyResolverNewVerification.ok, true);
+  assert.equal(
+    asyncKeyResolverNewVerification.keyId,
+    DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID,
+  );
+  assert.equal(asyncKeyResolverNewVerification.alg, "ed25519");
+  assert.equal(
+    asyncKeyResolverNewVerification.nonce,
+    DEMO_ASYNC_KEY_RESOLVER_NEW_NONCE,
+  );
+  assert.equal(
+    asyncKeyResolverCallsAfterNew,
+    DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_NEW,
+  );
+
+  // The retired old keyid no longer resolves after the rotation.
+  assert.equal(asyncKeyResolverRetiredVerification.ok, false);
+  assert.equal(
+    asyncKeyResolverRetiredVerification.code,
+    DEMO_ASYNC_KEY_RESOLVER_UNRESOLVED_CODE,
+  );
+  assert.equal(
+    asyncKeyResolverRetiredVerification.reason,
+    `keyid "${DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID}" could not be resolved to a key`,
+  );
+  assert.equal(
+    asyncKeyResolverCallsAfterRetired,
+    DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_RETIRED,
+  );
+
+  // A keyid the resolver never serves is refused the same way.
+  assert.equal(asyncKeyResolverUnknownVerification.ok, false);
+  assert.equal(
+    asyncKeyResolverUnknownVerification.code,
+    DEMO_ASYNC_KEY_RESOLVER_UNRESOLVED_CODE,
+  );
+  assert.equal(
+    asyncKeyResolverUnknownVerification.reason,
+    `keyid "${DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_KEY_ID}" could not be resolved to a key`,
+  );
+  assert.equal(
+    asyncKeyResolverCallsAfterUnknown,
+    DEMO_ASYNC_KEY_RESOLVER_CALLS_AFTER_UNKNOWN,
+  );
+
+  // The throwing resolver is contained: the code and reason are
+  // the library's own, and the resolver's error text never leaks.
+  assert.equal(asyncKeyResolverThrowingVerification.ok, false);
+  assert.equal(
+    asyncKeyResolverThrowingVerification.code,
+    DEMO_ASYNC_KEY_RESOLVER_THROWING_CODE,
+  );
+  assert.equal(
+    asyncKeyResolverThrowingVerification.reason,
+    DEMO_ASYNC_KEY_RESOLVER_THROWING_REASON,
+  );
+  assert.doesNotMatch(
+    asyncKeyResolverThrowingVerification.reason ?? "",
+    /async keystore down/,
+  );
+  assert.equal(
+    asyncKeyResolverThrowingCalls,
+    DEMO_ASYNC_KEY_RESOLVER_THROWING_CALLS,
+  );
+});
+
+test("demo async keyResolver segment lines print the rotation, the retired and unknown refusals, and the throwing containment — byte-identical across runs", async () => {
+  const first = await runDemo();
+  const { lines } = first;
+  const out = lines.join("\n");
+
+  assert.match(
+    out,
+    /Asynchronous keyResolver: verifyRequestAsync awaits the resolver/,
+  );
+  const headerIdx = lines.findIndex((l) =>
+    l.startsWith("Asynchronous keyResolver:"),
+  );
+  const singleFlightIdx = lines.findIndex((l) =>
+    l.startsWith("JWKS single-flight refresh:"),
+  );
+  assert.ok(singleFlightIdx !== -1 && headerIdx !== -1);
+  // The segment sits after the JWKS single-flight segment and is
+  // the last one in the demo.
+  assert.ok(singleFlightIdx < headerIdx);
+  assert.equal(lines[headerIdx - 1], "");
+  assert.deepEqual(lines.slice(headerIdx, headerIdx + 6), [
+    "Asynchronous keyResolver: verifyRequestAsync awaits the resolver — a key behind a remote JWKS endpoint, a Vault, or a KMS is one async hop per verification, and a key rotation is just the resolver returning a different key on the next call",
+    `Async keyResolver (old keyid "${DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID}"): OK (label sig1, keyid="${DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID}", alg="ed25519", nonce="${DEMO_ASYNC_KEY_RESOLVER_OLD_NONCE}") — resolved after 1 async call`,
+    `Key rotation: the resolver now serves the new keyid "${DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID}" — async keyResolver (new keyid): OK (label sig1, keyid="${DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID}", alg="ed25519", nonce="${DEMO_ASYNC_KEY_RESOLVER_NEW_NONCE}") — resolved after 2 async calls`,
+    `Retired keyid re-presented (old keyid "${DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID}" after rotation): FAILED (code KEY_RESOLUTION_FAILED: keyid "${DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID}" could not be resolved to a key) — the old key no longer resolves`,
+    `Unknown keyid "${DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_KEY_ID}": FAILED (code KEY_RESOLUTION_FAILED: keyid "${DEMO_ASYNC_KEY_RESOLVER_UNKNOWN_KEY_ID}" could not be resolved to a key)`,
+    `Throwing async resolver: FAILED (code VERIFICATION_ERROR: key resolver threw an error) — the resolver's own error is never copied into the verdict`,
+  ]);
+  assert.equal(headerIdx + 6, lines.length);
+
+  // Deterministic double run: only keyids, counts and outcomes
+  // are printed — never fresh key material — so the segment's
+  // lines are byte-identical between runs.
+  const second = await runDemo();
+  const secondIdx = second.lines.findIndex((l) =>
+    l.startsWith("Asynchronous keyResolver:"),
+  );
+  assert.deepEqual(
+    second.lines.slice(secondIdx, secondIdx + 6),
+    lines.slice(headerIdx, headerIdx + 6),
+  );
+});
+
+test("demo async keyResolver rotation re-derived outside the demo with a fresh resolver", async () => {
+  // Re-derive the segment's shape independently, outside the
+  // demo: a fresh async resolver with the same generation rule
+  // must give the same code/count pattern — the rotation is
+  // library behavior, not a demo print artifact.
+  const oldPair = generateEd25519KeyPair();
+  const newPair = generateEd25519KeyPair();
+  let calls = 0;
+  let generation = 0;
+  const resolver = async (keyId: string) => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    calls++;
+    if (generation === 0)
+      return keyId === DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID
+        ? oldPair.publicKey
+        : undefined;
+    return keyId === DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID
+      ? newPair.publicKey
+      : undefined;
+  };
+  const request = (keyId: string, key: KeyObject, nonce: string) =>
+    signRequest(
+      {
+        method: "POST",
+        url: "https://api.example.com/v1/payments",
+        headers: { "content-type": "application/json" },
+        body: DEMO_BODY,
+      },
+      {
+        keyId,
+        alg: "ed25519",
+        key,
+        created: DEMO_CREATED,
+        nonce,
+      },
+    );
+  const oldSigned = request(
+    DEMO_ASYNC_KEY_RESOLVER_OLD_KEY_ID,
+    oldPair.privateKey,
+    DEMO_ASYNC_KEY_RESOLVER_OLD_NONCE,
+  );
+  const oldResult = await verifyRequestAsync(oldSigned, {
+    keyResolver: resolver,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(oldResult.ok, true);
+  assert.equal(calls, 1);
+
+  generation = 1;
+  const newSigned = request(
+    DEMO_ASYNC_KEY_RESOLVER_NEW_KEY_ID,
+    newPair.privateKey,
+    DEMO_ASYNC_KEY_RESOLVER_NEW_NONCE,
+  );
+  const newResult = await verifyRequestAsync(newSigned, {
+    keyResolver: resolver,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(newResult.ok, true);
+  assert.equal(calls, 2);
+
+  const retiredResult = await verifyRequestAsync(oldSigned, {
+    keyResolver: resolver,
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(retiredResult.ok, false);
+  assert.equal(retiredResult.code, "KEY_RESOLUTION_FAILED");
+  assert.equal(calls, 3);
+
+  const throwingResult = await verifyRequestAsync(oldSigned, {
+    keyResolver: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      throw new Error("re-derived keystore down");
+    },
+    now: DEMO_CREATED + 60,
+  });
+  assert.equal(throwingResult.ok, false);
+  assert.equal(throwingResult.code, "VERIFICATION_ERROR");
+  assert.equal(throwingResult.reason, "key resolver threw an error");
+  assert.doesNotMatch(throwingResult.reason ?? "", /re-derived keystore/);
 });
