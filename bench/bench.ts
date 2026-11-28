@@ -2849,6 +2849,210 @@ function benchmarkVerifyKeyResolver(): number {
 }
 
 /**
+ * Pinned shape of the `verifyRequest` x live `JwksKeyStore`
+ * benchmark: three ed25519 key pairs (generated once,
+ * outside timing) held as a fixed three-kid snapshot in
+ * one offline-restored `JwksKeyStore` (snapshot restore,
+ * fetch implementation throws if ever called, zero
+ * network), and one signed fixture per kid over the
+ * shared bench fixture, each signed outside timing with
+ * `created` pinned at this instant — the verifier's
+ * injected `now`, and the store's injected clock, so no
+ * wall clock is read.
+ */
+const JWKS_SINGLE_CREATED = 1_700_000_000;
+const JWKS_SINGLE_KIDS = [
+  "bench-jwks-single-key-1",
+  "bench-jwks-single-key-2",
+  "bench-jwks-single-key-3",
+] as const;
+const JWKS_SINGLE_UNKNOWN_KID = "bench-jwks-single-unknown";
+const JWKS_SINGLE_URL =
+  "https://gateway.example.com/.well-known/jwks.json";
+const JWKS_SINGLE_MAX_STALE_SEC = 600;
+const JWKS_SINGLE_UNKNOWN_REASON =
+  `keyid "${JWKS_SINGLE_UNKNOWN_KID}" could not be resolved to a key`;
+
+/**
+ * `verifyRequest` through a live `JwksKeyStore.resolve`
+ * steady state: the key-resolution form a gateway uses
+ * when its keys live behind a JWKS endpoint — every
+ * measured call first resolves the signature's claimed
+ * `keyid` through the store (snapshot hit plus the
+ * store's `isStale`/`maxStaleSec` gate) and only then
+ * runs the cryptographic check, the cost the plain-Map
+ * `keyResolver` row above never pays. One measured op
+ * verifies the one pinned fixture signed under the
+ * first kid and re-pins that the result is ok, that the
+ * returned `keyId` equals that kid, and that the
+ * store's `stats().hits` grew by exactly one — the
+ * resolver ran once for the one label. Outside timing,
+ * the fail-closed half is pinned once: a fixture signed
+ * under an unknown kid returns exactly
+ * `{ ok: false, code: "KEY_RESOLUTION_FAILED" }` with
+ * the pinned reason; a snapshot restored 1000 seconds
+ * past its 300-second TTL still resolves (`isStale()`
+ * is advisory only); and a store capped with
+ * `maxStaleSec: 600` still resolves exactly at the
+ * 600-second bound but refuses one second past it,
+ * which surfaces as `KEY_RESOLUTION_FAILED`. Zero
+ * network, zero randomness in the measured assertions,
+ * no wall clock (the verifier clock and the store
+ * clocks are pinned).
+ */
+function benchmarkVerifyJwksKeyStore(): number {
+  const k1 = generateEd25519KeyPair();
+  const k2 = generateEd25519KeyPair();
+  const k3 = generateEd25519KeyPair();
+  const offlineFetch: JwksFetchImpl = async () => {
+    throw new Error("benchmark must not fetch (offline store)");
+  };
+  const buildSnapshot = () => ({
+    v: 1 as const,
+    fetchedAtSec: JWKS_SINGLE_CREATED,
+    keys: [
+      { ...exportPublicKeyJwk(k1.publicKey), kid: JWKS_SINGLE_KIDS[0] },
+      { ...exportPublicKeyJwk(k2.publicKey), kid: JWKS_SINGLE_KIDS[1] },
+      { ...exportPublicKeyJwk(k3.publicKey), kid: JWKS_SINGLE_KIDS[2] },
+    ],
+  });
+  const store = JwksKeyStore.restore(buildSnapshot(), JWKS_SINGLE_URL, {
+    fetchImpl: offlineFetch,
+    ttlSec: 300,
+    now: () => JWKS_SINGLE_CREATED,
+  });
+  const signed1 = signRequest(fixture, {
+    keyId: JWKS_SINGLE_KIDS[0],
+    alg: "ed25519",
+    key: k1.privateKey,
+    created: JWKS_SINGLE_CREATED,
+  });
+  const signed2 = signRequest(fixture, {
+    keyId: JWKS_SINGLE_KIDS[1],
+    alg: "ed25519",
+    key: k2.privateKey,
+    created: JWKS_SINGLE_CREATED,
+  });
+  const signed3 = signRequest(fixture, {
+    keyId: JWKS_SINGLE_KIDS[2],
+    alg: "ed25519",
+    key: k3.privateKey,
+    created: JWKS_SINGLE_CREATED,
+  });
+  const verifyOpts = { keyResolver: store.resolve, now: JWKS_SINGLE_CREATED };
+  const assertResolved = (
+    signed: SignedHttpRequest,
+    kid: string,
+    where: string,
+  ): void => {
+    const before = store.stats().hits;
+    const r = verifyRequest(signed, verifyOpts);
+    if (!r.ok)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest via JwksKeyStore (${where}) gave ${JSON.stringify(r)}`,
+      );
+    if (r.keyId !== kid)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest via JwksKeyStore (${where}) returned keyId ${JSON.stringify(r.keyId)} (expected ${JSON.stringify(kid)})`,
+      );
+    if (store.stats().hits !== before + 1)
+      throw new Error(
+        `benchmark self-check failed: verifyRequest via JwksKeyStore (${where}) moved stats().hits from ${before} to ${store.stats().hits} (expected exactly +1)`,
+      );
+  };
+
+  // Outside timing: all three snapshot kids verify.
+  assertResolved(signed1, JWKS_SINGLE_KIDS[0], "outside timing");
+  assertResolved(signed2, JWKS_SINGLE_KIDS[1], "outside timing");
+  assertResolved(signed3, JWKS_SINGLE_KIDS[2], "outside timing");
+
+  // Outside timing: an unknown keyid fails closed.
+  const unknownSigned = signRequest(fixture, {
+    keyId: JWKS_SINGLE_UNKNOWN_KID,
+    alg: "ed25519",
+    key: k1.privateKey,
+    created: JWKS_SINGLE_CREATED,
+  });
+  const unknown = verifyRequest(unknownSigned, verifyOpts);
+  if (
+    unknown.ok ||
+    unknown.code !== "KEY_RESOLUTION_FAILED" ||
+    unknown.keyId !== JWKS_SINGLE_UNKNOWN_KID ||
+    unknown.reason !== JWKS_SINGLE_UNKNOWN_REASON
+  )
+    throw new Error(
+      `benchmark self-check failed: unknown keyid result ${JSON.stringify(unknown)} ` +
+        `(expected KEY_RESOLUTION_FAILED for ${JWKS_SINGLE_UNKNOWN_KID})`,
+    );
+
+  // Outside timing: a stale snapshot still resolves.
+  const staleStore = JwksKeyStore.restore(buildSnapshot(), JWKS_SINGLE_URL, {
+    fetchImpl: offlineFetch,
+    ttlSec: 300,
+    now: () => JWKS_SINGLE_CREATED + 1000,
+  });
+  if (!staleStore.isStale())
+    throw new Error(
+      `benchmark self-check failed: verifyRequest via JwksKeyStore (outside timing, stale store) reported fresh at CREATED + 1000s past a 300s TTL`,
+    );
+  const stale = verifyRequest(signed1, {
+    keyResolver: staleStore.resolve,
+    now: JWKS_SINGLE_CREATED,
+  });
+  if (!stale.ok || stale.keyId !== JWKS_SINGLE_KIDS[0])
+    throw new Error(
+      `benchmark self-check failed: verifyRequest via JwksKeyStore (outside timing, stale snapshot) gave ${JSON.stringify(stale)}`,
+    );
+
+  // Outside timing: the maxStaleSec cutoff — exactly at
+  // the bound still resolves, one second past it refuses.
+  const cutoffBoundaryStore = JwksKeyStore.restore(
+    buildSnapshot(),
+    JWKS_SINGLE_URL,
+    {
+      fetchImpl: offlineFetch,
+      ttlSec: 300,
+      maxStaleSec: JWKS_SINGLE_MAX_STALE_SEC,
+      now: () => JWKS_SINGLE_CREATED + JWKS_SINGLE_MAX_STALE_SEC,
+    },
+  );
+  const boundary = verifyRequest(signed1, {
+    keyResolver: cutoffBoundaryStore.resolve,
+    now: JWKS_SINGLE_CREATED,
+  });
+  if (!boundary.ok || boundary.keyId !== JWKS_SINGLE_KIDS[0])
+    throw new Error(
+      `benchmark self-check failed: verifyRequest via JwksKeyStore (outside timing, maxStaleSec boundary) gave ${JSON.stringify(boundary)}`,
+    );
+  const cutoffStore = JwksKeyStore.restore(buildSnapshot(), JWKS_SINGLE_URL, {
+    fetchImpl: offlineFetch,
+    ttlSec: 300,
+    maxStaleSec: JWKS_SINGLE_MAX_STALE_SEC,
+    now: () => JWKS_SINGLE_CREATED + JWKS_SINGLE_MAX_STALE_SEC + 1,
+  });
+  if (cutoffStore.resolve(JWKS_SINGLE_KIDS[0]) !== undefined)
+    throw new Error(
+      `benchmark self-check failed: verifyRequest via JwksKeyStore (outside timing, maxStaleSec cutoff) still resolved past the bound`,
+    );
+  const cutoff = verifyRequest(signed1, {
+    keyResolver: cutoffStore.resolve,
+    now: JWKS_SINGLE_CREATED,
+  });
+  if (
+    cutoff.ok ||
+    cutoff.code !== "KEY_RESOLUTION_FAILED" ||
+    cutoff.keyId !== JWKS_SINGLE_KIDS[0]
+  )
+    throw new Error(
+      `benchmark self-check failed: verifyRequest via JwksKeyStore (outside timing, maxStaleSec cutoff) gave ${JSON.stringify(cutoff)}`,
+    );
+
+  return measure(() => {
+    assertResolved(signed1, JWKS_SINGLE_KIDS[0], "measured pass");
+  }, ITERATIONS);
+}
+
+/**
  * Pinned shape of the `verifyRequest` maxSignatureAgeSec
  * benchmark: one ed25519 key pair (generated once, outside
  * timing), a dated fixture signed outside timing with
@@ -21038,6 +21242,11 @@ results.push({
   alg: "verifyRequest keyResolver (2 keyids)",
   op: "verify",
   ops: benchmarkVerifyKeyResolver(),
+});
+results.push({
+  alg: "verifyRequest JwksKeyStore (1 label)",
+  op: "verify",
+  ops: benchmarkVerifyJwksKeyStore(),
 });
 results.push({
   alg: "verifyRequest maxSignatureAgeSec (300s cap)",
