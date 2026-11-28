@@ -55,11 +55,15 @@ import { signRequestCore, assertCoveredComponentsShape, assertLabelShape, assert
 import {
   checkSignatureHeaderLengths,
   verifyAllLabels,
+  verifyAllLabelsAsync,
   verifyRequest,
+  verifyRequestAsync,
   VERIFY_ALL_OPTION_KEYS,
   VERIFY_OPTION_KEYS,
   type VerifyAllOptions,
+  type VerifyAllOptionsAsync,
   type VerifyOptions,
+  type VerifyOptionsAsync,
   type VerifyResult,
 } from "./verify.js";
 
@@ -156,6 +160,29 @@ export type VerifyAllResponseOptions = VerifyAllOptions & {
 };
 
 /**
+ * Verification options for `verifyResponseAsync`: identical to
+ * `VerifyOptionsAsync`, plus the same optional `request` as the sync
+ * side: a wire signature covering `;req` components verifies against
+ * the request passed here, and fails the guard without one. The
+ * `keyResolver` may be asynchronous (see `AsyncKeyResolver`).
+ */
+export type VerifyResponseOptionsAsync = VerifyOptionsAsync & {
+  /** The request that triggered this response, for `;req` coverage. */
+  request?: RequestLike;
+};
+
+/**
+ * Verification options for `verifyAllResponseLabelsAsync`: identical
+ * to `VerifyAllOptionsAsync` (per-label async resolvers, freshness
+ * windows, `requiredLabels`, …), plus the same optional `request` as
+ * the single-label side.
+ */
+export type VerifyAllResponseOptionsAsync = VerifyAllOptionsAsync & {
+  /** The request that triggered this response, for `;req` coverage. */
+  request?: RequestLike;
+};
+
+/**
  * Components whose value derives from the request, not the response.
  * Covering one through the response API would sign a value this API
  * cannot know — the guard rejects them instead of inventing one.
@@ -228,7 +255,7 @@ function findRequestComponent(
  * to the request-side API.
  */
 function requestComponentError(
-  caller: "signResponse" | "verifyResponse" | "verifyAllResponseLabels",
+  caller: "signResponse" | "verifyResponse" | "verifyResponseAsync" | "verifyAllResponseLabels" | "verifyAllResponseLabelsAsync",
   entry: string,
   hasRequest: boolean,
 ): string {
@@ -238,7 +265,11 @@ function requestComponentError(
       ? "signRequest"
       : caller === "verifyAllResponseLabels"
         ? "verifyAllLabels"
-        : "verifyRequest";
+        : caller === "verifyResponseAsync"
+          ? "verifyRequestAsync"
+          : caller === "verifyAllResponseLabelsAsync"
+            ? "verifyAllLabelsAsync"
+            : "verifyRequest";
   if (REQUEST_DERIVED_COMPONENTS.has(base) && hasRequest)
     return (
       `${caller}: covered component "${entry}" derives from the request, not the response — ` +
@@ -261,7 +292,7 @@ function requestComponentError(
 // would sign a meaningless value for a webhook/gateway verifier, so
 // they are rejected here rather than only below 100.
 function assertStatus(
-  caller: "signResponse" | "verifyResponse" | "verifyAllResponseLabels",
+  caller: "signResponse" | "verifyResponse" | "verifyResponseAsync" | "verifyAllResponseLabels" | "verifyAllResponseLabelsAsync",
   status: unknown,
 ): asserts status is number {
   if (
@@ -474,6 +505,89 @@ export function verifyResponse(
 }
 
 /**
+ * Asynchronous twin of `verifyResponse` (backlog #1447): verify an
+ * HTTP response signature whose signing key lives behind an
+ * asynchronous lookup — a JWKS endpoint fetched on demand, a Vault,
+ * a KMS — by passing an async `keyResolver`.
+ *
+ * A step-for-step mirror of `verifyResponse`, not a refactor of it:
+ * the sync function is left untouched, and the only difference is
+ * the final delegation — `verifyRequestAsync` instead of
+ * `verifyRequest`. The pre-key pipeline — the status guard, the
+ * header-length gate, the request-derived-component guard — runs in
+ * the same order and under this entry point's own name, so an async
+ * verification reports exactly what the sync one would for the same
+ * response; the sync/async parity test pins that. The key-resolution
+ * semantics are the request side's (`verifyRequestAsync`): an unknown
+ * `keyid` fails with `KEY_RESOLUTION_FAILED`, a resolver that throws
+ * — or that resolves to a value that is not a `KeyObject` — is
+ * contained to `VERIFICATION_ERROR` without copying the resolver's
+ * own error (or the offending value) into the result. A synchronous
+ * resolver is still assignable here (see `AsyncKeyResolver`).
+ *
+ * Never throws on verification failure: returns `{ ok: false, code,
+ * reason }`. Throws only on caller configuration errors, exactly the
+ * sync set (a missing, non-integer, or out-of-range status; a wire
+ * signature whose covered components derive from the request without
+ * `;req`, or carry `;req` with no `request` attached; a `null` /
+ * non-object `res` or `opts`). The library sets no timeout on the
+ * resolver — an async resolver must bound its own latency, exactly
+ * as on the request side (see SECURITY.md).
+ */
+export async function verifyResponseAsync(
+  res: HttpResponseLike,
+  opts: VerifyResponseOptionsAsync,
+): Promise<VerifyResult> {
+  assertObjectParam("verifyResponseAsync", "res", res);
+  assertObjectParam("verifyResponseAsync", "opts", opts);
+  assertNoUnknownOptions(opts, VERIFY_RESPONSE_OPTION_KEYS, "verifyResponseAsync");
+  assertStatus("verifyResponseAsync", res.status);
+  // Header length limits (fail-closed, before the guard below parses
+  // `signature-input`): the guard's own parse must never run over an
+  // oversized header. `verifyRequestAsync` re-checks the same limits
+  // after the delegation, so this gate only protects the parse here.
+  const sigField = getHeader(res.headers, "signature");
+  const sigInputEarly = getHeader(res.headers, "signature-input");
+  const tooLarge = checkSignatureHeaderLengths(
+    sigInputEarly,
+    sigField,
+    opts,
+    opts.label ?? "sig1",
+    "verifyResponseAsync",
+  );
+  if (tooLarge !== undefined) return tooLarge;
+  const sigInput = getHeader(res.headers, "signature-input");
+  if (sigInput !== undefined) {
+    try {
+      const parsed = parseSignatureInput(sigInput, opts.label ?? "sig1");
+      const offending = findRequestComponent(
+        parsed.componentIds,
+        opts.request !== undefined,
+      );
+      if (offending !== undefined)
+        throw new Error(
+          requestComponentError(
+            "verifyResponseAsync",
+            offending,
+            opts.request !== undefined,
+          ),
+        );
+    } catch (e) {
+      // Our own guard error propagates; a parse failure means the
+      // header is malformed, which verifyRequestAsync reports properly.
+      if (
+        e instanceof Error &&
+        e.message.startsWith("verifyResponseAsync: covered component")
+      )
+        throw e;
+    }
+  }
+  // `request` is consumed here, not forwarded into VerifyOptionsAsync.
+  const { request, ...verifyOpts } = opts;
+  return verifyRequestAsync(responseToRequestLike(res, request), verifyOpts);
+}
+
+/**
  * Like `verifyResponse`, but throws a `VerifyError` — an `Error` subclass
  * carrying a machine-readable `.code` — instead of returning
  * `{ ok: false, ... }`. Use when callers prefer exceptions over
@@ -494,6 +608,33 @@ export function verifyResponseOrThrow(
   opts: VerifyResponseOptions,
 ): { label: string; keyId?: string | undefined; alg?: string | undefined; nonce?: string | undefined; tag?: string | undefined; created?: number | undefined; expires?: number | undefined; coveredComponents?: string[] | undefined } {
   const result = verifyResponse(res, opts);
+  if (result.ok)
+    return { label: result.label, keyId: result.keyId, alg: result.alg, nonce: result.nonce, tag: result.tag, created: result.created, expires: result.expires, coveredComponents: result.coveredComponents };
+  throw new VerifyError(
+    result.code ?? "VERIFICATION_ERROR",
+    result.reason ?? "verification failed",
+    { label: result.label, keyId: result.keyId, alg: result.alg, nonce: result.nonce, tag: result.tag, created: result.created, expires: result.expires },
+  );
+}
+
+/**
+ * Like `verifyResponseOrThrow`, but over the async entry point: awaits
+ * `verifyResponseAsync` and throws a `VerifyError` — an `Error`
+ * subclass carrying a machine-readable `.code` — instead of returning
+ * `{ ok: false, ... }`. On success returns the verified identity
+ * (`label`, `keyid`, `alg`, `nonce`, `tag`, `created`, `expires`,
+ * `coveredComponents`) — the same shape `verifyResponseOrThrow`
+ * returns. Caller configuration errors (a missing, non-integer, or
+ * out-of-range `status`; a wire signature whose covered components
+ * derive from the request without `;req`, or carry `;req` with no
+ * `request` attached) still throw a plain `Error`, exactly as
+ * `verifyResponseAsync` does.
+ */
+export async function verifyResponseOrThrowAsync(
+  res: HttpResponseLike,
+  opts: VerifyResponseOptionsAsync,
+): Promise<{ label: string; keyId?: string | undefined; alg?: string | undefined; nonce?: string | undefined; tag?: string | undefined; created?: number | undefined; expires?: number | undefined; coveredComponents?: string[] | undefined }> {
+  const result = await verifyResponseAsync(res, opts);
   if (result.ok)
     return { label: result.label, keyId: result.keyId, alg: result.alg, nonce: result.nonce, tag: result.tag, created: result.created, expires: result.expires, coveredComponents: result.coveredComponents };
   throw new VerifyError(
@@ -615,6 +756,110 @@ export function verifyAllResponseLabels(
 }
 
 /**
+ * Asynchronous twin of `verifyAllResponseLabels` (backlog #1447):
+ * verify every signature carried by the response whose keys live
+ * behind asynchronous resolvers — one resolver per label via
+ * `keyResolvers`, or one global async `keyResolver` as the fallback
+ * for unmapped labels.
+ *
+ * A step-for-step mirror of `verifyAllResponseLabels`, not a refactor
+ * of it: the sync function is left untouched, and the only difference
+ * is the final delegation — `verifyAllLabelsAsync` instead of
+ * `verifyAllLabels`. The per-label guard over every label, the
+ * header-length gate, and the `requiredLabels` synthetic failures
+ * run exactly as on the sync side, under this entry point's own
+ * name. A failing label never blocks the remaining labels, and a
+ * resolver failure on one label is contained to that label's result
+ * (`VERIFICATION_ERROR`), exactly as `verifyAllLabelsAsync` contains
+ * it per label on the request side.
+ *
+ * Never throws on verification failure: returns one `VerifyResult`
+ * per label, in wire order. Throws only on caller configuration
+ * errors, exactly the sync set (a missing, non-integer, or
+ * out-of-range `status`; a wire signature whose covered components
+ * derive from the request without `;req`, or carry `;req` with no
+ * `request` attached — checked for every label, not just the first;
+ * a `null` / non-object `res` or `opts`). A response with no
+ * `signature-input` header returns `[]` without throwing, exactly as
+ * `verifyAllResponseLabels` does.
+ */
+export async function verifyAllResponseLabelsAsync(
+  res: HttpResponseLike,
+  opts: VerifyAllResponseOptionsAsync,
+): Promise<VerifyResult[]> {
+  assertObjectParam("verifyAllResponseLabelsAsync", "res", res);
+  assertObjectParam("verifyAllResponseLabelsAsync", "opts", opts);
+  assertNoUnknownOptions(opts, VERIFY_ALL_RESPONSE_OPTION_KEYS, "verifyAllResponseLabelsAsync");
+  assertStatus("verifyAllResponseLabelsAsync", res.status);
+  // Header length limits (fail-closed, before the guard below parses
+  // `signature-input`): the guard's own parse must never run over an
+  // oversized header. `verifyAllLabelsAsync` re-checks the same limits
+  // after the delegation, so this gate only protects the parse here.
+  const sigField = getHeader(res.headers, "signature");
+  const sigInput = getHeader(res.headers, "signature-input");
+  const tooLarge = checkSignatureHeaderLengths(
+    sigInput,
+    sigField,
+    opts,
+    "",
+    "verifyAllResponseLabelsAsync",
+  );
+  if (tooLarge !== undefined) return [tooLarge];
+  // Response-side guard over every label: a request-derived component
+  // without `;req`, or a `;req` component with no request attached, is
+  // a caller configuration error — checked per label, so a second
+  // party's label cannot smuggle in a component the first label's
+  // guard already passed on. A parse failure means the header is
+  // malformed, which `verifyAllLabelsAsync` reports properly below.
+  if (sigInput !== undefined) {
+    try {
+      const labels = listSignatureLabels(sigInput);
+      for (const label of labels) {
+        try {
+          const parsed = parseSignatureInput(sigInput, label);
+          const offending = findRequestComponent(
+            parsed.componentIds,
+            opts.request !== undefined,
+          );
+          if (offending !== undefined)
+            throw new Error(
+              requestComponentError(
+                "verifyAllResponseLabelsAsync",
+                offending,
+                opts.request !== undefined,
+              ),
+            );
+        } catch (e) {
+          if (
+            e instanceof Error &&
+            e.message.startsWith("verifyAllResponseLabelsAsync: covered component")
+          )
+            throw e;
+          // This label's entry is unparsable — the delegation below
+          // reports it as MALFORMED_SIGNATURE_INPUT; the remaining
+          // labels still get their guard check.
+        }
+      }
+    } catch (e) {
+      if (
+        e instanceof Error &&
+        e.message.startsWith("verifyAllResponseLabelsAsync: covered component")
+      )
+        throw e;
+      // The header cannot even be split into labels — `verifyAllLabelsAsync`
+      // reports it as MALFORMED_SIGNATURE_INPUT below.
+    }
+  }
+  // `request` is consumed here, not forwarded into VerifyAllOptionsAsync.
+  // The synthesis path is the one `verifyResponseAsync` uses, shared
+  // through `responseToRequestLike` — `@status` still binds the
+  // status code and `;req` still resolves against the attached
+  // request, per label.
+  const { request, ...verifyAllOpts } = opts;
+  return verifyAllLabelsAsync(responseToRequestLike(res, request), verifyAllOpts);
+}
+
+/**
  * Throwing variant of `verifyAllResponseLabels`, for callers that prefer
  * exception flow over per-label result inspection (e.g. a settlement
  * webhook receiver that rejects the whole response on the first bad
@@ -647,6 +892,60 @@ export function verifyAllResponseLabelsOrThrow(
   opts: VerifyAllResponseOptions,
 ): VerifyResult[] {
   const results = verifyAllResponseLabels(res, opts);
+  for (const result of results) {
+    if (!result.ok)
+      throw new VerifyError(
+        result.code ?? "VERIFICATION_ERROR",
+        result.reason ?? "verification failed",
+        {
+          label: result.label,
+          keyId: result.keyId,
+          alg: result.alg,
+          nonce: result.nonce,
+          tag: result.tag,
+          created: result.created,
+          expires: result.expires,
+          verifyResults: [...results],
+        },
+      );
+  }
+  return results;
+}
+
+/**
+ * Throwing variant of `verifyAllResponseLabelsAsync`, for callers that
+ * prefer exception flow over per-label result inspection (e.g. a
+ * settlement webhook receiver that rejects the whole response on the
+ * first bad co-signature instead of reporting per-signer outcomes).
+ *
+ * Awaits `verifyAllResponseLabelsAsync` and throws a `VerifyError`
+ * carrying the first failing label's stable `code` and `label` (plus
+ * the wire fields `keyId` / `alg` / `nonce` / `tag` / `created` /
+ * `expires` the failure result reported, mirroring
+ * `verifyResponseOrThrowAsync`), with the full per-label array
+ * attached as `verifyResults` — a detached copy, so a bad gateway
+ * signature never hides the merchant signature that verified, and
+ * mutating the attached array never affects a later verification.
+ * When every label verifies, returns the per-label success results
+ * in wire order.
+ *
+ * A response with no `signature-input` header returns `[]` without
+ * throwing, exactly as `verifyAllResponseLabelsAsync` does — callers
+ * that must reject unsigned responses should check the returned
+ * length themselves, or pass `requiredLabels` (with required labels
+ * set, an unsigned response yields `MISSING_REQUIRED_LABEL` failures
+ * and this function throws a `VerifyError` carrying that code).
+ * Caller configuration errors (a missing, non-integer, or
+ * out-of-range `status`; a wire signature whose covered components
+ * derive from the request without `;req`, or carry `;req` with no
+ * `request` attached; a `null` / non-object `res` or `opts`) still
+ * throw a plain `Error`, never a `VerifyError`.
+ */
+export async function verifyAllResponseLabelsOrThrowAsync(
+  res: HttpResponseLike,
+  opts: VerifyAllResponseOptionsAsync,
+): Promise<VerifyResult[]> {
+  const results = await verifyAllResponseLabelsAsync(res, opts);
   for (const result of results) {
     if (!result.ok)
       throw new VerifyError(

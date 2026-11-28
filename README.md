@@ -15,7 +15,7 @@ Requires Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 3091 tests, all local, no external network (JWKS tests use a loopback-only server)
+npm test   # 3111 tests, all local, no external network (JWKS tests use a loopback-only server)
 ```
 
 Or run the bundled demo — one command generates a fresh ed25519 key
@@ -611,7 +611,11 @@ key lives in a JWKS endpoint fetched on demand, a Vault, or a KMS,
 pass an async resolver to `verifyRequestAsync` (or per label to
 `verifyAllLabelsAsync` via `keyResolvers`, with a global async
 `keyResolver` as the fallback for unmapped labels) instead of
-pre-fetching the key and calling the sync verifier. The resolver may
+pre-fetching the key and calling the sync verifier. The response side
+has the same twins — `verifyResponseAsync` /
+`verifyAllResponseLabelsAsync`, with `verifyResponseOrThrowAsync` /
+`verifyAllResponseLabelsOrThrowAsync` as the throwing variants (see
+the response section below). The resolver may
 return the key directly or a `Promise` of it, so a synchronous
 resolver keeps working here unchanged. The async entry points are
 the sync ones with the lookup awaited: the same option keys (no new
@@ -2042,6 +2046,35 @@ if (!results.every((r) => r.ok)) {
 const allResults = verifyAllResponseLabelsOrThrow(dual, {
   keys: { merchant: merchantPublicKey, gateway: gatewaySecret },
   requiredLabels: ["merchant", "gateway"],
+});
+```
+
+When the signing keys live behind an async lookup — a JWKS endpoint
+fetched on demand, a Vault, a KMS — the response side has async twins
+of the same entry points: `verifyResponseAsync` /
+`verifyAllResponseLabelsAsync` (plus `VerifyResponseOptionsAsync` /
+`VerifyAllResponseOptionsAsync` types), with
+`verifyResponseOrThrowAsync` / `verifyAllResponseLabelsOrThrowAsync`
+as the throwing twins. They are the response-side mirror of
+`verifyRequestAsync` / `verifyAllLabelsAsync`: the same option keys
+(no new option is introduced), the same verdict codes in the same
+check order, the same `;req` binding against the attached triggering
+request, and the same containment — an unknown `keyid` fails with
+`KEY_RESOLUTION_FAILED`, a resolver that throws (or resolves to a
+value that is not a `KeyObject`) is contained to
+`VERIFICATION_ERROR` without leaking the resolver's error into the
+result, per label on the multi-label path. A synchronous resolver
+keeps working here unchanged.
+
+```ts
+const result = await verifyResponseAsync(signed, {
+  keyResolver: async (keyId) => (await vault.getKey(keyId)) ?? undefined,
+});
+const results = await verifyAllResponseLabelsAsync(dual, {
+  keyResolvers: {
+    merchant: async (keyId) => merchantStore.get(keyId),
+    gateway: async (keyId) => gatewayStore.get(keyId),
+  },
 });
 ```
 
@@ -5799,7 +5832,7 @@ try {
 
 ## Reproducibility
 
-`npm test` runs 3091 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
+`npm test` runs 3111 tests including the RFC 9421 Appendix B.2.1, B.2.2, B.2.3, B.2.4, B.2.5 and B.2.6 independent interop vectors (all six verify end-to-end;
 every vector's base also matches byte-for-byte — see Interoperability), a golden signature-base vector and a golden
 `Content-Digest` vector (the latter cross-checked against `openssl`).
 No external network access (the JWKS tests serve their key documents from

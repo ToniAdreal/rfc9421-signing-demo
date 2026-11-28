@@ -148,7 +148,7 @@ export {
   fromNodeRequest,
   fromNodeResponse,
 } from "./nodeHttp.js";
-export { addResponseSignature, signResponse, verifyAllResponseLabels, verifyAllResponseLabelsOrThrow, verifyResponse, verifyResponseOrThrow } from "./response.js";
+export { addResponseSignature, signResponse, verifyAllResponseLabels, verifyAllResponseLabelsAsync, verifyAllResponseLabelsOrThrow, verifyAllResponseLabelsOrThrowAsync, verifyResponse, verifyResponseAsync, verifyResponseOrThrow, verifyResponseOrThrowAsync } from "./response.js";
 export { verifiedFetch } from "./verifiedFetch.js";
 export type {
   VerifiedFetchFn,
@@ -165,7 +165,9 @@ export type {
   SignedHttpResponse,
   SignResponseOptions,
   VerifyAllResponseOptions,
+  VerifyAllResponseOptionsAsync,
   VerifyResponseOptions,
+  VerifyResponseOptionsAsync,
 } from "./response.js";
 export type {
   CreateVerifiedFetchHandlerOptions,

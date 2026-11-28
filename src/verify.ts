@@ -908,7 +908,9 @@ function assertHeaderLengthLimit(
     | "verifyResponse"
     | "verifyAllResponseLabels"
     | "verifyRequestAsync"
-    | "verifyAllLabelsAsync",
+    | "verifyAllLabelsAsync"
+    | "verifyResponseAsync"
+    | "verifyAllResponseLabelsAsync",
 ): void {
   if (value === undefined) return;
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0)
@@ -944,7 +946,9 @@ export function checkSignatureHeaderLengths(
     | "verifyAllLabels"
     | "verifyAllResponseLabels"
     | "verifyRequestAsync"
-    | "verifyAllLabelsAsync" = "verifyRequest",
+    | "verifyAllLabelsAsync"
+    | "verifyResponseAsync"
+    | "verifyAllResponseLabelsAsync" = "verifyRequest",
 ): VerifyResult | undefined {
   assertObjectParam("checkSignatureHeaderLengths", "opts", opts);
   // A bogus limit is a caller configuration error, not a verification
